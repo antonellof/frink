@@ -27,7 +27,7 @@
 pub mod enqueue;
 pub mod kernels;
 
-use crate::gpu::{shared_device, silu_mul_device, CudaError};
+use crate::gpu::{resident_f32, shared_device, silu_mul_device, CudaError, ResidentF32};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::mul_mm_launch::enqueue_mul_mm;
 use cudarc::driver::CudaSlice;
@@ -224,13 +224,43 @@ pub fn launch_prefill_dense_stack(
     }
     let dev = shared_device()?;
     let mut h = upload(&dev, "hidden", hidden)?;
-    let mut kv_rows = Vec::with_capacity(layers.len());
+    // Every layer is enqueued before anything is downloaded: the first
+    // version synchronised twice per layer (its K and V rows), and the
+    // GPU sat idle after each sync while the host pushed rows and
+    // uploaded the next layer's small vectors -- a third of the pp512
+    // step on an RTX 3090 with the kernels already at 0.17 s of the
+    // 0.26 s. The per-layer K/V buffers stay alive here (4 MB a layer
+    // on Llama-3.2-3B) until the one sync at the end.
+    let mut pending = Vec::with_capacity(layers.len());
     for (layer, params) in layers {
-        let (k_rows, v_rows) = run_layer_resident(&dev, &mut h, layer, params, batch)?;
-        kv_rows.push((k_rows, v_rows));
+        pending.push(run_layer_resident(&dev, &mut h, layer, params, batch)?);
     }
     let hidden = download(&dev, "hidden", &h)?;
+    let mut kv_rows = Vec::with_capacity(layers.len());
+    for LayerKv {
+        k_all,
+        v_all,
+        n_prefix,
+        held: _,
+    } in pending
+    {
+        let k_rows = download(&dev, "K rows", &k_all.slice(n_prefix..))?;
+        let v_rows = download(&dev, "V rows", &v_all.slice(n_prefix..))?;
+        kv_rows.push((k_rows, v_rows));
+    }
     Ok(PrefillStackOut { hidden, kv_rows })
+}
+
+/// What one enqueued layer leaves for the downloads at the end of the
+/// stack: its K/V over prefix and batch, where the batch starts, and
+/// the resident buffers its kernels still read.
+struct LayerKv {
+    k_all: CudaSlice<f32>,
+    v_all: CudaSlice<f32>,
+    n_prefix: usize,
+    /// Kept alive, never read: dropped after the sync.
+    #[allow(dead_code)]
+    held: Vec<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// The host-side shape agreement, before any device work: a mismatch
@@ -345,7 +375,7 @@ fn run_layer_resident(
     layer: &PrefillDenseLayerCuda<'_>,
     params: &PrefillParams<'_>,
     batch: usize,
-) -> Result<(Vec<f32>, Vec<f32>), CudaError> {
+) -> Result<LayerKv, CudaError> {
     let hidden_dim = layer.attn_norm_w.len();
     let PrefillParams {
         n_heads,
@@ -365,18 +395,23 @@ fn run_layer_resident(
     let q_norm_shape = norm_rows(layer.extras.q_norm, q_width)?;
     let k_norm_shape = norm_rows(layer.extras.k_norm, kv_width)?;
 
-    // Every resident-weight Arc the GEMMs hand back is held here until
-    // the downloads at the end synchronise the stream.
-    let mut held = Vec::with_capacity(7);
+    // Every resident buffer a kernel reads asynchronously is held here
+    // until the stack's one sync: the GEMM weights, and the model's
+    // small vectors, which are resident too (`resident_f32`) rather
+    // than uploaded per layer per step.
+    let mut held: Vec<std::sync::Arc<dyn std::any::Any + Send + Sync>> = Vec::with_capacity(16);
+    let vec_of = |what: &str, v: &[f32]| -> Result<std::sync::Arc<ResidentF32>, CudaError> {
+        resident_f32(dev, v).map_err(|e| CudaError::Launch(format!("{what}: {e}")))
+    };
 
-    let attn_norm_w = upload(dev, "attn_norm", layer.attn_norm_w)?;
-    let ffn_norm_w = upload(dev, "ffn_norm", layer.ffn_norm_w)?;
+    let attn_norm_w = vec_of("attn_norm", layer.attn_norm_w)?;
+    let ffn_norm_w = vec_of("ffn_norm", layer.ffn_norm_w)?;
 
     // --- attention ---
-    let normed = enqueue_rmsnorm_rows(dev, h, &attn_norm_w, batch, hidden_dim, rms_eps)?;
+    let normed = enqueue_rmsnorm_rows(dev, h, &attn_norm_w.slice, batch, hidden_dim, rms_eps)?;
     let gemm = |m: &MulMmWeights<'_>, x: &CudaSlice<f32>, held: &mut Vec<_>| {
         let (out, w) = enqueue_mul_mm(dev, m.kind, m.data, x, m.rows, m.cols, batch, m.row_bytes)?;
-        held.push(w);
+        held.push(w as std::sync::Arc<dyn std::any::Any + Send + Sync>);
         Ok::<_, CudaError>(out)
     };
     let mut q = gemm(&layer.q, &normed, &mut held)?;
@@ -396,32 +431,38 @@ fn run_layer_resident(
                     bias.len()
                 )));
             }
-            let d_bias = upload(dev, "qkv bias", bias)?;
-            enqueue_add_bias_rows(dev, x, &d_bias, batch, width)?;
+            let d_bias = vec_of("qkv bias", bias)?;
+            enqueue_add_bias_rows(dev, x, &d_bias.slice, batch, width)?;
+            held.push(d_bias);
         }
     }
     if let (Some(w), Some((n, per))) = (layer.extras.q_norm, q_norm_shape) {
-        let d_w = upload(dev, "q_norm", w)?;
-        q = enqueue_rmsnorm_rows(dev, &q, &d_w, batch * per, n, rms_eps)?;
+        let d_w = vec_of("q_norm", w)?;
+        q = enqueue_rmsnorm_rows(dev, &q, &d_w.slice, batch * per, n, rms_eps)?;
+        held.push(d_w);
     }
     if let (Some(w), Some((n, per))) = (layer.extras.k_norm, k_norm_shape) {
-        let d_w = upload(dev, "k_norm", w)?;
-        k = enqueue_rmsnorm_rows(dev, &k, &d_w, batch * per, n, rms_eps)?;
+        let d_w = vec_of("k_norm", w)?;
+        k = enqueue_rmsnorm_rows(dev, &k, &d_w.slice, batch * per, n, rms_eps)?;
+        held.push(d_w);
     }
     if let Some(rope) = &layer.rope {
         let d_ff = match rope.freq_factors {
-            Some(ff) => Some(upload(dev, "freq_factors", ff)?),
+            Some(ff) => Some(vec_of("freq_factors", ff)?),
             None => None,
         };
         let args = RopeArgs {
             theta: rope.theta,
-            freq_factors: d_ff.as_ref(),
+            freq_factors: d_ff.as_ref().map(|r| &r.slice),
             rot_dim: rope.rot_dim,
             neox: rope.layout == RopeLayoutCuda::Neox,
             mscale: rope.mscale,
         };
         enqueue_rope_rows(dev, &mut q, batch, n_heads, head_dim, start_pos, &args)?;
         enqueue_rope_rows(dev, &mut k, batch, n_kv_heads, head_dim, start_pos, &args)?;
+        if let Some(d_ff) = d_ff {
+            held.push(d_ff);
+        }
     }
 
     // K/V over prefix + batch, in the cache's `[pos, kv_head, dim]`
@@ -472,14 +513,15 @@ fn run_layer_resident(
     let mut o = gemm(&layer.o, &attn, &mut held)?;
     drop(attn);
     if let Some(post) = layer.post_attn_norm {
-        let d_w = upload(dev, "post_attn_norm", post)?;
-        o = enqueue_rmsnorm_rows(dev, &o, &d_w, batch, hidden_dim, rms_eps)?;
+        let d_w = vec_of("post_attn_norm", post)?;
+        o = enqueue_rmsnorm_rows(dev, &o, &d_w.slice, batch, hidden_dim, rms_eps)?;
+        held.push(d_w);
     }
     enqueue_add_rows(dev, h, &o, batch * hidden_dim)?;
     drop(o);
 
     // --- FFN ---
-    let normed2 = enqueue_rmsnorm_rows(dev, h, &ffn_norm_w, batch, hidden_dim, rms_eps)?;
+    let normed2 = enqueue_rmsnorm_rows(dev, h, &ffn_norm_w.slice, batch, hidden_dim, rms_eps)?;
     let gate = gemm(&layer.gate, &normed2, &mut held)?;
     let up = gemm(&layer.up, &normed2, &mut held)?;
     drop(normed2);
@@ -488,20 +530,24 @@ fn run_layer_resident(
     let mut down = gemm(&layer.down, &act, &mut held)?;
     drop(act);
     if let Some(post) = layer.post_ffn_norm {
-        let d_w = upload(dev, "post_ffn_norm", post)?;
-        down = enqueue_rmsnorm_rows(dev, &down, &d_w, batch, hidden_dim, rms_eps)?;
+        let d_w = vec_of("post_ffn_norm", post)?;
+        down = enqueue_rmsnorm_rows(dev, &down, &d_w.slice, batch, hidden_dim, rms_eps)?;
+        held.push(d_w);
     }
     enqueue_add_rows(dev, h, &down, batch * hidden_dim)?;
     drop(down);
 
-    // The batch's rows of K/V are the tail of `k_all` / `v_all`. These
-    // two downloads are the layer's only host syncs; the hidden batch
-    // stays on the device for the next layer.
-    let n_prefix = start_pos * kv_width;
-    let k_rows = download(dev, "K rows", &k_all.slice(n_prefix..))?;
-    let v_rows = download(dev, "V rows", &v_all.slice(n_prefix..))?;
-    drop(held);
-    Ok((k_rows, v_rows))
+    // The batch's rows of K/V are the tail of `k_all` / `v_all`; the
+    // stack downloads them after every layer is enqueued. Nothing here
+    // synchronises.
+    held.push(attn_norm_w);
+    held.push(ffn_norm_w);
+    Ok(LayerKv {
+        k_all,
+        v_all,
+        n_prefix: start_pos * kv_width,
+        held,
+    })
 }
 
 #[cfg(test)]

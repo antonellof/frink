@@ -877,6 +877,50 @@ pub(crate) fn resident_cuda_weights(
     Ok(cached)
 }
 
+/// A model-owned f32 vector resident on the device: norm weights, QKV
+/// biases, RoPE divisors, which the resident prefill stack used to
+/// upload again for every layer of every step (three to seven pageable
+/// `htod_copy`s per layer, each a `cudaMalloc` and a synchronous copy
+/// between the kernels that should have been back to back). Keyed and
+/// checked exactly as [`resident_cuda_weights`]: the same
+/// `(pointer, len)` key, the same byte fingerprint on every hit, for
+/// the same reason.
+pub(crate) struct ResidentF32 {
+    pub(crate) slice: cudarc::driver::CudaSlice<f32>,
+    fingerprint: WeightFingerprint,
+}
+
+type F32CacheMap = std::collections::HashMap<CudaWeightCacheKey, std::sync::Arc<ResidentF32>>;
+
+static CUDA_F32_CACHE: std::sync::Mutex<Option<F32CacheMap>> = std::sync::Mutex::new(None);
+
+pub(crate) fn resident_f32(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    values: &[f32],
+) -> Result<std::sync::Arc<ResidentF32>, CudaError> {
+    // SAFETY: an f32 slice viewed as its bytes, for the fingerprint
+    // only; same length in bytes, same lifetime, never written.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values))
+    };
+    let key = (values.as_ptr() as usize, values.len());
+    let fingerprint = WeightFingerprint::of(bytes);
+    let mut guard = CUDA_F32_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(cached) = cache.get(&key) {
+        if cached.fingerprint == fingerprint {
+            return Ok(cached.clone());
+        }
+        cache.remove(&key);
+    }
+    let slice = dev
+        .htod_copy(values.to_vec())
+        .map_err(|e| CudaError::Launch(format!("{e:?}")))?;
+    let cached = std::sync::Arc::new(ResidentF32 { slice, fingerprint });
+    cache.insert(key, cached.clone());
+    Ok(cached)
+}
+
 // The kernel TEXT moved to `matvec_kinds`, one module per format
 // family; `gpu.rs` keeps the device plumbing. Re-exported so every
 // existing path still resolves -- a refactor that moves a definition
