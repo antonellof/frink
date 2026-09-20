@@ -91,6 +91,8 @@ Same via explicit subcommand: `frink run -m …`.
 | `-ngl` / `--gpu-layers` / `--n-gpu-layers` | `0`, `auto`, `all`, or a count at/above the layer count. A *partial* count is refused, see below |
 | `--ctk` | KV dtype, llama.cpp's set: `f32`, `f16` (default), `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`, plus frink's `fp8`. Served: `f16`, `q8_0`, `fp8` (the Q8_0 wire) and `q4_0` (4 bits with a Hadamard rotation on K where the head width allows it); the rest are accepted and reported as falling back. A value outside the set is refused, as llama.cpp refuses it. **Metal only**, see below. Sets `FRINK_CTK` |
 | `-d` / `--model-draft FILE` | A smaller checkpoint from the SAME family and tokenizer as the target, used as a speculative drafter. The output is exactly what the target would have written alone. Refused with a grammar, without a prompt, for a recurrent (Mamba) target or draft, and for a device-resident draft KV, see below |
+| `--draft-max N` / `--draft` | Tokens the drafter proposes per verification step (llama.cpp's spelling). Default 5 |
+| `--draft-p-min P` | Stop drafting once the drafter's own probability for the token it just sampled falls below `P` (llama.cpp's spelling). Default 0.75 |
 | `--lora FILE` | A LoRA adapter GGUF (what `convert_lora_to_gguf.py` writes), applied at scale 1. Repeatable; comma-separated as llama.cpp accepts it. See below |
 | `--lora-scaled FILE:SCALE` | The same with a scale. Adapters are numbered in the order given, every `--lora` before every `--lora-scaled` |
 | `--system` | Chat mode only |
@@ -166,6 +168,14 @@ ceiling; a drafter changes what is read per token rather than how fast.
 **The text is exactly what the target would have written alone** -- the
 rejection rule is lossless at every temperature, and the drafter can
 only ever save a forward pass.
+
+`--draft-max` (default 5) sets how many tokens the drafter proposes
+per verification step, and `--draft-p-min` (default 0.75) stops it
+early once its own confidence drops. The second is not a micro-tuning
+knob: a guessing drafter is worse than no drafter, because the target
+pays for the position either way AND a rejection discards every
+position after it, so proposing a token the drafter does not believe
+in costs twice.
 
 It refuses rather than guessing in five cases, each for a reason:
 
