@@ -92,6 +92,7 @@ pub mod mrope;
 pub mod mtp_blocks;
 pub mod norm;
 pub mod norm_sites;
+pub mod normed_residual;
 pub mod output_projection;
 pub mod parallel_dense_ffn;
 pub mod parallel_residual;

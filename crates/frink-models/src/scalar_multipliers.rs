@@ -370,13 +370,42 @@ pub struct MultiplierDims {
 /// refuses. Deriving the refusal list from this struct is the point --
 /// a hand-written second list is how frink once refused a key it
 /// implemented and implemented a key it refused.
+/// What a graph does with `{arch}.residual_scale`.
+///
+/// Three answers rather than a bool, because `minimax-01` reads the
+/// same key and multiplies something else by it. It is the one graph of
+/// the 155 that does: `minimax-01.cpp:249` makes `residual` the
+/// ATTENTION PRE-NORM's output, `:428-431` add `scale * residual` to
+/// the attention branch, and `:440,455-458` do the same with the FFN
+/// pre-norm's. The layer input itself -- `inpSA`, `:244` -- is never
+/// added to anything; it survives only to be sliced by `inp_out_ids`
+/// at `:424` and is then dropped, which is how a reader can check that
+/// the stream really is the normed value and not a second residual.
+///
+/// Measured over the pin: `grep -ln f_residual_scale src/models/*.cpp`
+/// is five files, and `minimax-01.cpp` is the only one whose
+/// `ggml_scale` takes a norm's output rather than a branch's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResidualScaleUse {
+    /// The graph never reads the key.
+    #[default]
+    NotRead,
+    /// `granite.cpp:213,238`: every BRANCH output is multiplied before
+    /// it rejoins the stream, read with `required = false`.
+    BranchOutput,
+    /// `minimax-01.cpp:428,455`: the sublayer's own PRE-NORM OUTPUT,
+    /// multiplied, REPLACES the stream the branch joins. REQUIRED
+    /// (`minimax-01.cpp:6` reads it with no default), so a file
+    /// without it is refused here as llama.cpp refuses it.
+    NormedInputRequired,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MultiplierSupport {
     /// `{arch}.embedding_scale` multiplies every token embedding row.
     pub embedding: bool,
-    /// `{arch}.residual_scale` multiplies EVERY branch output before it
-    /// rejoins the residual stream.
-    pub residual: bool,
+    /// What the graph does with `{arch}.residual_scale`.
+    pub residual: ResidualScaleUse,
     /// What the graph does with `{arch}.logit_scale`.
     pub logit: LogitScaleUse,
     /// Which key, if any, replaces the kernels' `1/sqrt(head_dim)`.
@@ -390,7 +419,7 @@ impl MultiplierSupport {
     /// graph.
     pub const NONE: Self = Self {
         embedding: false,
-        residual: false,
+        residual: ResidualScaleUse::NotRead,
         logit: LogitScaleUse::NotApplied,
         attention: AttentionScaleKey::NotRead,
         defaults: MultiplierDefaults::FromFileOnly,
@@ -401,7 +430,7 @@ impl MultiplierSupport {
     /// they share.
     pub const GRANITE: Self = Self {
         embedding: true,
-        residual: true,
+        residual: ResidualScaleUse::BranchOutput,
         logit: LogitScaleUse::Reciprocal,
         attention: AttentionScaleKey::Scale,
         defaults: MultiplierDefaults::FromFileOnly,
@@ -414,7 +443,7 @@ impl MultiplierSupport {
     /// before the file is consulted.
     pub const MINICPM: Self = Self {
         embedding: true,
-        residual: true,
+        residual: ResidualScaleUse::BranchOutput,
         logit: LogitScaleUse::Reciprocal,
         attention: AttentionScaleKey::NotRead,
         defaults: MultiplierDefaults::MiniCpm,
@@ -427,7 +456,7 @@ impl MultiplierSupport {
     /// of them seeded before the file is read.
     pub const GROK: Self = Self {
         embedding: true,
-        residual: false,
+        residual: ResidualScaleUse::NotRead,
         logit: LogitScaleUse::AsIs,
         attention: AttentionScaleKey::OutputScale,
         defaults: MultiplierDefaults::Grok,
@@ -439,7 +468,7 @@ impl MultiplierSupport {
     /// is read, and nothing is seeded before the file.
     pub const TALKIE: Self = Self {
         embedding: false,
-        residual: false,
+        residual: ResidualScaleUse::NotRead,
         logit: LogitScaleUse::AsIs,
         attention: AttentionScaleKey::NotRead,
         defaults: MultiplierDefaults::FromFileOnly,
@@ -452,7 +481,7 @@ impl MultiplierSupport {
     /// keys is read.
     pub const COMMAND_R: Self = Self {
         embedding: false,
-        residual: false,
+        residual: ResidualScaleUse::NotRead,
         logit: LogitScaleUse::AsIsOptional,
         attention: AttentionScaleKey::NotRead,
         defaults: MultiplierDefaults::FromFileOnly,
@@ -465,7 +494,20 @@ impl MultiplierSupport {
     /// An `embedding_scale` and nothing else: `hrm-text.cpp:8`.
     pub const EMBEDDING_ONLY: Self = Self {
         embedding: true,
-        residual: false,
+        residual: ResidualScaleUse::NotRead,
+        logit: LogitScaleUse::NotApplied,
+        attention: AttentionScaleKey::NotRead,
+        defaults: MultiplierDefaults::FromFileOnly,
+    };
+
+    /// `minimax-01`. ONE key, REQUIRED, and it multiplies each
+    /// sublayer's pre-norm output rather than its branch output
+    /// ([`ResidualScaleUse::NormedInputRequired`]). None of the other
+    /// three is read: `minimax-01.cpp:5-6` is the whole of its
+    /// `load_arch_hparams` beside the RMS epsilon.
+    pub const MINIMAX_01: Self = Self {
+        embedding: false,
+        residual: ResidualScaleUse::NormedInputRequired,
         logit: LogitScaleUse::NotApplied,
         attention: AttentionScaleKey::NotRead,
         defaults: MultiplierDefaults::FromFileOnly,
@@ -473,7 +515,7 @@ impl MultiplierSupport {
 
     pub const COHERE2: Self = Self {
         embedding: false,
-        residual: false,
+        residual: ResidualScaleUse::NotRead,
         logit: LogitScaleUse::AsIs,
         attention: AttentionScaleKey::NotRead,
         defaults: MultiplierDefaults::FromFileOnly,
@@ -507,6 +549,7 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     ("talkie", MultiplierSupport::TALKIE),
     ("command-r", MultiplierSupport::COMMAND_R),
     ("cohere2", MultiplierSupport::COHERE2),
+    ("minimax-01", MultiplierSupport::MINIMAX_01),
     // `muse-glimmer.cpp:8` reads `logit_scale` REQUIRED and `:186`
     // MULTIPLIES by it, which is `cohere2`'s shape rather than
     // Granite's divide.
@@ -560,8 +603,18 @@ pub struct DeclaredMultipliers {
 pub struct ResolvedMultipliers {
     /// [`crate::ModelConfig::embedding_scale`].
     pub embedding_scale: Option<f32>,
-    /// [`crate::ModelConfig::residual_scale`].
+    /// [`crate::ModelConfig::residual_scale`]: the multiplier on every
+    /// branch OUTPUT.
     pub residual_scale: Option<f32>,
+    /// [`crate::ModelConfig::normed_residual_scale`]: the multiplier on
+    /// each sublayer's PRE-NORM OUTPUT, which then replaces the
+    /// residual stream ([`ResidualScaleUse::NormedInputRequired`]).
+    ///
+    /// Never `Some` together with [`Self::residual_scale`]: one column
+    /// resolves both, and a `1.0` here is kept where a `1.0` there is
+    /// dropped, because this field also carries the TOPOLOGY and the
+    /// identity scale does not make it the ordinary one.
+    pub normed_residual_scale: Option<f32>,
     /// [`crate::ModelConfig::logit_multiplier`], already inverted where
     /// the architecture divides.
     pub logit_multiplier: Option<f32>,
@@ -584,6 +637,10 @@ pub enum MultiplierError {
     /// lm_head and return an argmax id only while every post-head
     /// transform is monotone increasing.
     NonPositiveLogitScale(f32),
+    /// The architecture reads `{arch}.residual_scale` as REQUIRED
+    /// (`minimax-01.cpp:6`) and the file does not declare it.
+    /// llama.cpp throws on the same file.
+    MissingRequiredResidualScale,
 }
 
 impl MultiplierError {
@@ -594,6 +651,11 @@ impl MultiplierError {
                 "`{arch}.logit_scale` is REQUIRED for this architecture (src/models/granite.cpp:7 \
                  reads it with no default) and the file does not declare it; llama.cpp refuses \
                  the same file"
+            ),
+            MultiplierError::MissingRequiredResidualScale => format!(
+                "`{arch}.residual_scale` is REQUIRED for this architecture \
+                 (src/models/minimax-01.cpp:6 reads it with no default) and the file does not \
+                 declare it; llama.cpp refuses the same file"
             ),
             MultiplierError::NonPositiveLogitScale(v) => format!(
                 "`{arch}.logit_scale` = {v}: the graph scales every logit by it \
@@ -705,7 +767,20 @@ pub fn resolve(
             .embedding
             .then(|| scale_or_none(embedding))
             .flatten(),
-        residual_scale: support.residual.then(|| scale_or_none(residual)).flatten(),
+        residual_scale: match support.residual {
+            ResidualScaleUse::BranchOutput => scale_or_none(residual),
+            ResidualScaleUse::NotRead | ResidualScaleUse::NormedInputRequired => None,
+        },
+        normed_residual_scale: match support.residual {
+            // NOT `scale_or_none`: the value carries the topology as
+            // well as the multiplier, and `minimax-01` is a different
+            // graph at a scale of exactly 1.0 -- it discards the layer
+            // input either way.
+            ResidualScaleUse::NormedInputRequired => {
+                Some(residual.ok_or(MultiplierError::MissingRequiredResidualScale)?)
+            }
+            ResidualScaleUse::NotRead | ResidualScaleUse::BranchOutput => None,
+        },
         logit_multiplier,
         attention_scale,
     })

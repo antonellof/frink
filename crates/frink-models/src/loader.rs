@@ -783,7 +783,7 @@ impl ModelConfig {
             &kv_heads_per_layer,
             ffn_per_layer.as_deref(),
             expert_ffn_dim,
-            recurrent_layers.as_deref(),
+            recurrent_layers.as_ref(),
         )?
         // `nanbeige.cpp:24-26` copies each physical layer's shape
         // arrays to every logical slot; HRM-Text's two stacks are
@@ -1626,6 +1626,7 @@ impl ModelConfig {
             final_logit_softcap,
             embedding_scale,
             residual_scale: multipliers.residual_scale,
+            normed_residual_scale: multipliers.normed_residual_scale,
             clamp_kqv,
             attn_temperature,
             logit_multiplier: multipliers.logit_multiplier,
@@ -2932,7 +2933,7 @@ impl Decoder {
                     &arch,
                     l,
                     &norm_sites,
-                    config.hidden_dim,
+                    &config,
                 )?,
             };
 

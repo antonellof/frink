@@ -67,7 +67,7 @@ fn every_unaudited_architecture_renders_a_detail_line() {
         assert!(detail.len() > 100, "`{}` renders {detail:?}", p.gguf_name);
     }
     assert_eq!(
-        n, 5,
+        n, 4,
         "the unaudited count moved. It was 47 until the triage itself found `minicpm3` was \
          an MLA model sitting on the generic-GQA row and it was reclassified to \
          DedicatedOnly, 46 until `deepseek`, `bailingmoe`, `seed_oss`, `maincoder` and \
@@ -177,7 +177,14 @@ fn every_unaudited_architecture_renders_a_detail_line() {
          `granite_swa`, `graniteswitch`, `muse-glimmer`, `maple`, `spark2_5`, `hrm_text`, \
          `minimax-01`, `qwen4exp`. A parity count against a moving upstream goes UP when \
          the pin moves and DOWN when a row closes, and one that only ever went down would \
-         mean nobody was reading upstream"
+         mean nobody was reading upstream, and 10 to 4 as SIX of those eight closed: \
+         `spark2_5` and `maple` on one match arm each, `granite_swa` and `muse-glimmer` \
+         the same day, `hrm_text` the next, and `minimax-01` on 2026-09-20, whose \
+         lightning-attention block went on the `AttnShape` seam the Mamba and Qwen3.5 rows \
+         built and whose recurrent mask went on `gdn::recurrent_layers`, so what actually \
+         needed new code was the RESIDUAL -- `src/models/minimax-01.cpp:249,428` make each \
+         sublayer's pre-norm output, scaled, the stream its branch joins, which is ONE \
+         graph of the 155 (`frink_models::normed_residual`)"
     );
 }
 
@@ -428,7 +435,7 @@ fn the_remaining_work_is_counted() {
         .count();
     // 2 before the 2026-09-19 pin move (`grovemoe`, `phi4`), plus the
     // eight upstream architectures it brought in.
-    assert_eq!(triaged + TRIAGE_PENDING.len(), 5);
+    assert_eq!(triaged + TRIAGE_PENDING.len(), 4);
 }
 
 /// `minicpm3` is refused as an MLA model, not as an unaudited one.
@@ -1198,7 +1205,7 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
     }
     assert_eq!(
         (fixture, arm, new_code, unknown),
-        (0, 0, 4, 1),
+        (0, 0, 3, 1),
         "the triage distribution moved; if a verdict changed on evidence that is correct, \
          update this and docs/MODELS.md together. BOTH cheap classes were ZERO between \
          2026-09-12 and 2026-09-19 -- `gemma` was the last FIXTURE-AWAY row and `chatglm` \
@@ -1214,7 +1221,12 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
          of `minimax-m2` is that a row whose verdict names its own closing evidence and \
          does not go and get it is a refusal that could have been a row. The NEW CODE \
          column went 1 to 7 the same day (`granite_swa`, `graniteswitch`, `muse-glimmer`, \
-         `hrm_text`, `minimax-01`, `qwen4exp`, plus `grovemoe`). That column went 26 to 24 when `olmo2` and `exaone4` closed together -- \
+         `hrm_text`, `minimax-01`, `qwen4exp`, plus `grovemoe`). It is back to 3 (`graniteswitch`, `qwen4exp`, \
+         `grovemoe`): `granite_swa` and `muse-glimmer` closed on norm facts nothing else \
+         upstream has, `hrm_text` on its two-stack schedule, and `minimax-01` on \
+         `frink_models::lightning` plus `frink_models::normed_residual`, where the BLOCK \
+         was the cheap half because the seam that selects it already existed. \
+         That column went 26 to 24 when `olmo2` and `exaone4` closed together -- \
          one topology, one implementation -- 24 to 21 when `granite`, `granitemoe` \
          and the `granite-moe` alias closed on ONE implementation of their four scalar \
          multipliers, 21 to 20 when `olmo` closed on the non-parametric LayerNorm, and \
@@ -1296,7 +1308,7 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
          single UNKNOWN left is `phi4`; `mistral`, `mixtral` and `yi` were the other \
          three and turned out not to be architectures at all"
     );
-    assert_eq!(fixture + arm + new_code + unknown, 5);
+    assert_eq!(fixture + arm + new_code + unknown, 4);
 }
 
 /// The per-layer activation-parameter seam closed two rows whose

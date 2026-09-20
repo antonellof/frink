@@ -12,7 +12,7 @@ same command shapes, same or better performance, on the hardware people
 actually own. `docs/plans/north-star.md` is the ranking every other plan
 is read through, and `docs/plans/README.md` is the index.
 
-Honest position, re-audited 2026-09-19 against a MOVED PIN. **98**
+Honest position, re-audited 2026-09-19 against a MOVED PIN. **99**
 architectures run with evidence (`capability::AUDITED_GENERIC_GQA`), 4
 more have dedicated engines, and everything else REFUSES. The "loads
 and is WRONG" class is closed: the generic path is opt-in, so an
@@ -113,14 +113,50 @@ is the THREE-stack schedule for that reason -- a tolerance widened
 until it passes everywhere is evidence of the machine, not of the
 model.
 
-So **five** triaged refusals are left, and they say which of three
+`minimax-01` (MiniMax-Text-01, 456B-A45B) closed on 2026-09-20 as the
+sixth, and it is the row where the BLOCK was the cheap half. Its
+recurrent mask is Qwen3.5's -- the same two keys, read by the same
+`crate::gdn::recurrent_layers`, with the interval seeded 8 instead of 4
+-- so `crate::gdn::INTERVAL_RECURRENT_ARCHITECTURES` gained a third
+column, the AttnShape those layers run, rather than a second reader;
+`RecurrentMask` is the mask and the block as ONE value from ONE
+constructor, because a file whose mask came from one architecture and
+whose block came from another is this repo's dominant bug shape.
+`crate::lightning` is the block on the `AttnShape` seam the Mamba rows
+built, one `SsmBlock` variant, with its state -- one `head_dim x
+head_dim` KV per head, `llama-hparams.cpp:249-253` -- riding the cache
+as every other recurrent block's. TWO facts in it are invisible in the
+tensor shapes and were both wrong here for a day: `minimax-01.cpp:303`
+runs the WHOLE fused projection through SiLU before the split, and
+`:305-309` read it HEAD-major (`[q|k|v]` per head) rather than as three
+blocks -- a permutation that is the identity at one head, so the
+fixture has four. What actually needed new code is the RESIDUAL:
+`:249,428-431,440,455-458` make each sublayer's PRE-NORM OUTPUT, times
+a REQUIRED `residual_scale`, the stream its branch joins, and the layer
+input (`inpSA`, `:244`) is bound, sliced by `inp_out_ids` at `:424`,
+and never added to anything. `crate::normed_residual` is that fact, one
+graph of the 155, measured by reading each `ggml_scale` argument in the
+five files that read the key; `ResidualScaleUse` is the ONE column of
+`MultiplierSupport` that answers both meanings, so the key cannot be
+given twice; and `Decoder::pre_norm_residual` is the one function every
+host body norms the stream through, because a site that normed by hand
+would read the right vector and keep the wrong topology --
+`no_host_body_norms_the_stream_by_hand` greps for exactly that, with
+the whitespace stripped so `cargo fmt` cannot silence it. The identity
+scale is NOT passed through `scale_or_none`, because the layer input is
+discarded at 1.0 too, and the fixture that declares 1.0 is what pins
+that: libllama's logits for it are not the ordinary graph's. KL 5.2e-10
+/ 9.5e-11 / 1.3e-9 / 1.3e-11 on four fixtures, at the `phimoe` class
+because every layer is a four-expert MoE; four sabotages each move the
+logits by more than 3.
+
+So **four** triaged refusals are left, and they say which of three
 things is missing: **0 are a fixture away, 0 are one match arm away**,
-4 need new code, 1 is unknown with the question stated. Both cheap
+3 need new code, 1 is unknown with the question stated. Both cheap
 classes are EMPTY again, which is where they were before the pin
-moved; FIVE of the eight rows the pin brought in closed the day it
-moved, and the three that are left each need a block this engine does
-not have (a per-token adapter selection, lightning attention, a
-delta-net over a hybrid memory index).
+moved; SIX of the eight rows the pin brought in have closed, and the
+two that are left each need a block this engine does not have (a
+per-token adapter selection, a delta-net over a hybrid memory index).
 
 Three things the pin move found that are not new architectures at all:
 `kimi_k3` had been spelled with an UNDERSCORE in the catalog since it

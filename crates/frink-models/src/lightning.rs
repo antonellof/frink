@@ -21,6 +21,28 @@
 //! crossed pre-norm, which is what the refusal's mention of
 //! `attn_norm_2` reads like until the graph is opened.
 //!
+//! # Two facts a reader of the tensor shapes alone gets wrong
+//!
+//! Both were wrong here for one PR, and neither shows up as a panic --
+//! the shapes agree either way and the numbers stay plausible, which
+//! is why they are pinned by the libllama golden rather than by
+//! inspection.
+//!
+//! **The projection runs through SiLU before it is split.**
+//! `:303` is `QKVcur = ggml_silu(ctx0, QKVcur)` on the whole
+//! `3 * n_head * head_dim` output, so Q, K and V are each
+//! `silu(W x)` and not `W x`. No other fused QKV in this repo does
+//! that.
+//!
+//! **The fused projection is HEAD-major, not Q-then-K-then-V.**
+//! `:305` reshapes it to `{3 * head_dim, n_head, ...}` and `:307-309`
+//! view Q, K and V at element offsets `0`, `head_dim` and
+//! `2 * head_dim` INSIDE that first axis, so head `h` owns the
+//! contiguous run `[q_h | k_h | v_h]` at `h * 3 * head_dim`. Reading
+//! it as three `n_head * head_dim` blocks is a permutation of the
+//! rows, which for a one-head fixture is the identity -- so the
+//! fixture has two.
+//!
 //! # Per token, not per chunk
 //!
 //! `:315-388` computes a whole ubatch at once with three decay inputs
@@ -32,17 +54,35 @@
 
 use frink_core::lightning::{lightning_step, slope_scale, slopes};
 use frink_core::matmul::rms_norm;
+use frink_core::recurrent_state::RecurrentState;
 use frink_core::weight_matrix::WeightMatrix;
+use frink_gguf::TensorSource;
 
-/// One lightning layer's weights.
+use crate::loader::{load_f32_vec, load_weight_matrix, LoadError};
+
+/// One lightning layer's weights, and the two counts that size them.
 pub struct Lightning {
-    /// `blk.N.attn_qkv.weight`, `[3 * n_head * head_dim, n_embd]`.
+    /// Query heads. Uniform across the file: `minimax-01.cpp:44-51`
+    /// sizes every recurrent layer from `n_head` and `n_embd_head_k`.
+    pub n_head: usize,
+    /// `n_embd_head_k`, which `llama-hparams.cpp:249-253` also uses as
+    /// `n_embd_head_la` to size the recurrent state.
+    pub head_dim: usize,
+    /// This layer's decay, a function of the layer index and the head
+    /// count alone.
+    pub decay: LightningDecay,
+    /// `blk.N.attn_qkv.weight`, `[3 * n_head * head_dim, n_embd]`,
+    /// HEAD-major (see the module docs).
     pub qkv: WeightMatrix,
     /// `blk.N.attn_gate.weight`, `[n_head * head_dim, n_embd]`.
     pub gate: WeightMatrix,
     /// `blk.N.attn_norm_2.weight`, `[n_head * head_dim]`.
     pub norm: Vec<f32>,
-    /// `blk.N.attn_output.weight`, `[n_embd, n_head * head_dim]`.
+    /// `blk.N.attn_output.weight`, `[n_embd, n_head * head_dim]`. The
+    /// same tensor NAME a full-attention layer of the same file uses
+    /// (`:53`), which is why it is loaded here rather than left on
+    /// `AttnWeights::o_proj`: the tail applies it after the gate, not
+    /// where the attention tail would.
     pub out_proj: WeightMatrix,
 }
 
@@ -77,8 +117,91 @@ impl LightningDecay {
 
 impl Lightning {
     /// Rows the per-head state needs: `head_dim * head_dim` per head.
+    ///
+    /// `llama-hparams.cpp:253` spells the same product
+    /// `n_embd_head_la * n_embd_head_la * n_head()`.
     pub fn state_len(n_head: usize, head_dim: usize) -> usize {
         n_head * head_dim * head_dim
+    }
+
+    /// Loads layer `layer`'s four tensors and checks them against
+    /// `minimax-01.cpp:44-53`'s shapes.
+    ///
+    /// `n_layer` is the LOGICAL layer count the graph loops over,
+    /// because the decay scale is `1 - il / (n_layer - 1)` and nothing
+    /// in the file carries it.
+    pub fn load(
+        file: &impl TensorSource,
+        layer: usize,
+        n_layer: usize,
+        n_head: usize,
+        head_dim: usize,
+        hidden_dim: usize,
+    ) -> Result<Self, LoadError> {
+        let width = n_head * head_dim;
+        let name = |t: &str| format!("blk.{layer}.{t}");
+        let matrix = |t: &str, rows: usize, cols: usize| -> Result<WeightMatrix, LoadError> {
+            let m = load_weight_matrix(file, &name(t))?;
+            if m.rows() != rows || m.cols() != cols {
+                return Err(LoadError::UnsupportedFeature(
+                    name(t),
+                    format!(
+                        "{}x{}; minimax-01.cpp:44-53 sizes it {rows}x{cols}",
+                        m.rows(),
+                        m.cols()
+                    ),
+                ));
+            }
+            Ok(m)
+        };
+        let norm = load_f32_vec(file, &name("attn_norm_2.weight"))?;
+        if norm.len() != width {
+            return Err(LoadError::UnsupportedFeature(
+                name("attn_norm_2.weight"),
+                format!(
+                    "{} entries; minimax-01.cpp:48 sizes it n_head * head_dim = {width}",
+                    norm.len()
+                ),
+            ));
+        }
+        Ok(Lightning {
+            n_head,
+            head_dim,
+            decay: LightningDecay::for_layer(layer, n_layer, n_head),
+            qkv: matrix("attn_qkv.weight", 3 * width, hidden_dim)?,
+            gate: matrix("attn_gate.weight", width, hidden_dim)?,
+            norm,
+            out_proj: matrix("attn_output.weight", hidden_dim, width)?,
+        })
+    }
+
+    /// A fresh sequence's state: one `head_dim x head_dim` KV per head
+    /// and no convolution window.
+    pub fn zero_state(&self) -> RecurrentState {
+        RecurrentState::zeros(0, Self::state_len(self.n_head, self.head_dim))
+    }
+
+    /// `rows` consecutive tokens of ONE sequence (`normed` is
+    /// `[rows][n_embd]`) through the block, advancing `state` in place.
+    pub fn forward_rows(
+        &self,
+        normed: &[f32],
+        rows: usize,
+        state: &mut RecurrentState,
+        rms_eps: f32,
+    ) -> Vec<f32> {
+        let hidden = self.out_proj.rows();
+        assert_eq!(normed.len(), rows * hidden);
+        assert_eq!(
+            state.ssm.len(),
+            Self::state_len(self.n_head, self.head_dim),
+            "lightning state sized by these weights"
+        );
+        let mut out = Vec::with_capacity(rows * hidden);
+        for row in normed.chunks(hidden) {
+            out.extend(self.forward_row(row, &mut state.ssm, rms_eps));
+        }
+        out
     }
 
     /// One token through the block, advancing `state` in place.
@@ -92,40 +215,34 @@ impl Lightning {
     /// `x` is the layer input AFTER `attn_norm`, as the graph has it
     /// (`:308`), and the return is what joins the residual -- `wo`
     /// applied, the gate and the norm already inside.
-    pub fn forward_row(
-        &self,
-        x: &[f32],
-        state: &mut [f32],
-        n_head: usize,
-        head_dim: usize,
-        decay: &LightningDecay,
-        eps: f32,
-    ) -> Vec<f32> {
+    pub fn forward_row(&self, x: &[f32], state: &mut [f32], eps: f32) -> Vec<f32> {
+        let (n_head, head_dim) = (self.n_head, self.head_dim);
         let width = n_head * head_dim;
         debug_assert_eq!(state.len(), Self::state_len(n_head, head_dim));
 
-        let qkv = self.qkv.apply(x);
+        // `:303`: the WHOLE projection through SiLU, before the split.
+        let mut qkv = self.qkv.apply(x);
         debug_assert_eq!(qkv.len(), 3 * width);
-        let (q, rest) = qkv.split_at(width);
-        let (k, v) = rest.split_at(width);
+        for v in &mut qkv {
+            *v = *v / (1.0 + (-*v).exp());
+        }
 
         // Per head, and the heads do not talk to each other: the state
         // is `head_dim x head_dim` per head and the recurrence is the
         // one `frink_core::lightning` pins against the chunked form.
+        // Head `h` owns `[q | k | v]` at `h * 3 * head_dim` (`:305-309`).
         let mut inner = vec![0.0f32; width];
         for h in 0..n_head {
-            let lo = h * head_dim;
-            let hi = lo + head_dim;
+            let base = h * 3 * head_dim;
+            let (q, k, v) = (
+                &qkv[base..base + head_dim],
+                &qkv[base + head_dim..base + 2 * head_dim],
+                &qkv[base + 2 * head_dim..base + 3 * head_dim],
+            );
             let s_lo = h * head_dim * head_dim;
             let s_hi = s_lo + head_dim * head_dim;
-            let out = lightning_step(
-                &q[lo..hi],
-                &k[lo..hi],
-                &v[lo..hi],
-                &mut state[s_lo..s_hi],
-                decay.per_step(h),
-            );
-            inner[lo..hi].copy_from_slice(&out);
+            let out = lightning_step(q, k, v, &mut state[s_lo..s_hi], self.decay.per_step(h));
+            inner[h * head_dim..(h + 1) * head_dim].copy_from_slice(&out);
         }
 
         // The tail: norm, then the sigmoid gate, then `wo`. The gate
@@ -156,6 +273,29 @@ mod tests {
 
     fn sigmoid(x: f32) -> f32 {
         1.0 / (1.0 + (-x).exp())
+    }
+
+    fn silu(x: f32) -> f32 {
+        x / (1.0 + (-x).exp())
+    }
+
+    fn block(
+        n_head: usize,
+        head_dim: usize,
+        n_embd: usize,
+        il: usize,
+        n_layer: usize,
+    ) -> Lightning {
+        let width = n_head * head_dim;
+        Lightning {
+            n_head,
+            head_dim,
+            decay: LightningDecay::for_layer(il, n_layer, n_head),
+            qkv: matrix(3 * width, n_embd, 1.0),
+            gate: matrix(width, n_embd, 2.0),
+            norm: (0..width).map(|i| 1.0 + i as f32 * 0.01).collect(),
+            out_proj: matrix(n_embd, width, 3.0),
+        }
     }
 
     /// The chunked form `minimax-01.cpp:315-388` computes, transcribed
@@ -194,17 +334,15 @@ mod tests {
     /// chunked form the graph computes, over a whole prefill and not
     /// just one step. `frink_core::lightning` pins the two-token case;
     /// this is the case a real prompt takes, through the projections.
+    ///
+    /// TWO heads, because the head-major split of the fused projection
+    /// (`:305-309`) is the identity at one head and a permutation at
+    /// two.
     #[test]
     fn the_block_agrees_with_the_graphs_chunked_form() {
         let (n_head, head_dim, n_embd, n_tokens) = (2usize, 4usize, 6usize, 5usize);
         let width = n_head * head_dim;
-        let layer = Lightning {
-            qkv: matrix(3 * width, n_embd, 1.0),
-            gate: matrix(width, n_embd, 2.0),
-            norm: (0..width).map(|i| 1.0 + i as f32 * 0.01).collect(),
-            out_proj: matrix(n_embd, width, 3.0),
-        };
-        let decay = LightningDecay::for_layer(1, 4, n_head);
+        let layer = block(n_head, head_dim, n_embd, 1, 4);
         let xs: Vec<Vec<f32>> = (0..n_tokens)
             .map(|t| {
                 (0..n_embd)
@@ -217,25 +355,33 @@ mod tests {
         let mut state = vec![0.0f32; Lightning::state_len(n_head, head_dim)];
         let got: Vec<Vec<f32>> = xs
             .iter()
-            .map(|x| layer.forward_row(x, &mut state, n_head, head_dim, &decay, 1e-5))
+            .map(|x| layer.forward_row(x, &mut state, 1e-5))
             .collect();
 
         // What the graph's chunked form produces, per head, from the
-        // same projections.
-        let projected: Vec<Vec<f32>> = xs.iter().map(|x| layer.qkv.apply(x)).collect();
+        // same projections -- SiLU applied and split head-major, as
+        // `:303-309` do.
+        let projected: Vec<Vec<f32>> = xs
+            .iter()
+            .map(|x| layer.qkv.apply(x).iter().map(|v| silu(*v)).collect())
+            .collect();
         let mut inner = vec![vec![0.0f32; width]; n_tokens];
         for h in 0..n_head {
-            let (lo, hi) = (h * head_dim, h * head_dim + head_dim);
+            let base = h * 3 * head_dim;
             let take = |o: usize| -> Vec<Vec<f32>> {
                 projected
                     .iter()
-                    .map(|p| p[o * width + lo..o * width + hi].to_vec())
+                    .map(|p| p[base + o * head_dim..base + (o + 1) * head_dim].to_vec())
                     .collect()
             };
-            let rows =
-                chunked_reference(&take(0), &take(1), &take(2), decay.scale * decay.slopes[h]);
+            let rows = chunked_reference(
+                &take(0),
+                &take(1),
+                &take(2),
+                layer.decay.scale * layer.decay.slopes[h],
+            );
             for (t, row) in rows.iter().enumerate() {
-                inner[t][lo..hi].copy_from_slice(row);
+                inner[t][h * head_dim..(h + 1) * head_dim].copy_from_slice(row);
             }
         }
         let want: Vec<Vec<f32>> = xs
@@ -263,6 +409,33 @@ mod tests {
         }
     }
 
+    /// `forward_rows` over a whole prompt is `forward_row` in a loop:
+    /// the batched host body and the decode step share ONE recurrence,
+    /// so a prefill and the decode that follows it cannot disagree
+    /// about the state.
+    #[test]
+    fn many_rows_are_the_same_as_one_row_at_a_time() {
+        let (n_head, head_dim, n_embd, n_tokens) = (2usize, 3usize, 5usize, 4usize);
+        let layer = block(n_head, head_dim, n_embd, 0, 3);
+        let xs: Vec<f32> = (0..n_tokens * n_embd)
+            .map(|i| (i as f32 * 0.11).sin())
+            .collect();
+
+        let mut batched = layer.zero_state();
+        let got = layer.forward_rows(&xs, n_tokens, &mut batched, 1e-5);
+
+        let mut one = layer.zero_state();
+        let mut want = Vec::new();
+        for row in xs.chunks(n_embd) {
+            want.extend(layer.forward_row(row, &mut one.ssm, 1e-5));
+        }
+        assert_eq!(got.len(), want.len());
+        for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+            assert!((a - b).abs() < 1e-6, "element {i}: {a} vs {b}");
+        }
+        assert_eq!(batched.ssm.as_ref(), one.ssm.as_ref());
+    }
+
     /// The gate reads the LAYER INPUT, not the block output. Getting
     /// that backwards still produces plausible numbers, so it is
     /// pinned rather than trusted: with the gate weights zeroed the
@@ -272,35 +445,30 @@ mod tests {
     fn the_gate_reads_the_layer_input() {
         let (n_head, head_dim, n_embd) = (2usize, 4usize, 6usize);
         let width = n_head * head_dim;
-        let zero_gate = Lightning {
-            qkv: matrix(3 * width, n_embd, 1.0),
-            gate: WeightMatrix::F32(Tensor::new(vec![0.0; width * n_embd], vec![width, n_embd])),
-            norm: vec![1.0; width],
-            out_proj: matrix(n_embd, width, 3.0),
-        };
+        let mut zero_gate = block(n_head, head_dim, n_embd, 0, 2);
+        zero_gate.gate =
+            WeightMatrix::F32(Tensor::new(vec![0.0; width * n_embd], vec![width, n_embd]));
+        zero_gate.norm = vec![1.0; width];
         let x: Vec<f32> = (0..n_embd).map(|i| (i as f32 * 0.2).sin()).collect();
-        let decay = LightningDecay::for_layer(0, 2, n_head);
 
         let mut state = vec![0.0f32; Lightning::state_len(n_head, head_dim)];
-        let half = zero_gate.forward_row(&x, &mut state, n_head, head_dim, &decay, 1e-5);
+        let half = zero_gate.forward_row(&x, &mut state, 1e-5);
 
         // The same block with the gate multiplied in by hand at 1.0.
         let mut s2 = vec![0.0f32; Lightning::state_len(n_head, head_dim)];
-        let qkv = zero_gate.qkv.apply(&x);
-        let (q, rest) = qkv.split_at(width);
-        let (k, v) = rest.split_at(width);
+        let qkv: Vec<f32> = zero_gate.qkv.apply(&x).iter().map(|v| silu(*v)).collect();
         let mut inner = vec![0.0f32; width];
         for h in 0..n_head {
-            let (lo, hi) = (h * head_dim, h * head_dim + head_dim);
+            let base = h * 3 * head_dim;
             let (slo, shi) = (h * head_dim * head_dim, (h + 1) * head_dim * head_dim);
             let out = frink_core::lightning::lightning_step(
-                &q[lo..hi],
-                &k[lo..hi],
-                &v[lo..hi],
+                &qkv[base..base + head_dim],
+                &qkv[base + head_dim..base + 2 * head_dim],
+                &qkv[base + 2 * head_dim..base + 3 * head_dim],
                 &mut s2[slo..shi],
-                decay.per_step(h),
+                zero_gate.decay.per_step(h),
             );
-            inner[lo..hi].copy_from_slice(&out);
+            inner[h * head_dim..(h + 1) * head_dim].copy_from_slice(&out);
         }
         let ungated = zero_gate
             .out_proj

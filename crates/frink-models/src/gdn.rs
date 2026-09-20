@@ -54,6 +54,7 @@ use frink_core::recurrent_state::RecurrentState;
 use frink_core::weight_matrix::WeightMatrix;
 use frink_gguf::TensorSource;
 
+use crate::layer_shapes::AttnShape;
 use crate::loader::{load_f32_vec, load_weight_matrix, LoadError};
 
 /// Architectures whose V heads read K heads grouped (`HeadMap::Grouped`,
@@ -797,16 +798,35 @@ fn sigmoid(x: f32) -> f32 {
 /// `{arch}.attention.recurrent_layers` / `{arch}.full_attention_interval`
 /// rather than by a zero KV count (`qwen35.cpp:17-24`; `qwen35moe.cpp`
 /// and `qwen3next.cpp` read the same two keys).
-pub const INTERVAL_RECURRENT_ARCHITECTURES: &[(&str, usize)] = &[
-    ("qwen35", 4),
-    ("qwen35moe", 4),
-    ("qwen3next", 4),
+///
+/// The third column is the BLOCK those layers run, because the mask and
+/// the block are one fact: `minimax-01` reads the identical two keys
+/// and runs lightning attention where Qwen3.5 runs the gated delta net
+/// (`crate::lightning`). Carried here rather than looked up beside the
+/// mask so the two cannot be resolved from different tables.
+pub const INTERVAL_RECURRENT_ARCHITECTURES: &[(&str, usize, AttnShape)] = &[
+    ("qwen35", 4, AttnShape::Gdn),
+    ("qwen35moe", 4, AttnShape::Gdn),
+    ("qwen3next", 4, AttnShape::Gdn),
     // `minimax-01.cpp:13` seeds 8 where `qwen35.cpp:21` seeds 4. The
     // RULE is the same line in both -- layer `i` is recurrent unless
     // `(i + 1) % interval == 0` -- so this is a default per
     // architecture and not a second reader.
-    ("minimax-01", 8),
+    ("minimax-01", 8, AttnShape::Lightning),
 ];
+
+/// Which layers are recurrent AND what block they run.
+///
+/// One value from one constructor ([`recurrent_layers`]): the mask
+/// alone would leave the block to be decided again somewhere else, and
+/// a file whose mask came from one architecture and whose block came
+/// from another is exactly this repo's dominant bug shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurrentMask {
+    /// One entry per TRUNK layer.
+    pub layers: Vec<bool>,
+    pub block: AttnShape,
+}
 
 /// Which trunk layers of `arch` are recurrent, or `None` for an
 /// architecture that decides by its head counts.
@@ -822,10 +842,10 @@ pub fn recurrent_layers(
     arch: &str,
     block_count: usize,
     n_layers: usize,
-) -> Result<Option<Vec<bool>>, LoadError> {
-    let Some((_, default_interval)) = INTERVAL_RECURRENT_ARCHITECTURES
+) -> Result<Option<RecurrentMask>, LoadError> {
+    let Some((_, default_interval, block)) = INTERVAL_RECURRENT_ARCHITECTURES
         .iter()
-        .find(|(a, _)| *a == arch)
+        .find(|(a, _, _)| *a == arch)
     else {
         return Ok(None);
     };
@@ -847,7 +867,10 @@ pub fn recurrent_layers(
                 LoadError::UnsupportedFeature(key.clone(), format!("entry {il} is not a bool"))
             })?);
         }
-        return Ok(Some(out));
+        return Ok(Some(RecurrentMask {
+            layers: out,
+            block: *block,
+        }));
     }
     let interval = file
         .metadata_u64(&format!("{arch}.full_attention_interval"))
@@ -858,11 +881,12 @@ pub fn recurrent_layers(
             "0: qwen35.cpp:22 takes `(i + 1) % interval`".to_string(),
         ));
     }
-    Ok(Some(
-        (0..n_layers)
+    Ok(Some(RecurrentMask {
+        layers: (0..n_layers)
             .map(|i| !(i + 1).is_multiple_of(interval))
             .collect(),
-    ))
+        block: *block,
+    }))
 }
 
 #[cfg(test)]

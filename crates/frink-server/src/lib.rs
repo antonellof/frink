@@ -8720,6 +8720,7 @@ pub(crate) mod tests {
             final_logit_softcap: None,
             embedding_scale: None,
             residual_scale: None,
+            normed_residual_scale: None,
             clamp_kqv: None,
             attn_temperature: None,
             router_input: frink_models::router_input::RouterInput::NormedFfnInput,

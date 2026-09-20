@@ -10,6 +10,7 @@
 use frink_core::recurrent_state::RecurrentState;
 
 use crate::gdn::Gdn;
+use crate::lightning::Lightning;
 use crate::mamba1::Mamba1;
 use crate::mamba2::Mamba2;
 use crate::plamo2_ssm::Plamo2Ssm;
@@ -24,6 +25,13 @@ pub enum SsmBlock {
     Gdn(Gdn),
     /// `build_plamo2_mamba_layer` (`plamo2.cpp:218-343`).
     Plamo2(Plamo2Ssm),
+    /// MiniMax-01's lightning attention (`minimax-01.cpp:293-420`),
+    /// `crate::lightning`. Its state is one `head_dim x head_dim` KV
+    /// per head and it has no convolution, which is why
+    /// `RecurrentState::conv` is empty for it -- as it is upstream,
+    /// where `:296-299` allocate the conv rows only because the
+    /// recurrent memory has no way to say a block does not want them.
+    Lightning(Lightning),
 }
 
 impl SsmBlock {
@@ -34,6 +42,7 @@ impl SsmBlock {
             SsmBlock::Mamba2(m) => m.zero_state(),
             SsmBlock::Gdn(m) => m.zero_state(),
             SsmBlock::Plamo2(m) => m.zero_state(),
+            SsmBlock::Lightning(m) => m.zero_state(),
         }
     }
 
@@ -51,6 +60,7 @@ impl SsmBlock {
             SsmBlock::Mamba2(m) => m.forward_rows(normed, rows, state, rms_eps),
             SsmBlock::Gdn(m) => m.forward_rows(normed, rows, state, rms_eps),
             SsmBlock::Plamo2(m) => m.forward_rows(normed, rows, state, rms_eps),
+            SsmBlock::Lightning(m) => m.forward_rows(normed, rows, state, rms_eps),
         }
     }
 

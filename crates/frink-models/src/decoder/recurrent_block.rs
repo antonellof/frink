@@ -38,9 +38,11 @@ impl Decoder {
     ) -> Vec<f32> {
         let mut out = match self.config.layer_shape(layer_idx).attention {
             AttnShape::ShortConv => self.shortconv_block(layer_idx, layer, normed, rows, kv),
-            AttnShape::Mamba1 | AttnShape::Mamba2 | AttnShape::Plamo2Ssm | AttnShape::Gdn => {
-                self.ssm_block(layer_idx, layer, normed, rows, kv)
-            }
+            AttnShape::Mamba1
+            | AttnShape::Mamba2
+            | AttnShape::Plamo2Ssm
+            | AttnShape::Gdn
+            | AttnShape::Lightning => self.ssm_block(layer_idx, layer, normed, rows, kv),
             other => unreachable!("layer {layer_idx} is {other:?}, not a recurrent block"),
         };
         // `plamo2.cpp:150`: the block's output under `attn_post_norm`

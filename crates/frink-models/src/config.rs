@@ -372,6 +372,15 @@ pub struct ModelConfig {
     /// hand-written copies that must agree about one scalar is the
     /// defect shape this repo keeps paying for.
     pub residual_scale: Option<f32>,
+    /// `Some(s)`: each sublayer's PRE-NORM OUTPUT, times `s`, REPLACES
+    /// the residual stream its branch joins, and the layer input is
+    /// discarded (`crate::normed_residual`; `minimax-01.cpp:249,428`).
+    ///
+    /// Never `Some` together with [`Self::residual_scale`] -- one
+    /// column of `MultiplierSupport` resolves both -- and `Some(1.0)`
+    /// is a real value here, because the field carries the topology as
+    /// well as the multiplier.
+    pub normed_residual_scale: Option<f32>,
     /// Multiplier applied to the lm_head's output, after the projection
     /// and before [`Self::final_logit_softcap`].
     ///
@@ -1066,6 +1075,7 @@ pub fn glm_5_2() -> ModelConfig {
         final_logit_softcap: None,
         embedding_scale: None,
         residual_scale: None,
+        normed_residual_scale: None,
         clamp_kqv: None,
         attn_temperature: None,
         router_input: crate::router_input::RouterInput::NormedFfnInput,
@@ -1168,6 +1178,7 @@ pub fn deepseek_v4_pro() -> ModelConfig {
         final_logit_softcap: None,
         embedding_scale: None,
         residual_scale: None,
+        normed_residual_scale: None,
         clamp_kqv: None,
         attn_temperature: None,
         router_input: crate::router_input::RouterInput::NormedFfnInput,
@@ -1302,6 +1313,7 @@ pub fn kimi_k3() -> ModelConfig {
         final_logit_softcap: None,
         embedding_scale: None,
         residual_scale: None,
+        normed_residual_scale: None,
         clamp_kqv: None,
         attn_temperature: None,
         router_input: crate::router_input::RouterInput::NormedFfnInput,
@@ -1382,6 +1394,7 @@ pub fn test_dense_fixture() -> ModelConfig {
         final_logit_softcap: None,
         embedding_scale: None,
         residual_scale: None,
+        normed_residual_scale: None,
         clamp_kqv: None,
         attn_temperature: None,
         router_input: crate::router_input::RouterInput::NormedFfnInput,
@@ -1457,6 +1470,7 @@ pub fn test_moe_fixture() -> ModelConfig {
         final_logit_softcap: None,
         embedding_scale: None,
         residual_scale: None,
+        normed_residual_scale: None,
         clamp_kqv: None,
         attn_temperature: None,
         router_input: crate::router_input::RouterInput::NormedFfnInput,
@@ -1535,6 +1549,7 @@ pub fn test_mixed_fixture() -> ModelConfig {
         final_logit_softcap: None,
         embedding_scale: None,
         residual_scale: None,
+        normed_residual_scale: None,
         clamp_kqv: None,
         attn_temperature: None,
         router_input: crate::router_input::RouterInput::NormedFfnInput,
