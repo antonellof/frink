@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-20
+
 ### Added
 
 - **`frink-server` speculates.** A request whose sampling the
