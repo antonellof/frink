@@ -15,6 +15,49 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`frink-server` speculates.** A request whose sampling the
+  verification can reproduce now drafts tokens with prompt-lookup (an
+  n-gram match over its own history, no second checkpoint, so no
+  memory and no load time) and verifies them in one batched forward.
+  The `usage` block reports what it bought, filling four fields that
+  had carried a wire contract and no producer since they were written.
+
+  **The answer does not change.** Verification draws with the server's
+  own sampler at every position and accepts a drafted token only if it
+  EQUALS that draw, so the emitted token is always the sampler's and a
+  drafter can only ever save a forward pass. That is lossless by
+  construction rather than by proof: there is no `p(x)`/`q(x)`
+  bookkeeping to get wrong, and no rollback, because state advances
+  only over committed tokens and the walk stops at the first
+  disagreement.
+
+  Refused rather than silently skipped, each for a reason: a
+  grammar-constrained request (verification draws through the same
+  grammar machine, and a rejected block would leave it advanced over
+  tokens that were never emitted), a paged or recurrent KV store
+  (a rejected draft must be rolled back and neither can), and a
+  request with no room. The `usage` fields stay ABSENT in those cases
+  rather than reporting zeros, because an absent field reads as "this
+  request did not speculate" where a zero reads as "the drafter was
+  useless".
+
+  Measured on a scripted engine: identical ids and text with 2 forward
+  passes against 6 when drafts are right, and 6 against 6 when they
+  are all wrong.
+
+### Changed
+
+- **`acceptance_length` counts forward passes, not speculative
+  rounds.** It is tokens per forward now, so 1.0 means speculation
+  bought nothing and 2.0 means half the forwards. The first
+  implementation divided by speculative rounds alone and reported 8.0
+  for a run that had taken 19 forwards to write 24 tokens -- a number
+  that flatters the drafter. The field had never been populated, so
+  nothing can have depended on the old reading.
+
+
 ## [0.27.0] - 2026-09-20
 
 ### Added

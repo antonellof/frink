@@ -1337,6 +1337,101 @@ pub(crate) fn forward_prompt_batch(
     }
 }
 
+/// The server's decode engine: one forward, and speculation when the
+/// store and the request allow it.
+///
+/// It owns the `&mut Kv` because a speculative round batches and rolls
+/// back the same store a step writes to, and two borrows of it cannot
+/// coexist (`sampling_loop::DecodeEngine` says why).
+///
+/// The drafter is `PromptLookupSpeculator`: an n-gram match over the
+/// history with no second checkpoint, so it costs no memory, no load
+/// time and no second tokenizer, and it is useful exactly where a
+/// coding agent lives -- output that quotes its input. A model-based
+/// drafter is another `Drafter` impl, not another engine.
+struct ServerEngine<'a> {
+    decoder: &'a Decoder,
+    kv: &'a mut Kv,
+    first_token_at: &'a mut Option<std::time::Instant>,
+    #[cfg(feature = "metal")]
+    kv_offload: bool,
+    drafter: Option<frink_models::speculative::PromptLookupSpeculator>,
+    accepted: usize,
+    drafted: usize,
+    /// FORWARD PASSES, not speculative rounds.
+    ///
+    /// `acceptance_length` divides the answer by this, and a round
+    /// that drafted nothing still costs a forward. Counting only the
+    /// speculative rounds reported 24 tokens over 3 rounds as 8.0
+    /// tokens per step while the run had actually taken more forwards
+    /// than that -- a number that flatters the drafter. Tokens per
+    /// forward is both honest and the speedup itself: 1.0 means
+    /// speculation bought nothing.
+    forwards: usize,
+}
+
+impl ServerEngine<'_> {
+    fn sync_after_step(&mut self) {
+        #[cfg(feature = "metal")]
+        if self.kv_offload {
+            if let Some(caches) = self.kv.contiguous_mut() {
+                self.decoder.sync_metal_attn_kv_to_host(caches);
+            }
+        }
+    }
+}
+
+impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
+    fn step(&mut self, next: usize, pos: usize) -> Vec<f32> {
+        if self.first_token_at.is_none() {
+            *self.first_token_at = Some(std::time::Instant::now());
+        }
+        // The anchor is offered the token that is about to be fed
+        // forward, at the length that includes it. A token that ended
+        // the generation never reaches here, which is the `finished`
+        // case `observe` refuses -- there would be no continuation to
+        // rejoin at.
+        if let Kv::Paged(lease) = &mut *self.kv {
+            lease.observe_sampled(next, pos + 1, false);
+        }
+        self.forwards += 1;
+        let l = self.kv.step(self.decoder, next, pos);
+        self.sync_after_step();
+        l
+    }
+
+    fn draft(&mut self, _prompt: &[usize], history: &[usize], max: usize) -> Vec<usize> {
+        let Some(d) = self.drafter.as_ref() else {
+            return Vec::new();
+        };
+        let mut proposal = d.propose_tokens(history);
+        proposal.truncate(max);
+        proposal
+    }
+
+    fn batch(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>> {
+        let rows = self.kv.step_batch(self.decoder, tokens, pos)?;
+        self.forwards += 1;
+        self.sync_after_step();
+        Some(rows)
+    }
+
+    fn truncate(&mut self, pos: usize) {
+        // `step_batch` refused the stores that cannot do this, so a
+        // failure here would mean the two have drifted apart.
+        debug_assert!(
+            self.kv.truncate_to(pos),
+            "a store that accepted a speculative batch must be able to roll it back"
+        );
+        self.sync_after_step();
+    }
+
+    fn observe(&mut self, accepted: usize, drafted: usize) {
+        self.accepted += accepted;
+        self.drafted += drafted;
+    }
+}
+
 /// Runs the prompt through `decoder`, then generates up to
 /// `params.max_tokens` new tokens, calling `emit` with each newly-safe-
 /// to-flush chunk of decoded text as it becomes available (see the
@@ -1352,11 +1447,12 @@ pub(crate) fn forward_prompt_batch(
 /// bytes of decoded text (respecting UTF-8 char boundaries) until
 /// they're confirmed clean, the same buffering approach real
 /// inference servers use for this exact reason.
-#[allow(clippy::too_many_arguments)] // one clear parameter per concern; a
-                                     // bundling struct here would just be GenerationParams's fields plus
-                                     // decoder/tokenizer/stop_tokens/bos_id/prompt/kv_pool/prefix_cache/emit
-                                     // re-wrapped for no real benefit at this call depth (two call sites,
-                                     // both in this crate).
+#[allow(clippy::too_many_arguments)]
+// one clear parameter per concern; a
+// bundling struct here would just be GenerationParams's fields plus
+// decoder/tokenizer/stop_tokens/bos_id/prompt/kv_pool/prefix_cache/emit
+// re-wrapped for no real benefit at this call depth (two call sites,
+// both in this crate).
 pub fn generate(
     decoder: &Decoder,
     tokenizer: &ServerTokenizer,
@@ -1621,6 +1717,39 @@ pub fn generate(
     // (already long) argument list unchanged, and the closure's mutable
     // borrow ends when it is dropped at the call's return.
     let mut first_token_at: Option<std::time::Instant> = None;
+    // Prompt-lookup drafting, when the request and the store allow it.
+    //
+    // No second checkpoint, so it costs no memory and no load time;
+    // `Kv::step_batch` refuses the stores that cannot roll a rejected
+    // draft back, which leaves this decision about the REQUEST alone.
+    //
+    // A grammar is refused here rather than inside the loop: the
+    // verification draws through the same grammar machine, and a
+    // rejected block would leave it advanced over tokens that were
+    // never emitted. That is the one sampler feature the verify-by-
+    // agreement rule does not get for free, and refusing is honest
+    // where a silent fallback would not be.
+    let draft_max = if params.grammar.is_some() || params.json_object {
+        0
+    } else {
+        crate::sampling_loop::DEFAULT_DRAFT_MAX
+    };
+    let mut engine = ServerEngine {
+        decoder,
+        kv: &mut kv,
+        first_token_at: &mut first_token_at,
+        #[cfg(feature = "metal")]
+        kv_offload,
+        drafter: (draft_max > 0).then(|| {
+            frink_models::speculative::PromptLookupSpeculator::new(
+                crate::sampling_loop::DRAFT_NGRAM,
+                draft_max,
+            )
+        }),
+        accepted: 0,
+        drafted: 0,
+        forwards: 0,
+    };
     let (finish, generated_ids, final_logits) = crate::sampling_loop::sample_until_stop(
         logits,
         pos,
@@ -1628,35 +1757,24 @@ pub fn generate(
         stop_tokens,
         params,
         |ids| tokenizer.decode_bytes(ids),
-        &mut |next: usize, pos: usize| {
-            if first_token_at.is_none() {
-                first_token_at = Some(std::time::Instant::now());
-            }
-            // The anchor is offered the token that is about to be fed
-            // forward, at the length that includes it. A token that
-            // ended the generation never reaches here, which is the
-            // `finished` case `observe` refuses -- there would be no
-            // continuation to rejoin at.
-            if let Kv::Paged(lease) = &mut kv {
-                lease.observe_sampled(next, pos + 1, false);
-            }
-            let l = kv.step(decoder, next, pos);
-            #[cfg(feature = "metal")]
-            if kv_offload {
-                if let Some(caches) = kv.contiguous_mut() {
-                    decoder.sync_metal_attn_kv_to_host(caches);
-                }
-            }
-            l
-        },
+        &mut engine,
         &mut emit,
         &decode_token,
-        0,
+        draft_max,
     )?;
     let decode_secs = decode_start.elapsed().as_secs_f64();
+    let (spec_forwards, spec_accepted, spec_drafted) =
+        (engine.forwards, engine.accepted, engine.drafted);
     logits = final_logits;
     let mut usage =
         Usage::new(prompt_tokens, generated_ids.len()).with_timings(prefill_secs, decode_secs);
+    // The producer this metric never had. Reported only when a round
+    // actually ran, so the fields stay ABSENT for a request that did
+    // not speculate rather than reporting a zero that reads as "the
+    // drafter was useless".
+    if spec_drafted > 0 {
+        usage = usage.with_speculation(spec_forwards, spec_accepted, spec_drafted, Vec::new());
+    }
     if let Some(at) = first_token_at {
         usage = usage.with_ttft(at.duration_since(prefill_start).as_secs_f64());
     }
@@ -1883,6 +2001,99 @@ mod tests {
 
     fn small_decoder() -> Decoder {
         Decoder::new_random_small(test_dense_fixture(), 2, 256)
+    }
+
+    /// The server really speculates, and says so in `usage`.
+    ///
+    /// What this test does NOT do is compare the speculative answer
+    /// against an unspeculated one, and the reason is worth stating:
+    /// there is no way to turn drafting off for one request without
+    /// changing something else about it. The first version used
+    /// `json_object` as the control and was wrong -- that turns on a
+    /// grammar, so it compared two different requests and the text
+    /// differed for that reason rather than because speculation had
+    /// changed anything.
+    ///
+    /// The equivalence claim is proven where it can be proven cleanly:
+    /// `sampling_loop::speculation_changes_the_forward_count_and_not_
+    /// the_answer` runs the same scripted engine with three drafters
+    /// and demands identical ids and text, and the KV seam's own test
+    /// pins a batched forward against a per-token one at 1e-6. This
+    /// test covers what those cannot: that the wiring reaches a real
+    /// request at all.
+    #[test]
+    fn the_server_speculates_and_reports_it() {
+        let decoder = small_decoder();
+        let params = greedy_params(24);
+
+        // Repetition is what a prompt-lookup drafter matches on, and
+        // the byte tokenizer makes the text the token ids.
+        let mut text = String::new();
+        let (finish, usage) = generate(
+            &decoder,
+            &ServerTokenizer::Byte,
+            &StopTokens::default(),
+            None,
+            "abcabcabcabcabcabcabcabcabcabcabcabc",
+            &params,
+            None,
+            None,
+            None,
+            None,
+            |s| text.push_str(s),
+        )
+        .expect("speculative");
+
+        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(usage.completion_tokens, 24);
+        assert!(
+            usage.draft_tokens.is_some_and(|d| d > 0),
+            "a repetitive prompt drafted nothing, so this test proves nothing"
+        );
+        assert!(
+            usage.accepted_draft_tokens.is_some_and(|a| a > 0),
+            "nothing was accepted, so no forward was saved"
+        );
+        // Tokens per forward: 1.0 is "speculation bought nothing".
+        let speedup = usage.acceptance_length.expect("acceptance length");
+        assert!(
+            speedup > 1.0,
+            "speculation saved no forwards (tokens per forward {speedup})"
+        );
+
+        // A request with no room to draft reports NOTHING rather than
+        // zeros: an absent field reads as "this request did not
+        // speculate", where a zero reads as "the drafter was useless".
+        //
+        // One token is the case where the budget guard forbids
+        // drafting outright -- a block always commits its accepted
+        // drafts PLUS one, so a round needs at least two tokens of
+        // room. That guard is also what keeps `max_tokens` honest, and
+        // it is the bug this row's loop test caught.
+        //
+        // Note the prompt is repetitive here too: the drafter would
+        // happily propose from it, and does not get the chance.
+        let single = greedy_params(1);
+        let mut one_text = String::new();
+        let (_, one_usage) = generate(
+            &decoder,
+            &ServerTokenizer::Byte,
+            &StopTokens::default(),
+            None,
+            "abcabcabcabcabcabcabcabcabcabcabcabc",
+            &single,
+            None,
+            None,
+            None,
+            None,
+            |s| one_text.push_str(s),
+        )
+        .expect("single token");
+        assert_eq!(one_usage.completion_tokens, 1);
+        assert!(
+            one_usage.draft_tokens.is_none(),
+            "a request with no room to draft must not report speculation"
+        );
     }
 
     /// A batch of `k` tokens leaves the cache exactly where feeding
