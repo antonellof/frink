@@ -89,7 +89,17 @@ pub struct ServerArgs {
 
     /// KV cache dtype, llama.cpp's `--cache-type-k`. Metal only; the
     /// CPU and CUDA KV cache is the host `Vec<f32>`.
-    #[arg(long = "ctk", visible_alias = "cache-type-k", value_name = "TYPE")]
+    ///
+    /// Validated against the same vocabulary `frink run` uses
+    /// (`frink_models::ctk`): the two flags set the same variable, and
+    /// an engine that refuses a value on one binary while silently
+    /// serving f16 on the other is two answers to one question.
+    #[arg(
+        long = "ctk",
+        visible_alias = "cache-type-k",
+        value_name = "TYPE",
+        value_parser = frink_models::ctk::parse_value
+    )]
     ctk: Option<String>,
 
     /// Accepted and already the default: frink always compiles and
@@ -368,25 +378,6 @@ fn rewrite_llama_style_argv(args: Vec<String>) -> Vec<String> {
             _ => arg,
         })
         .collect()
-}
-
-pub(crate) fn print_available_devices() {
-    println!("Available devices:");
-    println!("  CPU");
-
-    let metal = frink_metal::MetalProfile::detect();
-    if let Some(name) = metal.device_name {
-        println!("  Metal: {name}");
-    }
-
-    let cuda = frink_cuda::HardwareProfile::detect();
-    if cuda.cuda_available {
-        let name = cuda.cuda_device_name.as_deref().unwrap_or("unknown device");
-        println!("  CUDA: {name}");
-        if cuda.cuda_device_count > 1 {
-            println!("        ({} devices detected)", cuda.cuda_device_count);
-        }
-    }
 }
 
 fn cli_bind_addr(args: &ServerArgs, env_addr: Option<&str>) -> Option<String> {
@@ -705,6 +696,25 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server and `frink run` set the same `FRINK_CTK` variable, so
+    /// they have to agree about which values exist. The server used to
+    /// accept anything and pass it through, which meant
+    /// `frink-server --ctk nonsense` served f16 without a word while
+    /// `frink run --ctk nonsense` refused.
+    #[test]
+    fn the_server_accepts_exactly_the_cache_types_the_cli_does() {
+        for good in ["f16", "q8_0", "q4_0", "fp8", "q5_1"] {
+            let a = ServerArgs::try_parse_from(["frink-server", "--ctk", good]);
+            assert!(a.is_ok(), "{good} was refused");
+        }
+        for bad in ["nonsense", "turbo4", "q3_k"] {
+            let e = ServerArgs::try_parse_from(["frink-server", "--ctk", bad])
+                .expect_err(&format!("{bad} was accepted"));
+            let msg = e.to_string();
+            assert!(msg.contains("unsupported cache type"), "{msg}");
+        }
+    }
 
     #[test]
     fn parses_llama_server_style_options() {

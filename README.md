@@ -36,7 +36,7 @@ kernels, attention and expert routing are written here, in Rust.
   completions, the API server, `download`, `bench`, `batched-bench`,
   `quantize`, `imatrix`, `gguf-split` and `verify` are all inside it. No
   wheels, no CUDA userspace to match against a driver. PyTorch alone is
-  402 MB, before vLLM sits on top.
+  402 MB, before a serving stack sits on top.
 - **Quantized end to end.** Weights stay quantized on mmap and
   dequantize inside the matmul, so an 8B model fits on a laptop.
   K-quants, the IQ tiers, MXFP4, F16 and BF16.
@@ -47,7 +47,7 @@ kernels, attention and expert routing are written here, in Rust.
   Tokenization is verified against libllama on twenty checkpoints under
   both special-token settings, and every engine number in
   [the speed table](benchmarks/RESULTS.md) was measured against
-  llama.cpp on the same host and the same file. 47 architectures run
+  llama.cpp on the same host and the same file. 98 architectures run
   with a logit comparison to back it; the rest stop and say what is
   missing rather than guess.
 - **OpenAI-compatible server.** On Metal, multiple concurrent clients

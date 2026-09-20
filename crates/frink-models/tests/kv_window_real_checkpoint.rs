@@ -26,6 +26,17 @@
 //! ignored `models/` directory). `FRINK_TEST_GEMMA2_GGUF` overrides the
 //! path, which is the same escape hatch `gemma2_metal_quality_gate.rs`
 //! offers.
+//!
+//! # It used to take 21 minutes, and that was the build, not the test
+//!
+//! This ran for **1,266 seconds** on the M2 Pro and failed twice under
+//! the parallel workspace suite while passing on its own. The cause
+//! was not the checkpoint: `cargo test` compiled the quantized matmul
+//! kernels at opt-level 0. With the numeric crates optimised in the
+//! test profile (see the `[profile.test.package.*]` block in the
+//! workspace `Cargo.toml`) the same test takes **19.9 seconds**, a 64x
+//! difference, and it stays in the default suite rather than being
+//! hidden behind `--ignored`.
 
 use std::path::{Path, PathBuf};
 

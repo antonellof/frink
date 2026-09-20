@@ -73,3 +73,47 @@ frink-inference = { version = "0.26.0", path = "crates/frink-inference" }
 # (+98 crates, +6 MB), so an unconditional dependency would make
 # `cargo install frink-cli` compile an HTTP and TLS stack it never runs.
 frink-server = { version = "0.26.0", path = "crates/frink-server" }
+
+# Test and dev builds optimise the NUMERIC crates.
+#
+# Measured: `kv_window_real_checkpoint` runs two full decodes of a real
+# 1.7 GB Q4_K_M checkpoint in **1,266 seconds** at opt-level 0 and
+# **20.9 seconds** in release, a 60x difference on the same machine.
+# The work is quantized matmul kernels, which is the code optimisation
+# helps most and the code `cargo test` was compiling unoptimised.
+#
+# So the slow real-checkpoint tests were not inherently slow, they were
+# being run through an interpreter's worth of overhead. These overrides
+# give the kernels release-grade codegen while the test crates
+# themselves stay quick to compile, and `debug-assertions` stays ON:
+# this repo relies on `debug_assert!` and turning the optimiser up does
+# not turn those off.
+#
+# `dev` and `test` are both set because `cargo test` builds the crate
+# under test with the `test` profile and its path dependencies with
+# `dev`.
+[profile.dev.package.frink-core]
+opt-level = 3
+[profile.dev.package.frink-quant]
+opt-level = 3
+[profile.dev.package.frink-moe]
+opt-level = 3
+[profile.dev.package.frink-gguf]
+opt-level = 3
+[profile.dev.package.frink-models]
+opt-level = 3
+[profile.dev.package.frink-metal]
+opt-level = 3
+
+[profile.test.package.frink-core]
+opt-level = 3
+[profile.test.package.frink-quant]
+opt-level = 3
+[profile.test.package.frink-moe]
+opt-level = 3
+[profile.test.package.frink-gguf]
+opt-level = 3
+[profile.test.package.frink-models]
+opt-level = 3
+[profile.test.package.frink-metal]
+opt-level = 3

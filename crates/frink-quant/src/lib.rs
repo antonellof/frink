@@ -86,31 +86,31 @@ pub const Q5_1_BLOCK_ELEMS: usize = 32;
 pub const Q8_1_BLOCK_BYTES: usize = 36;
 pub const Q8_1_BLOCK_ELEMS: usize = 32;
 
-/// TurboQuant's randomized Hadamard rotation, which the turbo4 wire
-/// applies to K before quantizing it.
-pub mod turboquant;
+/// The randomized Hadamard rotation the 4-bit KV wire applies to K
+/// before quantizing it.
+pub mod kv_rotation;
 
-/// Metal `FRINK_CTK=turbo4` KV block: 32 elems → f16 scale + 16 nibble bytes.
-pub const TURBO4_KV_GROUP: usize = 32;
-pub const TURBO4_KV_BLOCK_BYTES: usize = 18;
+/// Metal `FRINK_CTK=q4` KV block: 32 elems → f16 scale + 16 nibble bytes.
+pub const Q4_KV_GROUP: usize = 32;
+pub const Q4_KV_BLOCK_BYTES: usize = 18;
 
 /// Metal `FRINK_CTK=fp8` KV block: 32 elems → f16 scale + 32 E4M3-ish bytes.
 /// Codes are absmax-scaled int8 in [-127,127] (portable stand-in for E4M3).
 pub const FP8_KV_GROUP: usize = 32;
 pub const FP8_KV_BLOCK_BYTES: usize = 34;
 
-/// Pack f32 into Metal turbo4 KV blocks (no WHT).
-pub fn pack_turbo4_kv_blocks(x: &[f32]) -> Vec<u8> {
-    assert_eq!(x.len() % TURBO4_KV_GROUP, 0);
-    let n_blocks = x.len() / TURBO4_KV_GROUP;
-    let mut out = vec![0u8; n_blocks * TURBO4_KV_BLOCK_BYTES];
+/// Pack f32 into Metal 4-bit KV blocks (no rotation).
+pub fn pack_q4_kv_blocks(x: &[f32]) -> Vec<u8> {
+    assert_eq!(x.len() % Q4_KV_GROUP, 0);
+    let n_blocks = x.len() / Q4_KV_GROUP;
+    let mut out = vec![0u8; n_blocks * Q4_KV_BLOCK_BYTES];
     for b in 0..n_blocks {
-        let chunk = &x[b * TURBO4_KV_GROUP..(b + 1) * TURBO4_KV_GROUP];
+        let chunk = &x[b * Q4_KV_GROUP..(b + 1) * Q4_KV_GROUP];
         let amax = chunk.iter().fold(0f32, |m, &v| m.max(v.abs()));
         let scale = if amax > 0.0 { amax / 7.0 } else { 0.0 };
         let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
         let bits = f16::from_f32(scale).to_le_bytes();
-        let dst = &mut out[b * TURBO4_KV_BLOCK_BYTES..(b + 1) * TURBO4_KV_BLOCK_BYTES];
+        let dst = &mut out[b * Q4_KV_BLOCK_BYTES..(b + 1) * Q4_KV_BLOCK_BYTES];
         dst[0] = bits[0];
         dst[1] = bits[1];
         for i in 0..16 {
@@ -122,15 +122,15 @@ pub fn pack_turbo4_kv_blocks(x: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Unpack [`pack_turbo4_kv_blocks`].
-pub fn unpack_turbo4_kv_blocks(bytes: &[u8]) -> Result<Vec<f32>, QuantError> {
-    if !bytes.len().is_multiple_of(TURBO4_KV_BLOCK_BYTES) {
-        return Err(QuantError::Misaligned(bytes.len(), TURBO4_KV_BLOCK_BYTES));
+/// Unpack [`pack_q4_kv_blocks`].
+pub fn unpack_q4_kv_blocks(bytes: &[u8]) -> Result<Vec<f32>, QuantError> {
+    if !bytes.len().is_multiple_of(Q4_KV_BLOCK_BYTES) {
+        return Err(QuantError::Misaligned(bytes.len(), Q4_KV_BLOCK_BYTES));
     }
-    let n_blocks = bytes.len() / TURBO4_KV_BLOCK_BYTES;
-    let mut out = Vec::with_capacity(n_blocks * TURBO4_KV_GROUP);
+    let n_blocks = bytes.len() / Q4_KV_BLOCK_BYTES;
+    let mut out = Vec::with_capacity(n_blocks * Q4_KV_GROUP);
     for b in 0..n_blocks {
-        let block = &bytes[b * TURBO4_KV_BLOCK_BYTES..(b + 1) * TURBO4_KV_BLOCK_BYTES];
+        let block = &bytes[b * Q4_KV_BLOCK_BYTES..(b + 1) * Q4_KV_BLOCK_BYTES];
         let scale = f16::from_le_bytes([block[0], block[1]]).to_f32();
         for i in 0..16 {
             let byte = block[2 + i];
@@ -5684,11 +5684,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn turbo4_kv_blocks_roundtrip_reasonable() {
+    fn q4_kv_blocks_roundtrip_reasonable() {
         let x: Vec<f32> = (0..64).map(|i| (i as f32 * 0.17).sin() * 2.0).collect();
-        let packed = pack_turbo4_kv_blocks(&x);
-        assert_eq!(packed.len(), 2 * TURBO4_KV_BLOCK_BYTES);
-        let y = unpack_turbo4_kv_blocks(&packed).unwrap();
+        let packed = pack_q4_kv_blocks(&x);
+        assert_eq!(packed.len(), 2 * Q4_KV_BLOCK_BYTES);
+        let y = unpack_q4_kv_blocks(&packed).unwrap();
         assert_eq!(y.len(), 64);
         let mut err = 0.0f32;
         for (a, b) in x.iter().zip(y.iter()) {

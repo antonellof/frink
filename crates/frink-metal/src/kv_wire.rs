@@ -1,15 +1,15 @@
 //! The KV wire: what a token's K and V look like in device memory, and
 //! the kernels that put them there and read them back.
 //!
-//! Split out of `attn.rs` when the TurboQuant rotation landed, because
+//! Split out of `attn.rs` when the K rotation landed, because
 //! that change touches the append kernel, the dtype table and the
 //! dequant path and none of the attention kernels, which is the line
 //! this module draws. `attn.rs` asks this module what a dtype costs,
 //! whether a geometry is servable and how to append; it owns the
 //! softmax.
 //!
-//! Selected by `FRINK_CTK` / `--ctk`. Implemented: F16, Q8_0, Turbo8
-//! (=Q8_0 wire), Turbo4, Fp8 (=Q8_0 wire). Turbo3 warns and falls back.
+//! Selected by `FRINK_CTK` / `--ctk`: `f16`, `q8_0`, `fp8` (the Q8_0
+//! wire under another name) and `q4`.
 
 use std::ptr::NonNull;
 use std::sync::OnceLock;
@@ -116,12 +116,12 @@ kernel void dequant_q8_0_to_f16(
 }
 "#;
 
-/// TurboQuant 4-bit KV: f16 scale + 16 nibble bytes / 32 elems (18 B),
-/// with K rotated first.
+/// 4-bit KV: f16 scale + 16 nibble bytes / 32 elems (18 B), with K
+/// rotated first.
 ///
 /// One threadgroup per (head, plane), `head_dim` threads. Plane 0 is K
 /// and takes the randomized Hadamard rotation of
-/// `frink_quant::turboquant` (sign flip by the same hash, then the
+/// `frink_quant::kv_rotation` (sign flip by the same hash, then the
 /// orthonormal butterfly) before the per-32-group absmax; plane 1 is V
 /// and does not, because the rotation is worth 39% of the error on K
 /// and 12% on V, measured, and a rotated V would additionally need the
@@ -131,17 +131,23 @@ kernel void dequant_q8_0_to_f16(
 /// appends stay ONE dispatch (GitHub issue #149), and it is 0 for a
 /// head width the rotation cannot serve, which keeps the unrotated wire
 /// this file shipped before.
-const KV_APPEND_TURBO4_KERNEL_SRC: &str = r#"
+const KV_APPEND_Q4_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-// Must match `frink_quant::turboquant::tq_sign`.
-inline float tq_sign(uint head_idx, uint channel) {
-    uint hash = head_idx * 2654435761u + channel * 40503u;
-    return (hash & 1u) ? -1.0f : 1.0f;
+// Must match `frink_quant::kv_rotation::rotation_sign` exactly: the
+// append writes under this pattern and the query rotation reads under
+// it, so a difference of one bit is a different model, not a lossier
+// one.
+inline float rotation_sign(uint head_idx, uint channel) {
+    uint h = head_idx * 0x9E3779B1u + channel * 0x85EBCA6Bu;
+    h ^= h >> 15;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 13;
+    return (h & 1u) ? -1.0f : 1.0f;
 }
 
-kernel void kv_append_turbo4(
+kernel void kv_append_q4(
     device const float* src_in [[buffer(0)]],
     device uchar* dst_in [[buffer(1)]],
     constant uint& offset_elems [[buffer(2)]],
@@ -165,14 +171,14 @@ kernel void kv_append_turbo4(
     if (head >= n_heads) return;
 
     // The sign pattern follows the KV head, not the token, so a query
-    // rotated by `rotate_q_turbo4` sees the pattern its own K was
+    // rotated by `rotate_q_q4` sees the pattern its own K was
     // stored under.
     uint head_in_row = (n_kv_heads > 0u) ? (head % n_kv_heads) : 0u;
     uint src_base = head * head_dim;
 
     float x = src[src_base + t];
     if (rotate != 0u && tgid.y == 0u) {
-        x *= tq_sign(head_in_row, t);
+        x *= rotation_sign(head_in_row, t);
         sh[t] = x;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint step = 1u; step < head_dim; step <<= 1u) {
@@ -216,16 +222,21 @@ kernel void kv_append_turbo4(
 /// `(H S q) . (H S k) = q . k`, so this is what makes a rotated store
 /// readable: every attention kernel keeps computing an ordinary dot
 /// product and neither of them knows the wire changed.
-const ROTATE_Q_TURBO4_KERNEL_SRC: &str = r#"
+const ROTATE_Q_Q4_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-inline float tq_sign(uint head_idx, uint channel) {
-    uint hash = head_idx * 2654435761u + channel * 40503u;
-    return (hash & 1u) ? -1.0f : 1.0f;
+// Same pattern as the append above and as
+// `frink_quant::kv_rotation::rotation_sign`.
+inline float rotation_sign(uint head_idx, uint channel) {
+    uint h = head_idx * 0x9E3779B1u + channel * 0x85EBCA6Bu;
+    h ^= h >> 15;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 13;
+    return (h & 1u) ? -1.0f : 1.0f;
 }
 
-kernel void rotate_q_turbo4(
+kernel void rotate_q_q4(
     device const float* src [[buffer(0)]],
     device float* dst [[buffer(1)]],
     constant uint& head_dim [[buffer(2)]],
@@ -243,7 +254,7 @@ kernel void rotate_q_turbo4(
     uint h_in_token = head % n_heads;
     uint kv_head = h_in_token / (n_heads / n_kv_heads);
     uint base = head * head_dim;
-    sh[t] = src[base + t] * tq_sign(kv_head, t);
+    sh[t] = src[base + t] * rotation_sign(kv_head, t);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint step = 1u; step < head_dim; step <<= 1u) {
         float a = sh[t];
@@ -256,11 +267,11 @@ kernel void rotate_q_turbo4(
 }
 "#;
 
-const DEQUANT_TURBO4_TO_F16_KERNEL_SRC: &str = r#"
+const DEQUANT_Q4_TO_F16_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void dequant_turbo4_to_f16(
+kernel void dequant_q4_to_f16(
     device const uchar* src [[buffer(0)]],
     device half* dst [[buffer(1)]],
     constant uint& n_elems [[buffer(2)]],
@@ -283,22 +294,27 @@ kernel void dequant_turbo4_to_f16(
     }
 }
 "#;
-/// Device KV cache element type (llama.cpp `-ctk` / `--kvcache-dtype` analogue).
+/// Device KV cache element type (llama.cpp `-ctk` analogue).
 ///
-/// Selected via `FRINK_CTK` ([`metal_kv_dtype`]). Implemented: F16, Q8_0,
-/// Turbo8 (=Q8_0 wire), Turbo4, Fp8 (=Q8_0 wire). Turbo3 warns → F16.
+/// Selected via `FRINK_CTK` ([`metal_kv_dtype`]). Every variant names
+/// the WIRE it writes, because that is the only thing a reader of a
+/// stored block needs to know: three 8-bit spellings that share one
+/// 34-byte layout, and one 4-bit layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetalKvDtype {
     F16,
+    /// ggml Q8_0: 32 int8 codes and one f16 scale, 34 bytes.
     Q8_0,
-    /// FP8-style KV (scaled int8 / Q8_0 layout).
+    /// 8-bit KV under the name a client may ask for it by. The store is
+    /// [`Self::Q8_0`]'s: the codes are absmax-scaled int8 in
+    /// `[-127, 127]`, a portable stand-in rather than real E4M3, and
+    /// the module says so rather than the name implying otherwise.
     Fp8,
-    /// TurboQuant 8-bit (Metal: same store as Q8_0; host WHT optional).
-    Turbo8,
-    /// TurboQuant 4-bit (WHT optional on host; Metal absmax nibble groups).
-    Turbo4,
-    /// TurboQuant 3-bit (experimental; not implemented yet).
-    Turbo3,
+    /// 4-bit KV: 32 codes in 16 nibble bytes and one f16 scale, 18
+    /// bytes, with the Hadamard rotation on K where the head width
+    /// allows it ([`q4_rotation_viable`]). Named `q4_0` because that is
+    /// llama.cpp's spelling for a 4-bit `-ctk`.
+    Q4_0,
 }
 
 impl MetalKvDtype {
@@ -307,31 +323,30 @@ impl MetalKvDtype {
             Self::F16 => "f16",
             Self::Q8_0 => "q8_0",
             Self::Fp8 => "fp8",
-            Self::Turbo8 => "turbo8",
-            Self::Turbo4 => "turbo4",
-            Self::Turbo3 => "turbo3",
+            Self::Q4_0 => "q4_0",
         }
     }
 
+    /// Exhaustive on purpose: a wire added here has to say whether it
+    /// runs before it can be selected.
     pub fn is_implemented(self) -> bool {
-        matches!(
-            self,
-            Self::F16 | Self::Q8_0 | Self::Turbo8 | Self::Turbo4 | Self::Fp8
-        )
+        match self {
+            Self::F16 | Self::Q8_0 | Self::Fp8 | Self::Q4_0 => true,
+        }
     }
 
     /// True when attention must dequant store → f16 scratch before FA/GQA.
     pub fn needs_f16_scratch(self) -> bool {
-        matches!(self, Self::Q8_0 | Self::Turbo8 | Self::Turbo4 | Self::Fp8)
+        matches!(self, Self::Q8_0 | Self::Fp8 | Self::Q4_0)
     }
 
     /// Uses ggml Q8_0 / fp8 34-byte blocks.
     pub(crate) fn is_q8_wire(self) -> bool {
-        matches!(self, Self::Q8_0 | Self::Turbo8 | Self::Fp8)
+        matches!(self, Self::Q8_0 | Self::Fp8)
     }
 }
 
-/// Whether a turbo4 store of this geometry rotates its K.
+/// Whether a 4-bit store of this geometry rotates its K.
 ///
 /// The rotation needs a power-of-two head width for the butterfly and
 /// a multiple of 32 so a head's boundary is also a quantization group's
@@ -345,9 +360,9 @@ impl MetalKvDtype {
 /// query rotation, asks the buffer rather than recomputing, because a
 /// store written rotated and read unrotated is a wrong answer no
 /// assertion would catch.
-pub fn turbo4_rotation_viable(head_dim: usize) -> bool {
-    frink_quant::turboquant::rotation_viable(head_dim)
-        && head_dim.is_multiple_of(frink_quant::TURBO4_KV_GROUP)
+pub fn q4_rotation_viable(head_dim: usize) -> bool {
+    frink_quant::kv_rotation::rotation_viable(head_dim)
+        && head_dim.is_multiple_of(frink_quant::Q4_KV_GROUP)
 }
 
 /// True when `n_kv_heads * head_dim` is a multiple of ggml Q8_0 block size (32).
@@ -355,9 +370,9 @@ pub fn metal_kv_q8_0_viable(n_kv_heads: usize, head_dim: usize) -> bool {
     (n_kv_heads * head_dim).is_multiple_of(frink_quant::Q8_0_BLOCK_ELEMS)
 }
 
-/// turbo4 / fp8 share the 32-elem group alignment.
-pub fn metal_kv_turbo4_viable(n_kv_heads: usize, head_dim: usize) -> bool {
-    (n_kv_heads * head_dim).is_multiple_of(frink_quant::TURBO4_KV_GROUP)
+/// The 4-bit wire's 32-element group alignment.
+pub fn metal_kv_q4_viable(n_kv_heads: usize, head_dim: usize) -> bool {
+    (n_kv_heads * head_dim).is_multiple_of(frink_quant::Q4_KV_GROUP)
 }
 
 /// Dtype actually used for new [`MetalKvBuffers`] (unimplemented / non-viable → F16).
@@ -378,13 +393,13 @@ pub fn effective_metal_kv_dtype(n_kv_heads: usize, head_dim: usize) -> MetalKvDt
         });
         return MetalKvDtype::F16;
     }
-    if requested == MetalKvDtype::Turbo4 && !metal_kv_turbo4_viable(n_kv_heads, head_dim) {
+    if requested == MetalKvDtype::Q4_0 && !metal_kv_q4_viable(n_kv_heads, head_dim) {
         static WARNED: OnceLock<()> = OnceLock::new();
         let _ = WARNED.get_or_init(|| {
             eprintln!(
-                "FRINK_CTK=turbo4: n_kv_heads*head_dim={} not divisible by {}; using f16",
+                "FRINK_CTK=q4_0: n_kv_heads*head_dim={} not divisible by {}; using f16",
                 n_kv_heads * head_dim,
-                frink_quant::TURBO4_KV_GROUP
+                frink_quant::Q4_KV_GROUP
             );
         });
         return MetalKvDtype::F16;
@@ -397,9 +412,7 @@ pub fn parse_metal_kv_dtype(raw: Option<&str>) -> MetalKvDtype {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("q8_0") | Some("q8") => MetalKvDtype::Q8_0,
         Some("fp8") | Some("e4m3") => MetalKvDtype::Fp8,
-        Some("turbo8") => MetalKvDtype::Turbo8,
-        Some("turbo4") => MetalKvDtype::Turbo4,
-        Some("turbo3") => MetalKvDtype::Turbo3,
+        Some("q4_0") => MetalKvDtype::Q4_0,
         Some("f16") | Some("fp16") | Some("half") | Some("bf16") => MetalKvDtype::F16,
         _ => MetalKvDtype::F16,
     }
@@ -428,7 +441,7 @@ pub fn metal_kv_dtype() -> MetalKvDtype {
 /// Kernel + block geometry for one KV wire format.
 ///
 /// One table rather than three near-identical encoders: the f16, Q8_0
-/// and Turbo4 appends previously restated the same threadgroup sizing,
+/// and 4-bit appends previously restated the same threadgroup sizing,
 /// the same alignment check and the same buffer bindings, which is the
 /// shape that loses a fix in two of three copies.
 struct KvAppendKernel {
@@ -449,10 +462,10 @@ fn kv_append_kernel(dtype: MetalKvDtype) -> KvAppendKernel {
         };
     }
     match dtype {
-        MetalKvDtype::Turbo4 => KvAppendKernel {
-            src: KV_APPEND_TURBO4_KERNEL_SRC,
-            name: "kv_append_turbo4",
-            elems_per_unit: frink_quant::TURBO4_KV_GROUP as u32,
+        MetalKvDtype::Q4_0 => KvAppendKernel {
+            src: KV_APPEND_Q4_KERNEL_SRC,
+            name: "kv_append_q4",
+            elems_per_unit: frink_quant::Q4_KV_GROUP as u32,
         },
         _ => KvAppendKernel {
             src: KV_APPEND_KERNEL_SRC,
@@ -503,21 +516,17 @@ fn encode_dequant_q8_0_to_f16(
     Ok(())
 }
 
-fn encode_dequant_turbo4_to_f16(
+fn encode_dequant_q4_to_f16(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     src: &ProtocolObject<dyn MTLBuffer>,
     dst: &ProtocolObject<dyn MTLBuffer>,
     n_elems: u32,
 ) -> Result<(), MetalError> {
-    if !n_elems.is_multiple_of(frink_quant::TURBO4_KV_GROUP as u32) {
+    if !n_elems.is_multiple_of(frink_quant::Q4_KV_GROUP as u32) {
         return Err(MetalError::CommandFailed);
     }
-    let pipe = ensure_pipeline(
-        device,
-        DEQUANT_TURBO4_TO_F16_KERNEL_SRC,
-        "dequant_turbo4_to_f16",
-    )?;
+    let pipe = ensure_pipeline(device, DEQUANT_Q4_TO_F16_KERNEL_SRC, "dequant_q4_to_f16")?;
     encoder.setComputePipelineState(&pipe.0);
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(src), 0, 0);
@@ -525,7 +534,7 @@ fn encode_dequant_turbo4_to_f16(
         let mut n = n_elems;
         encoder.setBytes_length_atIndex(NonNull::new(&mut n as *mut u32 as *mut _).unwrap(), 4, 2);
     }
-    let n_blocks = (n_elems as usize) / frink_quant::TURBO4_KV_GROUP;
+    let n_blocks = (n_elems as usize) / frink_quant::Q4_KV_GROUP;
     let tg = 256usize.min(n_blocks).max(1);
     let n_tg = n_blocks.div_ceil(tg);
     dispatch_counted(
@@ -554,7 +563,7 @@ pub fn encode_kv_dequant_to_f16(
 ) -> Result<(), MetalError> {
     match dtype {
         d if d.is_q8_wire() => encode_dequant_q8_0_to_f16(encoder, device, src, dst, n_elems),
-        MetalKvDtype::Turbo4 => encode_dequant_turbo4_to_f16(encoder, device, src, dst, n_elems),
+        MetalKvDtype::Q4_0 => encode_dequant_q4_to_f16(encoder, device, src, dst, n_elems),
         _ => Err(MetalError::CommandFailed),
     }
 }
@@ -604,7 +613,7 @@ pub fn encode_kv_store_append(
         encoder.setBuffer_offset_atIndex(Some(v_src), 0, 4);
         encoder.setBuffer_offset_atIndex(Some(&kv.v), 0, 5);
     }
-    if kv.dtype == MetalKvDtype::Turbo4 {
+    if kv.dtype == MetalKvDtype::Q4_0 {
         // Per (head, plane), because the rotation is over a whole head
         // and the quantization groups inside it share a threadgroup.
         let head_dim = kv.head_dim;
@@ -671,7 +680,7 @@ pub fn encode_kv_store_append(
     Ok(())
 }
 
-/// Rotate Q into `dst` by the matrix the rotated turbo4 store used.
+/// Rotate Q into `dst` by the matrix the rotated 4-bit store used.
 ///
 /// Caller contract, and the reason this is not optional: a store whose
 /// `k_rotated` is set must have its query put through this before any
@@ -680,7 +689,7 @@ pub fn encode_kv_store_append(
 /// do it in the same block that fills the f16 scratch, so the rotated
 /// K and the rotated Q are produced together or not at all.
 #[allow(clippy::too_many_arguments)]
-pub fn encode_rotate_q_turbo4(
+pub fn encode_rotate_q_q4(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     src: &ProtocolObject<dyn MTLBuffer>,
@@ -693,7 +702,7 @@ pub fn encode_rotate_q_turbo4(
     if head_dim == 0 || n_kv_heads == 0 || n_heads == 0 || !n_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::CommandFailed);
     }
-    let pipe = ensure_pipeline(device, ROTATE_Q_TURBO4_KERNEL_SRC, "rotate_q_turbo4")?;
+    let pipe = ensure_pipeline(device, ROTATE_Q_Q4_KERNEL_SRC, "rotate_q_q4")?;
     encoder.setComputePipelineState(&pipe.0);
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(src), 0, 0);
@@ -749,11 +758,11 @@ pub fn kv_wire_pipelines(dtype: MetalKvDtype) -> Vec<(&'static str, &'static str
 /// reads it back rather than inheriting one.
 fn dequant_kernel(dtype: MetalKvDtype) -> (&'static str, &'static str) {
     match dtype {
-        MetalKvDtype::Q8_0 | MetalKvDtype::Turbo8 | MetalKvDtype::Fp8 => {
+        MetalKvDtype::Q8_0 | MetalKvDtype::Fp8 => {
             (DEQUANT_Q8_0_TO_F16_KERNEL_SRC, "dequant_q8_0_to_f16")
         }
-        MetalKvDtype::Turbo4 => (DEQUANT_TURBO4_TO_F16_KERNEL_SRC, "dequant_turbo4_to_f16"),
-        MetalKvDtype::F16 | MetalKvDtype::Turbo3 => {
+        MetalKvDtype::Q4_0 => (DEQUANT_Q4_TO_F16_KERNEL_SRC, "dequant_q4_to_f16"),
+        MetalKvDtype::F16 => {
             unreachable!("{} does not use the f16 scratch", dtype.as_str())
         }
     }
@@ -763,17 +772,17 @@ fn dequant_kernel(dtype: MetalKvDtype) -> (&'static str, &'static str) {
 mod tests {
     use super::*;
 
-    /// Both turbo4 kernels have to COMPILE, and a compile failure used
+    /// Both 4-bit kernels have to COMPILE, and a compile failure used
     /// to surface as `Command encoder released without endEncoding` in
     /// whatever test ran next, because the error travels up through a
     /// `?` that skips `endEncoding`.
     #[test]
     #[ignore = "needs a real Metal GPU"]
-    fn turbo4_kernels_compile() {
+    fn q4_kernels_compile() {
         let shared = crate::gpu::shared_metal().expect("metal");
         for (src, name) in [
-            (KV_APPEND_TURBO4_KERNEL_SRC, "kv_append_turbo4"),
-            (ROTATE_Q_TURBO4_KERNEL_SRC, "rotate_q_turbo4"),
+            (KV_APPEND_Q4_KERNEL_SRC, "kv_append_q4"),
+            (ROTATE_Q_Q4_KERNEL_SRC, "rotate_q_q4"),
         ] {
             ensure_pipeline(&shared.device, src, name).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         }

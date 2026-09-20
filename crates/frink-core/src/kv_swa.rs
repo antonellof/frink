@@ -36,8 +36,8 @@
 //! > the other way round, and this direction is the one that is
 //! > implementable -- forcing `block_size` up to a multiple of a 128-token
 //! > gpt-oss window would make every block at least a whole window, which
-//! > defeats the point of blocks. vLLM states it as
-//! > `sliding_window % block_size == 0`; so does this module.
+//! > defeats the point of blocks. The constraint is the usual
+//! > `sliding_window % block_size == 0`, and this module holds it.
 //!
 //! # Why this is live, not hypothetical
 //!

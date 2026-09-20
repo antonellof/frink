@@ -77,8 +77,8 @@ with its own output (`crates/frink-quant/src/iq_tier_goldens.rs`).
 `frink-models::speculative`'s prompt-lookup speculative decoding
 (propose candidate continuation tokens by finding a repeat of the
 current context elsewhere in token history, verify them in a batched
-forward pass) follows the same idea popularized by vLLM's "prompt
-lookup decoding" feature -- no code is copied; the n-gram matching,
+forward pass) follows the prompt-lookup-decoding idea that is common
+across serving engines -- no code is copied; the n-gram matching,
 batched verification, and accept/reject accounting in frink's
 implementation are original.
 
@@ -199,10 +199,11 @@ inputs.
 
 The `/v1/chat/completions`, `/v1/models`, and `/health` endpoint shapes
 in `frink-server` follow the now-industry-standard OpenAI Chat
-Completions API convention used by llama.cpp's server, vLLM, SGLang,
-mistral.rs, and this project's own sibling,
-antonellof/cognitora-inference. No server code is copied from any of
-these; the wire format is a public API contract, not source code.
+Completions API convention that llama.cpp's server and the other
+OpenAI-compatible engines implement, including this project's own
+sibling, antonellof/cognitora-inference. No server code is copied from
+any of them; the wire format is a public API contract, not source
+code.
 
 ## Response caching design
 
@@ -364,12 +365,13 @@ than quietly dropping the rows:
 | `supervisor` | `python/freetoken/daemon/serve_manager.py` | manages an engine child process; frink ships one binary |
 
 
-FreeToken itself credits SGLang, vLLM, FlashInfer,
-flash-linear-attention, LightLLM and llama.cpp; in particular its radix
-prefix cache follows SGLang's `RadixCache` / `SWARadixCache` design and
-its incremental detokenization borrows the printable-text heuristic from
-SGLang and `transformers`' `TextStreamer`. Those lineages carry through
-this port.
+FreeToken credits prior art of its own, llama.cpp among it: its radix
+prefix cache follows the standard `RadixCache` / `SWARadixCache` design
+and its incremental detokenization borrows the printable-text heuristic
+that `transformers`' `TextStreamer` uses. Those lineages carry through
+this port. (What Apache-2.0 obliges is FreeToken's copyright and
+licence identification, above; this paragraph is frink's own account of
+where the design came from.)
 
 What was **not** ported, and why: everything in FreeToken that computes
 rather than decides. The Triton and CUDA kernels, the C++ CPU MoE
@@ -425,35 +427,15 @@ of their source code appears in this repository:
   hybrid execution model.
 - **ik_llama.cpp** (ikawrakow) -- MoE-aware CPU/GPU tensor placement,
   fused MoE operators, SOTA quantization types.
-- **Candle** and **mistral.rs** (Hugging Face / EricLBuehler) -- pure-Rust
-  tensor/model execution patterns, GGUF-in-Rust precedent (see also the
-  section above for the one case where candle's real source was read
-  directly to close a confirmed capability gap).
+- **Candle** (Hugging Face) -- pure-Rust tensor/model execution
+  patterns, GGUF-in-Rust precedent (see also the section above for the
+  one case where candle's real source was read directly to close a
+  confirmed capability gap).
 - **antonellof/cognitora-inference** -- the author's own orchestration
-  layer above vLLM/SGLang/llama.cpp; frink is designed to be pluggable
+  layer above the serving engines; frink is designed to be pluggable
   into cognitora's `cgn-agent` as an additional engine backend.
 
 If frink ever vendors or adapts actual source lines from an MIT or
 Apache-2.0 licensed project, the applicable upstream copyright and
 license notice will be added to this file alongside that code, per the
 terms of those licenses.
-
-## TurboQuant KV rotation (xInfer / attention.rs)
-
-`frink-quant`'s `turboquant` module and the `kv_append_turbo4` /
-`rotate_q_turbo4` Metal kernels implement the randomized Hadamard
-rotation that xInfer applies to its 4-bit KV cache. The scheme
-(deterministic per-head, per-channel sign flip, then a normalized
-Walsh-Hadamard transform over the head vector, with the query put
-through the same transform so the dot product is unchanged) was read
-from `attention.rs`'s `flash_attention.metal`, and the sign hash is
-that file's `tq_sign_flip` verbatim so a vector rotated by either
-implementation is the same vector. The surrounding code, the wire
-layout (frink keeps its own per-32-element scales) and the Rust host
-definition are frink's.
-
-  xInfer and attention.rs are MIT licensed:
-  Copyright (c) 2026 Guoqing Bao
-
-    https://github.com/guoqingbao/xinfer
-    https://github.com/guoqingbao/attention.rs

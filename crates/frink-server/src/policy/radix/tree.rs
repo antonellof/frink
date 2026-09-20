@@ -32,7 +32,7 @@
 //! tests.
 //!
 //! Ported 1:1 from FreeToken's `python/freetoken/kvcache/radix_cache.py`
-//! (Apache-2.0), which follows the SGLang radix-cache design; see
+//! (Apache-2.0), which follows the standard radix-cache design; see
 //! `docs/THIRD_PARTY_NOTICES.md`.
 
 use std::collections::HashMap;

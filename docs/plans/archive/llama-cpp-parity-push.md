@@ -604,7 +604,7 @@ Portable and worth taking, in value order:
 4. **Asymmetric K/V precision.** K dominates attention-score accuracy and
    V tolerates far less; pairing a higher-precision K with a lower-
    precision V (per-layer overridable) buys memory that uniform KV quant
-   cannot. Pairs with the `turbo3`/WHT work already on the roadmap.
+   cannot. Pairs with the low-bit KV and rotation work on the roadmap.
 5. **Decode sparse-V gate**: skip V dequant+accumulate entirely where the
    softmax weight is below ~1e-3. Bandwidth win at long context,
    independent of any MMA work.

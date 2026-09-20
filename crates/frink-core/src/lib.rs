@@ -2,8 +2,8 @@
 //! grouped-query causal attention with a simple KV cache.
 //!
 //! CPU reference implementation. The op set and naming (RMSNorm, RoPE,
-//! GQA, KV cache) follow the now-standard vocabulary popularized by
-//! llama.cpp / vLLM / candle-transformers; the actual Rust code below is
+//! GQA, KV cache) follow the now-standard vocabulary of the GGUF and
+//! transformer-inference ecosystem; the actual Rust code below is
 //! written independently. See docs/THIRD_PARTY_NOTICES.md for design credit.
 //!
 //! The MoE expert-residency stack -- [`expert_store`] (the byte budget

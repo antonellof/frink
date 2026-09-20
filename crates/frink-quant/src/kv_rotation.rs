@@ -1,9 +1,9 @@
-//! TurboQuant's randomized Hadamard rotation, host side.
+//! The randomized Hadamard rotation the 4-bit KV wire uses, host side.
 //!
 //! A 4-bit KV cache is lossy in one specific way: a handful of channels
 //! in every K vector carry a magnitude the rest do not, so the absmax
 //! that sets the scale is set by those channels and the other twenty-six
-//! of every thirty-two land in two or three codes. TurboQuant's answer
+//! of every thirty-two land in two or three codes. The answer
 //! is to rotate the head vector first, which spreads that magnitude
 //! across every channel, and to rotate the query by the same matrix at
 //! read time so the dot product is unchanged:
@@ -23,33 +23,40 @@
 //! can continue a sequence the GPU started. A rotated row handed to a
 //! host kernel that does not rotate its query is not a small error.
 //!
-//! This module is the definition the Metal `kv_append_turbo4` kernel is
+//! This module is the definition the Metal `kv_append_q4` kernel is
 //! checked against, the way `weight_matrix::hadamard` is the definition
-//! for `frink-metal`'s folded rotation. The sign hash is the one
-//! `attention.rs`'s `tq_sign_flip` uses (MIT, Guoqing Bao; see
-//! `docs/THIRD_PARTY_NOTICES.md`), deliberately, so a vector rotated
-//! here and a vector rotated there are the same vector and the two
-//! implementations can be compared directly.
+//! for `frink-metal`'s folded rotation. The two must agree bit for bit
+//! about the sign pattern, so the hash lives here and the kernel
+//! carries a copy of the same three constants with a comment pointing
+//! at this function.
 //!
 //! What is NOT rotated is V. Measured on K-shaped draws with six
 //! channels at 25x (128 dims, 4096 rows), the rotation is worth 39% of
 //! the error on K and 12% on V, and V would additionally need the
-//! attention output rotated back per head. `attention.rs` does not
-//! rotate V either.
+//! attention output rotated back per head, so K alone carries it.
 
 /// Per-channel sign of the randomized Hadamard rotation.
 ///
-/// Knuth's multiplicative constant on the head and a second odd
-/// multiplier on the channel, so two heads do not share a pattern: a
-/// shared pattern would leave a K vector that happens to align with a
-/// Hadamard basis row concentrated in every head at once, which is the
-/// case the randomization exists to rule out.
+/// Any deterministic pattern that decorrelates the heads will do, and
+/// what matters is only that the append kernel and the query rotation
+/// compute the SAME one; nothing outside this engine ever reads a
+/// rotated block, so the choice is free. This is a 32-bit integer hash
+/// (xorshift-multiply, the finalizer shape) over the head and channel
+/// mixed together, taking the low bit.
+///
+/// Two heads must not share a pattern: a shared one would leave a K
+/// vector that happens to align with a Hadamard basis row concentrated
+/// in every head at once, which is the case the randomization exists to
+/// rule out. `heads_do_not_share_a_sign_pattern` holds that.
 #[inline]
-pub fn tq_sign(head_idx: usize, channel: usize) -> f32 {
-    let hash = (head_idx as u32)
-        .wrapping_mul(2_654_435_761)
-        .wrapping_add((channel as u32).wrapping_mul(40_503));
-    if hash & 1 == 1 {
+pub fn rotation_sign(head_idx: usize, channel: usize) -> f32 {
+    let mut h = (head_idx as u32)
+        .wrapping_mul(0x9E37_79B1)
+        .wrapping_add((channel as u32).wrapping_mul(0x85EB_CA6B));
+    h ^= h >> 15;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^= h >> 13;
+    if h & 1 == 1 {
         -1.0
     } else {
         1.0
@@ -109,11 +116,11 @@ pub fn fwht_orthonormal_inplace(x: &mut [f32]) {
 pub fn rotate_head_inplace(v: &mut [f32], head_idx: usize) {
     assert!(
         rotation_viable(v.len()),
-        "turboquant rotation needs a power-of-two head width, got {}",
+        "kv_rotation rotation needs a power-of-two head width, got {}",
         v.len()
     );
     for (c, x) in v.iter_mut().enumerate() {
-        *x *= tq_sign(head_idx, c);
+        *x *= rotation_sign(head_idx, c);
     }
     fwht_orthonormal_inplace(v);
 }
@@ -135,12 +142,12 @@ pub fn rotate_row_inplace(row: &mut [f32], head_dim: usize) {
 pub fn unrotate_head_inplace(v: &mut [f32], head_idx: usize) {
     assert!(
         rotation_viable(v.len()),
-        "turboquant rotation needs a power-of-two head width, got {}",
+        "kv_rotation rotation needs a power-of-two head width, got {}",
         v.len()
     );
     fwht_orthonormal_inplace(v);
     for (c, x) in v.iter_mut().enumerate() {
-        *x *= tq_sign(head_idx, c);
+        *x *= rotation_sign(head_idx, c);
     }
 }
 
@@ -265,8 +272,8 @@ mod tests {
 
     #[test]
     fn heads_do_not_share_a_sign_pattern() {
-        let a: Vec<f32> = (0..128).map(|c| tq_sign(0, c)).collect();
-        let b: Vec<f32> = (0..128).map(|c| tq_sign(1, c)).collect();
+        let a: Vec<f32> = (0..128).map(|c| rotation_sign(0, c)).collect();
+        let b: Vec<f32> = (0..128).map(|c| rotation_sign(1, c)).collect();
         assert_ne!(a, b);
     }
 

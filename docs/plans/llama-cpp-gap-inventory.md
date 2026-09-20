@@ -366,7 +366,7 @@ on the CPU.
 | `IM2COL`, `CONV_2D`, `CONV_2D_DW`, `CONV_3D`, `CONV_TRANSPOSE_1D/2D`, `COL2IM_1D`, `POOL_1D/2D`, `UPSCALE` (`:396-478`) | none | medium | XL |
 | `ARGSORT` (`:448`), `TOP_K` (`:452`), `ARGMAX` (`:482`) | `argmax_f32` (`elem.rs`) and `moe_topk_softmax_batch` (routing-specific) only; no general argsort or top-k | medium | M |
 | standalone `SOFT_MAX` (`:333`), `GET_ROWS` for all 22 types (`:366`), `SET_ROWS` (`:370`), `CPY`/`DUP`/`CONT` (`:468-470`), plus `CONCAT`, `PAD`, `ROLL`, `ARANGE`, `TIMESTEP_EMBEDDING`, `CUMSUM`, `DIAG`, `TRI`, `SOLVE_TRI`, `L2_NORM`, `GROUP_NORM`, `ACC`, `SET`, `COUNT_EQUAL`, `SUM`/`SUM_ROWS`/`MEAN`, 22 unary ops, 6 GLU ops (`ggml-metal-device.cpp:239-319`) | `get_rows_q4_k` / `get_rows_q6_k` (`embd.rs`); `rms_norm*`, `add_rms_norm*`, `silu_mul`, `gelu_mul`, `vec_add`, `axpy`, `f32_to_f16` (`elem.rs`) | medium | XL |
-| KV cache dtypes f32/f16/bf16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl | f32/f16/q8_0/turbo4 (`crates/frink-models/src/kv_budget.rs:100-108`) | low | S |
+| KV cache dtypes f32/f16/bf16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl | f32/f16/q8_0/q4 (`crates/frink-models/src/kv_budget.rs:100-108`) | low | S |
 
 Where frink is genuinely competitive: the Metal MoE stack is real and
 mirrors llama's `mul_mm_id_map0` design -- `moe_mm_id_map0_ne20_{2,4,6,8}`,
@@ -617,7 +617,7 @@ These are the rows that matter most, because nothing errors.
 | **`-e` / `--escape`** | Default **on**: `common/common.h:563` `bool escape = true;` (`arg.cpp:1799-1804` registers `--no-escape` as the opt-out) | Default **off**: `run.rs:115` `default_value_t = false` | `llama-cli -p "a\nb"` emits a real newline; `frink -p "a\nb"` emits a literal backslash-n. Same command, different prompt, no warning | **critical** | S |
 | `--repeat-penalty` | Applies over a window of `--repeat-last-n`, default 64 (`arg.cpp:2025,2037`) | Applies over the entire generated history, unbounded, prompt excluded (`crates/frink-models/src/sampling.rs:420-434`; call sites `run.rs:909,1035,1161,1286`, `generate.rs:1530`) -- and compounds per occurrence, see §3.2/E3 | Three divergences in one flag | high | S |
 | `-dev` / `--device` | A comma-separated device **list**, `CUDA0,CUDA1` (`arg.cpp:2654`) | A single-valued enum `auto`/`none`/`cpu`/`metal`/`cuda` (`run.rs:82-89`, `OffloadDevice` `:135-142`) | `-dev CUDA0` fails to parse. The flag name is borrowed and the value grammar is not | high | M |
-| `--ctk` values | Actually changes the KV dtype (`arg.cpp:2384`) | Accepts `q8_0`/`fp8`/`turbo8`/`turbo4`/`turbo3` and then **warns and falls back to f16** (`run.rs:130-134`) | The flag is accepted and the memory saving does not happen | medium | M |
+| `--ctk` values | Actually changes the KV dtype (`arg.cpp:2384`) | Accepts `q8_0`/`fp8`/`q4` and applies them on Metal; on CPU and CUDA the KV cache is the host `Vec<f32>` and the flag is reported as ignored | The flag is honoured where a device KV store exists | medium | M |
 | `-cnv` | Both `-cnv` (on) and `-no-cnv` (off) exist (`arg.cpp:1849-1850`) | Only `--no-cnv` (`run.rs:111`); `-cnv` is a hard parse error | A pasted command that explicitly asks for conversation mode fails outright | medium | S |
 | `-sys` / `--system-prompt` | `arg.cpp:1724` | Spelled `--system` (`run.rs:107`); neither llama.cpp spelling parses | same | medium | S |
 | `-ctk` short form | `arg.cpp:2384` accepts `-ctk` and `--cache-type-k` | Only `--ctk` (`run.rs:133`). `frink-server` does rewrite `-ngl`/`-dev` (`lib.rs:178-184`) but that rewriter covers neither `-ctk` nor `frink run` | medium | S |
