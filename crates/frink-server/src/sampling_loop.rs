@@ -168,9 +168,352 @@ pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
     crate::policy::detokenize::floor_char_boundary(s, idx)
 }
 
+/// What one verification round committed.
+///
+/// UNWIRED, deliberately, and this says where it is going rather than
+/// leaving a reader to guess: the rule is one row and the wiring is
+/// the next. What still has to land for a request to reach it is
+/// listed in `docs/plans/server-speculative-decoding.md` -- a drafter
+/// chosen per request, the KV truncated to `accepted` rows when a
+/// draft is rejected, and `stats::requests::with_speculation` finally
+/// given the producer it has never had. Landing the rule first is what
+/// lets that wiring be reviewed against a tested definition instead of
+/// alongside one.
+///
+/// `accepted` is the number of DRAFTED tokens that survived, which is
+/// also how many KV rows the caller keeps: the drafts past that point
+/// were fed to the model and their rows are now wrong, and the
+/// corrective token has no row yet because it was never fed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "wired by the server speculative-decoding row; see above"
+)]
+pub(crate) struct VerifiedBlock {
+    /// Committed tokens, in order. Always at least one unless the
+    /// grammar completed immediately.
+    pub tokens: Vec<usize>,
+    /// Drafted tokens that matched what the sampler drew.
+    pub accepted: usize,
+    /// Drafted tokens offered this round.
+    pub drafted: usize,
+    /// The grammar's parse completed inside the block; nothing may
+    /// follow, and the caller stops.
+    pub grammar_complete: bool,
+}
+
+/// Verify a block of drafted tokens by AGREEMENT with the sampler.
+///
+/// The rule, decided in `docs/plans/server-speculative-decoding.md`:
+/// draw with [`crate::sample_step::sample_next`] at every position --
+/// the same sampler, state, penalty window and grammar machine the
+/// non-speculative loop uses -- and accept a drafted token if and only
+/// if it EQUALS that draw. The token emitted is always the sampler's,
+/// never the draft's, so a drafter can only ever save a forward pass
+/// and can never change an answer.
+///
+/// That is what makes this lossless by construction rather than by
+/// proof. There is no `p(x)`/`q(x)` bookkeeping that could be subtly
+/// wrong, and no rollback: state advances only over committed tokens,
+/// in order, and the walk stops at the first disagreement, so the
+/// grammar machine never has to be checkpointed.
+///
+/// # Logits
+///
+/// `first_logits` is the row the caller already holds for the position
+/// before `draft[0]`. `draft_logits[i]` is what the model produced
+/// after being fed `draft[i]`, so it is only MEANINGFUL while every
+/// draft up to and including `i` was accepted -- which is exactly why
+/// the walk stops at the first mismatch rather than scoring the rest.
+///
+/// When every draft is accepted there is one extra row left over, and
+/// the token drawn from it is free: that is the round's profit.
+#[allow(clippy::too_many_arguments)]
+#[allow(
+    dead_code,
+    reason = "wired by the server speculative-decoding row; see VerifiedBlock"
+)]
+pub(crate) fn verify_block(
+    state: &mut crate::sample_step::SampleState,
+    first_logits: &[f32],
+    draft_logits: &[Vec<f32>],
+    draft: &[usize],
+    params: &GenerationParams,
+    prompt: &[usize],
+    history: &mut Vec<usize>,
+    stop_tokens: &StopTokens,
+    decode_token: &dyn Fn(usize) -> String,
+) -> Result<VerifiedBlock, DecodeError> {
+    debug_assert_eq!(
+        draft.len(),
+        draft_logits.len(),
+        "one logit row per drafted token, or the rows and the drafts have drifted"
+    );
+
+    let mut out = VerifiedBlock {
+        tokens: Vec::new(),
+        accepted: 0,
+        drafted: draft.len(),
+        grammar_complete: false,
+    };
+
+    for i in 0..=draft.len() {
+        let logits = if i == 0 {
+            first_logits
+        } else {
+            &draft_logits[i - 1]
+        };
+        match crate::sample_step::sample_next(
+            state,
+            logits,
+            params,
+            prompt,
+            history,
+            stop_tokens,
+            decode_token,
+        )? {
+            crate::sample_step::Step::GrammarComplete => {
+                out.grammar_complete = true;
+                return Ok(out);
+            }
+            crate::sample_step::Step::Token(t) => {
+                history.push(t);
+                out.tokens.push(t);
+                // The last iteration has no draft to compare against:
+                // it is the bonus token every draft being right earns.
+                if i == draft.len() {
+                    break;
+                }
+                if t == draft[i] {
+                    out.accepted += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::sample_step::{sample_next, SampleState, Step};
+    use frink_models::sampling::SamplingParams;
+
+    fn greedy_params() -> GenerationParams {
+        GenerationParams {
+            reasoning: None,
+            max_tokens: 64,
+            sampling: SamplingParams {
+                temperature: 0.0,
+                ..SamplingParams::default()
+            },
+            seed: 1,
+            stop: Vec::new(),
+            stop_token_ids: Vec::new(),
+            json_object: false,
+            grammar: None,
+            cancel: None,
+            ignore_eos: false,
+            reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
+            lora: None,
+        }
+    }
+
+    /// One-hot logits, so the greedy draw at a row is known by
+    /// construction and the test is about the WALK, not the sampler.
+    fn peaked(vocab: usize, winner: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; vocab];
+        v[winner] = 10.0;
+        v
+    }
+
+    fn no_stops() -> StopTokens {
+        StopTokens::default()
+    }
+
+    fn decode(_: usize) -> String {
+        String::new()
+    }
+
+    /// Every draft right: `k` accepted plus the bonus token the last
+    /// logit row pays out, which is the entire point of the round.
+    #[test]
+    fn all_drafts_accepted_earn_one_extra_token() {
+        let params = greedy_params();
+        let mut state = SampleState::new(params.seed);
+        let mut history = Vec::new();
+        let draft = [3usize, 4, 5];
+        let first = peaked(8, 3);
+        let rows = vec![peaked(8, 4), peaked(8, 5), peaked(8, 6)];
+
+        let b = verify_block(
+            &mut state,
+            &first,
+            &rows,
+            &draft,
+            &params,
+            &[],
+            &mut history,
+            &no_stops(),
+            &decode,
+        )
+        .expect("verify");
+
+        assert_eq!(b.accepted, 3);
+        assert_eq!(b.drafted, 3);
+        assert_eq!(b.tokens, vec![3, 4, 5, 6], "three drafts plus the bonus");
+        assert_eq!(history, vec![3, 4, 5, 6]);
+    }
+
+    /// A wrong draft ends the round THERE, and the token committed at
+    /// that position is the sampler's, not the draft's. The rows after
+    /// it were produced from a prefix that never happened, so nothing
+    /// past the mismatch is scored.
+    #[test]
+    fn a_wrong_draft_commits_the_samplers_token_and_stops() {
+        let params = greedy_params();
+        let mut state = SampleState::new(params.seed);
+        let mut history = Vec::new();
+        let draft = [3usize, 99, 5];
+        let first = peaked(8, 3);
+        // Row 0 says 4; the draft claimed 99, so 4 is committed and the
+        // walk stops. Row 1 would have said 7 and must not be reached.
+        let rows = vec![peaked(8, 4), peaked(8, 7), peaked(8, 1)];
+
+        let b = verify_block(
+            &mut state,
+            &first,
+            &rows,
+            &draft,
+            &params,
+            &[],
+            &mut history,
+            &no_stops(),
+            &decode,
+        )
+        .expect("verify");
+
+        assert_eq!(b.accepted, 1, "only the first draft matched");
+        assert_eq!(b.tokens, vec![3, 4], "the sampler's token, not 99");
+        assert!(
+            !b.tokens.contains(&99),
+            "a draft must never be emitted as itself"
+        );
+        assert!(!b.tokens.contains(&7), "rows past the mismatch are invalid");
+    }
+
+    /// THE correctness claim, checked rather than argued: the tokens a
+    /// verified block commits are exactly the tokens the ordinary
+    /// per-token loop would have drawn from the same logits, because
+    /// both call the same sampler over the same growing history.
+    ///
+    /// This is what "lossless by construction" has to mean in a test,
+    /// and it holds whether the drafts were right or wrong -- the two
+    /// cases below differ only in how many forward passes it took.
+    #[test]
+    fn a_verified_block_commits_what_sequential_sampling_would_have() {
+        for draft in [
+            vec![3usize, 4, 5], // all correct
+            vec![3, 99, 5],     // wrong in the middle
+            vec![42, 4, 5],     // wrong immediately
+        ] {
+            let params = greedy_params();
+            let first = peaked(8, 3);
+            let rows = vec![peaked(8, 4), peaked(8, 5), peaked(8, 6)];
+
+            let mut spec_state = SampleState::new(params.seed);
+            let mut spec_history = Vec::new();
+            let b = verify_block(
+                &mut spec_state,
+                &first,
+                &rows,
+                &draft,
+                &params,
+                &[],
+                &mut spec_history,
+                &no_stops(),
+                &decode,
+            )
+            .expect("verify");
+
+            // The same rows, drawn one at a time, stopping after as
+            // many tokens as the block committed.
+            let mut seq_state = SampleState::new(params.seed);
+            let mut seq_history: Vec<usize> = Vec::new();
+            for i in 0..b.tokens.len() {
+                let logits = if i == 0 { &first } else { &rows[i - 1] };
+                let Step::Token(t) = sample_next(
+                    &mut seq_state,
+                    logits,
+                    &params,
+                    &[],
+                    &seq_history,
+                    &no_stops(),
+                    &decode,
+                )
+                .expect("sequential") else {
+                    panic!("grammar completed in a grammarless test")
+                };
+                seq_history.push(t);
+            }
+
+            assert_eq!(
+                b.tokens, seq_history,
+                "draft {draft:?}: a verified block must commit the sequential answer"
+            );
+
+            // Checked independently of the walk's own length, because
+            // the comparison above cannot see this: it drives its
+            // reference loop from `b.tokens.len()`, so a block that
+            // kept walking past a mismatch would agree with it
+            // trivially. A sabotage that removed the `break` was
+            // caught by exactly one test until this line existed.
+            //
+            // The invariant: a round commits its accepted drafts plus
+            // ONE token, the corrective one at the mismatch or the
+            // bonus one after the last draft. Never more, because
+            // every row after the first disagreement was produced from
+            // a prefix that never happened.
+            assert_eq!(
+                b.tokens.len(),
+                b.accepted + 1,
+                "draft {draft:?}: committed {} tokens for {} accepted drafts",
+                b.tokens.len(),
+                b.accepted
+            );
+        }
+    }
+
+    /// An empty draft is the ordinary loop: one row, one token, nothing
+    /// accepted and nothing saved. Worth pinning because it is the
+    /// boundary a caller hits when the drafter has nothing to offer.
+    #[test]
+    fn an_empty_draft_commits_exactly_one_token() {
+        let params = greedy_params();
+        let mut state = SampleState::new(params.seed);
+        let mut history = Vec::new();
+
+        let b = verify_block(
+            &mut state,
+            &peaked(8, 2),
+            &[],
+            &[],
+            &params,
+            &[],
+            &mut history,
+            &no_stops(),
+            &decode,
+        )
+        .expect("verify");
+
+        assert_eq!(b.tokens, vec![2]);
+        assert_eq!(b.accepted, 0);
+        assert_eq!(b.drafted, 0);
+    }
 
     /// Moved here with `earliest_stop_match` itself: a test that stays
     /// behind when its subject moves is a test nobody runs against the
