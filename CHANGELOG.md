@@ -15,6 +15,57 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **MiniMax-Text-01 runs (`minimax-01`)**, the sixth of the eight rows
+  the moved llama.cpp pin brought in, and the ninety-ninth architecture
+  with a logit comparison behind it. Its recurrent layers run lightning
+  attention: a linear attention whose state is one `head_dim x
+  head_dim` KV per head, decayed by `exp(-c s_h)` per token, with the
+  per-head slopes a geometric ladder and `c` falling with the layer
+  index. Which layers those are comes from the same two keys Qwen3.5
+  reads (`attention.recurrent_layers`, else
+  `full_attention_interval`, seeded 8 instead of 4); the rest are
+  ordinary GQA with partial NEOX RoPE, and every layer carries a
+  four-expert softmax MoE.
+
+  **Two facts the tensor shapes do not show**, both from
+  `src/models/minimax-01.cpp:303-309`, and both wrong here for a day
+  before a libllama golden said so: the fused `attn_qkv` runs through
+  SiLU BEFORE it is split, and it is HEAD-major -- head `h` owns the
+  contiguous run `[q | k | v]` -- rather than three
+  `n_head * head_dim` blocks. Reading it the other way is a
+  permutation of the rows, which is the identity at one head, so the
+  fixture has four.
+
+  **Its residual is not the layer input.** Each sublayer's own pre-norm
+  output, times a REQUIRED `{arch}.residual_scale`, REPLACES the stream
+  its branch joins (`:249,428-431,440,455-458`); the layer input is
+  bound, sliced by `inp_out_ids`, and never added to anything. That is
+  ONE graph of the 155 -- measured by reading the `ggml_scale` argument
+  in each of the five files that read the key, where the four Granite
+  rows scale a branch OUTPUT under the same key name -- so one column
+  answers both meanings and an architecture cannot be given the key
+  twice. A scale of exactly `1.0` is still this topology, so the value
+  is NOT dropped as an identity the way every other multiplier here
+  is, and a fixture declaring `1.0` pins that against libllama.
+
+  Every host body now takes its sublayer pre-norm through one
+  function, because a site that normed the stream by hand would read
+  the right vector and keep the wrong topology -- a difference no shape
+  check can see. A test greps the four bodies for that, with the
+  whitespace stripped so a formatter cannot silence it.
+
+  Five fixtures against libllama (the interval, the array spelling, a
+  fused QKV on the attention layers, a separate `output.weight`, the
+  unit scale), KL 1.3e-11 to 1.3e-9; four sabotages each move the
+  logits by more than 3. Every fused Metal launch refuses the model:
+  each bakes `x + branch` into its kernel, and here the residual never
+  leaves the pre-norm.
+
+  Four triaged refusals are left, and both cheap classes stay empty:
+  nothing is a fixture or a match arm away.
+
 ## [0.28.0] - 2026-09-20
 
 ### Added

@@ -231,6 +231,10 @@ pub enum AttnShape {
     /// `crate::gdn::recurrent_layers`, not by the head counts, which
     /// are uniform on such a file.
     Gdn,
+    /// MiniMax-01's lightning attention (`minimax-01.cpp:293-420`;
+    /// `crate::lightning`): as [`AttnShape::Gdn`] with that block,
+    /// decided by the same mask read from the same two keys.
+    Lightning,
 }
 
 /// Architectures whose graph ADDS a block's output to the residual on a
@@ -394,7 +398,8 @@ impl AttnShape {
             | AttnShape::Mamba2
             | AttnShape::Mamba1
             | AttnShape::Plamo2Ssm
-            | AttnShape::Gdn => 0,
+            | AttnShape::Gdn
+            | AttnShape::Lightning => 0,
         }
     }
 
@@ -408,7 +413,8 @@ impl AttnShape {
             | AttnShape::Mamba2
             | AttnShape::Mamba1
             | AttnShape::Plamo2Ssm
-            | AttnShape::Gdn => 0,
+            | AttnShape::Gdn
+            | AttnShape::Lightning => 0,
         }
     }
 
@@ -417,7 +423,11 @@ impl AttnShape {
     pub fn is_recurrent(self) -> bool {
         matches!(
             self,
-            AttnShape::Mamba2 | AttnShape::Mamba1 | AttnShape::Plamo2Ssm | AttnShape::Gdn
+            AttnShape::Mamba2
+                | AttnShape::Mamba1
+                | AttnShape::Plamo2Ssm
+                | AttnShape::Gdn
+                | AttnShape::Lightning
         )
     }
 
@@ -446,7 +456,8 @@ impl AttnShape {
             | AttnShape::Mamba2
             | AttnShape::Mamba1
             | AttnShape::Plamo2Ssm
-            | AttnShape::Gdn => (0, head_dim, v_head_dim),
+            | AttnShape::Gdn
+            | AttnShape::Lightning => (0, head_dim, v_head_dim),
             AttnShape::ShortConv => (1, hidden_dim, 0),
         }
     }
@@ -503,26 +514,26 @@ impl LayerShapes {
     /// `expert_ffn_dim`.
     ///
     /// `recurrent` is `crate::gdn::recurrent_layers`' answer: the layers
-    /// that run the gated delta net, on an architecture whose head
-    /// counts are uniform and say nothing about it.
+    /// that run a recurrent block AND which block, on an architecture
+    /// whose head counts are uniform and say nothing about either.
     pub fn resolve(
         arch: &str,
         heads: &[u64],
         kv_heads: &[u64],
         ffn: Option<&[u64]>,
         expert_ffn_dim: usize,
-        recurrent: Option<&[bool]>,
+        recurrent: Option<&crate::gdn::RecurrentMask>,
     ) -> Result<Self, LoadError> {
         let n = heads.len();
         assert_eq!(kv_heads.len(), n);
         if let Some(recurrent) = recurrent {
-            assert_eq!(recurrent.len(), n);
+            assert_eq!(recurrent.layers.len(), n);
             let zero_kv = ZeroKvLayer::for_arch(arch);
             let mut shapes = Vec::with_capacity(n);
             for il in 0..n {
                 let ffn_dim = ffn.map_or(expert_ffn_dim, |f| f[il] as usize);
-                let attention = if recurrent[il] {
-                    AttnShape::Gdn
+                let attention = if recurrent.layers[il] {
+                    recurrent.block
                 } else {
                     AttnShape::from_counts(
                         heads[il] as usize,
@@ -724,8 +735,9 @@ pub(crate) fn load_non_gqa_attention(
     arch: &str,
     layer: usize,
     norm_sites: &NormSites,
-    hidden_dim: usize,
+    config: &ModelConfig,
 ) -> Result<AttnWeights, LoadError> {
+    let hidden_dim = config.hidden_dim;
     let mut shortconv = None;
     let mut ssm = None;
     let (norm_weight, o_proj) = match shape {
@@ -774,6 +786,22 @@ pub(crate) fn load_non_gqa_attention(
             ssm = Some(crate::ssm_block::SsmBlock::Gdn(crate::gdn::Gdn::load(
                 file, arch, layer, hidden_dim,
             )?));
+            (
+                norm_sites.load_pre_norm(norm_sites.attn, file, Some(layer))?,
+                no_rows(0),
+            )
+        }
+        AttnShape::Lightning => {
+            ssm = Some(crate::ssm_block::SsmBlock::Lightning(
+                crate::lightning::Lightning::load(
+                    file,
+                    layer,
+                    config.n_layers,
+                    config.n_heads,
+                    config.head_dim,
+                    hidden_dim,
+                )?,
+            ));
             (
                 norm_sites.load_pre_norm(norm_sites.attn, file, Some(layer))?,
                 no_rows(0),

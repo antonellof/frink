@@ -136,6 +136,27 @@ is faster.
   GROUPED (`gdn::GROUPED_HEAD_ARCHITECTURES`, `HeadMap::Grouped`) and
   beta / alpha come from one `ssm_ba` projection (`gdn::BetaAlpha::
   Fused`); plain NEOX RoPE; KL 8.7e-12.
+- **MiniMax-Text-01** (`minimax-01`, 456B-A45B), audited against
+  libllama on 2026-09-20 (`tests/minimax_01_graphs.rs`, KL 1.3e-11 to
+  1.3e-9 on five fixtures). Lightning attention as a recurrent block
+  (`layer_shapes::AttnShape::Lightning`, `frink_models::lightning`,
+  `frink_core::lightning`): per head, a `head_dim x head_dim` KV
+  decayed by `exp(-c s_h)` per token with the slopes a geometric
+  ladder and `c = 1 - il/(n_layer - 1)`, then
+  `rms_norm(o, attn_norm_2) * sigmoid(attn_gate(x))` and
+  `attn_output`. The layers it runs on come from the same two keys
+  Qwen3.5 reads, with the interval seeded 8 instead of 4, so the mask
+  and the block it selects travel as ONE value
+  (`gdn::RecurrentMask`). Two things the tensor shapes do not show:
+  the fused `attn_qkv` runs through SiLU BEFORE the split
+  (`minimax-01.cpp:303`) and it is HEAD-major, `[q | k | v]` per head
+  (`:305-309`). Its residual topology is its own
+  (`frink_models::normed_residual`, ONE graph of the 155): each
+  sublayer's PRE-NORM output, times a REQUIRED `residual_scale`,
+  replaces the stream its branch joins, and the layer input is
+  discarded -- including at a scale of exactly 1.0, which is why the
+  value is not dropped as an identity. Every fused Metal launch
+  refuses the model.
 - **Ternary-Bonsai-2-27B** (PrismML's `PTQ1_0` export of a `qwen35`
   graph with a folded Hadamard rotation), verified on the REAL
   checkpoint on 2026-09-18 against PrismML's llama.cpp fork (the only

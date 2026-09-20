@@ -1140,6 +1140,14 @@ pub const AUDITED_GENERIC_GQA: &[&str] = &[
     // by its hparams. Its refusal had said "a fixture away" for a week
     // while the fixture sat in `tests/fixtures/`.
     "minimax-m2",
+    // tests/minimax_01_graphs.rs: `minimax-01` (MiniMax-Text-01). The
+    // lightning-attention block (`crate::lightning`) on the layers
+    // `attention.recurrent_layers` / `full_attention_interval` name
+    // (`minimax-01.cpp:11-17`), plain GQA with partial NEOX RoPE
+    // elsewhere, a softmax MoE on every layer, and the pre-norm
+    // residual topology (`crate::normed_residual`) its REQUIRED
+    // `residual_scale` multiplies.
+    "minimax-01",
     // tests/lfm2_graphs.rs: `lfm2` (LFM2-350M / 700M / 1.2B / 2.6B), the
     // first HYBRID row on the generic path. `lfm2.cpp:9-11` marks a
     // layer recurrent when `n_head_kv(il) == 0`, and `:192-208` is ONE
@@ -1827,18 +1835,6 @@ const NEOX_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
     // (`norm_sites::NO_OUTPUT_NORM`, because the last stack's own norm
     // is the final one). `tests/hrm_text_graphs.rs`.
     (
-        "minimax-01",
-        TriageClass::NewCode,
-        "lightning attention as a RECURRENT block. `src/models/minimax-01.cpp:9-17` mark the \
-         recurrent layers from `attention.recurrent_layers` or a \
-         `full_attention_interval`, exactly the two-key shape `crate::gdn::recurrent_layers` \
-         reads for Qwen3.5, so the LAYER seam (`AttnShape`, the state on the KV cache, the \
-         `ZeroKvLayer` rule) is the one this repo already has. What is new is the BLOCK: a \
-         linear attention with its own decay and normalisation, plus `attn_norm_2` \
-         (`src/models/minimax-01.cpp`, the only new graph that carries it) and a REQUIRED \
-         `residual_scale`",
-    ),
-    (
         "qwen4exp",
         TriageClass::NewCode,
         "the largest graph upstream has (`src/models/qwen4exp.cpp`, 1297 lines). A gated delta-net (`:1`, \
@@ -2411,6 +2407,30 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
         ] {
             v.push(gqa_neox(n));
         }
+        // `minimax-01` (MiniMax-Text-01, 456B-A45B) was NEW CODE in
+        // `NEOX_ROPE_TRIAGED` and is audited now. Its recurrent mask is
+        // the Qwen3.5 one -- the same two keys, read by
+        // `crate::gdn::recurrent_layers`, with the interval defaulting
+        // to 8 instead of 4 -- and the BLOCK those layers run is
+        // lightning attention (`crate::lightning`, `AttnShape::
+        // Lightning`), whose state is one `head_dim x head_dim` KV per
+        // head. Two things the tensor shapes do not show, both from
+        // `minimax-01.cpp:303-309`: the fused `attn_qkv` runs through
+        // SiLU BEFORE it is split, and it is HEAD-major (`[q|k|v]` per
+        // head) rather than three blocks. And the residual topology is
+        // its own (`crate::normed_residual`): each sublayer's pre-norm
+        // output, times a REQUIRED `residual_scale`, REPLACES the
+        // stream its branch joins, so the layer input is discarded.
+        // `tests/minimax_01_graphs.rs`.
+        v.push(prof(
+            "minimax-01",
+            TextGeneration,
+            DecoderFamily::Hybrid,
+            MemoryKind::Hybrid,
+            Neox,
+            ArchPath::GenericGqa { rope: Neox },
+            QkNormStyle::WholeVector,
+        ));
         // Triaged NEOX-RoPE rows; see `NORM_ROPE_TRIAGED` above.
         for (n, class, blocker) in NEOX_ROPE_TRIAGED {
             v.push(gqa_neox(n).triaged(*class, blocker));
@@ -3801,7 +3821,7 @@ pub fn unsupported_feature_keys(arch: &str) -> Vec<(String, &'static str)> {
 /// `1.0`, while llama.cpp's `f_attention_scale` uses `0.0` as its
 /// "unset, use 1/sqrt(head_dim)" sentinel.
 pub fn unsupported_scaling_keys(arch: &str) -> Vec<(String, &'static str, f32)> {
-    use crate::scalar_multipliers::{AttentionScaleKey, LogitScaleUse};
+    use crate::scalar_multipliers::{AttentionScaleKey, LogitScaleUse, ResidualScaleUse};
     let support = crate::scalar_multipliers::multiplier_support(arch);
     let key = |suffix: &str| format!("{arch}.{suffix}");
     let mut out = Vec::new();
@@ -3812,7 +3832,7 @@ pub fn unsupported_scaling_keys(arch: &str) -> Vec<(String, &'static str, f32)> 
             1.0,
         ));
     }
-    if !support.residual {
+    if support.residual == ResidualScaleUse::NotRead {
         out.push((
             key("residual_scale"),
             "residual multiplier (Granite `residual_multiplier`); not applied by the generic decoder",
@@ -4035,7 +4055,7 @@ mod audit_tests {
             }
         }
         assert!(
-            seen == 5,
+            seen == 4,
             "every unaudited generic architecture is triaged; found {seen}. \
              It was 47 until the triage found `minicpm3` was an MLA model on the \
              generic-GQA row and it moved to DedicatedOnly, 46 until five ONE MATCH ARM \
@@ -4169,7 +4189,14 @@ mod audit_tests {
              count is 6, and the second on two norm facts nothing else upstream has (a \
              WEIGHTLESS RMS on the embeddings and a post-norm epsilon written as a \
              literal in the graph). Four of the eight rows the pin brought in closed the \
-             day it moved"
+             day it moved, `hrm_text` made it five the day after, and `minimax-01` six the \
+             day after that, which is what leaves 4: its lightning-attention block is \
+             `crate::lightning` on the `AttnShape` seam the Qwen3.5 rows built, its \
+             recurrent mask is the same two keys `crate::gdn::recurrent_layers` already \
+             read, and the one thing neither reached is the residual topology \
+             (`crate::normed_residual`: each sublayer's PRE-NORM output, scaled by a \
+             REQUIRED `residual_scale`, REPLACES the stream its branch joins), which is ONE \
+             graph of the 155"
         );
     }
 

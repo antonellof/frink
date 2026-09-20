@@ -51,7 +51,6 @@
 //! drift.
 
 use frink_core::matmul::rms_norm;
-use rayon::prelude::*;
 
 use super::{Decoder, GptOssLayer, LayerWeights};
 use crate::norm::NormOp;
@@ -303,10 +302,13 @@ impl Decoder {
             ffn,
         } = inputs;
         let normed2 = match ffn {
-            FfnInput::PostAttnResidual => layer
-                .moe
-                .norm_weight
-                .apply(hidden, self.config.rms_norm_eps),
+            FfnInput::PostAttnResidual => self.pre_norm_residual(&layer.moe.norm_weight, hidden, 1),
+            // A parallel layer's FFN reads a norm of the LAYER input,
+            // which `Decoder::branch_inputs` took before attention ran;
+            // nothing there is the residual stream, so there is nothing
+            // for `crate::normed_residual` to adopt. No architecture
+            // has both (`normed_residual::NORMED_RESIDUAL_ARCHITECTURES`
+            // is one row and `minimax-01.cpp:434-440` is sequential).
             FfnInput::LayerInput(x) => x,
         };
         let mut ffn_out = match oai {
@@ -451,11 +453,9 @@ impl Decoder {
             ffn,
         } = inputs;
         let normed2_batch: Vec<f32> = match ffn {
-            FfnInput::PostAttnResidual => hidden_batch
-                .par_chunks(hidden_dim)
-                .map(|h| layer.moe.norm_weight.apply(h, config.rms_norm_eps))
-                .flatten()
-                .collect(),
+            FfnInput::PostAttnResidual => {
+                self.pre_norm_residual(&layer.moe.norm_weight, hidden_batch, batch_size)
+            }
             FfnInput::LayerInput(x) => {
                 debug_assert_eq!(x.len(), batch_size * hidden_dim);
                 x

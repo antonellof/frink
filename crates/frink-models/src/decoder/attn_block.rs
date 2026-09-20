@@ -214,7 +214,10 @@ impl Decoder {
             | AttnShape::Mamba2
             | AttnShape::Mamba1
             | AttnShape::Plamo2Ssm
-            | AttnShape::Gdn => return Some(self.recurrent_block(layer_idx, layer, normed, 1, kv)),
+            | AttnShape::Gdn
+            | AttnShape::Lightning => {
+                return Some(self.recurrent_block(layer_idx, layer, normed, 1, kv))
+            }
         };
 
         let (mut q, mut k, mut v) = match precomputed {

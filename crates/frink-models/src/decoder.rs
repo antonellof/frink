@@ -27,6 +27,7 @@ mod fused_recurrent;
 mod fused_view;
 pub mod kv_window;
 mod lm_head;
+mod pre_norm;
 mod qk_norm;
 mod qkv_bias;
 mod recurrent_block;
@@ -1043,6 +1044,11 @@ impl Decoder {
     fn metal_can_serve_model(config: &ModelConfig, lora_attached: bool) -> bool {
         !lora_attached
             && config.residual_scale.is_none()
+            // `minimax-01.cpp:249,428`: the residual a fused kernel
+            // adds its branch to is the PRE-NORM's output, which never
+            // leaves the device in any of these stacks
+            // (`crate::normed_residual`).
+            && config.normed_residual_scale.is_none()
             && config.clamp_kqv.is_none()
             && config.attn_temperature.is_none()
             // BitNet's two inner norms (`crate::sub_norms`): no fused
@@ -2774,16 +2780,10 @@ impl Decoder {
                     // Residual is on-device; host rms_norm would use stale hidden.
                     Vec::new()
                 } else {
-                    layer
-                        .attn
-                        .norm_weight
-                        .apply(&hidden, self.config.rms_norm_eps)
+                    self.pre_norm_residual(&layer.attn.norm_weight, &mut hidden, 1)
                 };
                 #[cfg(not(feature = "metal"))]
-                let normed = layer
-                    .attn
-                    .norm_weight
-                    .apply(&hidden, self.config.rms_norm_eps);
+                let normed = self.pre_norm_residual(&layer.attn.norm_weight, &mut hidden, 1);
 
                 #[cfg(feature = "metal")]
                 {
@@ -3015,12 +3015,11 @@ impl Decoder {
                                                             hidden = h;
                                                             metal_moe_resident = false;
                                                             // KV already advanced; finish FFN on host.
-                                                            let normed2 = layer
-                                                                .moe
-                                                                .norm_weight
-                                                                .apply(
-                                                                &hidden,
-                                                                self.config.rms_norm_eps,
+                                                            let normed2 = self
+                                                                .pre_norm_residual(
+                                                                &layer.moe.norm_weight,
+                                                                &mut hidden,
+                                                                1,
                                                             );
                                                             let ffn_out = Self::combine_ffn_outputs_for_position(
                                                                 l,
@@ -3388,10 +3387,7 @@ impl Decoder {
             let layer = self.layer_for(l);
             // --- attention block ---
             let inputs = self.branch_inputs(layer, &hidden, 1);
-            let normed = layer
-                .attn
-                .norm_weight
-                .apply(&hidden, self.config.rms_norm_eps);
+            let normed = self.pre_norm_residual(&layer.attn.norm_weight, &mut hidden, 1);
 
             // The same body the contiguous path runs, with the paged
             // backing as its one parameter. It used to be a copy, and
@@ -4635,11 +4631,8 @@ impl Decoder {
 
             // --- attention block ---
             let inputs = self.branch_inputs(layer, &hidden_batch, batch_size);
-            let normed_batch: Vec<f32> = hidden_batch
-                .par_chunks(hidden_dim)
-                .map(|h| layer.attn.norm_weight.apply(h, self.config.rms_norm_eps))
-                .flatten()
-                .collect();
+            let normed_batch: Vec<f32> =
+                self.pre_norm_residual(&layer.attn.norm_weight, &mut hidden_batch, batch_size);
             let oai = self
                 .gpt_oss
                 .as_ref()
@@ -4666,7 +4659,8 @@ impl Decoder {
                     | crate::layer_shapes::AttnShape::Mamba2
                     | crate::layer_shapes::AttnShape::Mamba1
                     | crate::layer_shapes::AttnShape::Plamo2Ssm
-                    | crate::layer_shapes::AttnShape::Gdn => {
+                    | crate::layer_shapes::AttnShape::Gdn
+                    | crate::layer_shapes::AttnShape::Lightning => {
                         let out = self.recurrent_block(
                             l,
                             layer,
@@ -5103,11 +5097,8 @@ impl Decoder {
             let (n_heads, n_kv_heads) = (shape.attention.n_heads(), shape.attention.n_kv_heads());
             // --- attention block ---
             let inputs = self.branch_inputs(layer, &hidden_batch, batch_size);
-            let normed_batch: Vec<f32> = hidden_batch
-                .par_chunks(hidden_dim)
-                .map(|h| layer.attn.norm_weight.apply(h, self.config.rms_norm_eps))
-                .flatten()
-                .collect();
+            let normed_batch: Vec<f32> =
+                self.pre_norm_residual(&layer.attn.norm_weight, &mut hidden_batch, batch_size);
             let oai = self
                 .gpt_oss
                 .as_ref()
@@ -5128,7 +5119,8 @@ impl Decoder {
                     | crate::layer_shapes::AttnShape::Mamba2
                     | crate::layer_shapes::AttnShape::Mamba1
                     | crate::layer_shapes::AttnShape::Plamo2Ssm
-                    | crate::layer_shapes::AttnShape::Gdn => {
+                    | crate::layer_shapes::AttnShape::Gdn
+                    | crate::layer_shapes::AttnShape::Lightning => {
                         let mut out = Vec::with_capacity(batch_size * hidden_dim);
                         for b in 0..batch_size {
                             let step = kv.step(b, l);

@@ -46,6 +46,7 @@ impl Decoder {
         if !matches!(shape.attention, AttnShape::Gqa { .. })
             || shape.ffn_dim == 0
             || self.config.residual_scale.is_some()
+            || self.config.normed_residual_scale.is_some()
             || self.config.skip_stream
             || self.gpt_oss.is_some()
             || !self.config.layer_ffn_acts(l).all_swiglu()
