@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-20
+
 ### Added
 
 - **MiniMax-Text-01 runs (`minimax-01`)**, the sixth of the eight rows
