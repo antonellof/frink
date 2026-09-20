@@ -68,6 +68,7 @@ pub(crate) mod responses;
 mod resume;
 mod sample_step;
 mod sampling_knobs;
+mod sampling_loop;
 mod security;
 mod serving;
 mod session;

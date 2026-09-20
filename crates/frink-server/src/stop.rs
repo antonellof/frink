@@ -54,7 +54,7 @@
 
 use std::collections::HashSet;
 
-use crate::generate::{earliest_stop_match, floor_char_boundary};
+use crate::sampling_loop::{earliest_stop_match, floor_char_boundary};
 
 /// What a piece of decoded output should do to the stream.
 #[derive(Debug, PartialEq, Eq)]
