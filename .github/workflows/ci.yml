@@ -54,7 +54,6 @@ jobs:
       - run: cargo clippy -p frink-cli -p frink-server --features cuda -- -D warnings
 
   # Metal kernels are Apple-only; compile the feature chain on macOS.
-  # Hardware-only tests remain #[ignore]d (run locally with --ignored).
   metal-feature-chain:
     name: clippy/build --features metal (macos compile only)
     runs-on: macos-latest
@@ -66,6 +65,39 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p frink-metal -p frink-cli -p frink-server --features metal --verbose
       - run: cargo clippy -p frink-metal -p frink-cli -p frink-server --features metal -- -D warnings
+
+  # The Metal kernels, ON A GPU.
+  #
+  # `frink-metal` carries 71 `#[ignore]`d tests whose reason is "needs a
+  # real Metal GPU", and until this job every one of them ran only on a
+  # maintainer's laptop: CI compiled the kernels and never executed
+  # one. GitHub's `macos-latest` runners are Apple silicon with a
+  # working Metal device, and these tests need no checkpoint -- they
+  # build their inputs from `Lcg` output and compare against a CPU
+  # twin -- so there is nothing to download and nothing to cache.
+  #
+  # Kept as a separate job from the compile one so a kernel that fails
+  # on the GPU is not reported as a build break, and so the compile
+  # gate still answers on a runner outage here.
+  #
+  # MEASURED on the hosted runner, because a green check that silently
+  # skipped every test would be worse than no job: 71 passed, 0 failed,
+  # 31.02s (run 35503018762). The `system_profiler` step above is kept
+  # so the device is named in the log and a future skip is visible
+  # rather than inferred.
+  metal-gpu-tests:
+    name: cargo test --features metal -- --ignored (real GPU)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Metal device present
+        run: system_profiler SPDisplaysDataType | head -20
+      # Both halves: the default set must stay green on a GPU too, and
+      # the `--ignored` set is the one that has never run here.
+      - run: cargo test -p frink-metal --features metal --verbose
+      - run: cargo test -p frink-metal --features metal -- --ignored --test-threads=1
 
   # What the release tarball actually ships, in the PROFILE it ships in.
   #
