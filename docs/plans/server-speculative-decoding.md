@@ -1,6 +1,6 @@
 # Speculative decoding in the server
 
-Status: **not started**. The engine half is built, tested and lossless;
+Status: **design decided 2026-09-20, see (3); implementation next**. The engine half is built, tested and lossless;
 the server cannot reach it. This says what wiring it actually costs,
 because the obvious answer ("call the function") is wrong for a reason
 worth writing down.
@@ -70,6 +70,54 @@ force:
    logit bias, no penalties -- and take the ordinary path otherwise.
    Cheap, honest, and narrow enough that a coding agent's requests
    (which use tools, hence grammars) would never hit it.
+
+### (3) Verify by AGREEMENT with the server's own sampler
+
+Decided 2026-09-20, and it is neither of the two above.
+
+At each verified position, draw with `sample_step::sample_next` -- the
+same sampler, the same state, the same penalty window and the same
+grammar machine the non-speculative path uses -- and accept the drafted
+token if and only if it EQUALS that draw. Emit the sampler's token
+either way; the draft only ever saves a forward pass, it never decides
+an output.
+
+Why this beats both:
+
+* **It is lossless by construction rather than by proof.** The token
+  emitted at every position is literally the one the server's sampler
+  produced for that prefix, so the output distribution is the
+  non-speculative distribution. There is no `p(x)`/`q(x)` bookkeeping
+  to get subtly wrong, and (1)'s hard part disappears.
+* **No checkpoint/restore.** Sampler state advances only for COMMITTED
+  tokens, in order, and verification stops at the first mismatch, so
+  nothing is ever rolled back. The grammar machine, the penalty window
+  over `prompt ++ generated`, logit bias and `n_probs` all work
+  untouched -- which is exactly what (1) needed a new seam for.
+* **It serves every request**, including the grammar-constrained ones
+  (2) would have refused. A coding agent's traffic uses tools, hence
+  grammars, so under (2) the feature would never have fired for the
+  users most likely to want it.
+
+What it costs, stated plainly: a lower acceptance rate than the
+Leviathan / Chen rule at temperature > 0, because that rule accepts
+with probability `min(1, p/q)` where this accepts with probability
+`P(draft == draw)`. **At temperature 0 the two are identical**, and
+greedy is where a coding agent lives. `frink_models::speculative`
+keeps the Chen rule for `frink run`, which has a `SamplingParams` and
+no grammar; the server takes this path.
+
+The one real caveat, and it is a measurement rather than an argument:
+the verified logits come from a BATCHED forward where the
+non-speculative path computes them one token at a time, and this repo
+already documents that the two differ in float reduction order. A
+position where the top two logits are within that difference can
+resolve the other way. That is a property of batching, not of
+speculation -- the batched prefill has it today -- but the acceptance
+metric will show it as an occasional rejection, and the test has to
+pin agreement rather than assume it.
+
+### The two options this replaces
 
 (1) is the real answer and (2) is a defensible first step ONLY if the
 refusal is per-request and visible in the response's usage block, not a
