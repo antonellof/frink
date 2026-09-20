@@ -1651,6 +1651,7 @@ pub fn generate(
         },
         &mut emit,
         &decode_token,
+        None,
     )?;
     let decode_secs = decode_start.elapsed().as_secs_f64();
     logits = final_logits;
@@ -1833,6 +1834,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
         },
         &mut emit,
         &|id: usize| tokenizer.decode(&[id]),
+        None,
     )?;
     let decode_secs = decode_start.elapsed().as_secs_f64();
 
@@ -2450,6 +2452,7 @@ mod tests {
             |_tok, _pos| logits_for(take()),
             |chunk| chunks.push(chunk.to_string()),
             &render,
+            None,
         )?;
         Ok((finish, ids, chunks))
     }
@@ -2497,6 +2500,7 @@ mod tests {
             |_tok, _pos| logits_for(take()),
             |chunk| chunks.push(chunk.to_string()),
             &|_id| String::new(),
+            None,
         )
         .expect("decode");
 

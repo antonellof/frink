@@ -39,6 +39,9 @@ pub(crate) fn sample_until_stop(
     mut step: impl FnMut(usize, usize) -> Vec<f32>,
     mut emit: impl FnMut(&str),
     decode_token: &dyn Fn(usize) -> String,
+    // `None` is the ordinary path, unchanged. `Some` speculates when
+    // the backend says it can; see `Speculation::batch`.
+    mut spec: Option<(&mut dyn Speculation, usize)>,
 ) -> Result<(FinishReason, Vec<usize>, Vec<f32>), DecodeError> {
     let mut matcher = crate::stop::StopMatcher::new(&params.stop, &params.stop_token_ids);
     // Sits BEFORE the stop matcher: a stop string is text, so it can
@@ -58,6 +61,17 @@ pub(crate) fn sample_until_stop(
     let mut finish = FinishReason::Length;
 
     for _ in 0..params.max_tokens {
+        // The budget is a number of TOKENS, and this loop counts
+        // iterations. Those were the same thing while every iteration
+        // produced exactly one token; a speculative round commits a
+        // whole block, so the count has to be asked directly. Without
+        // this a `max_tokens` of 6 returned nine tokens, which the
+        // test comparing speculative output against plain output is
+        // what found.
+        if generated_ids.len() >= params.max_tokens {
+            finish = FinishReason::Length;
+            break;
+        }
         // The one place cancellation is honoured, shared by `generate`
         // and `generate_engine`. Checked before sampling so a cancel
         // that lands between two tokens costs no further work, and
@@ -67,6 +81,102 @@ pub(crate) fn sample_until_stop(
             finish = FinishReason::Cancelled;
             break;
         }
+        // A speculative round commits a BLOCK: the drafts that agreed
+        // with the sampler, plus one token that did not (or the bonus
+        // one, when every draft agreed). Every token still goes
+        // through `commit_token` in order, so the stop rules cannot
+        // differ between the two paths.
+        //
+        // The rows for accepted drafts are already in the store; the
+        // LAST committed token has not been fed, exactly as in the
+        // ordinary path, so the tail of this loop feeds it.
+        if let Some((spec, draft_max)) = spec.as_mut() {
+            // The budget is per TOKEN and this loop counts iterations,
+            // which used to be the same thing. A block commits its
+            // accepted drafts plus one, so a round may only draft
+            // `remaining - 1`: without this a `max_tokens` of 6 with a
+            // 3-token drafter returned more than six tokens, and the
+            // test that compares speculative output against plain
+            // output caught it.
+            let remaining = params.max_tokens.saturating_sub(generated_ids.len());
+            let room = remaining.saturating_sub(1);
+            let draft = if room == 0 {
+                Vec::new()
+            } else {
+                spec.draft(prompt_ids, &generated_ids, (*draft_max).min(room))
+            };
+            if !draft.is_empty() {
+                if let Some(rows) = spec.batch(&draft, pos) {
+                    let block = verify_block(
+                        &mut state,
+                        &logits,
+                        &rows,
+                        &draft,
+                        params,
+                        prompt_ids,
+                        // A copy, because `commit_token` below is what
+                        // really appends: the block's own walk needs
+                        // the penalty window to include the tokens it
+                        // has committed so far, and `sample_next`
+                        // takes the history as one slice. One clone
+                        // per BLOCK, not per token.
+                        &mut generated_ids.clone(),
+                        stop_tokens,
+                        decode_token,
+                    )?;
+                    spec.observe(block.accepted, block.drafted);
+                    // Rejected drafts wrote rows that describe a prefix
+                    // that never happened.
+                    if block.accepted < draft.len() {
+                        spec.truncate(pos + block.accepted);
+                    }
+                    pos += block.accepted;
+
+                    let mut stopped = None;
+                    let mut last: Option<usize> = None;
+                    for (i, &t) in block.tokens.iter().enumerate() {
+                        match commit_token(
+                            t,
+                            params,
+                            stop_tokens,
+                            &mut matcher,
+                            &mut utf8,
+                            &mut generated_ids,
+                            &mut decode_one,
+                            &mut emit,
+                        ) {
+                            Committed::Continue => last = Some(t),
+                            Committed::Stopped(reason) => {
+                                // The tokens after this one are not part
+                                // of the answer, and neither are their
+                                // rows.
+                                let kept = pos - block.accepted + i.min(block.accepted);
+                                spec.truncate(kept);
+                                pos = kept;
+                                stopped = Some(reason);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(reason) = stopped {
+                        finish = reason;
+                        break;
+                    }
+                    if block.grammar_complete {
+                        finish = FinishReason::Stop;
+                        break;
+                    }
+                    // Only the final committed token still needs
+                    // feeding; the accepted drafts already have rows.
+                    if let Some(t) = last {
+                        logits = step(t, pos);
+                        pos += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+
         let next = match crate::sample_step::sample_next(
             &mut state,
             &logits,
@@ -87,38 +197,24 @@ pub(crate) fn sample_until_stop(
                 break;
             }
         };
-        if !params.ignore_eos && stop_tokens.contains(next) {
-            finish = FinishReason::Stop;
-            break;
-        }
-        // Layer 1: before the token is detokenized or counted. A
-        // control token the client asked to stop on is not part of the
-        // answer, so it contributes neither an id nor a character --
-        // exactly how `eos_id` is treated one line above.
-        if matcher.is_stop_token(next) {
-            finish = FinishReason::Stop;
-            break;
-        }
-        generated_ids.push(next);
-        logits = step(next, pos);
-        pos += 1;
-
-        // Layer 2: only text that can no longer become part of a stop
-        // string leaves here.
-        match matcher.push(&utf8.push(&decode_one(&[next]))) {
-            crate::stop::StopStep::Emit(text) => {
-                if !text.is_empty() {
-                    emit(&text);
-                }
-            }
-            crate::stop::StopStep::Matched { text, stop } => {
-                if !text.is_empty() {
-                    emit(&text);
-                }
-                finish = FinishReason::StopSequence(stop);
+        match commit_token(
+            next,
+            params,
+            stop_tokens,
+            &mut matcher,
+            &mut utf8,
+            &mut generated_ids,
+            &mut decode_one,
+            &mut emit,
+        ) {
+            Committed::Continue => {}
+            Committed::Stopped(reason) => {
+                finish = reason;
                 break;
             }
         }
+        logits = step(next, pos);
+        pos += 1;
     }
 
     // A generation that stopped mid-character cannot complete it, so
@@ -166,6 +262,89 @@ pub(crate) fn earliest_stop_match<'a>(text: &str, stops: &'a [String]) -> Option
 /// applied to.
 pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
     crate::policy::detokenize::floor_char_boundary(s, idx)
+}
+
+/// What committing one token did to the generation.
+enum Committed {
+    Continue,
+    Stopped(FinishReason),
+}
+
+/// The per-token work every path shares: the two stop layers, the id,
+/// and the text.
+///
+/// Extracted when the speculative path landed, because that path
+/// commits a BLOCK of tokens and has to do exactly this to each one in
+/// order. Copying it to vary it is how this repo lost five model
+/// features from one duplicated decode path, and a stop rule that
+/// fired on one path and not the other would be a request that ignores
+/// `stop`.
+///
+/// Note what is NOT here: feeding the token forward. A speculated
+/// token's row may already exist, and the caller knows which.
+#[allow(clippy::too_many_arguments)]
+fn commit_token(
+    next: usize,
+    params: &GenerationParams,
+    stop_tokens: &StopTokens,
+    matcher: &mut crate::stop::StopMatcher,
+    utf8: &mut crate::utf8_stream::Utf8Stream,
+    generated_ids: &mut Vec<usize>,
+    decode_one: &mut impl FnMut(&[usize]) -> Vec<u8>,
+    emit: &mut impl FnMut(&str),
+) -> Committed {
+    if !params.ignore_eos && stop_tokens.contains(next) {
+        return Committed::Stopped(FinishReason::Stop);
+    }
+    // Layer 1: before the token is detokenized or counted. A control
+    // token the client asked to stop on is not part of the answer, so
+    // it contributes neither an id nor a character -- exactly how
+    // `eos_id` is treated one line above.
+    if matcher.is_stop_token(next) {
+        return Committed::Stopped(FinishReason::Stop);
+    }
+    generated_ids.push(next);
+
+    // Layer 2: only text that can no longer become part of a stop
+    // string leaves here.
+    match matcher.push(&utf8.push(&decode_one(&[next]))) {
+        crate::stop::StopStep::Emit(text) => {
+            if !text.is_empty() {
+                emit(&text);
+            }
+            Committed::Continue
+        }
+        crate::stop::StopStep::Matched { text, stop } => {
+            if !text.is_empty() {
+                emit(&text);
+            }
+            Committed::Stopped(FinishReason::StopSequence(stop))
+        }
+    }
+}
+
+/// What a speculative round needs from the engine.
+///
+/// A trait rather than three closures because the three are one
+/// decision: a backend either can draft, batch AND roll back, or it
+/// takes the ordinary path. Splitting them invites a caller that
+/// drafts into a store it cannot undo.
+pub(crate) trait Speculation {
+    /// Up to `max` tokens continuing `history`, or empty for none.
+    fn draft(&mut self, prompt: &[usize], history: &[usize], max: usize) -> Vec<usize>;
+
+    /// Feed `tokens` at `pos`, one logit row per token.
+    ///
+    /// `None` means this store must not be speculated into at all --
+    /// see `Kv::step_batch`, which asks whether it can roll back
+    /// BEFORE it writes.
+    fn batch(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>>;
+
+    /// Drop every row past `pos`, undoing rejected drafts.
+    fn truncate(&mut self, pos: usize);
+
+    /// Accepted and drafted, for the acceptance metric.
+    fn observe(&mut self, accepted: usize, drafted: usize);
 }
 
 /// What one verification round committed.
@@ -488,6 +667,179 @@ mod tests {
         }
     }
 
+    /// A scripted engine: position `p` produces a one-hot row whose
+    /// winner is `script[p]`, so the answer is known and both paths
+    /// must find it.
+    struct Scripted {
+        script: Vec<usize>,
+        vocab: usize,
+        /// Drafts to offer, one per round; empty entry means none.
+        drafts: Vec<Vec<usize>>,
+        round: usize,
+        batches: usize,
+        accepted: usize,
+        drafted: usize,
+    }
+
+    impl Scripted {
+        fn row(&self, pos: usize) -> Vec<f32> {
+            peaked(self.vocab, self.script.get(pos).copied().unwrap_or(0))
+        }
+    }
+
+    impl Speculation for Scripted {
+        fn draft(&mut self, _p: &[usize], _h: &[usize], max: usize) -> Vec<usize> {
+            let d = self.drafts.get(self.round).cloned().unwrap_or_default();
+            self.round += 1;
+            d.into_iter().take(max).collect()
+        }
+        fn batch(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>> {
+            self.batches += 1;
+            Some((0..tokens.len()).map(|i| self.row(pos + i + 1)).collect())
+        }
+        fn truncate(&mut self, _pos: usize) {}
+        fn observe(&mut self, accepted: usize, drafted: usize) {
+            self.accepted += accepted;
+            self.drafted += drafted;
+        }
+    }
+
+    /// THE claim the whole row rests on: speculation changes how many
+    /// forwards it takes to get an answer, never the answer.
+    ///
+    /// Same scripted engine, same prompt, same sampler seed; once with
+    /// no drafter and once with a drafter that is right, wrong, and
+    /// silent in turn. The text and the ids have to match exactly, and
+    /// the per-token forward count has to DROP, or speculation is
+    /// costing work rather than saving it.
+    #[test]
+    fn speculation_changes_the_forward_count_and_not_the_answer() {
+        let script = vec![1usize, 2, 3, 4, 5, 6, 7];
+        let vocab = 16;
+        let params = GenerationParams {
+            max_tokens: 6,
+            ..greedy_params()
+        };
+
+        // Plain: one forward per token.
+        let mut plain_steps = 0usize;
+        let mut plain_text = String::new();
+        let (_, plain_ids, _) = sample_until_stop(
+            peaked(vocab, script[0]),
+            0,
+            &[],
+            &no_stops(),
+            &params,
+            |ids| {
+                ids.iter()
+                    .map(|i| format!("<{i}>"))
+                    .collect::<String>()
+                    .into_bytes()
+            },
+            |_t, pos| {
+                plain_steps += 1;
+                peaked(vocab, script.get(pos + 1).copied().unwrap_or(0))
+            },
+            |c| plain_text.push_str(c),
+            &decode,
+            None,
+        )
+        .expect("plain");
+
+        // `draft[0]` is the token drawn from the CURRENT logits, not
+        // the one after it: verification starts at the position the
+        // caller already holds a row for. Getting this off by one is
+        // what made the first version of this test vacuous -- every
+        // draft was rejected at index 0 and the speed assertion below
+        // never ran.
+        for (label, drafts) in [
+            ("always right", vec![vec![1usize, 2, 3], vec![4, 5, 6]]),
+            ("always wrong", vec![vec![9usize, 9, 9], vec![9, 9, 9]]),
+            (
+                "mixed, and silent",
+                vec![vec![1usize, 9, 3], vec![], vec![4, 5]],
+            ),
+        ] {
+            let mut engine = Scripted {
+                script: script.clone(),
+                vocab,
+                drafts,
+                round: 0,
+                batches: 0,
+                accepted: 0,
+                drafted: 0,
+            };
+            let mut spec_steps = 0usize;
+            let mut spec_text = String::new();
+            let (_, spec_ids, _) = {
+                let mut e = std::mem::replace(
+                    &mut engine,
+                    Scripted {
+                        script: Vec::new(),
+                        vocab,
+                        drafts: Vec::new(),
+                        round: 0,
+                        batches: 0,
+                        accepted: 0,
+                        drafted: 0,
+                    },
+                );
+                let out = sample_until_stop(
+                    peaked(vocab, script[0]),
+                    0,
+                    &[],
+                    &no_stops(),
+                    &params,
+                    |ids| {
+                        ids.iter()
+                            .map(|i| format!("<{i}>"))
+                            .collect::<String>()
+                            .into_bytes()
+                    },
+                    |_t, pos| {
+                        spec_steps += 1;
+                        peaked(vocab, script.get(pos + 1).copied().unwrap_or(0))
+                    },
+                    |c| spec_text.push_str(c),
+                    &decode,
+                    Some((&mut e, 3)),
+                )
+                .expect("speculative");
+                engine = e;
+                out
+            };
+
+            assert_eq!(
+                spec_ids, plain_ids,
+                "{label}: speculation changed the ids (plain={plain_ids:?} spec={spec_ids:?})"
+            );
+            assert_eq!(
+                spec_text, plain_text,
+                "{label}: speculation changed the text"
+            );
+            println!(
+                "CASE {label} accepted={} drafted={} spec_steps={spec_steps} plain_steps={plain_steps}",
+                engine.accepted, engine.drafted
+            );
+            if label == "always wrong" {
+                assert_eq!(engine.accepted, 0, "a wrong draft must never be accepted");
+            } else {
+                // The point of the row: fewer forwards for the same
+                // answer. Asserted unconditionally for the cases that
+                // DO accept, so the claim cannot go untested the way
+                // it did while the drafts were off by one.
+                assert!(
+                    engine.accepted > 0,
+                    "{label}: nothing was accepted, so this case proves nothing"
+                );
+                assert!(
+                    spec_steps < plain_steps,
+                    "{label}: accepted {} drafts and still took {spec_steps} forwards against {plain_steps}",
+                    engine.accepted
+                );
+            }
+        }
+    }
     /// An empty draft is the ordinary loop: one row, one token, nothing
     /// accepted and nothing saved. Worth pinning because it is the
     /// boundary a caller hits when the drafter has nothing to offer.
