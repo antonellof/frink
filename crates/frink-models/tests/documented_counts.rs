@@ -116,3 +116,165 @@ fn the_generated_manifest_lists_every_audited_architecture() {
          regenerate with `frink archs --write`; missing: {missing:?}"
     );
 }
+
+/// Every relative markdown link in the docs has to resolve.
+///
+/// Four did not: two plans pointed at `../../CONFIG.md` and
+/// `../../benchmarks/RESULTS.md` from a depth that no longer existed
+/// after the files moved. Nothing checked, so they rotted quietly and
+/// a reader following one got a 404 on GitHub.
+#[test]
+fn every_relative_doc_link_resolves() {
+    // This project's own docs only: the repo-root markdown files
+    // (not recursively, or the walk reaches `ui/node_modules`, whose
+    // vendored READMEs have link rot of their own and are nobody's
+    // business here) plus everything under `docs/`.
+    let root = repo_root();
+    let mut docs: Vec<PathBuf> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_file() && p.extension().is_some_and(|x| x == "md") {
+                docs.push(p);
+            }
+        }
+    }
+    collect_markdown(&root.join("docs"), &mut docs);
+    assert!(docs.len() > 10, "found only {} markdown files", docs.len());
+
+    let mut broken = Vec::new();
+    for doc in &docs {
+        let text = std::fs::read_to_string(doc).unwrap_or_default();
+        for target in relative_link_targets(&text) {
+            let resolved = doc.parent().expect("a file has a parent").join(&target);
+            if !resolved.exists() {
+                broken.push(format!("{}: {target}", doc.display()));
+            }
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "broken relative links:\n  {}",
+        broken.join("\n  ")
+    );
+}
+
+fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_markdown(&p, out);
+        } else if p.extension().is_some_and(|x| x == "md") {
+            out.push(p);
+        }
+    }
+}
+
+/// `](path.md)` and `](path.md#anchor)`, skipping URLs.
+fn relative_link_targets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == ']' && bytes[i + 1] == '(' {
+            let mut j = i + 2;
+            let mut target = String::new();
+            while j < bytes.len() && bytes[j] != ')' && bytes[j] != '#' {
+                target.push(bytes[j]);
+                j += 1;
+            }
+            if target.ends_with(".md") && !target.contains("://") && !target.starts_with('/') {
+                out.push(target);
+            }
+            i = j;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `docs/CONFIG.md` has a "Removed" section saying those switches are
+/// gone and setting them does nothing. Both halves of that claim are
+/// checkable: a documented LIVE variable must be read somewhere, and a
+/// REMOVED one must not be.
+///
+/// It passes today (90 live, all read; 18 removed, none read). It is
+/// here because the removed half is the one that rots: re-adding a
+/// knob under an old name would make the documentation actively wrong
+/// rather than merely stale.
+#[test]
+fn documented_environment_variables_match_what_the_code_reads() {
+    let text = read("docs/CONFIG.md");
+    let removed_start = text
+        .find("## Removed")
+        .expect("CONFIG.md has a Removed section");
+    let removed_end = text[removed_start + 5..]
+        .find("\n## ")
+        .map(|o| removed_start + 5 + o)
+        .unwrap_or(text.len());
+
+    let live: Vec<String> = frink_env_names(&text[..removed_start])
+        .into_iter()
+        .chain(frink_env_names(&text[removed_end..]))
+        .collect();
+    let removed = frink_env_names(&text[removed_start..removed_end]);
+    assert!(live.len() > 50, "only {} live vars parsed", live.len());
+    assert!(!removed.is_empty(), "the Removed section parsed empty");
+
+    let mut sources = String::new();
+    let mut files = Vec::new();
+    collect_rust(&repo_root().join("crates"), &mut files);
+    for f in files {
+        sources.push_str(&std::fs::read_to_string(f).unwrap_or_default());
+    }
+
+    let unread: Vec<&String> = live
+        .iter()
+        .filter(|v| !sources.contains(&format!("\"{v}\"")))
+        .collect();
+    assert!(unread.is_empty(), "documented but never read: {unread:?}");
+
+    let resurrected: Vec<&String> = removed
+        .iter()
+        .filter(|v| sources.contains(&format!("\"{v}\"")))
+        .collect();
+    assert!(
+        resurrected.is_empty(),
+        "listed under Removed and still read: {resurrected:?}"
+    );
+}
+
+fn frink_env_names(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in text.split('`') {
+        if part.starts_with("FRINK_")
+            && part
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && !out.contains(&part.to_string())
+        {
+            out.push(part.to_string());
+        }
+    }
+    out
+}
+
+fn collect_rust(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if p.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            collect_rust(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}

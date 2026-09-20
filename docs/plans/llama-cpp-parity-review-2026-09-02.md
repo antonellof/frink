@@ -174,5 +174,5 @@ Use [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) as the evidence l
 
 - Issue [#46](https://github.com/antonellof/frink/issues/46) — Metal parallel decode (closed in 0.15.2)
 - [`docs/plans/metal-parallel-concurrency.md`](metal-parallel-concurrency.md) — design
-- [`docs/CONFIG.md`](../../CONFIG.md) — env vars
-- [`docs/API.md`](../../API.md) — HTTP surface
+- [`docs/CONFIG.md`](../CONFIG.md) — env vars
+- [`docs/API.md`](../API.md) — HTTP surface
