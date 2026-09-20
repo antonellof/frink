@@ -36,12 +36,12 @@ pub(crate) fn sample_until_stop(
     // Raw BYTES, not text. A character can straddle two tokens, and
     // deciding UTF-8 per token destroys it -- see `crate::utf8_stream`.
     mut decode_one: impl FnMut(&[usize]) -> Vec<u8>,
-    mut step: impl FnMut(usize, usize) -> Vec<f32>,
+    engine: &mut dyn DecodeEngine,
     mut emit: impl FnMut(&str),
     decode_token: &dyn Fn(usize) -> String,
-    // `None` is the ordinary path, unchanged. `Some` speculates when
-    // the backend says it can; see `Speculation::batch`.
-    mut spec: Option<(&mut dyn Speculation, usize)>,
+    // Tokens a round may draft. Zero is the ordinary path, and so is
+    // an engine whose `draft` returns nothing.
+    draft_max: usize,
 ) -> Result<(FinishReason, Vec<usize>, Vec<f32>), DecodeError> {
     let mut matcher = crate::stop::StopMatcher::new(&params.stop, &params.stop_token_ids);
     // Sits BEFORE the stop matcher: a stop string is text, so it can
@@ -90,7 +90,7 @@ pub(crate) fn sample_until_stop(
         // The rows for accepted drafts are already in the store; the
         // LAST committed token has not been fed, exactly as in the
         // ordinary path, so the tail of this loop feeds it.
-        if let Some((spec, draft_max)) = spec.as_mut() {
+        if draft_max > 0 {
             // The budget is per TOKEN and this loop counts iterations,
             // which used to be the same thing. A block commits its
             // accepted drafts plus one, so a round may only draft
@@ -103,10 +103,10 @@ pub(crate) fn sample_until_stop(
             let draft = if room == 0 {
                 Vec::new()
             } else {
-                spec.draft(prompt_ids, &generated_ids, (*draft_max).min(room))
+                engine.draft(prompt_ids, &generated_ids, draft_max.min(room))
             };
             if !draft.is_empty() {
-                if let Some(rows) = spec.batch(&draft, pos) {
+                if let Some(rows) = engine.batch(&draft, pos) {
                     let block = verify_block(
                         &mut state,
                         &logits,
@@ -124,11 +124,11 @@ pub(crate) fn sample_until_stop(
                         stop_tokens,
                         decode_token,
                     )?;
-                    spec.observe(block.accepted, block.drafted);
+                    engine.observe(block.accepted, block.drafted);
                     // Rejected drafts wrote rows that describe a prefix
                     // that never happened.
                     if block.accepted < draft.len() {
-                        spec.truncate(pos + block.accepted);
+                        engine.truncate(pos + block.accepted);
                     }
                     pos += block.accepted;
 
@@ -151,7 +151,7 @@ pub(crate) fn sample_until_stop(
                                 // of the answer, and neither are their
                                 // rows.
                                 let kept = pos - block.accepted + i.min(block.accepted);
-                                spec.truncate(kept);
+                                engine.truncate(kept);
                                 pos = kept;
                                 stopped = Some(reason);
                                 break;
@@ -169,7 +169,7 @@ pub(crate) fn sample_until_stop(
                     // Only the final committed token still needs
                     // feeding; the accepted drafts already have rows.
                     if let Some(t) = last {
-                        logits = step(t, pos);
+                        logits = engine.step(t, pos);
                         pos += 1;
                     }
                     continue;
@@ -213,7 +213,7 @@ pub(crate) fn sample_until_stop(
                 break;
             }
         }
-        logits = step(next, pos);
+        logits = engine.step(next, pos);
         pos += 1;
     }
 
@@ -323,28 +323,50 @@ fn commit_token(
     }
 }
 
-/// What a speculative round needs from the engine.
+/// Everything the loop asks of the engine, including speculation.
 ///
-/// A trait rather than three closures because the three are one
-/// decision: a backend either can draft, batch AND roll back, or it
-/// takes the ordinary path. Splitting them invites a caller that
-/// drafts into a store it cannot undo.
-pub(crate) trait Speculation {
+/// `step` lives here rather than staying a closure for a reason found
+/// by trying the other way: a speculative round needs `batch` and
+/// `truncate` on the SAME KV store that `step` writes to, and a
+/// closure capturing `&mut Kv` holds that borrow for its whole life,
+/// so the caller could not hand out both. One object owns the store
+/// and answers every question about it.
+///
+/// Speculation is opt-in through defaults: an engine that only
+/// implements `step` drafts nothing and takes the ordinary path, which
+/// is what every caller did before this trait existed. A blanket impl
+/// keeps plain closures working for the tests that only need a step.
+pub(crate) trait DecodeEngine {
+    /// Feed one token at `pos`, returning the next position's logits.
+    fn step(&mut self, token: usize, pos: usize) -> Vec<f32>;
+
     /// Up to `max` tokens continuing `history`, or empty for none.
-    fn draft(&mut self, prompt: &[usize], history: &[usize], max: usize) -> Vec<usize>;
+    fn draft(&mut self, _prompt: &[usize], _history: &[usize], _max: usize) -> Vec<usize> {
+        Vec::new()
+    }
 
     /// Feed `tokens` at `pos`, one logit row per token.
     ///
     /// `None` means this store must not be speculated into at all --
     /// see `Kv::step_batch`, which asks whether it can roll back
     /// BEFORE it writes.
-    fn batch(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>>;
+    fn batch(&mut self, _tokens: &[usize], _pos: usize) -> Option<Vec<Vec<f32>>> {
+        None
+    }
 
     /// Drop every row past `pos`, undoing rejected drafts.
-    fn truncate(&mut self, pos: usize);
+    fn truncate(&mut self, _pos: usize) {}
 
     /// Accepted and drafted, for the acceptance metric.
-    fn observe(&mut self, accepted: usize, drafted: usize);
+    fn observe(&mut self, _accepted: usize, _drafted: usize) {}
+}
+
+/// A plain step closure is an engine that never speculates, so the
+/// callers that only have a forward keep working unchanged.
+impl<F: FnMut(usize, usize) -> Vec<f32>> DecodeEngine for F {
+    fn step(&mut self, token: usize, pos: usize) -> Vec<f32> {
+        self(token, pos)
+    }
 }
 
 /// What one verification round committed.
@@ -679,15 +701,35 @@ mod tests {
         batches: usize,
         accepted: usize,
         drafted: usize,
+        /// Forwards taken, which is the number this row exists to move.
+        steps: usize,
     }
 
     impl Scripted {
+        fn new(script: &[usize], vocab: usize, drafts: Vec<Vec<usize>>) -> Self {
+            Scripted {
+                script: script.to_vec(),
+                vocab,
+                drafts,
+                round: 0,
+                batches: 0,
+                accepted: 0,
+                drafted: 0,
+                steps: 0,
+            }
+        }
+
         fn row(&self, pos: usize) -> Vec<f32> {
             peaked(self.vocab, self.script.get(pos).copied().unwrap_or(0))
         }
     }
 
-    impl Speculation for Scripted {
+    impl DecodeEngine for Scripted {
+        fn step(&mut self, _token: usize, pos: usize) -> Vec<f32> {
+            self.steps += 1;
+            self.row(pos + 1)
+        }
+
         fn draft(&mut self, _p: &[usize], _h: &[usize], max: usize) -> Vec<usize> {
             let d = self.drafts.get(self.round).cloned().unwrap_or_default();
             self.round += 1;
@@ -708,10 +750,16 @@ mod tests {
     /// forwards it takes to get an answer, never the answer.
     ///
     /// Same scripted engine, same prompt, same sampler seed; once with
-    /// no drafter and once with a drafter that is right, wrong, and
-    /// silent in turn. The text and the ids have to match exactly, and
-    /// the per-token forward count has to DROP, or speculation is
-    /// costing work rather than saving it.
+    /// no drafting and once with a drafter that is right, wrong, and
+    /// silent in turn. The ids and the text have to match exactly, and
+    /// the forward count has to DROP where drafts are accepted, or
+    /// speculation is costing work rather than saving it.
+    ///
+    /// Comparing against the plain path rather than checking
+    /// speculation alone is what caught the real bug here:
+    /// `max_tokens` counts TOKENS and the loop counts ITERATIONS,
+    /// which were the same thing until a round could commit a block,
+    /// and a limit of 6 returned nine.
     #[test]
     fn speculation_changes_the_forward_count_and_not_the_answer() {
         let script = vec![1usize, 2, 3, 4, 5, 6, 7];
@@ -720,9 +768,14 @@ mod tests {
             max_tokens: 6,
             ..greedy_params()
         };
+        let bytes = |ids: &[usize]| {
+            ids.iter()
+                .map(|i| format!("<{i}>"))
+                .collect::<String>()
+                .into_bytes()
+        };
 
-        // Plain: one forward per token.
-        let mut plain_steps = 0usize;
+        let mut plain = Scripted::new(&script, vocab, Vec::new());
         let mut plain_text = String::new();
         let (_, plain_ids, _) = sample_until_stop(
             peaked(vocab, script[0]),
@@ -730,85 +783,47 @@ mod tests {
             &[],
             &no_stops(),
             &params,
-            |ids| {
-                ids.iter()
-                    .map(|i| format!("<{i}>"))
-                    .collect::<String>()
-                    .into_bytes()
-            },
-            |_t, pos| {
-                plain_steps += 1;
-                peaked(vocab, script.get(pos + 1).copied().unwrap_or(0))
-            },
+            bytes,
+            &mut plain,
             |c| plain_text.push_str(c),
             &decode,
-            None,
+            0,
         )
         .expect("plain");
 
         // `draft[0]` is the token drawn from the CURRENT logits, not
         // the one after it: verification starts at the position the
-        // caller already holds a row for. Getting this off by one is
-        // what made the first version of this test vacuous -- every
-        // draft was rejected at index 0 and the speed assertion below
-        // never ran.
+        // caller already holds a row for. Getting this off by one made
+        // the first version of this test vacuous -- every draft was
+        // rejected at index 0 and the speed assertion never ran.
         for (label, drafts) in [
-            ("always right", vec![vec![1usize, 2, 3], vec![4, 5, 6]]),
+            ("always right", vec![vec![1usize, 2, 3], vec![5, 6, 7]]),
             ("always wrong", vec![vec![9usize, 9, 9], vec![9, 9, 9]]),
             (
                 "mixed, and silent",
-                vec![vec![1usize, 9, 3], vec![], vec![4, 5]],
+                vec![vec![1usize, 9, 3], vec![], vec![5, 6]],
             ),
         ] {
-            let mut engine = Scripted {
-                script: script.clone(),
-                vocab,
-                drafts,
-                round: 0,
-                batches: 0,
-                accepted: 0,
-                drafted: 0,
-            };
-            let mut spec_steps = 0usize;
+            let mut engine = Scripted::new(&script, vocab, drafts);
             let mut spec_text = String::new();
-            let (_, spec_ids, _) = {
-                let mut e = std::mem::replace(
-                    &mut engine,
-                    Scripted {
-                        script: Vec::new(),
-                        vocab,
-                        drafts: Vec::new(),
-                        round: 0,
-                        batches: 0,
-                        accepted: 0,
-                        drafted: 0,
-                    },
-                );
-                let out = sample_until_stop(
-                    peaked(vocab, script[0]),
-                    0,
-                    &[],
-                    &no_stops(),
-                    &params,
-                    |ids| {
-                        ids.iter()
-                            .map(|i| format!("<{i}>"))
-                            .collect::<String>()
-                            .into_bytes()
-                    },
-                    |_t, pos| {
-                        spec_steps += 1;
-                        peaked(vocab, script.get(pos + 1).copied().unwrap_or(0))
-                    },
-                    |c| spec_text.push_str(c),
-                    &decode,
-                    Some((&mut e, 3)),
-                )
-                .expect("speculative");
-                engine = e;
-                out
-            };
+            let (_, spec_ids, _) = sample_until_stop(
+                peaked(vocab, script[0]),
+                0,
+                &[],
+                &no_stops(),
+                &params,
+                bytes,
+                &mut engine,
+                |c| spec_text.push_str(c),
+                &decode,
+                3,
+            )
+            .expect("speculative");
 
+            println!(
+                "CASE {label} accepted={} drafted={} spec_steps={} plain_steps={}",
+                engine.accepted, engine.drafted, engine.steps, plain.steps
+            );
             assert_eq!(
                 spec_ids, plain_ids,
                 "{label}: speculation changed the ids (plain={plain_ids:?} spec={spec_ids:?})"
@@ -817,29 +832,28 @@ mod tests {
                 spec_text, plain_text,
                 "{label}: speculation changed the text"
             );
-            println!(
-                "CASE {label} accepted={} drafted={} spec_steps={spec_steps} plain_steps={plain_steps}",
-                engine.accepted, engine.drafted
-            );
+
             if label == "always wrong" {
                 assert_eq!(engine.accepted, 0, "a wrong draft must never be accepted");
             } else {
-                // The point of the row: fewer forwards for the same
-                // answer. Asserted unconditionally for the cases that
-                // DO accept, so the claim cannot go untested the way
-                // it did while the drafts were off by one.
+                // Asserted unconditionally for the cases that DO
+                // accept, so the claim cannot go untested the way it
+                // did while the drafts were off by one.
                 assert!(
                     engine.accepted > 0,
                     "{label}: nothing was accepted, so this case proves nothing"
                 );
                 assert!(
-                    spec_steps < plain_steps,
-                    "{label}: accepted {} drafts and still took {spec_steps} forwards against {plain_steps}",
-                    engine.accepted
+                    engine.steps < plain.steps,
+                    "{label}: accepted {} drafts and still took {} forwards against {}",
+                    engine.accepted,
+                    engine.steps,
+                    plain.steps
                 );
             }
         }
     }
+
     /// An empty draft is the ordinary loop: one row, one token, nothing
     /// accepted and nothing saved. Worth pinning because it is the
     /// boundary a caller hits when the drafter has nothing to offer.

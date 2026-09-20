@@ -1628,7 +1628,7 @@ pub fn generate(
         stop_tokens,
         params,
         |ids| tokenizer.decode_bytes(ids),
-        |next, pos| {
+        &mut |next: usize, pos: usize| {
             if first_token_at.is_none() {
                 first_token_at = Some(std::time::Instant::now());
             }
@@ -1651,7 +1651,7 @@ pub fn generate(
         },
         &mut emit,
         &decode_token,
-        None,
+        0,
     )?;
     let decode_secs = decode_start.elapsed().as_secs_f64();
     logits = final_logits;
@@ -1826,7 +1826,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
         stop_tokens,
         params,
         |ids| tokenizer.decode_bytes(ids),
-        |next, pos| {
+        &mut |next: usize, pos: usize| {
             if first_token_at.is_none() {
                 first_token_at = Some(std::time::Instant::now());
             }
@@ -1834,7 +1834,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
         },
         &mut emit,
         &|id: usize| tokenizer.decode(&[id]),
-        None,
+        0,
     )?;
     let decode_secs = decode_start.elapsed().as_secs_f64();
 
@@ -2449,10 +2449,10 @@ mod tests {
                     .collect::<String>()
                     .into_bytes()
             },
-            |_tok, _pos| logits_for(take()),
+            &mut |_tok: usize, _pos: usize| logits_for(take()),
             |chunk| chunks.push(chunk.to_string()),
             &render,
-            None,
+            0,
         )?;
         Ok((finish, ids, chunks))
     }
@@ -2497,10 +2497,10 @@ mod tests {
             // One byte per token: each of the middle ones is invalid
             // UTF-8 on its own, which is the whole problem.
             |ids| ids.iter().map(|&id| bytes[id]).collect(),
-            |_tok, _pos| logits_for(take()),
+            &mut |_tok: usize, _pos: usize| logits_for(take()),
             |chunk| chunks.push(chunk.to_string()),
             &|_id| String::new(),
-            None,
+            0,
         )
         .expect("decode");
 
