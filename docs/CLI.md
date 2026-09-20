@@ -90,6 +90,7 @@ Same via explicit subcommand: `frink run -m …`.
 | `--list-devices` | Print compiled, detected devices and exit |
 | `-ngl` / `--gpu-layers` / `--n-gpu-layers` | `0`, `auto`, `all`, or a count at/above the layer count. A *partial* count is refused, see below |
 | `--ctk` | KV dtype, llama.cpp's set: `f32`, `f16` (default), `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`, plus frink's `fp8`. Served: `f16`, `q8_0`, `fp8` (the Q8_0 wire) and `q4_0` (4 bits with a Hadamard rotation on K where the head width allows it); the rest are accepted and reported as falling back. A value outside the set is refused, as llama.cpp refuses it. **Metal only**, see below. Sets `FRINK_CTK` |
+| `-d` / `--model-draft FILE` | A smaller checkpoint from the SAME family and tokenizer as the target, used as a speculative drafter. The output is exactly what the target would have written alone. Refused with a grammar, without a prompt, for a recurrent (Mamba) target or draft, and for a device-resident draft KV, see below |
 | `--lora FILE` | A LoRA adapter GGUF (what `convert_lora_to_gguf.py` writes), applied at scale 1. Repeatable; comma-separated as llama.cpp accepts it. See below |
 | `--lora-scaled FILE:SCALE` | The same with a scale. Adapters are numbered in the order given, every `--lora` before every `--lora-scaled` |
 | `--system` | Chat mode only |
@@ -154,11 +155,44 @@ candidate**, not once per occurrence in the history, so a token seen `n`
 times is no longer scaled by `penalty^n`. Both were live on every
 `frink run` at the defaults above.
 
-**Speculative decoding:** `frink speculative` is a prompt-lookup demo.
-It matches n-grams against the history, there is no draft model, and it
-runs on synthetic random weights, so the hit rate it prints tells you
-nothing about a real drafter. What it does report honestly is acceptance
-length and the per-position accept rate alongside the call counts.
+**Speculative decoding** comes in two shapes, and only one of them is
+a demo.
+
+`-d` / `--model-draft FILE` is the real one: a second, smaller GGUF
+from the same family and tokenizer proposes tokens and the target
+verifies them in one batched pass. Decode reads every weight of the
+target per token, so bandwidth divided by model bytes is a hard
+ceiling; a drafter changes what is read per token rather than how fast.
+**The text is exactly what the target would have written alone** -- the
+rejection rule is lossless at every temperature, and the drafter can
+only ever save a forward pass.
+
+It refuses rather than guessing in five cases, each for a reason:
+
+- with `--grammar` / `--grammar-file` / `-j`, because the draft is
+  verified against the target's own sampler and the grammar machine's
+  state would have to be rolled back with it;
+- without a prompt, since there is no history to draft from;
+- when the TARGET has recurrent (Mamba) layers, because such a state is
+  a reduction over the whole prefix and cannot be rolled back to a
+  middle position (`docs/MODELS.md` names the affected families);
+- when the DRAFT does, for the same reason;
+- when the drafter's KV would live on the DEVICE (a Metal or CUDA
+  drafter), because a drafter that cannot see its own rows cannot roll
+  back the ones the target rejected. `--device cpu` runs it. This one
+  was found by running it rather than by reading: on Metal it panicked
+  mid-answer, after the first block had already been printed.
+
+`frink speculative` is the demo: it matches n-grams against the history,
+has no draft model, and runs on synthetic random weights, so the hit
+rate it prints tells you nothing about a real drafter. What it does
+report honestly is acceptance length and the per-position accept rate
+alongside the call counts.
+
+Neither reaches `frink-server` yet: the HTTP API's speculation fields
+in `usage` are a wire contract with nothing populating them
+(`docs/API.md`), and the row that changes that is
+`docs/plans/server-speculative-decoding.md`.
 
 Verification uses the speculative-sampling rejection rule, so it stays
 lossless at any temperature rather than only at `--temp 0`. Real drafters
