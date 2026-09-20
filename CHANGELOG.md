@@ -59,6 +59,18 @@ are the ones worth reading twice.
   refused. `MetalKvBuffers::k_rotated` is the one field that answers
   the question, set once at construction.
 
+### Fixed
+
+- **`FRINK_CTK` from the environment works through `frink run`.** It is
+  documented in `docs/CONFIG.md` as "same as `--ctk`" and could not be:
+  the resolution writes `args.ctk` into the variable unconditionally
+  and that field's default is `f16`, so an environment saying `turbo4`
+  was overwritten before `frink_metal::attn::metal_kv_dtype` looked.
+  clap reads the variable as the argument's default now, so the flag
+  wins when given and the environment when it is not, and the
+  write-back is idempotent rather than destructive. Nothing had ever
+  checked it; there is a test. (#297)
+
 ### Changed
 
 - **The KV wire left `attn.rs` for `frink-metal/src/kv_wire.rs`.** The

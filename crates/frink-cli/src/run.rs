@@ -352,10 +352,21 @@ pub struct InferArgs {
     /// KV cache dtype (llama.cpp `-ctk` analogue). Sets `FRINK_CTK`.
     /// Values: `f16` (default), `q8_0`, `fp8`, `turbo8`, `turbo4`, `turbo3`.
     /// Non-f16 paths warn and fall back to f16 until Metal kernels land.
+    ///
+    /// `env` is not decoration: `docs/CONFIG.md` has always documented
+    /// `FRINK_CTK` as "same as `--ctk`", and it could not be, because
+    /// the resolution below writes this field's value into that
+    /// variable unconditionally and the field's default is `f16`. An
+    /// environment that said `turbo4` was overwritten before any Metal
+    /// code read it (GitHub issue #297). Letting clap read the variable
+    /// as the default keeps one spelling: the flag wins when given, the
+    /// environment when it is not, and the write-back below is then
+    /// idempotent rather than destructive.
     #[arg(
         long = "ctk",
         visible_alias = "cache-type-k",
         value_name = "TYPE",
+        env = "FRINK_CTK",
         default_value = "f16"
     )]
     pub ctk: String,
@@ -2242,6 +2253,42 @@ mod tests {
             line.contains("--ctk f16 ignored"),
             "a flag with no effect must say so: {line}"
         );
+    }
+
+    /// GitHub issue #297: `FRINK_CTK` is documented as "same as
+    /// `--ctk`" and could not be.
+    ///
+    /// The resolution writes `args.ctk` into the variable
+    /// unconditionally, so before clap read it as the default an
+    /// environment that said `turbo4` was overwritten with the flag's
+    /// `f16` before `frink_metal::attn::metal_kv_dtype` ever looked.
+    /// Nothing checked it, which is why a documented spelling shipped
+    /// dead.
+    ///
+    /// Serialised, because it mutates process-wide state and the other
+    /// tests in this file parse the same argument.
+    #[test]
+    fn the_environment_supplies_the_kv_dtype_when_the_flag_does_not() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = std::env::var("FRINK_CTK").ok();
+
+        // SAFETY: single-threaded test body, holding ENV_LOCK.
+        unsafe { std::env::set_var("FRINK_CTK", "turbo4") };
+        let a = args(&["-m", "m.gguf"]);
+        assert_eq!(a.ctk, "turbo4", "the environment was ignored");
+
+        // An explicit flag still wins over it.
+        let a = args(&["-m", "m.gguf", "--ctk", "q8_0"]);
+        assert_eq!(a.ctk, "q8_0", "the flag lost to the environment");
+
+        // SAFETY: same.
+        unsafe {
+            match restore {
+                Some(v) => std::env::set_var("FRINK_CTK", v),
+                None => std::env::remove_var("FRINK_CTK"),
+            }
+        }
     }
 
     /// `-dev cpu` is not `-dev none`, and `-ngl all` under either does

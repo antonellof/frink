@@ -45,7 +45,7 @@ library or overriding the CLI.
 |---|---|
 | `FRINK_METAL` | `1` / `0` / `auto`, Metal offload |
 | `FRINK_METAL_ATTN` | `1` / `0`, fused Metal attention + resident KV |
-| `FRINK_CTK` | KV dtype: `f16` (default), `q8_0` / `turbo8` / `fp8` / `turbo4`; `turbo3` falls back to F16. Same as `--ctk`, and like it **Metal only**: the CPU and CUDA KV cache is the host `Vec<f32>`. Through `frink run` the flag's default currently overwrites this variable, see issue #297 |
+| `FRINK_CTK` | KV dtype: `f16` (default), `q8_0` / `turbo8` / `fp8` / `turbo4`; `turbo3` falls back to F16. Same as `--ctk`, and like it **Metal only**: the CPU and CUDA KV cache is the host `Vec<f32>`. `--ctk` wins when given, this variable when it is not |
 | `FRINK_CUDA` | `1` / `0` / `auto` (build with `--features cuda`) |
 | `FRINK_CUDA_MUL_MM` | `simt` keeps the batched GEMM on the f32 SIMT body where the device (`sm_80`+) would take the tensor-core body. An A/B lever, not a tuning knob: the tensor-core body is the faster one wherever it runs |
 | `FRINK_VULKAN` | `1` / `0` / `auto` (build with `--features vulkan`). `Q8_0` matvec only and no GEMM, so a prefill stays on the host |
