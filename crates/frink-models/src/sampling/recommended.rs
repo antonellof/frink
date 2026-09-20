@@ -9,7 +9,7 @@ use super::SamplingParams;
 /// The sampling a **checkpoint recommends for itself**, one `Option`
 /// per field so that "this model says nothing about top_p" stays
 /// distinguishable from "this model recommends top_p = 1.0". This is
-/// sglang's `sampling_defaults='model'`, ported from FreeToken
+/// the `sampling_defaults='model'` convention, ported from FreeToken
 /// `python/freetoken/utils/hf.py:92 load_generation_sampling`.
 ///
 /// Every field is `None` for a checkpoint that recommends nothing,

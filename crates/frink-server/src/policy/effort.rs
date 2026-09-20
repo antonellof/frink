@@ -3,7 +3,8 @@
 //! Each checkpoint's chat template accepts only its own effort
 //! vocabulary and hard-fails on the rest, while clients speak whatever
 //! dialect their provider taught them. Named levels project onto the
-//! numeric scale vLLM and SGLang share, and out-of-vocabulary values
+//! numeric scale the OpenAI-compatible servers share, and
+//! out-of-vocabulary values
 //! quantize to the nearest supported gear instead of failing the
 //! request.
 //!
@@ -24,8 +25,9 @@ use serde_json::{json, Map, Value};
 
 /// One gear on the shared effort scale.
 ///
-/// The numeric positions must match vLLM's and SGLang's table so the
-/// ecosystems agree on what "medium" means relative to "xhigh".
+/// The numeric positions must match the table the other
+/// OpenAI-compatible servers use, so the ecosystem agrees on what
+/// "medium" means relative to "xhigh".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Effort {
     None,
@@ -708,7 +710,7 @@ mod tests {
         assert_eq!(quantize_effort("high", &EffortProfile::inert()), None);
     }
 
-    /// vLLM's rule for a two-gear encoder: `medium` (0.7) is 0.2 from
+    /// The shared rule for a two-gear encoder: `medium` (0.7) is 0.2 from
     /// `high` (0.9), past the quantize distance, so it drops to the
     /// template default rather than silently maxing the model out.
     #[test]

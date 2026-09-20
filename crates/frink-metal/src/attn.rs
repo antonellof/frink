@@ -1,5 +1,5 @@
 //! Device K/V caches default to **f16** (llama.cpp `-ctk f16 -ctv f16`).
-//! Quantized stores: `FRINK_CTK=q8_0|turbo8|turbo4|fp8` (turbo3 still falls
+//! Quantized stores: `FRINK_CTK=q8_0|fp8|q4` (an unknown value falls
 //! back to f16). Quant caches dequant to a process-wide f16 scratch before
 //! FA/GQA. Q/activations stay f32. Append converts on GPU.
 //!
@@ -107,13 +107,13 @@ pub fn metal_attn_enabled() -> bool {
 // which states what it is and why running a decode step on the wrong
 // thread used to change the answer (GitHub issue #166). Re-exported
 // here because `frink-models` reads it at `frink_metal::attn::`.
-// The KV wire moved to `crate::kv_wire` when the TurboQuant rotation
+// The KV wire moved to `crate::kv_wire` when the K rotation
 // landed. Re-exported here because `frink-models`, the bench guard and
 // the tests all read these at `frink_metal::attn::`, and a wire format
 // is not worth a rename across nine call sites.
 pub use crate::kv_wire::{
     effective_metal_kv_dtype, encode_kv_dequant_to_f16, encode_kv_store_append, metal_kv_dtype,
-    metal_kv_q8_0_viable, metal_kv_turbo4_viable, parse_metal_kv_dtype, MetalKvDtype,
+    metal_kv_q4_viable, metal_kv_q8_0_viable, parse_metal_kv_dtype, MetalKvDtype,
 };
 
 pub use crate::greedy_fold::{
@@ -1052,10 +1052,10 @@ kernel void gqa_prefill(
 /// read f16 via a process-wide dequant scratch shared across layers.
 pub struct MetalKvBuffers {
     pub(crate) dtype: MetalKvDtype,
-    /// Whether the stored K went through the TurboQuant rotation.
+    /// Whether the stored K went through the Hadamard rotation.
     ///
     /// Decided once, at construction, by
-    /// [`crate::kv_wire::turbo4_rotation_viable`], and read by exactly
+    /// [`crate::kv_wire::q4_rotation_viable`], and read by exactly
     /// two places: the append, which rotates, and the attention sites,
     /// which rotate the query to match. A wire written one way and read
     /// the other is a wrong answer rather than an error, so there is one
@@ -1083,11 +1083,11 @@ fn kv_store_nbytes(dtype: MetalKvDtype, elems: usize) -> Result<usize, MetalErro
             }
             Ok((elems / frink_quant::Q8_0_BLOCK_ELEMS) * frink_quant::Q8_0_BLOCK_BYTES)
         }
-        MetalKvDtype::Turbo4 => {
-            if !elems.is_multiple_of(frink_quant::TURBO4_KV_GROUP) {
+        MetalKvDtype::Q4_0 => {
+            if !elems.is_multiple_of(frink_quant::Q4_KV_GROUP) {
                 return Err(MetalError::CommandFailed);
             }
-            Ok((elems / frink_quant::TURBO4_KV_GROUP) * frink_quant::TURBO4_KV_BLOCK_BYTES)
+            Ok((elems / frink_quant::Q4_KV_GROUP) * frink_quant::Q4_KV_BLOCK_BYTES)
         }
         _ => Ok(elems * 2),
     }
@@ -1116,7 +1116,7 @@ impl MetalKvBuffers {
             d if d.is_q8_wire() && !metal_kv_q8_0_viable(n_kv_heads, head_dim) => {
                 return Err(MetalError::CommandFailed);
             }
-            MetalKvDtype::Turbo4 if !metal_kv_turbo4_viable(n_kv_heads, head_dim) => {
+            MetalKvDtype::Q4_0 if !metal_kv_q4_viable(n_kv_heads, head_dim) => {
                 return Err(MetalError::CommandFailed);
             }
             d if d.is_implemented() => d,
@@ -1135,8 +1135,7 @@ impl MetalKvBuffers {
             .ok_or(MetalError::BufferAllocFailed)?;
         Ok(Self {
             dtype,
-            k_rotated: dtype == MetalKvDtype::Turbo4
-                && crate::kv_wire::turbo4_rotation_viable(head_dim),
+            k_rotated: dtype == MetalKvDtype::Q4_0 && crate::kv_wire::q4_rotation_viable(head_dim),
             k,
             v,
             n_kv_heads,
@@ -1189,9 +1188,9 @@ impl MetalKvBuffers {
                     );
                 }
             }
-            MetalKvDtype::Turbo4 => {
+            MetalKvDtype::Q4_0 => {
                 // The store holds K rotated, so host rows are rotated on
-                // the way in exactly as `kv_append_turbo4` rotates the
+                // the way in exactly as `kv_append_q4` rotates the
                 // ones the GPU writes. The pair with the unrotate in
                 // `tokens_host` is what keeps a sequence that crosses
                 // between the two paths reading the same K.
@@ -1199,15 +1198,15 @@ impl MetalKvBuffers {
                 let k_in: &[f32] = if self.k_rotated {
                     let mut owned = k[..n].to_vec();
                     for row in owned.chunks_exact_mut(self.elems_per_token()) {
-                        frink_quant::turboquant::rotate_row_inplace(row, self.head_dim);
+                        frink_quant::kv_rotation::rotate_row_inplace(row, self.head_dim);
                     }
                     k_rot = owned;
                     &k_rot
                 } else {
                     &k[..n]
                 };
-                let k_q = frink_quant::pack_turbo4_kv_blocks(k_in);
-                let v_q = frink_quant::pack_turbo4_kv_blocks(&v[..n]);
+                let k_q = frink_quant::pack_q4_kv_blocks(k_in);
+                let v_q = frink_quant::pack_q4_kv_blocks(&v[..n]);
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         k_q.as_ptr(),
@@ -1281,11 +1280,9 @@ impl MetalKvBuffers {
                     frink_quant::dequant_q8_0(v_bytes).expect("q8 v aligned"),
                 )
             }
-            MetalKvDtype::Turbo4 => {
-                let nbytes =
-                    (elems / frink_quant::TURBO4_KV_GROUP) * frink_quant::TURBO4_KV_BLOCK_BYTES;
-                let byte_off =
-                    (off / frink_quant::TURBO4_KV_GROUP) * frink_quant::TURBO4_KV_BLOCK_BYTES;
+            MetalKvDtype::Q4_0 => {
+                let nbytes = (elems / frink_quant::Q4_KV_GROUP) * frink_quant::Q4_KV_BLOCK_BYTES;
+                let byte_off = (off / frink_quant::Q4_KV_GROUP) * frink_quant::Q4_KV_BLOCK_BYTES;
                 let k_ptr = self.k.contents();
                 let v_ptr = self.v.contents();
                 let k_bytes = unsafe {
@@ -1294,20 +1291,17 @@ impl MetalKvBuffers {
                 let v_bytes = unsafe {
                     std::slice::from_raw_parts(v_ptr.as_ptr().add(byte_off) as *const u8, nbytes)
                 };
-                let mut k = frink_quant::unpack_turbo4_kv_blocks(k_bytes).expect("turbo4 k");
+                let mut k = frink_quant::unpack_q4_kv_blocks(k_bytes).expect("q4 k");
                 // The device store holds K rotated; the host cache this
                 // feeds is read by host kernels whose queries are not,
                 // so the rotation is undone on the way out. This is the
                 // one site that reads a rotated store as plain K.
                 if self.k_rotated {
                     for row in k.chunks_exact_mut(per) {
-                        frink_quant::turboquant::unrotate_row_inplace(row, self.head_dim);
+                        frink_quant::kv_rotation::unrotate_row_inplace(row, self.head_dim);
                     }
                 }
-                (
-                    k,
-                    frink_quant::unpack_turbo4_kv_blocks(v_bytes).expect("turbo4 v"),
-                )
+                (k, frink_quant::unpack_q4_kv_blocks(v_bytes).expect("q4 v"))
             }
             _ => {
                 let k_ptr = self.k.contents();
@@ -1892,7 +1886,7 @@ pub(crate) fn encode_gqa_with_kv(
         let q = if kv.k_rotated {
             let sq = scratch.q.as_ref();
             mrs.begin_op(encoder, &[q], &[sq]);
-            let r = crate::kv_wire::encode_rotate_q_turbo4(
+            let r = crate::kv_wire::encode_rotate_q_q4(
                 encoder, device, q, &scratch.q, 1, n_heads, n_kv_heads, head_dim,
             );
             mrs.end_op(&[q], &[sq]);
@@ -1957,7 +1951,7 @@ fn encode_gqa_prefill_with_kv(
         let q = if kv.k_rotated {
             let sq = scratch.q.as_ref();
             mrs.begin_op(encoder, &[q], &[sq]);
-            let r = crate::kv_wire::encode_rotate_q_turbo4(
+            let r = crate::kv_wire::encode_rotate_q_q4(
                 encoder, device, q, &scratch.q, n_q, n_heads, n_kv_heads, head_dim,
             );
             mrs.end_op(&[q], &[sq]);
@@ -5220,21 +5214,29 @@ mod tests {
         assert_eq!(parse_metal_kv_dtype(Some("q8")), MetalKvDtype::Q8_0);
     }
 
+    /// Every spelling this layer resolves, and the rule that an
+    /// unknown one is f16 rather than a guess.
+    ///
+    /// The spellings are llama.cpp's (`q4_0`, not a name of frink's
+    /// own), so a copied command line resolves to the same store. The
+    /// CLI refuses what is outside the set before reaching here
+    /// (`frink_models::ctk`); this fallback is the last resort for the
+    /// environment variable, which has no parser in front of it.
     #[test]
-    fn parse_metal_kv_dtype_turbo_family() {
+    fn parse_metal_kv_dtype_covers_every_spelling() {
         assert_eq!(parse_metal_kv_dtype(Some("fp8")), MetalKvDtype::Fp8);
-        assert_eq!(parse_metal_kv_dtype(Some("turbo8")), MetalKvDtype::Turbo8);
-        assert_eq!(parse_metal_kv_dtype(Some("turbo4")), MetalKvDtype::Turbo4);
-        assert_eq!(parse_metal_kv_dtype(Some("turbo3")), MetalKvDtype::Turbo3);
-        assert!(MetalKvDtype::Turbo4.is_implemented());
-        assert!(MetalKvDtype::Turbo8.is_implemented());
+        assert_eq!(parse_metal_kv_dtype(Some("e4m3")), MetalKvDtype::Fp8);
+        assert_eq!(parse_metal_kv_dtype(Some("q4_0")), MetalKvDtype::Q4_0);
+        assert_eq!(parse_metal_kv_dtype(Some("Q4_0")), MetalKvDtype::Q4_0);
+        assert_eq!(parse_metal_kv_dtype(Some("nonsense")), MetalKvDtype::F16);
+        assert_eq!(parse_metal_kv_dtype(None), MetalKvDtype::F16);
+        assert!(MetalKvDtype::Q4_0.is_implemented());
         assert!(MetalKvDtype::Fp8.is_implemented());
-        assert!(!MetalKvDtype::Turbo3.is_implemented());
         assert!(MetalKvDtype::F16.is_implemented());
         assert!(MetalKvDtype::Q8_0.is_implemented());
         assert!(metal_kv_q8_0_viable(4, 64));
         assert!(!metal_kv_q8_0_viable(2, 8));
-        assert!(metal_kv_turbo4_viable(4, 64));
+        assert!(metal_kv_q4_viable(4, 64));
     }
 
     fn cpu_gqa(
@@ -6256,7 +6258,7 @@ mod tests {
         assert_eq!(k_dl.len(), n_q * n_kv_heads * head_dim);
     }
 
-    /// A rotated turbo4 store has to answer what an f16 store answers.
+    /// A rotated 4-bit store has to answer what an f16 store answers.
     ///
     /// The rotation is invisible by construction: K is stored rotated
     /// and Q is rotated to match, so the attention output is the same
@@ -6267,7 +6269,7 @@ mod tests {
     /// which head's sign pattern to use.
     #[test]
     #[ignore = "needs a real Metal GPU"]
-    fn turbo4_kv_prefill_matches_f16_path() {
+    fn q4_kv_prefill_matches_f16_path() {
         let n_heads = 4;
         let n_kv_heads = 2;
         let head_dim = 64;
@@ -6285,8 +6287,8 @@ mod tests {
             MetalKvBuffers::with_capacity_dtype(n_kv_heads, head_dim, 16, MetalKvDtype::F16)
                 .expect("f16 kv");
         let mut kv_t4 =
-            MetalKvBuffers::with_capacity_dtype(n_kv_heads, head_dim, 16, MetalKvDtype::Turbo4)
-                .expect("turbo4 kv");
+            MetalKvBuffers::with_capacity_dtype(n_kv_heads, head_dim, 16, MetalKvDtype::Q4_0)
+                .expect("q4 kv");
         assert!(kv_t4.k_rotated, "head_dim 64 should rotate");
         let rope = MetalRope::new(MetalRopeLayout::Norm);
         let layer_rope = LayerRope {
@@ -6310,13 +6312,13 @@ mod tests {
         let (attn_t4, _, _) = launch_prefill_attn_block(
             &q, &k, &v, &mut kv_t4, n_heads, n_q, rope, layer_rope, 0, None, false,
         )
-        .expect("turbo4 prefill");
+        .expect("q4 prefill");
         assert_eq!(attn_f16.len(), attn_t4.len());
         for (i, (a, b)) in attn_f16.iter().zip(attn_t4.iter()).enumerate() {
             let tol = 8e-2 * a.abs().max(1.0);
             assert!(
                 (a - b).abs() <= tol,
-                "attn elem {i}: f16={a} turbo4={b} tol={tol}"
+                "attn elem {i}: f16={a} q4={b} tol={tol}"
             );
         }
 
@@ -6364,7 +6366,7 @@ mod tests {
     /// on one side only is silent, so it gets a round trip of its own.
     #[test]
     #[ignore = "needs a real Metal GPU"]
-    fn turbo4_host_round_trip_is_plain_k() {
+    fn q4_host_round_trip_is_plain_k() {
         let n_kv_heads = 2;
         let head_dim = 64;
         let seq = 3;
@@ -6381,8 +6383,8 @@ mod tests {
             .map(|i| ((i * 53 % 97) as f32 - 48.0) / 48.0)
             .collect();
         let mut kv =
-            MetalKvBuffers::with_capacity_dtype(n_kv_heads, head_dim, 16, MetalKvDtype::Turbo4)
-                .expect("turbo4 kv");
+            MetalKvBuffers::with_capacity_dtype(n_kv_heads, head_dim, 16, MetalKvDtype::Q4_0)
+                .expect("q4 kv");
         assert!(kv.k_rotated);
         kv.upload_from_host(&k, &v, seq).expect("upload");
         let (k_back, v_back) = kv.tokens_host(0, seq);

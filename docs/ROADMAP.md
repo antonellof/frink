@@ -209,7 +209,7 @@ this is stale.
    follows serves this.
 2. **RAM and VRAM optimization.** Residency planning already exists
    (`frink inspect-plan`). What is missing is acting on it hard enough
-   to change which models fit: tighter KV (`turbo3`, quantized CTK),
+   to change which models fit: tighter KV (3-bit, quantized CTK),
    streaming expert residency, and not materializing activations
    nothing reads.
 3. **Hybrid CPU/GPU, especially for MoE.** Routed experts are the
@@ -281,9 +281,49 @@ this is stale.
   and [`benchmarks/receipts/serving/`](../benchmarks/receipts/serving/))
 - Full KV layer offload, multi-GPU, tensor parallel, PD disaggregation
 
+**Beyond the llama.cpp surface**
+
+The goal is to replace llama.cpp: the same models, the same command
+shapes, the same or better performance. That is the floor, not the
+ceiling, and these are the serving-engine features worth having on top
+of it, ranked by what they buy on hardware people own. Each is a
+feature, not a port: the shapes are public, the implementations are
+frink's.
+
+- **Multimodal.** A vision tower and a projector beside the text
+  decoder, and the image preprocessing to feed it. The largest single
+  item on this list, and the one llama.cpp also has, so it is first.
+- **Speculative decoding over HTTP.** The engine half is built,
+  lossless and tested and the server cannot reach it; see
+  [`plans/server-speculative-decoding.md`](plans/server-speculative-decoding.md).
+  A multi-token-prediction drafter is a second `Drafter` impl for the
+  seventeen architectures whose MTP blocks frink already skips by name.
+- **Quantized safetensors, and quantizing on load.** Reading FP8
+  blockwise, GPTQ, AWQ, MXFP4 and NVFP4 checkpoints directly, and
+  quantizing a BF16 checkpoint while loading it rather than converting
+  first. Both sit behind a generic `config.json` to `ModelConfig`
+  loader that does not exist yet: `frink-models` reads safetensors for
+  one dedicated stack and one pooler, nothing more.
+- **Tensor parallel and multi-node.** Sharding one model across
+  devices, then across hosts.
+- **Prefill/decode disaggregation and KV connectors**, which the
+  out-of-core plan is the groundwork for.
+- **CUDA graph capture.** On Metal the equivalent, one encoded graph
+  per token, is what 0.25.0's submission collapsing approximates by
+  hand.
+
+**Consistency gaps found by audit, not yet closed**
+
+- `--list-devices` does not list Vulkan on either binary, although
+  `--features vulkan` builds a Vulkan backend. The listing is one
+  function now (`frink_models::devices`), so adding it is one edit
+  rather than two, but `frink-vulkan` is reachable only through
+  `frink-core`'s optional feature and that plumbing is a row of its
+  own.
+
 **KV cache and memory**
 
-- The `turbo3` dtype. Metal WHT on the CTK path shipped: `turbo4` rotates K, see `plans/xinfer-audit-2026-09-19.md`
+- A 3-bit KV dtype. The Metal Hadamard rotation on the CTK path shipped: `--ctk q4_0` rotates K
 - Act on the residency plan `inspect-plan` produces: stream cold
   experts, bound the KV budget, report what a host really fits
 - Hybrid CPU/GPU expert placement for MoE, the main lever for running a

@@ -31,9 +31,10 @@ reaches the admin ring, and **no producer for it**. A metrics column no
 code path can fill reads as coverage, which is the same defect class as
 a gate that cannot fire.
 
-vLLM ships five drafting methods (n-gram, suffix, EAGLE/EAGLE3, MLP,
-MTP) and llama.cpp's server ships `--model-draft` with `--draft-max` /
-`--draft-min`. frink ships neither over HTTP.
+The serving engines ship several drafting methods between them
+(n-gram, suffix, EAGLE-style, MLP and MTP heads), and llama.cpp's
+server ships `--model-draft` with `--draft-max` / `--draft-min`. frink
+ships none of them over HTTP.
 
 ## Why it is not "call the function"
 

@@ -23,7 +23,12 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Per-process stamp: the low bits of the wall clock at first use. Not
 /// a security token -- it only needs to differ between restarts.
-fn process_stamp() -> u64 {
+///
+/// Public because `frink-server`'s conversation ids need the same
+/// stamp for the same reason, and had a byte-identical copy of this
+/// function whose doc comment said it was mirroring this one. A copy
+/// that says it is a copy is still a copy.
+pub fn process_stamp() -> u64 {
     use std::sync::OnceLock;
     static STAMP: OnceLock<u64> = OnceLock::new();
     *STAMP.get_or_init(|| {

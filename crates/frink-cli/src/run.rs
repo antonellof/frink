@@ -350,14 +350,17 @@ pub struct InferArgs {
     pub mtp: bool,
 
     /// KV cache dtype (llama.cpp `-ctk` analogue). Sets `FRINK_CTK`.
-    /// Values: `f16` (default), `q8_0`, `fp8`, `turbo8`, `turbo4`, `turbo3`.
-    /// Non-f16 paths warn and fall back to f16 until Metal kernels land.
+    /// Values: `f16` (default), `q8_0`, `fp8` (the Q8_0 wire) and `q4`
+    /// (4 bits per element, with a Hadamard rotation on K where the
+    /// head width allows it). An unrecognised value falls back to
+    /// `f16`, as does every value on a backend whose KV cache is the
+    /// host `Vec<f32>`.
     ///
     /// `env` is not decoration: `docs/CONFIG.md` has always documented
     /// `FRINK_CTK` as "same as `--ctk`", and it could not be, because
     /// the resolution below writes this field's value into that
     /// variable unconditionally and the field's default is `f16`. An
-    /// environment that said `turbo4` was overwritten before any Metal
+    /// environment that said `q4` was overwritten before any Metal
     /// code read it (GitHub issue #297). Letting clap read the variable
     /// as the default keeps one spelling: the flag wins when given, the
     /// environment when it is not, and the write-back below is then
@@ -367,7 +370,8 @@ pub struct InferArgs {
         visible_alias = "cache-type-k",
         value_name = "TYPE",
         env = "FRINK_CTK",
-        default_value = "f16"
+        default_value = "f16",
+        value_parser = frink_models::ctk::parse_value
     )]
     pub ctk: String,
 }
@@ -751,9 +755,24 @@ fn banner_line(args: &InferArgs, device: OffloadDevice) -> String {
     // (double the KV bytes the banner implied) when the warning was
     // the only honest line of the two. `kv_elem_for` is now the single
     // source, so the number in the banner is the number in the budget.
+    //
+    // The note says "ignored" only when the request really was not
+    // honoured. Comparing the resolved name to the typed STRING said
+    // otherwise for every alias: `--ctk fp8` resolves to the Q8_0 wire
+    // by design and `--ctk q4_0` to the 4-bit one, and both printed
+    // "ignored" while doing exactly what was asked. What is genuinely
+    // ignored is a selectable dtype on a backend that has no device KV
+    // store at all, which is what `KvElem::F32` means here.
     let effective_ctk = kv_elem_for(args);
     let requested_ctk = args.ctk.trim();
-    let ctk_note = if effective_ctk.as_str() == requested_ctk {
+    let ctk_note = if !frink_models::ctk::is_served(requested_ctk) {
+        // Accepted because llama.cpp accepts it, and there is no store
+        // behind it here.
+        format!(
+            " (--ctk {requested_ctk} has no frink store; using {})",
+            effective_ctk.as_str()
+        )
+    } else if effective_ctk == frink_models::kv_budget::KvElem::from_ctk(requested_ctk) {
         String::new()
     } else {
         format!(" (--ctk {requested_ctk} ignored: only the Metal KV store has a selectable dtype)")
@@ -1136,25 +1155,6 @@ fn resolve_prompt(args: &InferArgs) -> anyhow::Result<String> {
     Ok(prompt)
 }
 
-fn print_available_devices() {
-    println!("Available devices:");
-    println!("  CPU");
-
-    let metal = frink_metal::MetalProfile::detect();
-    if let Some(name) = metal.device_name {
-        println!("  Metal: {name}");
-    }
-
-    let cuda = frink_cuda::HardwareProfile::detect();
-    if cuda.cuda_available {
-        let name = cuda.cuda_device_name.as_deref().unwrap_or("unknown device");
-        println!("  CUDA: {name}");
-        if cuda.cuda_device_count > 1 {
-            println!("        ({} devices detected)", cuda.cuda_device_count);
-        }
-    }
-}
-
 fn apply_backend_env(args: &InferArgs) -> anyhow::Result<()> {
     if args.threads > 0 {
         // SAFETY: single-threaded init before rayon workers spawn.
@@ -1321,7 +1321,7 @@ pub(crate) fn load_decoder_streaming_if_needed(
 
 pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
     if args.list_devices {
-        print_available_devices();
+        frink_models::devices::print_available_devices();
         return Ok(());
     }
     // `-hf` resolves to a local path before anything else looks at
@@ -2260,7 +2260,7 @@ mod tests {
     ///
     /// The resolution writes `args.ctk` into the variable
     /// unconditionally, so before clap read it as the default an
-    /// environment that said `turbo4` was overwritten with the flag's
+    /// environment that said `q4` was overwritten with the flag's
     /// `f16` before `frink_metal::attn::metal_kv_dtype` ever looked.
     /// Nothing checked it, which is why a documented spelling shipped
     /// dead.
@@ -2274,9 +2274,9 @@ mod tests {
         let restore = std::env::var("FRINK_CTK").ok();
 
         // SAFETY: single-threaded test body, holding ENV_LOCK.
-        unsafe { std::env::set_var("FRINK_CTK", "turbo4") };
+        unsafe { std::env::set_var("FRINK_CTK", "q4_0") };
         let a = args(&["-m", "m.gguf"]);
-        assert_eq!(a.ctk, "turbo4", "the environment was ignored");
+        assert_eq!(a.ctk, "q4_0", "the environment was ignored");
 
         // An explicit flag still wins over it.
         let a = args(&["-m", "m.gguf", "--ctk", "q8_0"]);

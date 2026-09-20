@@ -107,7 +107,7 @@ use crate::decoder::KvWindowPolicy;
 
 /// Element width of one cached K/V scalar, per backend store.
 ///
-/// The block-quantized variants are the ggml/TurboQuant wire formats
+/// The block-quantized variants are the wire formats
 /// `frink-metal` writes for `FRINK_CTK` (see
 /// `frink_metal::attn::MetalKvDtype`), so their cost is per 32-element
 /// block, not per scalar.
@@ -118,10 +118,11 @@ pub enum KvElem {
     /// Metal device KV default (`FRINK_CTK=f16`, llama.cpp `-ctk f16`).
     F16,
     /// ggml Q8_0 wire: 32 elems -> 2-byte scale + 32 int8 = 34 bytes.
-    /// `FRINK_CTK=q8_0|turbo8|fp8` all land on this width.
+    /// `FRINK_CTK=q8_0|fp8` both land on this width.
     Q8_0,
-    /// TurboQuant 4-bit: 32 elems -> 2-byte scale + 16 nibble bytes.
-    Turbo4,
+    /// 4-bit wire: 32 elems -> 2-byte scale + 16 nibble bytes.
+    /// llama.cpp's `-ctk q4_0` spelling.
+    Q4_0,
 }
 
 impl KvElem {
@@ -150,9 +151,9 @@ impl KvElem {
                 let blocks = elems.div_ceil(frink_quant::Q8_0_BLOCK_ELEMS as u64);
                 blocks.saturating_mul(frink_quant::Q8_0_BLOCK_BYTES as u64)
             }
-            KvElem::Turbo4 => {
-                let blocks = elems.div_ceil(frink_quant::TURBO4_KV_GROUP as u64);
-                blocks.saturating_mul(frink_quant::TURBO4_KV_BLOCK_BYTES as u64)
+            KvElem::Q4_0 => {
+                let blocks = elems.div_ceil(frink_quant::Q4_KV_GROUP as u64);
+                blocks.saturating_mul(frink_quant::Q4_KV_BLOCK_BYTES as u64)
             }
         }
     }
@@ -162,16 +163,15 @@ impl KvElem {
             KvElem::F32 => "f32",
             KvElem::F16 => "f16",
             KvElem::Q8_0 => "q8_0",
-            KvElem::Turbo4 => "turbo4",
+            KvElem::Q4_0 => "q4_0",
         }
     }
 
     /// Maps a `FRINK_CTK` / `--ctk` value onto the width the Metal KV
     /// store really keeps. Mirrors
-    /// `frink_metal::attn::effective_metal_kv_dtype`: `turbo8` and
-    /// `fp8` share Q8_0's 34-byte wire, and anything unrecognised or
-    /// unimplemented (`turbo3`) falls back to f16 rather than being
-    /// budgeted at a width no kernel writes.
+    /// `frink_metal::attn::effective_metal_kv_dtype`: `fp8` shares
+    /// Q8_0's 34-byte wire, and anything unrecognised falls back to
+    /// f16 rather than being budgeted at a width no kernel writes.
     ///
     /// Note this does *not* check the block alignment that function
     /// also checks (`n_kv_heads * head_dim` divisible by 32), so a
@@ -183,8 +183,8 @@ impl KvElem {
             // llama.cpp's `-ctk f32`, and the width of frink's own
             // host `KvCache`.
             "f32" => KvElem::F32,
-            "q8_0" | "turbo8" | "fp8" => KvElem::Q8_0,
-            "turbo4" => KvElem::Turbo4,
+            "q8_0" | "fp8" => KvElem::Q8_0,
+            "q4_0" => KvElem::Q4_0,
             _ => KvElem::F16,
         }
     }
@@ -924,7 +924,7 @@ mod tests {
         );
         assert_eq!(
             KvShape {
-                elem: KvElem::Turbo4,
+                elem: KvElem::Q4_0,
                 ..shape
             }
             .per_token_kv_bytes(),
@@ -937,12 +937,12 @@ mod tests {
         assert_eq!(KvElem::from_ctk("f16"), KvElem::F16);
         assert_eq!(KvElem::from_ctk("f32"), KvElem::F32);
         assert_eq!(KvElem::from_ctk("Q8_0"), KvElem::Q8_0);
-        // turbo8 and fp8 share Q8_0's wire, per MetalKvDtype.
-        assert_eq!(KvElem::from_ctk("turbo8"), KvElem::Q8_0);
+        // fp8 shares Q8_0's wire, per MetalKvDtype.
         assert_eq!(KvElem::from_ctk("fp8"), KvElem::Q8_0);
-        assert_eq!(KvElem::from_ctk("turbo4"), KvElem::Turbo4);
-        // turbo3 is unimplemented and falls back to f16, as does junk.
-        assert_eq!(KvElem::from_ctk("turbo3"), KvElem::F16);
+        assert_eq!(KvElem::from_ctk("fp8"), KvElem::Q8_0);
+        assert_eq!(KvElem::from_ctk("q4_0"), KvElem::Q4_0);
+        // An unrecognised value falls back to f16, as does junk.
+        assert_eq!(KvElem::from_ctk("nonsense"), KvElem::F16);
         assert_eq!(KvElem::from_ctk("  nonsense "), KvElem::F16);
     }
 

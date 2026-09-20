@@ -17,61 +17,131 @@ are the ones worth reading twice.
 
 ### Added
 
-- **`--ctk turbo4` is TurboQuant now, not just its name.** The 4-bit KV
-  store applies the randomized Hadamard rotation to K before
-  quantizing it, and rotates the query by the same matrix at read time
-  so `q . k` is unchanged; V is left alone. Before this, frink shipped
-  a dtype called `turbo4` that was plain per-32-element absmax, which
-  is not what TurboQuant is.
+- **`--ctk q4_0`: 4-bit KV with a Hadamard rotation on K.** The 4-bit KV
+  store rotates K before quantizing it (a deterministic per-head,
+  per-channel sign flip, then a normalized Walsh-Hadamard transform
+  over the head vector) and puts the query through the same matrix at
+  read time, so `q . k` is unchanged and the rotation only spreads the
+  outlier channels that make 4 bits lossy. V is left alone, measured:
+  the rotation is worth 39% of the error on K and 12% on V.
 
-  `frink-quant`'s `turboquant` module is the host definition the Metal
-  kernel is checked against, and the sign hash is xInfer's
-  `tq_sign_flip` verbatim so a vector rotated by either engine is the
-  same vector (MIT, see `docs/THIRD_PARTY_NOTICES.md`). The wire is
-  unchanged: frink keeps its own f16 scale per 32 elements where
-  xInfer carries one per head.
+  `frink-quant`'s `kv_rotation` module is the host definition the Metal
+  kernel is checked against. The wire is unchanged: an f16 scale per 32
+  elements and 16 nibble bytes, 18 bytes a block.
 
   Measured as next-token agreement with an f16 store across sixty
   long-context windows, 2,000 to 20,172 characters of the corpus, on
-  Llama-3.2-3B-Instruct Q4_K_M, the rotation moves frink's wire from
-  45/60 to 48/60, and a per-head scale with the rotation, which is
-  what xInfer ships, reads 52/60 against 41/60 without it. The
-  rotation wins in both wires; whether the wire itself should change
-  is a four-window difference in sixty and is recorded as an open
-  question rather than acted on. It costs about 5% of turbo4 decode
-  (37.8 to 35.8 tok/s at a 5,110-token context on an M2 Pro, against
-  f16's 51.8). Two metrics were
-  discarded before that one, and both are recorded in
-  `docs/plans/xinfer-audit-2026-09-19.md`: a free-running greedy
-  generation is chaotic and separates nothing, and `frink perplexity`
-  returns byte-identical numbers for every KV dtype because that path
-  never touches the Metal store.
+  Llama-3.2-3B-Instruct Q4_K_M: **52/60** for the shipped build,
+  against 45/60 for the same wire without the rotation. It costs about
+  5% of 4-bit decode (37.8 to 35.8 tok/s at a 5,110-token context on an
+  M2 Pro, against f16's 51.8).
+
+  **How much of that is noise, measured rather than argued.** An
+  earlier build of the same scheme, differing only in the arbitrary
+  per-channel sign pattern, scored 48/60. Nothing about the algorithm
+  changed between them, so four windows in sixty is the spread of the
+  metric itself, not a difference between schemes. That is worth more
+  than either number: it says a comparison of two KV schemes at this
+  sample size can only be believed when it is wider than about four
+  windows. The rotation against no rotation (52 against 45) is; the
+  scale-granularity question that looked settled at 48 against 52 is
+  NOT, and is recorded as open rather than acted on.
+
+  Two metrics were discarded before that one: a free-running greedy
+  generation is chaotic, so one flipped token makes the rest unrelated
+  and six prompts scored anywhere from 0 to 134 characters for the same
+  build; and `frink perplexity` returns byte-identical numbers for
+  every KV dtype, because that path never touches the Metal store.
 
   Two host paths had to learn the rotation with it, and neither would
   have failed loudly: `MetalKvBuffers::upload_from_host` seeds the
   device store after a CPU prefill, and `tokens_host` fills the host
   cache when the dense stack runs ahead of it. A rotated row handed to
-  a host kernel whose query is not rotated is a different model, so
-  the round trip has a test of its own.
+  a host kernel whose query is not rotated is a different model, so the
+  round trip has a test of its own, bounded in per-head L2 because an
+  orthogonal transform preserves the norm and not the element.
 
   A head width the butterfly cannot serve (not a power of two, or not
   a multiple of 32) keeps the unrotated wire rather than being
   refused. `MetalKvBuffers::k_rotated` is the one field that answers
   the question, set once at construction.
 
-### Fixed
-
-- **`FRINK_CTK` from the environment works through `frink run`.** It is
-  documented in `docs/CONFIG.md` as "same as `--ctk`" and could not be:
-  the resolution writes `args.ctk` into the variable unconditionally
-  and that field's default is `f16`, so an environment saying `turbo4`
-  was overwritten before `frink_metal::attn::metal_kv_dtype` looked.
-  clap reads the variable as the argument's default now, so the flag
-  wins when given and the environment when it is not, and the
-  write-back is idempotent rather than destructive. Nothing had ever
-  checked it; there is a test. (#297)
-
 ### Changed
+
+- **`--ctk` / `FRINK_CTK` take llama.cpp's value set, and refuse what
+  it refuses.** The accepted spellings are llama.cpp's nine (`f32`,
+  `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`,
+  `common/arg.cpp:304`) plus frink's own `fp8` / `e4m3`, so a command
+  line carries over unchanged. Served are `f16`, `q8_0`, `fp8` (the
+  Q8_0 wire) and `q4_0`; the rest resolve to the nearest store that
+  exists and the banner SAYS so rather than printing a substitution
+  silently. A value outside the set is now refused with the list, where
+  it used to become `f16` without a word, so a typo asked for a smaller
+  KV cache and got the largest one.
+
+  The previous `turbo8` / `turbo4` / `turbo3` spellings are gone, and
+  two of the three carried no information: `turbo8` was a second name
+  for `q8_0`'s identical 34-byte store, and `turbo3` had no
+  implementation at all and fell back to f16.
+
+- **The banner stopped calling honoured flags ignored.** It compared
+  the resolved dtype name to the typed string, so every alias printed
+  `(--ctk fp8 ignored: ...)` while doing exactly what was asked.
+
+- **`frink-server --ctk` validates what `frink run --ctk` validates.**
+  Both set `FRINK_CTK`, and the server accepted any string and passed
+  it through, so `frink-server --ctk nonsense` served f16 without a
+  word while `frink run --ctk nonsense` refused. One vocabulary
+  (`frink_models::ctk`), one parser, and a test that holds them
+  together.
+
+- **The documented architecture count is checked against the table.**
+  `README.md` said 47 architectures run with a logit comparison,
+  `CLAUDE.md` said 98 and `capability::AUDITED_GENERIC_GQA` holds 98:
+  three numbers for one fact, drifting further apart with every row
+  that closed. README is corrected, and
+  `crates/frink-models/tests/documented_counts.rs` fails when the prose
+  and the table disagree again. The same test found
+  `docs/manifests/architecture_manifest.md` stale by five architectures
+  (`spark2_5`, `maple`, `granite_swa`, `muse-glimmer`, `hrm_text`),
+  which is regenerated.
+
+- **Three byte-identical functions collapsed onto one each**, found by
+  hashing every function body in the workspace and comparing across
+  files:
+  - `print_available_devices` existed twice, once per binary, printing
+    the user-visible `--list-devices` text. A backend added to one copy
+    would have been missing from the other. It is
+    `frink_models::devices` now, and the audit that found it also found
+    that NEITHER copy lists Vulkan although frink has a Vulkan backend
+    (recorded in `docs/ROADMAP.md`).
+  - `process_stamp` was duplicated between `frink-api::request_id` and
+    `frink-server`'s conversation ids, with a doc comment on the copy
+    saying it mirrored the original. A copy that says it is a copy is
+    still a copy; the original is `pub` now.
+  - The `--ctk` value parser, which this release introduced, was
+    written into both front ends before being collapsed into
+    `frink_models::ctk::parse_value`.
+
+- **`cargo test` optimises the numeric crates, and the suite got 64x
+  faster where it mattered.** `kv_window_real_checkpoint` ran for
+  **1,266 seconds** and failed twice under the parallel workspace
+  suite while passing alone. The checkpoint was not the problem: the
+  test profile compiled the quantized matmul kernels at opt-level 0.
+  The same test is **19.9 seconds** with `opt-level = 3` for
+  `frink-core`, `frink-quant`, `frink-moe`, `frink-gguf`,
+  `frink-models` and `frink-metal` in the `dev` and `test` profiles
+  (20.9s in `--release`, so this is the whole gap), and the entire
+  `cargo test --workspace` now finishes in **3m52s** green.
+
+  `debug-assertions` stays on: this repo relies on `debug_assert!`, and
+  raising the optimiser does not disable it. The test crates themselves
+  are left unoptimised so they stay cheap to compile.
+
+  The first fix attempted was `#[ignore]` on the slow test, matching
+  its sibling against the same checkpoint. That was treating the
+  symptom, and it is reverted: at 20 seconds the test belongs in the
+  default suite.
 
 - **The KV wire left `attn.rs` for `frink-metal/src/kv_wire.rs`.** The
   dtype table, the append and dequant kernels and the store geometry
@@ -81,6 +151,18 @@ are the ones worth reading twice.
   restate the dtype-to-kernel mapping that the append table already
   held, which is the two-structures-that-must-agree shape; it is
   derived from that table now.
+
+### Fixed
+
+- **`FRINK_CTK` from the environment works through `frink run`.** It is
+  documented in `docs/CONFIG.md` as "same as `--ctk`" and could not be:
+  the resolution writes `args.ctk` into the variable unconditionally
+  and that field's default is `f16`, so an environment saying `q4`
+  was overwritten before `frink_metal::attn::metal_kv_dtype` looked.
+  clap reads the variable as the argument's default now, so the flag
+  wins when given and the environment when it is not, and the
+  write-back is idempotent rather than destructive. Nothing had ever
+  checked it; there is a test. (#297)
 
 ## [0.26.0] - 2026-09-19
 
@@ -329,9 +411,9 @@ are the ones worth reading twice.
   BOTH reference engines. Against the moved llama.cpp pin the
   text-generation gap is the twelve new rows above; the remaining
   scopes are encoder/embedding (11), multimodal (10), diffusion (4) and
-  audio (3). Against vLLM the architecture count is the wrong
-  comparison (HF class names, several per GGUF architecture) and the
-  gap is in serving features, where the finding is that **speculative
+  audio (3). On the serving side an architecture count is the wrong
+  comparison (HF class names map several-to-one onto a GGUF
+  architecture) and the gap is in features, where the finding is that **speculative
   decoding is built, lossless, tested and unreachable from the
   server** -- `frink_models::speculative` has one caller,
   `frink-cli`, while `frink-server` carries an acceptance-rate metric

@@ -99,7 +99,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use cli::{apply_cli_overrides, print_available_devices};
+use cli::apply_cli_overrides;
 pub use cli::{ServerArgs, BUILT_WITH_CUDA, BUILT_WITH_METAL};
 
 use frink_core::cache::KvBlockPool;
@@ -767,7 +767,7 @@ pub(crate) struct ChatMessage {
     /// which is exactly what the markers exist to prevent.
     ///
     /// Accepted under both spellings clients use: `reasoning_content`
-    /// (the vLLM/DeepSeek convention frink emits) and `reasoning`
+    /// (the DeepSeek convention frink emits) and `reasoning`
     /// (what the OpenAI Responses and Anthropic surfaces call it), so a
     /// client can replay a turn shaped the way it received it.
     #[serde(default, alias = "reasoning")]
@@ -876,7 +876,7 @@ struct ChatCompletionRequest {
     #[serde(default)]
     top_p: Option<f32>,
     /// llama.cpp's `--min-p`. Not an OpenAI field; accepted under the
-    /// same spelling llama.cpp's server and vLLM use, because a client
+    /// same spelling llama.cpp's server uses, because a client
     /// that sends it and is silently served an unfiltered distribution
     /// cannot tell that apart from having had it honoured.
     #[serde(default)]
@@ -913,7 +913,8 @@ struct ChatCompletionRequest {
     /// Run past the model's own end-of-generation tokens, so this
     /// request produces exactly `max_tokens`.
     ///
-    /// A serving-benchmark knob, and the vLLM/SGLang spelling of it. It
+    /// A serving-benchmark knob, under the spelling the other
+    /// OpenAI-compatible servers use. It
     /// exists because a benchmark whose requests stop at their own EOS
     /// finishes them at different lengths, and the slowest percentile
     /// is then whichever request happened to be asked for the most
@@ -3917,7 +3918,7 @@ fn install_ring_crypto_provider() {
 /// and neither front end can drift into its own startup logic.
 pub fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     if args.list_devices {
-        print_available_devices();
+        frink_models::devices::print_available_devices();
         return Ok(());
     }
     apply_cli_overrides(&args)?;

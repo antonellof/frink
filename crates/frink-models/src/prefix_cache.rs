@@ -13,8 +13,8 @@
 //!
 //! Deliberately scoped: this does a linear scan over a small,
 //! LRU-bounded set of stored prefixes to find the longest common
-//! prefix, not a trie/radix-tree structure (vLLM's and SGLang's
-//! RadixAttention do this properly at production scale). For the
+//! prefix, not a trie/radix-tree structure (a radix cache does this
+//! properly at production scale). For the
 //! small number of concurrent conversations a demo server actually
 //! handles, a linear scan is simpler and correctness is easier to
 //! verify.

@@ -2,9 +2,8 @@
 //! `codex` speaks.
 //!
 //! Ported from FreeToken's `server/responses_api.py` (Apache-2.0; see
-//! `docs/THIRD_PARTY_NOTICES.md`), which is itself the *simple* rail of
-//! vLLM's `OpenAIServingResponses` -- the gpt-oss Harmony rail is not
-//! ported, here or there.
+//! `docs/THIRD_PARTY_NOTICES.md`), and only its *simple* rail: the
+//! gpt-oss Harmony rail is not ported, here or there.
 //!
 //! # This is a shaping, not a second engine
 //!

@@ -39,6 +39,10 @@ pub mod gdn;
 #[cfg(feature = "metal")]
 pub mod fused_layer;
 
+/// The `-ctk` value vocabulary, which is llama.cpp's.
+pub mod ctk;
+/// What `--list-devices` prints, shared by both front ends.
+pub mod devices;
 pub mod gemma4_engine;
 pub mod gemma4_gguf_loader;
 pub mod glm52_decoder;

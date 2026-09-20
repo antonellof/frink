@@ -30,15 +30,11 @@ Four items are large enough to carry their own design document:
   per layer, copied both ways), and four measured non-results so they
   are not tried again.
 
-Audits of the other engines sit beside them:
+One audit sits beside them:
 
 - **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)**,
-  llama.cpp and vLLM re-measured against a moved pin.
-- **[`xinfer-audit-2026-09-19.md`](xinfer-audit-2026-09-19.md)**,
-  xInfer read the same way: the three-way Metal benchmark that put
-  frink ahead of it and of llama.cpp on the hardware, what it has that
-  frink does not, and the TurboQuant rotation that closed on the back
-  of it.
+  the llama.cpp surface re-measured against a moved pin, plus the
+  serving-feature gaps that a GGUF architecture count cannot see.
 
 How work lands is written down too:
 
@@ -58,7 +54,7 @@ One item has a written **verdict** rather than a design:
 
 Parity inventory and deltas against llama.cpp:
 
-- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the current re-measurement, llama.cpp AND vLLM
+- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the current re-measurement of the llama.cpp surface and the serving-feature gaps
 - **[`server-speculative-decoding.md`](server-speculative-decoding.md)** — the engine has it, the server cannot reach it
 - **[`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md)** — evidence-backed differential (not a plan)
 - **[`llama-cpp-full-parity-audit-2026-09-02.md`](llama-cpp-full-parity-audit-2026-09-02.md)** — file map + sweep + priority plan

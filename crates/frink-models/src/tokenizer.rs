@@ -324,7 +324,8 @@ enum BpeEncodingStyle {
 /// unprintable as raw codepoints) maps to a codepoint starting at 256.
 /// This is the exact algorithm from OpenAI's GPT-2 `encoder.py`
 /// `bytes_to_unicode()`, reimplemented independently in Rust: real BPE
-/// vocabularies (llama.cpp, mistral.rs via the `tokenizers` crate) list
+/// vocabularies (llama.cpp, and anything using the `tokenizers`
+/// crate) list
 /// merge-table entries in *this* remapped space (e.g. "\u{0120}the",
 /// where the leading char is U+0120, the remapped space byte 0x20), not
 /// in raw byte or `char` space, so skipping this step -- which frink

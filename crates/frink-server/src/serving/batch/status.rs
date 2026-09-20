@@ -308,7 +308,7 @@ fn pool_field(name: &str, unit: &str, usage: Option<PoolUsage>) -> String {
 }
 
 /// The window pool keeps upstream's `swa` wording, so a frink log line
-/// diffs against a FreeToken or SGLang one without translation.
+/// diffs against a FreeToken one without translation.
 fn window_field(usage: Option<PoolUsage>) -> String {
     pool_field("swa", "token", usage)
 }

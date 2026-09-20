@@ -3,8 +3,7 @@
 //! talks to.
 //!
 //! Ported from FreeToken's `server/anthropic_api.py` (Apache-2.0; see
-//! `docs/THIRD_PARTY_NOTICES.md`), which is itself adapted from vLLM's
-//! `AnthropicServingMessages`.
+//! `docs/THIRD_PARTY_NOTICES.md`).
 //!
 //! # This is a shaping, not a second engine
 //!

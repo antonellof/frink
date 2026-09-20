@@ -28,7 +28,7 @@ candidates and are triaged (`granite_swa`, `graniteswitch`,
 refused by name (`bailingmoe3`, `dots3note`, `hy_v4`, `kimi-k3`), and
 two are text-to-speech. A count that only ever fell would mean nobody
 was reading upstream. `docs/plans/parity-audit-2026-09-19.md` is the
-re-measurement, llama.cpp AND vLLM.
+re-measurement of the llama.cpp surface and the serving features.
 
 `spark2_5` (Spark-2.5 1.7B) closed the same day, which is what a ONE
 MATCH ARM verdict is supposed to cost: `spark2-5.cpp:41,97-105` is a
@@ -1580,41 +1580,35 @@ bisection is recorded in `tests/nomic_bert_graphs.rs` with what it
 eliminated (a uniform softmax still differs; f16 K/V does not explain
 it).
 
-**xInfer was read the same way llama.cpp is, on 2026-09-19**, and the
-first thing it settled is the one that would have been assumed:
-measured back to back on the M2 Pro with both engines built from
-source, frink decodes Llama-3.2-3B Q4_K_M at 67.1 tok/s against 45.8
-and Llama-3.1-8B at 32.0 against 26.0, prefills the 3B at 510-573
-against 249-338, and runs a Phi-4-mini GGUF that xInfer refuses to
-load. Its published numbers are CUDA numbers from 5090s and Hopper
-parts, where its speed comes from cutlass and FlashInfer through
-`attention-rs` and a forked candle; frink's CUDA gap is already
-measured against llama.cpp and adding a third engine to it changes no
-diagnosis. `docs/plans/xinfer-audit-2026-09-19.md` is the audit, and
-what it says frink lacks is multimodal, quantized safetensors, ISQ,
-server-side MTP and multi-node, in that order of worth.
+**`--ctk q4` grew a Hadamard rotation on 2026-09-19**, and its lesson
+is about measurement rather than kernels. The 4-bit KV store rotates K
+at append (a deterministic per-head, per-channel sign flip and a
+normalized Walsh-Hadamard transform) and puts Q through the same matrix
+at read, so `q . k` is unchanged; V is left alone, worth 39% of the
+error on K against 12% on V. Two metrics were discarded first: a
+free-running greedy generation is chaotic, so one flipped token makes
+the rest unrelated and six prompts scored anywhere from 0 to 134
+characters for the SAME build; and `frink perplexity` is byte-identical
+for `f16`, `q8_0` and `q4` because that path never touches the Metal
+store, which is a metric that does not move when the thing under test
+changes. The one that works is next-token agreement with an f16 store
+over sixty long-context windows: 45/60 for the unrotated wire and
+52/60 for the shipped rotated one. The number that matters more is a
+NULL result found by accident: an earlier build of the identical
+scheme, differing only in the arbitrary per-channel sign pattern,
+scored 48/60. Four windows in sixty is therefore the spread of the
+METRIC, not a difference between schemes, so a KV comparison here is
+only believable when it is wider than that. Rotation against no
+rotation (52 against 45) clears it; the scale-granularity question
+does not, and stays open rather than acted on.
+Two host paths had to learn the rotation with the kernel,
+`upload_from_host` and `tokens_host`, because a rotated row handed to a
+host kernel whose query is not rotated is a different model and neither
+would have failed loudly.
 
-One row closed off it, and its lesson is about measurement rather than
-kernels. `--ctk turbo4` was TurboQuant's NAME on plain per-32-element
-absmax; it is TurboQuant now, a randomized Hadamard rotation on K at
-append and the same rotation on Q at read, V untouched as upstream
-leaves it. Two metrics were discarded first: a free-running greedy
-generation is chaotic, so one flipped token makes the rest unrelated
-and six prompts scored anywhere from 0 to 134 characters for the same
-build; and `frink perplexity` is byte-identical for `f16`, `q8_0` and
-`turbo4` because that path never touches the Metal store, which is a
-metric that does not move when the thing under test changes. The one
-that works is next-token agreement with an f16 store over sixty
-long-context windows, and it reads 45/60 for the old wire, 48/60 with
-the rotation, 41/60 for a per-head scale without it and 52/60 for
-xInfer's own pairing. The first three arrived before the fourth and
-supported a tidy story the fourth breaks, which is why the wire did
-NOT change: four windows in sixty is a direction and not a result, and
-it is recorded as an open question rather than acted on. Two host
-paths had to learn the rotation with the kernel, `upload_from_host`
-and `tokens_host`, because a rotated row handed to a host kernel whose
-query is not rotated is a different model and neither would have
-failed loudly.
+The `--ctk` values are named after the WIRE now (`f16`, `q8_0`, `fp8`,
+`q4`), because the previous set carried two names for one 34-byte store
+and one name for a store that had no implementation.
 
 Do not read the architecture catalog as a support matrix. `frink
 parity` is the oracle: its tokenizer half matches llama.cpp on every

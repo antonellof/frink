@@ -1,4 +1,4 @@
-# Parity audit, 2026-09-19: llama.cpp AND vLLM
+# Parity audit, 2026-09-19: architectures and serving features
 
 What this is: a re-measurement of the two engines frink is read
 against, done on the day 0.25.0 shipped, so the next work is chosen
@@ -102,7 +102,7 @@ Against the llama.cpp this repo PINS, frink serves **every text
 generation architecture that has a graph**. Against llama.cpp's
 `master` as of today it serves 116 of 130, because the pin is six
 weeks and **792 commits** stale and fourteen architectures landed in
-that window. Against vLLM the architecture question is the wrong one
+that window. On the serving side the architecture question is the wrong one
 -- the overlap is high and the naming spaces differ -- and the gap is
 in SERVING features, where one of them is already half-built in this
 tree.
@@ -191,30 +191,24 @@ wrong in the direction that matters (a graph that started reading a
 key). The pin bump and the census re-run belong in one PR, before any
 of the fourteen rows.
 
-## 2. vLLM
+## 2. Serving features
 
-### 2.1 The model count is not the comparison
+### 2.1 A model count is not the comparison
 
-```
-$ curl .../vllm/model_executor/models/registry.py
-_TEXT_GENERATION_MODELS 137   _EMBEDDING_MODELS 37   _MULTIMODAL_MODELS ~225 entries
-```
-
-Those are HF `*ForCausalLM` class names, several of which map to one
-GGUF architecture string (`LlamaForCausalLM`, `MistralForCausalLM`,
-`YiForCausalLM` are all `llama` in GGUF, which this repo learned the
-hard way on 2026-09-10). Counting them against frink's 116 would be
-comparing two different things. The honest statement is that the
-text-generation OVERLAP is close to complete, and vLLM's advantage is
-in three scopes frink defers: multimodal, pooling/embedding models,
-and encoder-decoder.
+A GGUF architecture string is not a Hugging Face `*ForCausalLM` class
+name, and several of the latter map onto one of the former
+(`LlamaForCausalLM`, `MistralForCausalLM` and `YiForCausalLM` are all
+`llama` in GGUF, which this repo learned the hard way on 2026-09-10).
+Counting one against the other compares two different things. The
+scopes frink actually defers are three: multimodal,
+pooling/embedding models, and encoder-decoder.
 
 ### 2.2 Feature parity, measured against this tree
 
-vLLM's own `docs/features/README.md` matrix rows, each checked against
-frink by grep rather than by memory:
+The serving features an OpenAI-compatible engine is expected to have,
+each checked against frink by grep rather than by memory:
 
-| vLLM feature | frink | evidence |
+| Serving feature | frink | evidence |
 |---|---|---|
 | chunked prefill (CP) | **yes** | `frink-server/src/generate.rs` |
 | automatic prefix caching (APC) | **yes** | `policy/radix`, over paged KV |
@@ -260,32 +254,32 @@ class as a gate that cannot fire.
 Leviathan / Chen rejection rule, with `accept_or_resample` pinned by
 tests), `PromptLookupSpeculator` needs no second checkpoint and no
 GPU, and `draft_model.rs` already exists for the `--model-draft` case.
-So the whole of vLLM's `n_gram` and `draft_model` spec-decode arms are
-one wiring job away over the API, and the `mtp` arm is one `Drafter`
-impl away for the seventeen architectures whose MTP blocks frink
-already SKIPS by name (`crate::mtp_blocks::NEXTN_READERS`).
+So both the n-gram and the draft-model arms are one wiring job away
+over the API, and a multi-token-prediction arm is one `Drafter` impl
+away for the seventeen architectures whose MTP blocks frink already
+SKIPS by name (`crate::mtp_blocks::NEXTN_READERS`).
 
 ## 3. Ranked, against the north star
 
 The north star is "the Rust alternative to llama.cpp: same models,
-same command shapes, same or better performance". vLLM is the second
-reading, not the first, so a vLLM-only feature ranks below a llama.cpp
-gap of the same size.
+same command shapes, same or better performance". A serving feature no
+llama.cpp user can ask for ranks below a llama.cpp gap of the same
+size.
 
 1. **Update the llama.cpp pin and re-run every census.** Everything
    below is measured against a tree that is 792 commits old, and two
    of this repo's tables are derived from a grep over it.
 2. **Speculative decoding in the server.** Built, tested, lossless,
-   unreachable; the metric for it already exists. Both engines have
-   it; only frink has it and cannot serve it.
+   unreachable; the metric for it already exists. llama.cpp's server
+   has it over HTTP and frink does not.
 3. ~~**`granite_swa` and `maple`**~~ -- `maple` closed on 2026-09-19
    with `spark2_5`; `granite_swa` is left and needs two small per-layer
    tables (an `expert_used_count` array, which the loader now reads,
    and `attention.rope_pattern`, the first upstream graph that lets the
    FILE decide which layers rotate).
 4. **`bert` and the encoder/embedding family.** Eleven llama.cpp rows
-   and vLLM's whole pooling scope in one seam, and frink already has
-   the two routes that would serve them.
+   and the whole pooling scope in one seam, and frink already has the
+   two routes that would serve them.
 5. **`minimax-01`**, the new hybrid recurrent row, on the seam that has
    closed nine rows in two weeks.
 6. The MLA/DSA and hyper-connection rows (`dots3note`, `hy_v4`,

@@ -7,8 +7,8 @@
 //!
 //! * **Drafting** is the [`Drafter`] trait. The only implementation in
 //!   the tree is [`PromptLookupSpeculator`], an n-gram match over the
-//!   history with no model at all (the same idea as vLLM's "prompt
-//!   lookup decoding"), chosen because it needs no GPU, no second set
+//!   history with no model at all (prompt-lookup drafting), chosen
+//!   because it needs no GPU, no second set
 //!   of weights and no checkpoint to be useful. A model-based drafter
 //!   (MTP head, EAGLE, dFlash) is a second impl of the same trait.
 //! * **Verification** is [`speculative_decode_with`], and it does not

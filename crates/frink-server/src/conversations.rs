@@ -465,19 +465,12 @@ const ID_PREFIX: &str = "conv_";
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Per-process stamp, so ids minted by two runs of the same binary in
-/// the same directory cannot collide. Mirrors
-/// `frink_api::request_id`'s scheme rather than inventing a second
-/// one, and for the same reason: unique without a lock or an RNG.
-fn process_stamp() -> u64 {
-    use std::sync::OnceLock;
-    static STAMP: OnceLock<u64> = OnceLock::new();
-    *STAMP.get_or_init(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
-    })
-}
+/// the same directory cannot collide.
+///
+/// It is `frink_api::request_id`'s, not a second implementation of the
+/// same idea: this file used to carry a byte-identical copy whose own
+/// comment said it mirrored that one.
+use frink_api::request_id::process_stamp;
 
 fn next_conversation_id() -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
