@@ -79,6 +79,12 @@ jobs:
   # Kept as a separate job from the compile one so a kernel that fails
   # on the GPU is not reported as a build break, and so the compile
   # gate still answers on a runner outage here.
+  #
+  # MEASURED on the hosted runner, because a green check that silently
+  # skipped every test would be worse than no job: 71 passed, 0 failed,
+  # 31.02s (run 35503018762). The `system_profiler` step above is kept
+  # so the device is named in the log and a future skip is visible
+  # rather than inferred.
   metal-gpu-tests:
     name: cargo test --features metal -- --ignored (real GPU)
     runs-on: macos-latest
