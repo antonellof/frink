@@ -146,7 +146,7 @@ isProject: false
 # llama.cpp parity push
 
 > Working plan for closing the measured gaps against
-> [`benchmarks/RESULTS.md`](../../benchmarks/RESULTS.md). Re-ranked
+> [`benchmarks/RESULTS.md`](../../../benchmarks/RESULTS.md). Re-ranked
 > **2026-08-10** from a four-way read-only audit of `frink` against
 > `.scratch/llama.cpp` (CPU prefill, CPU kernel coverage, Metal, and
 > model/weight coverage). Every claim below carries a `file:line`; the two
@@ -1235,7 +1235,7 @@ them — they cost more and hurt less than anything above.
 ## Definition of done
 
 The push is finished when **all red rows** in
-[`benchmarks/RESULTS.md`](../../benchmarks/RESULTS.md) read ≤ 1.0×, with
+[`benchmarks/RESULTS.md`](../../../benchmarks/RESULTS.md) read ≤ 1.0×, with
 answer parity. Tracked explicitly so "mostly done" is not a resting place.
 **25 red as published** (29 at the start of the push); the Metal `pp512`
 count drops to 5 when the owed d=128 suite run publishes:
