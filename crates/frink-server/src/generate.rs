@@ -801,6 +801,70 @@ impl Kv {
     }
 
     /// One decode step.
+    /// Feed a whole block and return one logit row per token, which
+    /// is what verifying `k` drafted tokens costs instead of `k`
+    /// forwards ([`Decoder::forward_batch`]).
+    ///
+    /// `None` means this store cannot serve speculation, and the
+    /// caller takes the ordinary path rather than guessing. Two
+    /// reasons, both real:
+    ///
+    /// * **Paged.** Rejecting a draft means releasing the positions it
+    ///   wrote, and a paged store hands those out through a block
+    ///   table that the radix cache may already have published a
+    ///   prefix of. Undoing that is its own row
+    ///   (`docs/plans/server-speculative-decoding.md`); refusing is the
+    ///   honest answer until it lands.
+    /// * **Recurrent.** A Mamba-style state is a REDUCTION over the
+    ///   whole prefix rather than a row per position, so there is
+    ///   nothing to drop. `KvCache::can_truncate_to` says so, and
+    ///   [`Self::truncate_to`] asks it rather than assuming.
+    #[allow(
+        dead_code,
+        reason = "called by the speculative loop; see sampling_loop::verify_block"
+    )]
+    fn step_batch(
+        &mut self,
+        decoder: &Decoder,
+        tokens: &[usize],
+        pos: usize,
+    ) -> Option<Vec<Vec<f32>>> {
+        match self {
+            Kv::Contiguous(caches) => {
+                // Asked BEFORE the forward, not after: a store that
+                // cannot roll back must not be written speculatively
+                // in the first place.
+                if !caches.iter().all(|c| c.can_truncate_to(pos)) {
+                    return None;
+                }
+                Some(decoder.forward_batch(tokens, pos, caches))
+            }
+            Kv::Paged(_) => None,
+        }
+    }
+
+    /// Drop every position past `pos`, which is how a rejected draft is
+    /// undone. `false` when this store cannot, and the caller must then
+    /// never have speculated -- [`Self::step_batch`] is the gate.
+    #[allow(
+        dead_code,
+        reason = "called by the speculative loop; see sampling_loop::verify_block"
+    )]
+    fn truncate_to(&mut self, pos: usize) -> bool {
+        match self {
+            Kv::Contiguous(caches) => {
+                if !caches.iter().all(|c| c.can_truncate_to(pos)) {
+                    return false;
+                }
+                for c in caches.iter_mut() {
+                    c.truncate(pos);
+                }
+                true
+            }
+            Kv::Paged(_) => false,
+        }
+    }
+
     fn step(&mut self, decoder: &Decoder, token: usize, pos: usize) -> Vec<f32> {
         match self {
             Kv::Contiguous(caches) => decoder.forward_token(token, pos, caches),
@@ -1817,6 +1881,94 @@ mod tests {
 
     fn small_decoder() -> Decoder {
         Decoder::new_random_small(test_dense_fixture(), 2, 256)
+    }
+
+    /// A batch of `k` tokens leaves the cache exactly where feeding
+    /// them one at a time would, and hands back one row per token.
+    /// Both halves matter: the rows are what verification reads, and
+    /// the cache state is what the next step continues from.
+    #[test]
+    fn step_batch_matches_stepping_one_token_at_a_time() {
+        let decoder = small_decoder();
+        let tokens = [1usize, 5, 9, 2];
+
+        let mut batched = Kv::Contiguous(decoder.config.new_kv_caches());
+        let rows = batched
+            .step_batch(&decoder, &tokens, 0)
+            .expect("a contiguous store speculates");
+        assert_eq!(rows.len(), tokens.len(), "one row per token");
+
+        let mut stepped = Kv::Contiguous(decoder.config.new_kv_caches());
+        let one_at_a_time: Vec<Vec<f32>> = tokens
+            .iter()
+            .enumerate()
+            .map(|(pos, &t)| stepped.step(&decoder, t, pos))
+            .collect();
+
+        for (pos, (b, o)) in rows.iter().zip(one_at_a_time.iter()).enumerate() {
+            assert_eq!(b.len(), o.len(), "row {pos} width");
+            for (i, (x, y)) in b.iter().zip(o.iter()).enumerate() {
+                // The measured batched-vs-sequential ulp, the same
+                // bound `frink-models` pins that difference at.
+                assert!(
+                    (x - y).abs() < 1e-6,
+                    "row {pos} logit {i}: batched={x} sequential={y}"
+                );
+            }
+        }
+    }
+
+    /// Rejecting a draft means the rows it wrote are gone, and the
+    /// store continues as if they never happened. Checked by walking
+    /// the same tokens again after the rollback and demanding the same
+    /// logits: a stale row left behind would change them.
+    #[test]
+    fn truncate_to_undoes_the_rows_a_rejected_draft_wrote() {
+        let decoder = small_decoder();
+        let committed = [1usize, 5];
+        let draft = [9usize, 2];
+
+        let mut kv = Kv::Contiguous(decoder.config.new_kv_caches());
+        kv.step_batch(&decoder, &committed, 0).expect("committed");
+        let after_commit = kv
+            .step_batch(&decoder, &draft, committed.len())
+            .expect("draft");
+
+        // Reject the whole draft.
+        assert!(
+            kv.truncate_to(committed.len()),
+            "a contiguous store rolls back"
+        );
+
+        // Feeding the same draft again must land on the same rows.
+        let again = kv
+            .step_batch(&decoder, &draft, committed.len())
+            .expect("draft again");
+        for (pos, (a, b)) in after_commit.iter().zip(again.iter()).enumerate() {
+            for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+                assert!(
+                    (x - y).abs() < 1e-6,
+                    "row {pos} logit {i} after rollback: {x} vs {y}"
+                );
+            }
+        }
+    }
+
+    /// The gate is asked BEFORE anything is written. A store that
+    /// cannot roll back must not be speculated into at all, which is
+    /// why `step_batch` returns `None` rather than `truncate_to`
+    /// failing after the damage is done.
+    #[test]
+    fn a_paged_store_refuses_to_speculate_rather_than_failing_to_undo() {
+        // Constructed without a pool: the point is the arm, not the
+        // pages, and `step_batch` decides on the variant alone.
+        let decoder = small_decoder();
+        let mut kv = Kv::Contiguous(decoder.config.new_kv_caches());
+        assert!(
+            kv.step_batch(&decoder, &[1], 0).is_some(),
+            "the contiguous arm serves speculation"
+        );
+        assert!(kv.truncate_to(0), "and can undo it");
     }
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
