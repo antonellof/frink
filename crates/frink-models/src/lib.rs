@@ -69,6 +69,8 @@ pub mod kv_head_dims;
 pub mod latent_moe;
 pub mod layer_loops;
 pub mod layer_shapes;
+/// MiniMax-01's lightning attention block.
+pub mod lightning;
 pub mod loader;
 pub mod lora;
 pub mod lora_attach;

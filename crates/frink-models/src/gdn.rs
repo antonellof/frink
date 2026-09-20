@@ -797,24 +797,38 @@ fn sigmoid(x: f32) -> f32 {
 /// `{arch}.attention.recurrent_layers` / `{arch}.full_attention_interval`
 /// rather than by a zero KV count (`qwen35.cpp:17-24`; `qwen35moe.cpp`
 /// and `qwen3next.cpp` read the same two keys).
-pub const INTERVAL_RECURRENT_ARCHITECTURES: &[&str] = &["qwen35", "qwen35moe", "qwen3next"];
+pub const INTERVAL_RECURRENT_ARCHITECTURES: &[(&str, usize)] = &[
+    ("qwen35", 4),
+    ("qwen35moe", 4),
+    ("qwen3next", 4),
+    // `minimax-01.cpp:13` seeds 8 where `qwen35.cpp:21` seeds 4. The
+    // RULE is the same line in both -- layer `i` is recurrent unless
+    // `(i + 1) % interval == 0` -- so this is a default per
+    // architecture and not a second reader.
+    ("minimax-01", 8),
+];
 
 /// Which trunk layers of `arch` are recurrent, or `None` for an
 /// architecture that decides by its head counts.
 ///
-/// `qwen35.cpp:17-24`: the array wins when present (read at
-/// `block_count` length, the MTP block included, and cut to the trunk
-/// here); else layer `i` is recurrent iff `(i + 1) % interval != 0`,
-/// with `interval` from `{arch}.full_attention_interval` (default 4).
+/// `qwen35.cpp:17-24` and `minimax-01.cpp:11-17` are the same rule in
+/// two files: the array wins when present (read at `block_count`
+/// length, the MTP block included, and cut to the trunk here); else
+/// layer `i` is recurrent iff `(i + 1) % interval != 0`, with
+/// `interval` from `{arch}.full_attention_interval`. Only the DEFAULT
+/// differs between them, which is why the table carries it.
 pub fn recurrent_layers(
     file: &impl TensorSource,
     arch: &str,
     block_count: usize,
     n_layers: usize,
 ) -> Result<Option<Vec<bool>>, LoadError> {
-    if !INTERVAL_RECURRENT_ARCHITECTURES.contains(&arch) {
+    let Some((_, default_interval)) = INTERVAL_RECURRENT_ARCHITECTURES
+        .iter()
+        .find(|(a, _)| *a == arch)
+    else {
         return Ok(None);
-    }
+    };
     let key = format!("{arch}.attention.recurrent_layers");
     if let Some(frink_gguf::GgufValue::Array(items)) = file.metadata(&key) {
         if items.len() != block_count {
@@ -837,7 +851,7 @@ pub fn recurrent_layers(
     }
     let interval = file
         .metadata_u64(&format!("{arch}.full_attention_interval"))
-        .unwrap_or(4) as usize;
+        .unwrap_or(*default_interval as u64) as usize;
     if interval == 0 {
         return Err(LoadError::UnsupportedFeature(
             format!("{arch}.full_attention_interval"),
