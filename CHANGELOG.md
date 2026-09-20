@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-20
+
 ### Added
 
 - **`--ctk q4_0`: 4-bit KV with a Hadamard rotation on K.** The 4-bit KV
