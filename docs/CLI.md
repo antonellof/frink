@@ -199,10 +199,10 @@ rate it prints tells you nothing about a real drafter. What it does
 report honestly is acceptance length and the per-position accept rate
 alongside the call counts.
 
-Neither reaches `frink-server` yet: the HTTP API's speculation fields
-in `usage` are a wire contract with nothing populating them
-(`docs/API.md`), and the row that changes that is
-`docs/plans/server-speculative-decoding.md`.
+`frink-server` speculates too, with the prompt-lookup drafter and no
+flag: it is on for any request whose sampling the verification can
+reproduce, and the `usage` block reports what it bought
+(`docs/API.md`). A draft model over HTTP is not wired.
 
 Verification uses the speculative-sampling rejection rule, so it stays
 lossless at any temperature rather than only at `--temp 0`. Real drafters

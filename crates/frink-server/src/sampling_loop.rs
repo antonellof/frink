@@ -323,6 +323,21 @@ fn commit_token(
     }
 }
 
+/// Tokens a prompt-lookup round drafts.
+///
+/// llama.cpp's `--draft-max` default is 16 and its drafter is a second
+/// MODEL; a prompt-lookup drafter is right far less often, and every
+/// rejected draft is a position the target paid for and threw away.
+/// Five is `frink run`'s default for the same drafter, so the two
+/// front ends agree.
+pub(crate) const DEFAULT_DRAFT_MAX: usize = 5;
+
+/// N-gram length the prompt-lookup drafter matches on.
+///
+/// Shorter matches more often and is wrong more often. Two is
+/// `frink run`'s.
+pub(crate) const DRAFT_NGRAM: usize = 2;
+
 /// Everything the loop asks of the engine, including speculation.
 ///
 /// `step` lives here rather than staying a closure for a reason found

@@ -241,7 +241,7 @@ by total wall time reads a 50 tok/s model as 5 tok/s on a long prompt.
 | `time_to_first_token_ms` | prefill start → first token produced |
 | `prompt_per_second`, `predicted_per_second` | per-phase throughput |
 | `cached_tokens` | prompt tokens reused from the KV prefix cache |
-| `acceptance_length` | completion tokens per speculative verification step |
+| `acceptance_length` | completion tokens per FORWARD PASS, speculative or not. 1.0 means speculation saved nothing, 2.0 means half the forwards. A round that drafted nothing still costs a forward and is counted, because a denominator of speculative rounds alone reports a number that flatters the drafter |
 | `draft_tokens`, `accepted_draft_tokens` | draft tokens evaluated / kept |
 | `draft_accept_rate_per_position` | accept rate at each position in the draft block |
 
@@ -259,10 +259,21 @@ uniformly mediocre one, and the two call for opposite block sizes.
 `/admin/stats` rows carry `acceptance_length` and
 `draft_accept_rate_per_position` for the same reason.
 
-**Today these fields are always absent**: `frink-server` has no
-speculative decode path yet (`frink speculative` is a CLI-only demo),
-so nothing populates them. They are the wire contract the engine's
-metrics land on, not evidence that the server speculates.
+**The server speculates now**, so these fields are present whenever a
+request actually drafted. The drafter is prompt-lookup: an n-gram match
+over the request's own history, with no second checkpoint, so it costs
+no memory and no load time and it helps exactly where output quotes
+input. `acceptance_length` is tokens per forward pass, and 1.0 means
+the drafting bought nothing.
+
+The fields stay ABSENT, rather than reporting zeros, for a request that
+did not draft: a grammar-constrained request (the verification draws
+through the same grammar machine, and a rejected block would leave it
+advanced over tokens that were never emitted, so drafting is refused
+rather than silently skipped), a paged or recurrent KV store (a
+rejected draft has to be rolled back and neither can), and a request
+with no room to draft. An absent field reads as "this request did not
+speculate"; a zero would read as "the drafter was useless".
 
 Streamed requests get the same `usage` object on the final chunk.
 
@@ -1471,7 +1482,8 @@ than `bert` (they refuse by name, see above) ·
 multi-GPU, tensor parallel, prefill/decode disaggregation · streamed
 argument deltas for the JSON-payload tool formats (they arrive whole) ·
 streamed tool calls on the continuous-batching path · a speculative
-decode path in the server, so every speculation field in `usage` is
+decode path for grammar-constrained or paged requests, so their
+speculation fields in `usage` are
 absent today · llama.cpp's `/infill`, `/props`, `GET /slots` (the live
 slot listing; `POST /slots/{id}` save/restore is supported, see above),
 and `/apply-template`, none of which has a frink counterpart.
