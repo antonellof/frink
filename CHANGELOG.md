@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-22
+
 ### Added
 
 - **`logprobs` on `/v1/chat/completions`** too, in OpenAI's chat shape.
