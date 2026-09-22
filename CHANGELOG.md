@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-09-22
+
 ### Added
 
 - **`n` > 1 with `stream`, interleaved.** The choices are decoded a
