@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-09-23
+
 ### Added
 
 - **`skip_special_tokens: false` and `return_tokens_as_token_ids`.**
