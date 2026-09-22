@@ -1191,6 +1191,17 @@ pub struct GenerationParams {
     /// radix tree already holds, so it has no rows for those
     /// positions).
     pub prompt_logprobs: Option<usize>,
+    /// vLLM's `cache_salt`: which caller's namespace this request's
+    /// prefix cache entries belong to, hashed to a `u64`.
+    ///
+    /// `None` is the shared namespace, which is what every request got
+    /// before this field existed and what every request that names no
+    /// salt still gets. A prefix cache is shared state keyed by token
+    /// ids, so WITHOUT a salt one caller's prompt can be answered from
+    /// another's cached prefix -- that is not a performance question
+    /// but an isolation one, and naming a salt is how a caller asks
+    /// for their own.
+    pub cache_salt: Option<u64>,
     pub stop: Vec<String>,
     /// Stop strings that are exactly one token in this model's
     /// vocabulary, resolved once by whoever holds the tokenizer.
@@ -1720,7 +1731,7 @@ pub fn generate(
             let m = pc
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
-                .find_longest_prefix(&tokens);
+                .find_longest_prefix_salted(&tokens, params.cache_salt);
             (m.matched_len > 0).then_some(m)
         })
     } else {
@@ -1826,6 +1837,20 @@ pub fn generate(
             // lm_head at every one instead of once
             // (`Kv::prefill_scored`). A request that did not ask keeps
             // the cheap path exactly as it was.
+            if params.cache_salt.is_some() && matches!(kv, Kv::Paged(_)) {
+                // The radix tree walks ONE tree keyed by token ids and
+                // its nodes hold block indices the whole deployment
+                // shares; there is no namespace to scope a lookup to.
+                // Serving this would be the worst of the three
+                // options: a caller who asked for isolation, told they
+                // got it, and sharing anyway.
+                return Err(DecodeError::Unsupported(
+                    "`cache_salt` is not implemented for the paged KV store: its prefix tree has \
+                     no per-caller namespace, so the isolation the field asks for would not \
+                     hold. Serve without `--paged-kv`."
+                        .to_string(),
+                ));
+            }
             if params.prompt_logprobs.is_some() {
                 let Some(rows) = kv.prefill_scored(decoder, &tokens) else {
                     // The paged store's prefill SKIPS whatever the
@@ -2014,6 +2039,7 @@ pub fn generate(
         kv_pool_configured: kv_pool.is_some(),
         radix_enabled: paged_kv.is_some_and(|c| c.radix.is_some()),
         prefix_cache,
+        cache_salt: params.cache_salt,
     }
     .finish();
 
@@ -2530,6 +2556,7 @@ mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,
             reasoning: None,
@@ -2913,6 +2940,7 @@ mod tests {
             None,
             &prompt,
             &GenerationParams {
+                cache_salt: None,
                 prompt_logprobs: None,
                 wants_logprobs: false,
                 reasoning: None,
@@ -3079,6 +3107,7 @@ mod tests {
 
     fn scripted_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,
             reasoning: None,
@@ -3382,6 +3411,7 @@ mod tests {
             None,
             &prompt,
             &GenerationParams {
+                cache_salt: None,
                 prompt_logprobs: None,
                 wants_logprobs: false,
                 reasoning: None,

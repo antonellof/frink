@@ -66,6 +66,13 @@ pub struct CacheKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenerationKey {
     pub max_tokens: usize,
+    /// The caller's namespace. KEYED: the response cache is shared
+    /// state keyed by the prompt exactly as the prefix cache is, so
+    /// two callers sending the same prompt under different salts must
+    /// not be served each other's answer. Keying the prefix cache and
+    /// not this one would leave the isolation half-built, which is
+    /// worse than not offering it.
+    pub cache_salt: Option<u64>,
     /// How many completions the caller asked for. KEYED: a stored
     /// single answer must never be served to a request that asked for
     /// four, and vice versa -- they are different answers, not the same
@@ -130,7 +137,7 @@ impl Hash for GrammarKey {
 /// The destructure below is exhaustive ON PURPOSE, for the same reason
 /// [`sampling_key`]'s is: a field added to `GenerationParams` stops this
 /// crate compiling, HERE, until someone decides whether it belongs in
-/// the cache key. Three of the twelve fields are deliberately NOT keyed and
+/// the cache key. Three of the thirteen fields are deliberately NOT keyed and
 /// each says why at its `_` binding -- an exclusion on the record is a
 /// decision; a field nobody looked at is the bug in #35.
 pub fn generation_key(params: &GenerationParams) -> GenerationKey {
@@ -162,6 +169,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // cache such a request at all (`CachedCompletion` stores no
         // distributions), so this never decides a hit.
         prompt_logprobs: _,
+        cache_salt,
         sampling,
         // NOT KEYED. The resolved seed is a clock reading for any
         // request that named none, which would give every greedy
@@ -193,6 +201,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
     } = params;
     GenerationKey {
         max_tokens: *max_tokens,
+        cache_salt: *cache_salt,
         n: *n,
         sampling: sampling_key(sampling),
         stop: stop.clone(),
@@ -560,6 +569,7 @@ mod tests {
     /// field at its do-nothing value.
     fn params() -> GenerationParams {
         GenerationParams {
+            cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,

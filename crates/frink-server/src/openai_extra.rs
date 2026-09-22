@@ -579,6 +579,7 @@ pub async fn completions(
     let n_logprobs = req.n_logprobs()?;
     let n_prompt = req.n_prompt_logprobs()?;
     let params = GenerationParams {
+        cache_salt: crate::cache_salt::namespace(req.unimplemented.cache_salt.as_deref()),
         // Also on when `best_of` is ranking, because the score IS the
         // logprobs: there is nothing to rank by without them. The
         // caller still only SEES what they asked for.

@@ -74,6 +74,10 @@ pub(crate) struct RequestTail<'a> {
     pub(crate) kv_pool_configured: bool,
     pub(crate) radix_enabled: bool,
     pub(crate) prefix_cache: Option<&'a Mutex<PrefixCache>>,
+    /// The namespace this request's entry belongs to
+    /// (`GenerationParams::cache_salt`). Stored WITH the entry so a
+    /// later lookup under a different salt cannot see it.
+    pub(crate) cache_salt: Option<u64>,
 }
 
 impl RequestTail<'_> {
@@ -103,6 +107,7 @@ impl RequestTail<'_> {
             kv_pool_configured,
             radix_enabled,
             prefix_cache,
+            cache_salt,
         } = self;
 
         let mut usage =
@@ -196,7 +201,7 @@ impl RequestTail<'_> {
                         tokens.extend(generated_ids);
                         pc.lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .store(tokens, caches, logits);
+                            .store_salted(tokens, caches, logits, cache_salt);
                     }
                 }
             }

@@ -110,6 +110,16 @@ pub(crate) struct UnimplementedFields {
     /// Forbid these strings. `stop` is implemented and is not this:
     /// `stop` ENDS the generation, this one steers around a token.
     pub(crate) bad_words: Option<Value>,
+    /// vLLM's `cache_salt`: the caller's prefix-cache namespace.
+    ///
+    /// Deserialized here because the table is where every route reads
+    /// its shared fields from, but it is SERVED rather than refused --
+    /// `crate::cache_salt` hashes it and the contiguous prefix cache
+    /// and the response cache both key on it. The one place it is
+    /// refused is a PAGED request, and that refusal lives at the
+    /// route, because the store is a property of the deployment rather
+    /// than of the field.
+    pub(crate) cache_salt: Option<String>,
     /// Include special tokens in the returned text. frink always skips
     /// them, so `true` is accepted and `false` is refused.
     pub(crate) skip_special_tokens: Option<bool>,
@@ -149,6 +159,7 @@ impl UnimplementedFields {
             prompt_embeds,
             allowed_token_ids,
             bad_words,
+            cache_salt,
             skip_special_tokens,
             return_tokens_as_token_ids,
         } = self;
@@ -240,6 +251,9 @@ impl UnimplementedFields {
                 "forbidding strings during sampling; `stop` ends a generation but does not steer it",
             ));
         }
+        // Served, not refused; see the field. Named here so the
+        // exhaustive destructure stays exhaustive.
+        let _ = cache_salt;
         if skip_special_tokens == &Some(false) {
             return Err(refusal(
                 route,
@@ -338,16 +352,19 @@ mod tests {
                 serde_json::json!({ "return_tokens_as_token_ids": true }),
             ),
         ];
-        // The count is the struct's field count: a member added without
-        // a case here changes it.
+        // Every field of the struct is accounted for: refused above,
+        // or named here as SERVED. A member added to the struct and
+        // forgotten in both places changes the count and fails, which
+        // is the whole reason this assertion exists.
+        const SERVED: [&str; 1] = ["cache_salt"];
         assert_eq!(
-            cases.len(),
+            cases.len() + SERVED.len(),
             serde_json::to_value(UnimplementedFields::default())
                 .expect("serializes")
                 .as_object()
                 .expect("an object")
                 .len(),
-            "every field of the struct needs a case"
+            "every field of the struct must be refused above or listed in SERVED"
         );
         for (field, body) in cases {
             // The native wire, which serves none of them: `n` is

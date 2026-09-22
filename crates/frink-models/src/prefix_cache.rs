@@ -42,6 +42,15 @@ use frink_core::cache::KvCache;
 /// computation to know what to generate next).
 #[derive(Clone)]
 struct StoredPrefix {
+    /// Which caller's namespace this entry belongs to, or `None` for
+    /// the shared one.
+    ///
+    /// A prefix cache is shared state keyed by token ids, so without
+    /// this one caller's prompt can be answered from another caller's
+    /// cached prefix. That is not a performance question, it is an
+    /// isolation one: `cache_salt` names a namespace, and an entry
+    /// stored under one is invisible to every other.
+    salt: Option<u64>,
     tokens: Vec<usize>,
     kv_caches: Vec<KvCache>,
     pending_logits: Vec<f32>,
@@ -114,8 +123,25 @@ impl PrefixCache {
     /// truncated to the matching length before being handed back, so
     /// the caller never sees state from a divergent continuation).
     pub fn find_longest_prefix(&mut self, tokens: &[usize]) -> PrefixMatch {
+        self.find_longest_prefix_salted(tokens, None)
+    }
+
+    /// The same, scoped to a caller's namespace.
+    ///
+    /// An entry stored under a different salt is not a shorter match,
+    /// it is NO match: the whole point is that the two callers cannot
+    /// see each other's prefixes, so a partial overlap must not be
+    /// reused either.
+    pub fn find_longest_prefix_salted(
+        &mut self,
+        tokens: &[usize],
+        salt: Option<u64>,
+    ) -> PrefixMatch {
         let mut best: Option<(usize, usize)> = None; // (matched_len, index)
         for (i, entry) in self.entries.iter().enumerate() {
+            if entry.salt != salt {
+                continue;
+            }
             let common = common_prefix_len(&entry.tokens, tokens);
             if common > 0 && best.map(|(len, _)| common > len).unwrap_or(true) {
                 best = Some((common, i));
@@ -201,6 +227,17 @@ impl PrefixCache {
     /// answer for it (`KvCache::can_truncate_to`). llama.cpp's server
     /// re-prefills such models too.
     pub fn store(&mut self, tokens: Vec<usize>, kv_caches: Vec<KvCache>, pending_logits: Vec<f32>) {
+        self.store_salted(tokens, kv_caches, pending_logits, None)
+    }
+
+    /// The same, into a caller's namespace.
+    pub fn store_salted(
+        &mut self,
+        tokens: Vec<usize>,
+        kv_caches: Vec<KvCache>,
+        pending_logits: Vec<f32>,
+        salt: Option<u64>,
+    ) {
         if kv_caches
             .iter()
             .any(|c| c.window().is_some() || c.recurrent.is_some())
@@ -223,6 +260,7 @@ impl PrefixCache {
         }
         self.clock += 1;
         self.entries.push(StoredPrefix {
+            salt,
             last_used: self.clock,
             tokens,
             kv_caches,
@@ -396,6 +434,53 @@ mod tests {
         assert!(
             m.pending_logits.is_none(),
             "stored pending_logits predicted the token after the FULL stored sequence, not after the partial match point -- must not be reused here"
+        );
+    }
+
+    /// **Two callers cannot see each other's prefixes.**
+    ///
+    /// Not "a shorter match": an entry under a different salt is NO
+    /// match at all, because a partial overlap is exactly what would
+    /// leak -- the shared leading tokens are usually the system
+    /// prompt, which is the part a caller most expects to be theirs.
+    #[test]
+    fn a_salted_entry_is_invisible_to_every_other_salt() {
+        let mut cache = PrefixCache::new(8);
+        let tokens = vec![1usize, 2, 3, 4];
+        cache.store_salted(tokens.clone(), vec![dummy_cache(4)], vec![0.0; 4], Some(7));
+
+        // The same prompt under another salt: no reuse.
+        let other = cache.find_longest_prefix_salted(&tokens, Some(9));
+        assert_eq!(other.matched_len, 0, "a different caller reused the prefix");
+        // And under none.
+        let shared = cache.find_longest_prefix_salted(&tokens, None);
+        assert_eq!(shared.matched_len, 0, "the shared namespace reused it");
+        // The owner still gets it.
+        let mine = cache.find_longest_prefix_salted(&tokens, Some(7));
+        assert_eq!(mine.matched_len, 4, "the owner lost its own prefix");
+    }
+
+    /// A PARTIAL overlap across salts is also no match, which is the
+    /// case a length comparison would have let through.
+    #[test]
+    fn a_partial_overlap_across_salts_is_still_no_match() {
+        let mut cache = PrefixCache::new(8);
+        let stored = vec![1usize, 2, 3, 4];
+        cache.store_salted(stored.clone(), vec![dummy_cache(4)], vec![0.0; 4], Some(1));
+        let overlapping = vec![1usize, 2, 9, 9];
+        assert_eq!(
+            cache
+                .find_longest_prefix_salted(&overlapping, Some(2))
+                .matched_len,
+            0,
+            "two leading tokens leaked across a salt boundary"
+        );
+        assert_eq!(
+            cache
+                .find_longest_prefix_salted(&overlapping, Some(1))
+                .matched_len,
+            2,
+            "the owner lost its own partial match"
         );
     }
 

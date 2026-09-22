@@ -38,6 +38,7 @@ mod attribution;
 mod best_of;
 mod budget;
 mod cache_admin;
+mod cache_salt;
 mod cancel;
 mod chat_params;
 mod chat_template;
@@ -4871,6 +4872,7 @@ pub(crate) mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
@@ -5578,6 +5580,56 @@ pub(crate) mod tests {
                 "{why}: {answer}"
             );
         }
+    }
+
+    /// **`cache_salt` isolates one caller's cached prefixes from
+    /// another's**, end to end: two requests with the same prompt and
+    /// different salts must not be served each other's answer.
+    ///
+    /// The response cache is the visible half -- a hit is reported in
+    /// `frink_cache`, so a leak is observable from the wire.
+    #[tokio::test]
+    async fn a_salt_keeps_one_callers_cached_answer_from_another() {
+        let app = test_app();
+        let body = |salt: Option<&str>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "the same prompt"}],
+                "max_tokens": 4,
+                "seed": 1
+            });
+            if let Some(s) = salt {
+                b["cache_salt"] = serde_json::json!(s);
+            }
+            b
+        };
+        let post = |b: serde_json::Value| {
+            let app = app.clone();
+            async move { post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, b).await }
+        };
+
+        // Caller A warms the cache, then hits it.
+        let (status, _) = post(body(Some("tenant-a"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, again) = post(body(Some("tenant-a"))).await;
+        assert_eq!(
+            again["frink_cache"], "hit",
+            "the owner did not get its own entry back: {again}"
+        );
+
+        // Caller B, same prompt, must NOT.
+        let (_, other) = post(body(Some("tenant-b"))).await;
+        assert_ne!(
+            other["frink_cache"], "hit",
+            "a different caller was served tenant-a's answer: {other}"
+        );
+
+        // And the shared namespace is its own too.
+        let (_, shared) = post(body(None)).await;
+        assert_ne!(
+            shared["frink_cache"], "hit",
+            "an unsalted request was served a salted answer: {shared}"
+        );
     }
 
     /// `n` on the chat route: several choices from one prefill, each
