@@ -15,6 +15,39 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`best_of` on both OpenAI routes.** Generates `best_of` completions
+  from one shared prefill and returns the `n` best by **summed
+  log-probability**.
+
+  ```
+  best_of: 5  ->  choices: 1
+                  prompt_tokens 4, completion_tokens 20
+  ```
+
+  That pair is the whole contract: five were generated and billed,
+  one came back, and the prompt was still prefilled once.
+
+  The row waited on a scoring rule, and the rule is upstream's:
+  the sum of `ln p` over the generated tokens, under the distribution
+  each was actually drawn from. It became available when the sampler
+  learned to publish that distribution (0.34.0); before it there was
+  nothing to rank by except length.
+
+  **The sum is length-sensitive and favours short answers**, and the
+  module says so rather than implying otherwise. A per-token mean
+  ranks differently -- one token at `p = 0.5` sums to `-0.69` while ten
+  at `p = 0.9` sum to `-1.05`, so the sum picks the single token and a
+  mean picks the ten -- and is deliberately not used, because giving a
+  different answer from every other engine for the same request is
+  worse than a rule with a known bias. Ties keep generation order, so
+  a seeded `best_of` returns the same completion every run.
+
+  `best_of` below `n` is a **400** naming both numbers: the field is
+  implemented, and asking for the best 3 of 2 is not a request any
+  server can serve.
+
 ## [0.35.0] - 2026-09-22
 
 ### Added

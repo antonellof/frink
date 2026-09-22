@@ -541,11 +541,17 @@ pub async fn completions(
     // this wire will render it.
     let n_logprobs = req.n_logprobs()?;
     let params = GenerationParams {
-        wants_logprobs: n_logprobs.is_some(),
+        // Also on when `best_of` is ranking, because the score IS the
+        // logprobs: there is nothing to rank by without them. The
+        // caller still only SEES what they asked for.
+        wants_logprobs: n_logprobs.is_some() || req.unimplemented.ranks_candidates(),
         // The prompt is prefilled once and the KV forked per choice
         // (`crate::generate`). Streaming is refused above for `n` > 1,
         // so a streaming request always lands on 1.
-        n: req.unimplemented.n.unwrap_or(1).max(1) as usize,
+        // `best_of` decides how many are GENERATED; `n` how many come
+        // back. Defaults to `n`, as upstream, so a request that names
+        // neither still generates one.
+        n: req.unimplemented.candidates(),
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.
@@ -572,6 +578,7 @@ pub async fn completions(
         reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
         lora: crate::lora::resolve_request(active.generative()?, req.lora.as_deref())?,
     };
+    let wanted = req.unimplemented.n.unwrap_or(1).max(1) as usize;
     let (choices, usage) = crate::decode_task::buffered(
         crate::decode_task::DecodeHandles::take(&state, &active)?,
         prompt,
@@ -583,6 +590,14 @@ pub async fn completions(
     // The same detokenizer `/v1/detokenize` answers with, so a client
     // that asks what a reported token means gets the same string back.
     let decode_piece = |id: usize| active.decode_any(&[id]);
+    // The winners, in descending score, when `best_of` generated more
+    // than the caller asked back (`crate::best_of`). A no-op when it
+    // did not, so the ordinary path keeps generation order.
+    let choices = if choices.len() > wanted {
+        crate::best_of::take_best(choices, wanted)
+    } else {
+        choices
+    };
     let rendered: Vec<serde_json::Value> = choices
         .into_iter()
         .enumerate()
@@ -991,6 +1006,81 @@ mod tests {
                 "offset {off} does not point at {piece:?} in {text:?}"
             );
         }
+    }
+
+    /// `best_of` generates `k` and returns the best `n`, and the BILL
+    /// says so: `completion_tokens` counts every token generated,
+    /// including the discarded ones, while `prompt_tokens` still
+    /// counts the prompt once because the prefill was shared.
+    ///
+    /// That pair is the whole contract. A server that returned one
+    /// completion while billing for one would not have generated five.
+    #[tokio::test]
+    async fn best_of_generates_several_and_bills_for_all_of_them() {
+        let app = crate::tests::test_app();
+        let body = |extra: serde_json::Value| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "prompt": "hello",
+                "max_tokens": 4,
+                "temperature": 1.0
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            b
+        };
+
+        let (status, one) = crate::tests::post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            body(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{one}");
+        let one_completion = one["usage"]["completion_tokens"].as_u64().unwrap();
+
+        let (status, best) = crate::tests::post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            body(serde_json::json!({"best_of": 5})),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{best}");
+        assert_eq!(
+            best["choices"].as_array().map(Vec::len),
+            Some(1),
+            "best_of returns n, which defaults to 1: {best}"
+        );
+        assert_eq!(
+            best["usage"]["completion_tokens"].as_u64().unwrap(),
+            one_completion * 5,
+            "five were not generated, so nothing was ranked: {best}"
+        );
+        assert_eq!(
+            best["usage"]["prompt_tokens"], one["usage"]["prompt_tokens"],
+            "the prefill was not shared: {best}"
+        );
+    }
+
+    /// `best_of` below `n` is a 400 on the VALUE naming both, not a
+    /// 501 on the field: the field is implemented, and asking for the
+    /// best 3 of 2 is not a request any server can serve.
+    #[tokio::test]
+    async fn best_of_below_n_is_refused_with_both_numbers() {
+        let app = crate::tests::test_app();
+        let (status, answer) = crate::tests::post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({"model": "x", "prompt": "hi", "max_tokens": 2, "best_of": 2, "n": 3}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{answer}");
+        let message = answer["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("best_of") && message.contains('2') && message.contains('3'),
+            "{answer}"
+        );
     }
 
     /// `logprobs` is served, and its argument is validated rather than

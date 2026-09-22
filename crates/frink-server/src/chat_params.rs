@@ -80,10 +80,13 @@ impl ChatCompletionRequest {
             // choice (`crate::generate`). A STREAMING request never
             // reaches here with more than 1: `chat_completions_stream`
             // refuses the pair by name.
-            n: self.unimplemented.n.unwrap_or(1).max(1) as usize,
+            // `best_of` decides how many are GENERATED, `n` how many
+            // come back (`crate::best_of`).
+            n: self.unimplemented.candidates(),
             // Reporting costs the greedy fast path, so only a request
             // that will render them asks for them.
-            wants_logprobs: self.n_logprobs().is_ok_and(|n| n.is_some()),
+            wants_logprobs: self.n_logprobs().is_ok_and(|n| n.is_some())
+                || self.unimplemented.ranks_candidates(),
             // Set by `generation_params_for_template`, which is the only
             // caller that knows the SERVED model name. Left `None` here
             // so a path that never resolves it reports the field absent

@@ -118,6 +118,21 @@ pub(crate) struct UnimplementedFields {
 }
 
 impl UnimplementedFields {
+    /// How many completions to GENERATE: `best_of` when it is bigger
+    /// than `n`, else `n`, else one. Upstream's default for `best_of`
+    /// is `n`, so a request naming neither generates one.
+    pub(crate) fn candidates(&self) -> usize {
+        let n = self.n.unwrap_or(1).max(1) as usize;
+        let k = self.best_of.unwrap_or(0) as usize;
+        n.max(k)
+    }
+
+    /// True when more will be generated than returned, which is the
+    /// only case that needs a score.
+    pub(crate) fn ranks_candidates(&self) -> bool {
+        self.candidates() > self.n.unwrap_or(1).max(1) as usize
+    }
+
     /// Refuse anything the caller asked for that this server does not
     /// do, naming the field and what to reach for instead.
     ///
@@ -151,12 +166,27 @@ impl UnimplementedFields {
                  to return them in; use /v1/completions or send the request again",
             ));
         }
-        if best_of.is_some_and(|v| v > 1) {
+        // `best_of` goes where `n` goes: it needs a `choices` array to
+        // return the winners in, and the same fork to generate the
+        // candidates. Scored by summed logprob (`crate::best_of`).
+        if best_of.is_some_and(|v| v > 1) && !SERVES_SEVERAL_CHOICES.contains(&route) {
             return Err(refusal(
                 route,
                 "best_of",
-                "generating several completions and returning the best-scoring one",
+                "generating several completions and returning the best-scoring one on this wire, \
+                 which has no `choices` array to return them in",
             ));
+        }
+        // Upstream's own constraint, and it is a 400 rather than a 501
+        // because the field IS implemented: asking for the best 3 of 2
+        // is not a request any server can serve.
+        if let (Some(k), Some(n)) = (best_of, n) {
+            if k < n {
+                return Err(crate::invalid_request(
+                    &format!("`best_of` is {k} and `n` is {n}; best_of must be at least n"),
+                    "best_of",
+                ));
+            }
         }
         if prompt_logprobs.is_some() {
             return Err(refusal(
