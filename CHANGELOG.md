@@ -15,6 +15,39 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`prompt_logprobs` on `/v1/completions`.** Scores the PROMPT rather
+  than the completion: one entry per prompt token, the first `null`
+  because nothing predicted it, each later one giving the
+  log-probability the model assigned the token that actually followed,
+  with its 1-based rank.
+
+  ```
+  0: null (nothing predicted it)
+  2: ' ' logp=-4.96 rank=1, ' following' logp=-5.43 rank=2,
+     ' capital' logp=-8.29 rank=501
+  6: ' Paris' logp=-0.35 rank=1, ' located' logp=-2.85 rank=2
+  ```
+
+  `' capital'` at **rank 501** is the field working: a token the
+  caller supplied that no sampler would ever have picked, still
+  scored. That is the case it exists for.
+
+  Scored from the **plain softmax** of the model's own logits, not the
+  sampler's filtered chain. A prompt token was supplied, not drawn, so
+  reporting a penalised and top-p-truncated distribution for it would
+  answer "how likely was this token" with "how likely would the
+  sampler have been to pick it", which is a different question.
+
+  A separate prefill entry point, because the costs differ: scoring
+  projects the lm_head at every prompt position rather than once, so a
+  request that did not ask keeps the cheap path exactly as it was.
+
+  **501 on the paged store**, whose prefill skips the positions the
+  prefix tree already holds and so has no rows to score them with --
+  refused by name rather than reported with holes.
+
 ## [0.36.0] - 2026-09-22
 
 ### Added

@@ -789,6 +789,29 @@ impl Kv {
     /// `host_kv` only reaches the contiguous arm: the paged arm always
     /// needs real host rows, because scattering them into the page
     /// store IS reading them back.
+    /// Prefill AND score every prompt position, for
+    /// `prompt_logprobs`.
+    ///
+    /// A separate entry point rather than a flag on [`Self::prefill`],
+    /// because the two do measurably different work:
+    /// `forward_batch_last` projects the lm_head ONCE, at the final
+    /// position, while this projects it at every one. On a 6000-token
+    /// prompt that is 6000 vocabulary-wide matmuls instead of one, and
+    /// a request that did not ask for prompt logprobs must not pay for
+    /// them.
+    ///
+    /// `None` for the paged store: its prefill skips whatever the
+    /// radix tree already computed, so the positions it returns are
+    /// the ones it recomputed rather than the whole prompt, and
+    /// scoring a prefix nobody ran would be an invention. Refused by
+    /// name at the route instead.
+    fn prefill_scored(&mut self, decoder: &Decoder, tokens: &[usize]) -> Option<Vec<Vec<f32>>> {
+        match self {
+            Kv::Contiguous(caches) => Some(decoder.forward_batch(tokens, 0, caches)),
+            Kv::Paged(_) => None,
+        }
+    }
+
     fn prefill(&mut self, decoder: &Decoder, tokens: &[usize], host_kv: bool) -> Vec<f32> {
         match self {
             Kv::Contiguous(caches) => forward_prompt_batch(decoder, tokens, 0, caches, host_kv),
@@ -1158,6 +1181,16 @@ pub struct GenerationParams {
     /// answered with an argmax. A request that will not read it should
     /// not pay for it.
     pub wants_logprobs: bool,
+    /// How many alternatives to report per PROMPT position, or `None`
+    /// for a request that did not ask.
+    ///
+    /// Separate from `wants_logprobs` because the costs are different
+    /// and so are the refusals: scoring the prompt projects the
+    /// lm_head at every prompt position rather than once, and the
+    /// paged store cannot do it at all (its prefill skips what the
+    /// radix tree already holds, so it has no rows for those
+    /// positions).
+    pub prompt_logprobs: Option<usize>,
     pub stop: Vec<String>,
     /// Stop strings that are exactly one token in this model's
     /// vocabulary, resolved once by whoever holds the tokenizer.
@@ -1477,6 +1510,21 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
 /// bytes of decoded text (respecting UTF-8 char boundaries) until
 /// they're confirmed clean, the same buffering approach real
 /// inference servers use for this exact reason.
+/// What a generation hands back before a wire shapes it: one
+/// `(finish reason, per-token distributions)` per choice, the prompt's
+/// logit rows and the ids they came from, and the usage.
+///
+/// A named type because clippy is right that the tuple had become
+/// unreadable, and because it is the fourth thing to be added to it in
+/// a day -- see `Generated`, which is this plus the text the emit
+/// callback collected.
+pub(crate) type GenerationOutput = (
+    Vec<(FinishReason, crate::sampling_loop::PerTokenProbs)>,
+    Vec<Vec<f32>>,
+    Vec<usize>,
+    Usage,
+);
+
 /// One completion of a request, with everything a wire may render for
 /// it.
 ///
@@ -1485,6 +1533,35 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
 /// member for the distributions -- and each widening was a mechanical
 /// edit across every caller. A named field is added once and read by
 /// the wires that want it.
+/// Everything one request produced.
+///
+/// A struct because the tuple it replaces grew FOUR times in one day
+/// -- `FinishReason`, then with the text, then with the per-choice
+/// distributions, then with the prompt's. Each widening was a
+/// mechanical edit across every caller, and the fourth is the one that
+/// should have been the first.
+///
+/// `prompt_rows` sits here rather than on a choice because it belongs
+/// to the REQUEST: the prompt was prefilled once and scored once,
+/// whatever `n` was.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Generated {
+    pub(crate) choices: Vec<GeneratedChoice>,
+    /// One logit row per prompt position, EMPTY unless the request
+    /// asked to score the prompt.
+    pub(crate) prompt_rows: Vec<Vec<f32>>,
+    /// The prompt ids those rows were computed from, INCLUDING the BOS
+    /// the tokenizer prepended.
+    ///
+    /// Carried beside the rows rather than re-derived at the route,
+    /// for the same reason `PerTokenProbs` carries its ids: a renderer
+    /// that re-tokenized the prompt could line up a different sequence
+    /// with these rows and report a score for a token the model never
+    /// saw.
+    pub(crate) prompt_ids: Vec<usize>,
+    pub(crate) usage: Usage,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GeneratedChoice {
     pub(crate) finish: FinishReason,
@@ -1512,13 +1589,7 @@ pub fn generate(
     prefix_cache: Option<&Mutex<PrefixCache>>,
     ceiling: Option<&ContextCeiling>,
     mut emit: impl FnMut(usize, &str),
-) -> Result<
-    (
-        Vec<(FinishReason, crate::sampling_loop::PerTokenProbs)>,
-        Usage,
-    ),
-    DecodeError,
-> {
+) -> Result<GenerationOutput, DecodeError> {
     let vocab_size = decoder.config.vocab_size;
 
     // Metal greedy GPU argmax: fold final_norm+lm_head+argmax into the
@@ -1665,6 +1736,11 @@ pub fn generate(
         .map(|m| m.matched_len)
         .or_else(|| (prefix_cache.is_some() && kv_pool.is_none()).then_some(0));
 
+    // One logit row per prompt position, only when the request asked
+    // to score the prompt.
+    let mut prompt_rows: Vec<Vec<f32>> = Vec::new();
+    // Kept because the tail consumes `tokens`.
+    let mut tokens_for_scoring: Vec<usize> = Vec::new();
     let prefill_start = std::time::Instant::now();
     let mut pos;
     let mut logits: Vec<f32>;
@@ -1745,9 +1821,35 @@ pub fn generate(
             // When `FRINK_CHUNKED_PREFILL` is set, split long prompts
             // into chunks that reuse the same KV caches.
             pos = tokens.len();
-            // The prefix cache is the only thing here that reads these
-            // caches back; without one, the download is pure cost.
-            kv.prefill(decoder, &tokens, prefix_cache.is_some())
+            // Scoring the prompt needs a logit row per POSITION, which
+            // is a separate entry point because it projects the
+            // lm_head at every one instead of once
+            // (`Kv::prefill_scored`). A request that did not ask keeps
+            // the cheap path exactly as it was.
+            if params.prompt_logprobs.is_some() {
+                let Some(rows) = kv.prefill_scored(decoder, &tokens) else {
+                    // The paged store's prefill SKIPS whatever the
+                    // radix tree already holds, so it has no rows for
+                    // those positions and scoring them would be an
+                    // invention. Refused by name rather than reported
+                    // with holes.
+                    return Err(DecodeError::Unsupported(
+                        "`prompt_logprobs` needs a logit row for every prompt position, and a \
+                         paged request's prefill skips the positions the prefix tree already \
+                         holds. Serve it without `--paged-kv`."
+                            .to_string(),
+                    ));
+                };
+                let last = rows.last().cloned().unwrap_or_default();
+                tokens_for_scoring = tokens.clone();
+                prompt_rows = rows;
+                last
+            } else {
+                // The prefix cache is the only thing here that reads
+                // these caches back; without one, the download is pure
+                // cost.
+                kv.prefill(decoder, &tokens, prefix_cache.is_some())
+            }
         };
     }
 
@@ -1915,7 +2017,17 @@ pub fn generate(
     }
     .finish();
 
-    Ok((finishes.into_iter().zip(choice_logprobs).collect(), usage))
+    let scored_ids = if prompt_rows.is_empty() {
+        Vec::new()
+    } else {
+        tokens_for_scoring
+    };
+    Ok((
+        finishes.into_iter().zip(choice_logprobs).collect(),
+        prompt_rows,
+        scored_ids,
+        usage,
+    ))
 }
 
 /// Shared sampling + stop-sequence-aware emission loop, given already-
@@ -1951,13 +2063,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     // to handle the simple case and forget the other. These engines
     // hold a recurrent state that collapses history irreversibly, so
     // they cannot fork a prefix and always answer with exactly one.
-) -> Result<
-    (
-        Vec<(FinishReason, crate::sampling_loop::PerTokenProbs)>,
-        Usage,
-    ),
-    DecodeError,
-> {
+) -> Result<GenerationOutput, DecodeError> {
     // These engines cannot fork: a KDA / MLA recurrent state is a
     // reduction over the whole prefix, so there is no cache to clone
     // into a second choice. Refused by name rather than served as one.
@@ -2030,7 +2136,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     }
     // No distributions: these engines refuse `n` > 1 above and their
     // logprobs row is not wired either.
-    Ok((vec![(finish, Vec::new())], usage))
+    Ok((vec![(finish, Vec::new())], Vec::new(), Vec::new(), usage))
 }
 
 #[cfg(test)]
@@ -2147,7 +2253,7 @@ mod tests {
         let prompt = "abcabcabcabcabcabc";
 
         let mut one_text = String::new();
-        let (one_finish, one_usage) = generate(
+        let (one_finish, _rows, _ids, one_usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2166,7 +2272,7 @@ mod tests {
         let mut four = greedy_params(6);
         four.n = 4;
         let mut per_choice = vec![String::new(); 4];
-        let (finishes, usage) = generate(
+        let (finishes, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2267,7 +2373,7 @@ mod tests {
         // Repetition is what a prompt-lookup drafter matches on, and
         // the byte tokenizer makes the text the token ids.
         let mut text = String::new();
-        let (finish, usage) = generate(
+        let (finish, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2313,7 +2419,7 @@ mod tests {
         // happily propose from it, and does not get the chance.
         let single = greedy_params(1);
         let mut one_text = String::new();
-        let (_, one_usage) = generate(
+        let (_, _rows, _ids, one_usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2424,6 +2530,7 @@ mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            prompt_logprobs: None,
             wants_logprobs: false,
             reasoning: None,
             max_tokens,
@@ -2581,7 +2688,7 @@ mod tests {
         let decoder = small_decoder();
         let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
         let mut chunks = String::new();
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2612,7 +2719,7 @@ mod tests {
 
         let mut chunks = String::new();
         let mut emitted = 0usize;
-        let (finish, usage) = generate(
+        let (finish, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2657,7 +2764,7 @@ mod tests {
         let mut params = greedy_params(5);
         params.cancel = Some(crate::cancel::CancelToken::new());
 
-        let (finish, usage) = generate(
+        let (finish, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2711,7 +2818,7 @@ mod tests {
         // exactly the same state as this direct computation.
         let eos = greedy_next_token_after(&decoder, &prompt_ids);
 
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::from_eos(Some(eos)),
@@ -2749,7 +2856,7 @@ mod tests {
         let never_sampled = (turn_ender + 1) % decoder.config.vocab_size;
 
         let stop = StopTokens::from_eos(Some(never_sampled)).with_id(Some(turn_ender));
-        let (finish, usage) = generate(
+        let (finish, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &stop,
@@ -2783,7 +2890,7 @@ mod tests {
         let prompt = String::from_utf8(vec![1u8]).unwrap();
 
         let mut baseline = String::new();
-        let (baseline_finish, _usage) = generate(
+        let (baseline_finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -2799,13 +2906,14 @@ mod tests {
         .unwrap();
 
         let mut with_unmatchable_stop = String::new();
-        let (stop_finish, _usage2) = generate(
+        let (stop_finish, _rows, _ids, _usage2) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
             None,
             &prompt,
             &GenerationParams {
+                prompt_logprobs: None,
                 wants_logprobs: false,
                 reasoning: None,
                 max_tokens: 20,
@@ -2971,6 +3079,7 @@ mod tests {
 
     fn scripted_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            prompt_logprobs: None,
             wants_logprobs: false,
             reasoning: None,
             max_tokens,
@@ -3266,13 +3375,14 @@ mod tests {
         }
 
         let mut truncated = String::new();
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
             None,
             &prompt,
             &GenerationParams {
+                prompt_logprobs: None,
                 wants_logprobs: false,
                 reasoning: None,
                 max_tokens: 20,
@@ -3304,7 +3414,7 @@ mod tests {
     fn usage_reports_both_phases_and_a_time_to_first_token() {
         let decoder = small_decoder();
         let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
-        let (_finish, usage) = generate(
+        let (_finish, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -3339,7 +3449,7 @@ mod tests {
         let decoder = small_decoder();
         let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
 
-        let (_f, no_cache) = generate(
+        let (_f, _rows, _ids, no_cache) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -3356,7 +3466,7 @@ mod tests {
         assert_eq!(no_cache.cached_tokens, None, "no prefix cache configured");
 
         let pc = Mutex::new(PrefixCache::new(4));
-        let (_f, miss) = generate(
+        let (_f, _rows, _ids, miss) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -3374,7 +3484,7 @@ mod tests {
 
         // Second turn extends the first: three prompt tokens are reused.
         let longer = String::from_utf8(vec![1u8, 2, 3, 9]).unwrap();
-        let (_f, hit) = generate(
+        let (_f, _rows, _ids, hit) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -3669,7 +3779,7 @@ mod tests {
         let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
 
         let mut contiguous = String::new();
-        let (finish_a, usage_a) = generate(
+        let (finish_a, _rows, _ids, usage_a) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -3686,7 +3796,7 @@ mod tests {
 
         let config = paged_config(&decoder, /* block_size = */ 4, /* blocks = */ 64);
         let mut paged = String::new();
-        let (finish_b, usage_b) = generate(
+        let (finish_b, _rows, _ids, usage_b) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -3842,7 +3952,7 @@ mod tests {
 
         let win_config = paged_config(&windowed, block_size, blocks);
         let mut out = String::new();
-        let (_, usage) = generate(
+        let (_, _rows, _ids, usage) = generate(
             &windowed,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4236,7 +4346,7 @@ mod tests {
             // What the SECOND request adopted, which on a fresh tree is
             // only ever what the first published.
             let mut probe = String::new();
-            let (_, usage) = generate(
+            let (_, _rows, _ids, usage) = generate(
                 &decoder,
                 &ServerTokenizer::Byte,
                 &StopTokens::default(),
@@ -4333,7 +4443,7 @@ mod tests {
         // contiguous prefix cache uses for the same meaning.
         let cfg2 = paged_config_with_radix(&decoder, 4, 64, true);
         let mut sink = String::new();
-        let (_f, first_usage) = generate(
+        let (_f, _rows, _ids, first_usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4352,7 +4462,7 @@ mod tests {
             Some(0),
             "a cold tree reuses nothing"
         );
-        let (_f, second_usage) = generate(
+        let (_f, _rows, _ids, second_usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4484,7 +4594,7 @@ mod tests {
         let config = pool_config(pool.clone(), Duration::ZERO);
 
         let mut out = String::new();
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4527,7 +4637,7 @@ mod tests {
         let pool = Arc::new(Mutex::new(KvBlockPool::new(block_size, 12)));
         let config = pool_config(pool.clone(), Duration::ZERO);
 
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4706,7 +4816,7 @@ mod tests {
         let config = pool_config(pool.clone(), Duration::ZERO);
 
         for _ in 0..3 {
-            let (finish, _usage) = generate(
+            let (finish, _rows, _ids, _usage) = generate(
                 &decoder,
                 &ServerTokenizer::Byte,
                 &StopTokens::default(),
@@ -4859,7 +4969,7 @@ mod tests {
         let ceiling = ContextCeiling::new(Some(4), shape);
 
         let mut emitted = 0usize;
-        let (finish, usage) = generate(
+        let (finish, _rows, _ids, usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4892,7 +5002,7 @@ mod tests {
         let ceiling = ContextCeiling::new(Some(7), shape);
 
         let mut with = String::new();
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),
@@ -4947,7 +5057,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(15));
 
         let config = pool_config(pool.clone(), Duration::from_millis(500));
-        let (finish, _usage) = generate(
+        let (finish, _rows, _ids, _usage) = generate(
             &decoder,
             &ServerTokenizer::Byte,
             &StopTokens::default(),

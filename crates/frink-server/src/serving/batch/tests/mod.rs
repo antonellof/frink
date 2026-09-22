@@ -48,6 +48,7 @@ fn tiny_decoder() -> Arc<Decoder> {
 
 fn greedy_params(max_tokens: usize, seed: u64) -> GenerationParams {
     GenerationParams {
+        prompt_logprobs: None,
         wants_logprobs: false,
         n: 1,
         reasoning: None,

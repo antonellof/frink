@@ -330,6 +330,7 @@ mod tests {
 
     fn params(json_object: bool, temperature: f32) -> GenerationParams {
         GenerationParams {
+            prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
             reasoning: None,

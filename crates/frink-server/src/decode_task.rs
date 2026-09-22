@@ -95,7 +95,7 @@ impl DecodeHandles {
         prompt: &str,
         params: &GenerationParams,
         // Per choice, choice 0 first. See `crate::run_generation_emit`.
-    ) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), generate::DecodeError> {
+    ) -> Result<generate::Generated, generate::DecodeError> {
         crate::run_generation(
             &self.model,
             prompt,
@@ -117,7 +117,7 @@ impl DecodeHandles {
         params: &GenerationParams,
         emit: impl FnMut(&str),
         // Per choice, choice 0 first. See `crate::run_generation_emit`.
-    ) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), generate::DecodeError> {
+    ) -> Result<generate::Generated, generate::DecodeError> {
         crate::run_generation_emit(
             &self.model,
             prompt,
@@ -144,7 +144,7 @@ pub(crate) async fn buffered(
     handles: DecodeHandles,
     prompt: String,
     params: GenerationParams,
-) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), ApiError> {
+) -> Result<generate::Generated, ApiError> {
     tokio::task::spawn_blocking(move || handles.run(&prompt, &params))
         .await
         .map_err(join_error_response)?

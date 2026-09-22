@@ -110,6 +110,112 @@ fn logprob(p: f32) -> f64 {
     (p as f64).ln()
 }
 
+/// Score the PROMPT: for each position after the first, the
+/// log-probability the model gave the token that actually followed.
+///
+/// `per_position` is one logit row per prompt token, as
+/// `Decoder::forward_batch` returns them. Row `i` predicts position
+/// `i + 1`, so the LAST row is dropped -- it predicts the first
+/// generated token, which is the completion's business and is already
+/// reported there.
+///
+/// # The plain softmax, not the sampler's chain
+///
+/// A prompt token was NOT drawn from the sampler's filtered
+/// distribution; it was supplied by the caller. Reporting a
+/// penalised, top-p-truncated distribution for it would describe a
+/// choice that never happened, and would answer "how likely was this
+/// token" with "how likely would the sampler have been to pick it",
+/// which is a different question. So this is the raw softmax over the
+/// model's own logits.
+///
+/// That also means a prompt token can have probability far below any
+/// sampling threshold and still be reported, which is the point: the
+/// field exists to score text the model did not choose.
+///
+/// # Position 0 is `null`
+///
+/// The first prompt token has no preceding context, so nothing
+/// predicted it. `null` rather than an invented number, and it is one
+/// entry so the array lines up with the prompt token for token.
+pub(crate) fn render_prompt(
+    prompt: &[usize],
+    per_position: &[Vec<f32>],
+    top_k: usize,
+    decode: &dyn Fn(usize) -> String,
+) -> Value {
+    let mut out: Vec<Value> = Vec::with_capacity(prompt.len());
+    // Nothing predicted the first token.
+    out.push(Value::Null);
+    for (i, id) in prompt.iter().enumerate().skip(1) {
+        let Some(logits) = per_position.get(i - 1) else {
+            // Fewer rows than prompt tokens: the caller is told what
+            // is missing rather than handed a shorter array it has to
+            // line up itself.
+            out.push(Value::Null);
+            continue;
+        };
+        let probs = softmax(logits);
+        let mut alternatives: Vec<(usize, f32)> = probs
+            .iter()
+            .enumerate()
+            .map(|(t, p)| (t, *p))
+            .filter(|(_, p)| *p > 0.0)
+            .collect();
+        alternatives.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        alternatives.truncate(top_k);
+        let mut map = serde_json::Map::new();
+        // The token that actually followed is always present, whether
+        // or not it made the top `k`: a caller scoring their own text
+        // needs its number, and omitting it would make the field
+        // useless for exactly the case it exists for.
+        let actual = probs.get(*id).copied().unwrap_or(0.0);
+        map.insert(
+            decode(*id),
+            serde_json::json!({
+                "logprob": logprob(actual),
+                "rank": rank_of(&probs, *id),
+                "decoded_token": decode(*id),
+            }),
+        );
+        for (alt, p) in alternatives {
+            map.entry(decode(alt)).or_insert_with(|| {
+                serde_json::json!({
+                    "logprob": logprob(p),
+                    "rank": rank_of(&probs, alt),
+                    "decoded_token": decode(alt),
+                })
+            });
+        }
+        out.push(Value::Object(map));
+    }
+    Value::Array(out)
+}
+
+/// 1-based rank of `id` by probability, which is what a caller uses to
+/// ask "how surprising was this token" without reading the whole
+/// distribution.
+fn rank_of(probs: &[f32], id: usize) -> usize {
+    let p = probs.get(id).copied().unwrap_or(0.0);
+    1 + probs.iter().filter(|q| **q > p).count()
+}
+
+/// Numerically stable softmax over the model's own logits.
+fn softmax(logits: &[f32]) -> Vec<f32> {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if !max.is_finite() {
+        return vec![0.0; logits.len()];
+    }
+    let mut out: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
+    let total: f32 = out.iter().sum();
+    if total > 0.0 {
+        for p in &mut out {
+            *p /= total;
+        }
+    }
+    out
+}
+
 /// The CHAT wire's shape, which is a different object from
 /// `/v1/completions`'s and not a rename of it.
 ///
@@ -229,6 +335,77 @@ mod tests {
     #[test]
     fn the_chat_shape_is_absent_when_not_asked_for() {
         assert_eq!(render_chat(&Vec::new(), None, &decoder()), Value::Null);
+    }
+
+    /// The prompt's first token is `null` -- nothing predicted it --
+    /// and every later one carries the log-probability the model gave
+    /// the token that ACTUALLY followed, plus its rank.
+    #[test]
+    fn the_prompt_is_scored_from_the_second_token_on() {
+        // Two logit rows for a three-token prompt: row i predicts
+        // position i + 1, and the last row (predicting the first
+        // GENERATED token) is not part of the prompt.
+        let prompt = vec![0usize, 1, 2];
+        let rows = vec![
+            // predicts prompt[1] == 1: make 1 the likeliest.
+            vec![0.0f32, 2.0, 0.0],
+            // predicts prompt[2] == 2: make 2 UNLIKELY, so the test
+            // covers the case the field exists for.
+            vec![3.0f32, 3.0, 0.0],
+        ];
+        let out = render_prompt(&prompt, &rows, 2, &decoder());
+        let arr = out.as_array().expect("an array");
+        assert_eq!(arr.len(), 3, "one entry per prompt token: {out}");
+        assert!(arr[0].is_null(), "nothing predicted the first token");
+
+        // The likely one.
+        let e1 = arr[1].as_object().expect("an object");
+        assert_eq!(e1["t1"]["rank"], 1, "{e1:?}");
+        assert!(e1["t1"]["logprob"].as_f64().unwrap() > -0.5, "{e1:?}");
+
+        // The UNLIKELY one is still reported, with its real rank --
+        // that is the whole point of the field.
+        let e2 = arr[2].as_object().expect("an object");
+        assert!(
+            e2.contains_key("t2"),
+            "the token that actually followed was omitted: {e2:?}"
+        );
+        assert_eq!(e2["t2"]["rank"], 3, "{e2:?}");
+        assert!(
+            e2["t2"]["logprob"].as_f64().unwrap() < -2.0,
+            "an unlikely token was reported as likely: {e2:?}"
+        );
+    }
+
+    /// It is the PLAIN softmax, not the sampler's filtered chain: a
+    /// prompt token was supplied, not drawn, so a truncated
+    /// distribution would describe a choice that never happened.
+    ///
+    /// Pinned by a token that any top-p would have removed: it still
+    /// gets a real, finite number.
+    #[test]
+    fn a_prompt_token_no_sampler_would_pick_still_gets_a_number() {
+        let prompt = vec![0usize, 2];
+        // Token 2 is vanishingly unlikely beside token 0.
+        let rows = vec![vec![12.0f32, 0.0, -12.0]];
+        let out = render_prompt(&prompt, &rows, 1, &decoder());
+        let e = out[1].as_object().expect("an object");
+        let v = e["t2"]["logprob"].as_f64().expect("a real number");
+        assert!(v.is_finite(), "ln(0) reached the wire: {e:?}");
+        assert!(v < -20.0, "a filtered distribution was used: {e:?}");
+        assert_eq!(e["t2"]["rank"], 3);
+    }
+
+    /// Fewer rows than prompt tokens is reported as `null` for the
+    /// positions nobody scored, so the array still lines up token for
+    /// token rather than being silently short.
+    #[test]
+    fn missing_rows_are_null_rather_than_a_shorter_array() {
+        let out = render_prompt(&[0usize, 1, 2], &[vec![0.0, 1.0, 0.0]], 1, &decoder());
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert!(arr[0].is_null() && arr[2].is_null(), "{out}");
+        assert!(arr[1].is_object(), "{out}");
     }
 
     #[test]
