@@ -499,11 +499,10 @@ pub async fn completions(
     let prompt = req.prompt_text()?.to_string();
     let active = state.require_active()?;
     let params = GenerationParams {
-        // `n` is wired in a later step of
-        // `docs/plans/several-completions-per-request.md`; the field is
-        // still refused on the wire by `crate::unimplemented_fields`,
-        // so nothing can reach this with anything but 1.
-        n: 1,
+        // The prompt is prefilled once and the KV forked per choice
+        // (`crate::generate`). Streaming is refused above for `n` > 1,
+        // so a streaming request always lands on 1.
+        n: req.unimplemented.n.unwrap_or(1).max(1) as usize,
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.
@@ -530,23 +529,35 @@ pub async fn completions(
         reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
         lora: crate::lora::resolve_request(active.generative()?, req.lora.as_deref())?,
     };
-    let (chunks, finish, usage) = crate::decode_task::buffered(
+    let (choices, usage) = crate::decode_task::buffered(
         crate::decode_task::DecodeHandles::take(&state, &active)?,
         prompt,
         params,
     )
     .await?;
 
-    let text = chunks.concat();
-    let finish_reason = match finish {
-        FinishReason::Stop | FinishReason::StopSequence(_) => "stop",
-        FinishReason::Length => "length",
-        // Unreachable today -- this path passes `cancel: None` -- but
-        // written out rather than defaulted so that wiring cancellation
-        // into `/v1/completions` later is a compile error here first,
-        // instead of a completion silently reported as finished.
-        FinishReason::Cancelled => "cancelled",
-    };
+    // One entry per choice, in order, which is what `n` asked for.
+    let rendered: Vec<serde_json::Value> = choices
+        .into_iter()
+        .enumerate()
+        .map(|(index, (finish, text))| {
+            let finish_reason = match finish {
+                FinishReason::Stop | FinishReason::StopSequence(_) => "stop",
+                FinishReason::Length => "length",
+                // Unreachable today -- this path passes `cancel: None`
+                // -- but written out rather than defaulted so that
+                // wiring cancellation into `/v1/completions` later is a
+                // compile error here first, instead of a completion
+                // silently reported as finished.
+                FinishReason::Cancelled => "cancelled",
+            };
+            serde_json::json!({
+                "index": index,
+                "text": text,
+                "finish_reason": finish_reason,
+            })
+        })
+        .collect();
     let model_name = req.model.unwrap_or_else(|| active.name().to_string());
     call.record_success(
         &state,
@@ -559,11 +570,7 @@ pub async fn completions(
         "id": call.request_id,
         "object": "text_completion",
         "model": model_name,
-        "choices": [{
-            "index": 0,
-            "text": text,
-            "finish_reason": finish_reason,
-        }],
+        "choices": rendered,
         "usage": usage,
     })))
 }
@@ -595,6 +602,86 @@ mod tests {
             body.0["error"]["message"].as_str().unwrap().contains(field),
             "the refusal must name {field}: {body:?}"
         );
+    }
+
+    /// `n` on the one OpenAI route whose response can carry several
+    /// answers. The acceptance property is `prompt_tokens`: three
+    /// completions of one prompt are billed for ONE prompt, because
+    /// the prefill was shared and the KV forked
+    /// (`docs/plans/several-completions-per-request.md`).
+    #[tokio::test]
+    async fn several_completions_share_one_prefill() {
+        let app = crate::tests::test_app();
+        let body = |n: u32| {
+            serde_json::json!({
+                "model": "x",
+                "prompt": "hello",
+                "max_tokens": 4,
+                "n": n,
+                "temperature": 1.0
+            })
+        };
+
+        let (status, one) =
+            crate::tests::post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, body(1)).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{one}");
+        assert_eq!(one["choices"].as_array().unwrap().len(), 1);
+
+        let (status, three) =
+            crate::tests::post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, body(3)).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{three}");
+        let choices = three["choices"].as_array().expect("an array");
+        assert_eq!(choices.len(), 3, "{three}");
+        for (i, c) in choices.iter().enumerate() {
+            assert_eq!(c["index"], i, "choices carry their own index");
+            assert!(c["text"].is_string(), "{c}");
+            assert!(c["finish_reason"].is_string(), "{c}");
+        }
+        // THE property: one prompt, billed once.
+        assert_eq!(
+            three["usage"]["prompt_tokens"], one["usage"]["prompt_tokens"],
+            "n = 3 billed the prompt more than once, so the prefill was not shared"
+        );
+        assert_eq!(
+            three["usage"]["completion_tokens"].as_u64().unwrap(),
+            one["usage"]["completion_tokens"].as_u64().unwrap() * 3,
+            "completion tokens are the sum over choices"
+        );
+    }
+
+    /// The wires with no `choices` array still refuse it BY NAME
+    /// rather than quietly answering with one.
+    #[tokio::test]
+    async fn a_wire_without_a_choices_array_still_refuses_n() {
+        let app = crate::tests::test_app();
+        for (uri, body) in [
+            (
+                frink_api::routes::COMPLETION,
+                serde_json::json!({"prompt": "hi", "n_predict": 2, "n": 3}),
+            ),
+            (
+                frink_api::routes::V1_CHAT_COMPLETIONS,
+                serde_json::json!({
+                    "model": "x",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 2,
+                    "n": 3
+                }),
+            ),
+        ] {
+            let (status, answer) = crate::tests::post_json_uri(&app, uri, body).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::NOT_IMPLEMENTED,
+                "{uri} served `n`: {answer}"
+            );
+            assert!(
+                answer["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains('n')),
+                "{uri}: {answer}"
+            );
+        }
     }
 
     /// The values frink *does* honour must not be refused: upstream's

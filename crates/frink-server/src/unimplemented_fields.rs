@@ -58,6 +58,14 @@ use serde_json::Value;
 
 use crate::{unsupported_feature, ApiError};
 
+/// The routes whose response shape can carry more than one answer.
+///
+/// Not "every OpenAI route": llama.cpp's native `/completion` returns a
+/// single `content` string, and neither the Anthropic nor the Responses
+/// wire has a `choices` array, so `n` has nowhere to go on them and is
+/// refused by name rather than silently collapsed to one.
+const SERVES_SEVERAL_CHOICES: &[&str] = &[frink_api::routes::V1_COMPLETIONS];
+
 /// Fields deserialized purely in order to be refused.
 ///
 /// Every member is `Option`, and `None` is "the caller said nothing",
@@ -122,13 +130,17 @@ impl UnimplementedFields {
             return_tokens_as_token_ids,
         } = self;
 
-        // `n: 1` and `best_of: 1` are what this server already does, so
-        // a caller who spells them out is served rather than refused.
-        if n.is_some_and(|v| v > 1) {
+        // `n` > 1 is SERVED on the routes whose response has a
+        // `choices[]` array to put the extra answers in, and refused on
+        // the ones that do not: llama.cpp's native `/completion`
+        // returns one `content`, and the Anthropic and Responses wires
+        // have no such field at all. `n: 1` is every route.
+        if n.is_some_and(|v| v > 1) && !SERVES_SEVERAL_CHOICES.contains(&route) {
             return Err(refusal(
                 route,
                 "n",
-                "more than one completion per request; send the request again for another sample",
+                "more than one completion per request on this wire, which has no `choices` array \
+                 to return them in; use /v1/completions or send the request again",
             ));
         }
         if best_of.is_some_and(|v| v > 1) {
@@ -238,7 +250,9 @@ mod tests {
             serde_json::json!({}),
         ] {
             assert!(
-                parse(body.clone()).refuse("/v1/completions").is_ok(),
+                parse(body.clone())
+                    .refuse(frink_api::routes::COMPLETION)
+                    .is_ok(),
                 "{body} should be served"
             );
         }
@@ -295,11 +309,46 @@ mod tests {
             "every field of the struct needs a case"
         );
         for (field, body) in cases {
+            // The native wire, which serves none of them: `n` is
+            // SERVED on `/v1/completions` (see
+            // `a_route_with_a_choices_array_serves_n`), and picking a
+            // route that refuses everything keeps this test about the
+            // table rather than about the exception.
             let err = parse(body)
-                .refuse("/v1/completions")
+                .refuse(frink_api::routes::COMPLETION)
                 .expect_err("{field} must refuse");
             let msg = format!("{err:?}");
             assert!(msg.contains(field), "{field} not named in {msg}");
+        }
+    }
+
+    /// `n` is the one field with a per-route answer, and both halves
+    /// are pinned: served where the response has a `choices` array to
+    /// put the answers in, refused by name where it does not.
+    #[test]
+    fn a_route_with_a_choices_array_serves_n() {
+        let four = parse(serde_json::json!({ "n": 4 }));
+        assert!(
+            four.refuse(frink_api::routes::V1_COMPLETIONS).is_ok(),
+            "the route that renders several choices must serve `n`"
+        );
+        for route in [
+            frink_api::routes::COMPLETION,
+            frink_api::routes::V1_CHAT_COMPLETIONS,
+        ] {
+            let err = four.refuse(route).expect_err("no choices array");
+            assert!(format!("{err:?}").contains('n'), "{route}");
+        }
+        // And `n: 1` is every route, including the ones that refuse
+        // more: a caller spelling out the default asked for what they
+        // are getting.
+        let one = parse(serde_json::json!({ "n": 1 }));
+        for route in [
+            frink_api::routes::COMPLETION,
+            frink_api::routes::V1_CHAT_COMPLETIONS,
+            frink_api::routes::V1_COMPLETIONS,
+        ] {
+            assert!(one.refuse(route).is_ok(), "{route} refused n = 1");
         }
     }
 

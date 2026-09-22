@@ -1475,14 +1475,20 @@ async fn responses_full(
     let params =
         chat.generation_params_for_template(&template, active.name(), active.sampler_model())?;
 
-    let (chunks, finish, usage) = crate::decode_task::buffered(
+    let (choices, usage) = crate::decode_task::buffered(
         crate::decode_task::DecodeHandles::take(&state, &active)?,
         prompt,
         params,
     )
     .await?;
 
-    let parsed = output::parse_output(&chunks.concat(), &offered, posture);
+    // Choice 0: this wire has no `n`, and `crate::unimplemented_fields`
+    // refuses the field.
+    let (finish, generated) = choices
+        .into_iter()
+        .next()
+        .expect("a generation produces at least one choice");
+    let parsed = output::parse_output(&generated, &offered, posture);
     state.record_request(stats::Record {
         request_id: &request_id,
         route: ROUTE,
@@ -1608,7 +1614,13 @@ async fn responses_stream(
             },
         );
         match result {
-            Ok((finish, usage, full_text)) => {
+            // Streaming, so exactly one choice: `n` > 1 with `stream`
+            // is refused at the route.
+            Ok((choices, usage)) => {
+                let (finish, full_text) = choices
+                    .into_iter()
+                    .next()
+                    .expect("a generation produces at least one choice");
                 if overlap {
                     // Both parsers may still be withholding a run that
                     // could have become a marker and did not. It is
