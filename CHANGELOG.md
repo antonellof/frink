@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-09-22
+
 ### Added
 
 - **`n` and `best_of` on the paged KV store, by copy-on-write.** The
