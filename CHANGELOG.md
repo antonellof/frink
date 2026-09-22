@@ -15,6 +15,38 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hybrid model's recurrent layers were charged for a KV cache they
+  do not keep**, so every hybrid was priced at up to four times its real
+  per-token cost and refused prompts the box could serve.
+
+  Found on a real deployment: Ternary-Bonsai-2-27B is a `qwen35` graph
+  with `full_attention_interval 4` over 64 blocks, so **16 layers cache
+  and 48 run a gated delta net** whose state is fixed-size rather than
+  one K and one V per position. The budget multiplied by `n_layers` and
+  priced it at **524288 bytes/token instead of 131072**. A CPU-only host
+  refused a 6415-token prompt at a derived ceiling of **4096** that
+  should have been four times that. On an M2 Pro the same checkpoint's
+  `ctx auto` goes from **30464 to 122368** tokens with no other change.
+
+  The repo's dominant defect shape once more: two structures that must
+  agree about how wide a layer's cache is.
+  `ModelConfig::new_kv_caches` asks `AttnShape::cache_geometry` per
+  layer and builds an EMPTY cache for a recurrent one; `kv_budget`
+  multiplied by a scalar. Nothing compared them, and every
+  pure-attention model made the two agree, which is why it went
+  unnoticed.
+
+  `KvShape` now carries `kv_layers` beside `n_layers` and prices the
+  former, read through the same per-layer question the cache
+  constructors ask. The plan line says so rather than printing a
+  true-sounding total: `16 of 64 layers x [...]`. Reaches every hybrid
+  frink serves -- the Qwen3.5 family, `minimax-01`, Granite 4.0, LFM2,
+  Jamba, Mamba, PLaMo-2, Nemotron-H, Falcon-H1 -- and is largest for the
+  pure recurrent rows, which were charged a full attention cache for
+  layers that keep no rows at all.
+
 ## [0.30.0] - 2026-09-22
 
 ### Fixed

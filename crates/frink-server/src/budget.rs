@@ -451,6 +451,7 @@ mod tests {
     fn shape() -> KvShape {
         KvShape {
             n_layers: 2,
+            kv_layers: 2,
             layout: KvLayout::Gqa {
                 n_kv_heads: 1,
                 head_dim: 4,
