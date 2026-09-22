@@ -1589,7 +1589,7 @@ async fn responses_stream(
             batcher.as_ref(),
             ceiling.as_deref(),
             metal_private_decode_gate.as_deref(),
-            |chunk| {
+            |_choice, chunk| {
                 if !overlap || chunk.is_empty() {
                     return;
                 }

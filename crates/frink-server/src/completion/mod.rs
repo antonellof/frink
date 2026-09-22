@@ -548,6 +548,9 @@ pub(crate) async fn completion(
         // still refused on the wire by `crate::unimplemented_fields`,
         // so nothing can reach this with anything but 1.
         n: 1,
+        // Set by the STREAMING routes, which are the only ones whose
+        // delivery order a client can observe (`crate::round_robin`).
+        interleave_choices: false,
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.
@@ -689,7 +692,7 @@ async fn stream(
                 cancel_token.cancel();
             }
         };
-        let result = handles.run_emit(&prompt, &params, |chunk| {
+        let result = handles.run_emit(&prompt, &params, |_choice, chunk| {
             if !chunk.is_empty() {
                 send(frame(&partial_body(chunk)));
             }

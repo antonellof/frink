@@ -85,6 +85,9 @@ impl ChatCompletionRequest {
             // `best_of` decides how many are GENERATED, `n` how many
             // come back (`crate::best_of`).
             n: self.unimplemented.candidates(),
+            // Set by the STREAMING routes, which are the only ones whose
+            // delivery order a client can observe (`crate::round_robin`).
+            interleave_choices: false,
             // Reporting costs the greedy fast path, so only a request
             // that will render them asks for them.
             wants_logprobs: self.n_logprobs().is_ok_and(|n| n.is_some())

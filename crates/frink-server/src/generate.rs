@@ -1314,6 +1314,21 @@ pub struct GenerationParams {
     /// so a seeded request is reproducible and choice 0 of `n = 4` is
     /// byte-identical to the single answer of `n = 1`.
     pub n: usize,
+    /// Whether the choices must arrive INTERLEAVED, a token at a time,
+    /// rather than one completion after another.
+    ///
+    /// What a streaming `n` needs, and the only thing that was ever
+    /// missing for it: a client reading `choices[].index` expects the
+    /// choices together, and the sequential order gives it choice 0's
+    /// whole answer before choice 1 says anything.
+    ///
+    /// It costs the drafter (`crate::round_robin`): a speculative
+    /// round commits a BLOCK, and delivering five tokens of one choice
+    /// and then five of the next is the bursty delivery this exists to
+    /// avoid. A buffered request keeps the sequential order and keeps
+    /// speculation with it, because the order it collects in cannot be
+    /// observed.
+    pub interleave_choices: bool,
     /// Whether this request will READ the per-token distribution.
     ///
     /// A flag rather than "report always", because reporting costs the
@@ -1567,7 +1582,10 @@ pub(crate) fn forward_prompt_batch(
 struct ServerEngine<'a> {
     decoder: &'a Decoder,
     kv: &'a mut Kv,
-    first_token_at: &'a mut Option<std::time::Instant>,
+    /// Shared by every choice's engine, so a `Cell` rather than a
+    /// `&mut`: `n` completions decode in one request and the time to
+    /// FIRST token is the request's, whichever choice produced it.
+    first_token_at: &'a std::cell::Cell<Option<std::time::Instant>>,
     #[cfg(feature = "metal")]
     kv_offload: bool,
     drafter: Option<frink_models::speculative::PromptLookupSpeculator>,
@@ -1598,8 +1616,8 @@ impl ServerEngine<'_> {
 
 impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
     fn step(&mut self, next: usize, pos: usize) -> Vec<f32> {
-        if self.first_token_at.is_none() {
-            *self.first_token_at = Some(std::time::Instant::now());
+        if self.first_token_at.get().is_none() {
+            self.first_token_at.set(Some(std::time::Instant::now()));
         }
         // The anchor is offered the token that is about to be fed
         // forward, at the length that includes it. A token that ended
@@ -2037,7 +2055,7 @@ pub fn generate(
     // instead of `sample_until_stop`'s signature keeps that function's
     // (already long) argument list unchanged, and the closure's mutable
     // borrow ends when it is dropped at the call's return.
-    let mut first_token_at: Option<std::time::Instant> = None;
+    let first_token_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
     // Prompt-lookup drafting, when the request and the store allow it.
     //
     // No second checkpoint, so it costs no memory and no load time;
@@ -2107,60 +2125,134 @@ pub fn generate(
     let mut first_generated_ids: Vec<usize> = Vec::new();
     let mut first_logits: Vec<f32> = Vec::new();
 
-    for choice in 0..n {
-        // Derived, not drawn: `n: 4, seed: 7` is stable across runs and
-        // across `n`, so choice 0 of four is byte-identical to the
-        // single answer of one.
-        let mut choice_params = params.clone();
-        choice_params.seed = params.seed.wrapping_add(choice as u64);
-        let choice_params = if choice == 0 { params } else { &choice_params };
+    // Derived, not drawn: `n: 4, seed: 7` is stable across runs and
+    // across `n`, so choice 0 of four is byte-identical to the single
+    // answer of one. Built once here because both schedules below read
+    // the same list.
+    let per_choice_params: Vec<GenerationParams> = (0..n)
+        .map(|choice| {
+            let mut p = params.clone();
+            p.seed = params.seed.wrapping_add(choice as u64);
+            p
+        })
+        .collect();
 
-        let choice_kv: &mut Kv = if choice == 0 {
-            &mut kv
-        } else {
-            &mut forks[choice - 1]
-        };
-        let mut engine = ServerEngine {
-            decoder,
-            kv: choice_kv,
-            first_token_at: &mut first_token_at,
-            #[cfg(feature = "metal")]
-            kv_offload,
-            drafter: (draft_max > 0).then(|| {
-                frink_models::speculative::PromptLookupSpeculator::new(
-                    crate::sampling_loop::DRAFT_NGRAM,
-                    draft_max,
-                )
-            }),
-            accepted: 0,
-            drafted: 0,
-            forwards: 0,
-        };
-        let (finish, generated_ids, final_logits, choice_probs) =
-            crate::sampling_loop::sample_until_stop(
-                logits.clone(),
-                pos,
-                &tokens,
+    if n > 1 && params.interleave_choices {
+        // A client reading `choices[].index` asked for the choices
+        // together, so they are stepped a token at a time rather than
+        // one completion after another (`crate::round_robin`). No
+        // drafting: a speculative round commits a BLOCK, and bursts of
+        // five tokens per choice are what this schedule exists to
+        // avoid.
+        let mut kvs: Vec<&mut Kv> = std::iter::once(&mut kv).chain(forks.iter_mut()).collect();
+        let mut engines: Vec<ServerEngine> = kvs
+            .drain(..)
+            .map(|choice_kv| ServerEngine {
+                decoder,
+                kv: choice_kv,
+                first_token_at: &first_token_at,
+                #[cfg(feature = "metal")]
+                kv_offload,
+                drafter: None,
+                accepted: 0,
+                drafted: 0,
+                forwards: 0,
+            })
+            .collect();
+        let contexts: Vec<crate::choice_stream::StepContext<'_>> = per_choice_params
+            .iter()
+            .map(|p| crate::choice_stream::StepContext {
+                params: p,
+                prompt_ids: &tokens,
                 stop_tokens,
-                choice_params,
-                |ids| tokenizer.decode_bytes(ids),
-                &mut engine,
-                &mut |text: &str| emit(choice, text),
-                &decode_token,
-                draft_max,
-            )?;
-        // Read the counters out BEFORE the borrow ends, because this is
-        // the engine's last use and it borrows `kv` and
-        // `first_token_at` mutably.
-        speculation.0 += engine.forwards;
-        speculation.1 += engine.accepted;
-        speculation.2 += engine.drafted;
-        completion_tokens += generated_ids.len();
-        finishes.push(finish);
-        choice_logprobs.push(choice_probs);
-        if choice == 0 {
-            first_generated_ids = generated_ids;
-            first_logits = final_logits;
+                decode_token: &decode_token,
+            })
+            .collect();
+        let streams: Vec<crate::choice_stream::ChoiceStream> = per_choice_params
+            .iter()
+            .map(|p| crate::choice_stream::ChoiceStream::new(logits.clone(), pos, p))
+            .collect();
+        let outcomes = {
+            let mut dyns: Vec<&mut dyn crate::sampling_loop::DecodeEngine> = engines
+                .iter_mut()
+                .map(|e| e as &mut dyn crate::sampling_loop::DecodeEngine)
+                .collect();
+            crate::round_robin::sample_round_robin(
+                streams,
+                &mut dyns,
+                &contexts,
+                &mut |ids| tokenizer.decode_bytes(ids),
+                &mut emit,
+            )?
+        };
+        for engine in &engines {
+            speculation.0 += engine.forwards;
+            speculation.1 += engine.accepted;
+            speculation.2 += engine.drafted;
+        }
+        drop(engines);
+        for (choice, (finish, generated_ids, final_logits, choice_probs)) in
+            outcomes.into_iter().enumerate()
+        {
+            completion_tokens += generated_ids.len();
+            finishes.push(finish);
+            choice_logprobs.push(choice_probs);
+            if choice == 0 {
+                first_generated_ids = generated_ids;
+                first_logits = final_logits;
+            }
+        }
+    } else {
+        for choice in 0..n {
+            let choice_params = &per_choice_params[choice];
+
+            let choice_kv: &mut Kv = if choice == 0 {
+                &mut kv
+            } else {
+                &mut forks[choice - 1]
+            };
+            let mut engine = ServerEngine {
+                decoder,
+                kv: choice_kv,
+                first_token_at: &first_token_at,
+                #[cfg(feature = "metal")]
+                kv_offload,
+                drafter: (draft_max > 0).then(|| {
+                    frink_models::speculative::PromptLookupSpeculator::new(
+                        crate::sampling_loop::DRAFT_NGRAM,
+                        draft_max,
+                    )
+                }),
+                accepted: 0,
+                drafted: 0,
+                forwards: 0,
+            };
+            let (finish, generated_ids, final_logits, choice_probs) =
+                crate::sampling_loop::sample_until_stop(
+                    logits.clone(),
+                    pos,
+                    &tokens,
+                    stop_tokens,
+                    choice_params,
+                    |ids| tokenizer.decode_bytes(ids),
+                    &mut engine,
+                    &mut |text: &str| emit(choice, text),
+                    &decode_token,
+                    draft_max,
+                )?;
+            // Read the counters out BEFORE the borrow ends, because this is
+            // the engine's last use and it borrows `kv` and
+            // `first_token_at` mutably.
+            speculation.0 += engine.forwards;
+            speculation.1 += engine.accepted;
+            speculation.2 += engine.drafted;
+            completion_tokens += generated_ids.len();
+            finishes.push(finish);
+            choice_logprobs.push(choice_probs);
+            if choice == 0 {
+                first_generated_ids = generated_ids;
+                first_logits = final_logits;
+            }
         }
     }
     let decode_secs = decode_start.elapsed().as_secs_f64();
@@ -2187,7 +2279,7 @@ pub fn generate(
         prefill_secs,
         decode_secs,
         prefill_start,
-        first_token_at,
+        first_token_at: first_token_at.get(),
         cached_tokens,
         speculation,
         kv_pool_configured: kv_pool.is_some(),
@@ -2718,6 +2810,7 @@ mod tests {
             sampling: SamplingParams::default(),
             seed: 1,
             n: 1,
+            interleave_choices: false,
             stop: Vec::new(),
             stop_token_ids: Vec::new(),
             json_object: false,
@@ -3102,6 +3195,7 @@ mod tests {
                 sampling: SamplingParams::default(),
                 seed: 1,
                 n: 1,
+                interleave_choices: false,
                 stop: vec!["ZZ_NEVER_MATCHES_ZZ".to_string()],
                 stop_token_ids: Vec::new(),
                 json_object: false,
@@ -3272,6 +3366,7 @@ mod tests {
             },
             seed: 1,
             n: 1,
+            interleave_choices: false,
             stop: Vec::new(),
             stop_token_ids: Vec::new(),
             json_object: false,
@@ -3573,6 +3668,7 @@ mod tests {
                 sampling: SamplingParams::default(),
                 seed: 1,
                 n: 1,
+                interleave_choices: false,
                 stop: vec![stop_str.clone()],
                 stop_token_ids: Vec::new(),
                 json_object: false,

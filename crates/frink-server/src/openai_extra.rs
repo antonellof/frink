@@ -592,6 +592,9 @@ pub async fn completions(
         // back. Defaults to `n`, as upstream, so a request that names
         // neither still generates one.
         n: req.unimplemented.candidates(),
+        // Set by the STREAMING routes, which are the only ones whose
+        // delivery order a client can observe (`crate::round_robin`).
+        interleave_choices: false,
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.

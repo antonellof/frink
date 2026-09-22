@@ -115,7 +115,7 @@ impl DecodeHandles {
         &self,
         prompt: &str,
         params: &GenerationParams,
-        emit: impl FnMut(&str),
+        emit: impl FnMut(usize, &str),
         // Per choice, choice 0 first. See `crate::run_generation_emit`.
     ) -> Result<generate::Generated, generate::DecodeError> {
         crate::run_generation_emit(
