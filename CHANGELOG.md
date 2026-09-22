@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-22
+
 ### Added
 
 - **`n` > 1 on `/v1/chat/completions`** as well, from one prefill.
