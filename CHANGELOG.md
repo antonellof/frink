@@ -15,6 +15,34 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`logprobs` on `/v1/chat/completions`** too, in OpenAI's chat shape.
+  On a real model:
+
+  ```
+  'Blue'  logp=-0.0545  p=0.947  bytes=[66,108,117,101]
+          top: 'Blue':-0.05, 'Red':-3.26, 'Purple':-4.80
+  ```
+
+  `choices[].logprobs.content[]` of `{token, logprob, bytes,
+  top_logprobs[]}` -- a different object from the completions wire's
+  four parallel arrays, and rendered by its own function rather than
+  translated from the other, because a translation layer would have to
+  agree with two upstream shapes at once.
+
+  **Such a request is uncacheable and always misses.**
+  `CachedCompletion` stores text and finish reasons, never
+  distributions, so replaying an entry for a logprobs request would
+  return a completion with no logprobs and a 200. Sabotage confirms
+  it: letting the cache serve one produces exactly
+  `"logprobs":{"content":[]}` beside `"frink_cache":"hit"`.
+
+  `top_logprobs` without `logprobs: true` is a **400**, not an implied
+  `true`: guessing which of two fields the caller meant is how a
+  server answers a question nobody asked. Above the cap of 20 is a
+  400 on the value rather than a 501 on the field.
+
 ## [0.34.0] - 2026-09-22
 
 ### Added

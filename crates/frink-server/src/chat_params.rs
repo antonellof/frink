@@ -76,14 +76,14 @@ impl ChatCompletionRequest {
         model: crate::sampling_knobs::SamplerModel<'_>,
     ) -> Result<GenerationParams, ApiError> {
         Ok(GenerationParams {
-            // Wired per route once a wire renders them; see
-            // `docs/plans/per-token-logprobs.md`.
-            wants_logprobs: false,
             // The prompt is prefilled once and the KV forked per
             // choice (`crate::generate`). A STREAMING request never
             // reaches here with more than 1: `chat_completions_stream`
             // refuses the pair by name.
             n: self.unimplemented.n.unwrap_or(1).max(1) as usize,
+            // Reporting costs the greedy fast path, so only a request
+            // that will render them asks for them.
+            wants_logprobs: self.n_logprobs().is_ok_and(|n| n.is_some()),
             // Set by `generation_params_for_template`, which is the only
             // caller that knows the SERVED model name. Left `None` here
             // so a path that never resolves it reports the field absent
@@ -177,6 +177,20 @@ impl ChatCompletionRequest {
     /// sampling and surprising any client expecting fresh output per
     /// call.
     pub(crate) fn is_cacheable(&self) -> bool {
+        // A request that asked for logprobs must MISS and must not
+        // store: `CachedCompletion` holds text and finish reasons, not
+        // distributions, so replaying an entry for it would answer a
+        // logprobs request with no logprobs and a 200 -- the
+        // silent-wrong class. Making it uncacheable is the honest
+        // answer while the entry cannot carry them; storing them is a
+        // row of its own, and the note is on `CachedCompletion`.
+        //
+        // `n_logprobs` rather than the raw fields, so this and the
+        // renderer cannot disagree about what "asked for logprobs"
+        // means.
+        if self.n_logprobs().is_ok_and(|n| n.is_some()) {
+            return false;
+        }
         self.temperature.unwrap_or(0.0) <= 0.0 || self.seed.is_some()
     }
 

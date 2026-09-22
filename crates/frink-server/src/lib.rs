@@ -1126,6 +1126,38 @@ impl ChatCompletionRequest {
     /// the client hasn't explicitly disabled it via `tool_choice:
     /// "none"` -- see `ToolChoice`'s doc comment for what the other
     /// values do (nothing different from `"auto"`).
+    /// How many alternatives to report per position, or `None` when
+    /// this request did not ask for logprobs at all.
+    ///
+    /// OpenAI's chat wire splits the question in two: `logprobs: true`
+    /// turns the object on, and `top_logprobs: N` says how many
+    /// alternatives to list. `top_logprobs` without `logprobs` is not
+    /// a valid request upstream and is refused here rather than read
+    /// as an implied `true`, because guessing which of two fields the
+    /// caller meant is how a server answers a question nobody asked.
+    fn n_logprobs(&self) -> Result<Option<usize>, ApiError> {
+        const MAX: u32 = 20;
+        match (self.logprobs, self.top_logprobs) {
+            (Some(true), Some(n)) if n > MAX => Err(invalid_request(
+                &format!(
+                    "`top_logprobs` is {n}; this server reports at most {MAX} alternatives per \
+                     position, as upstream does"
+                ),
+                "top_logprobs",
+            )),
+            (Some(true), Some(n)) => Ok(Some(n as usize)),
+            // `logprobs: true` alone is the chosen token's logprob and
+            // no alternatives, which is what upstream's default `0`
+            // means.
+            (Some(true), None) => Ok(Some(0)),
+            (_, Some(_)) => Err(invalid_request(
+                "`top_logprobs` requires `logprobs: true`",
+                "top_logprobs",
+            )),
+            _ => Ok(None),
+        }
+    }
+
     /// True when the caller asked for more than one completion.
     ///
     /// Read off the shared table's own field, so the route and the
@@ -1340,11 +1372,10 @@ impl ChatCompletionRequest {
                 ));
             }
         }
-        if self.logprobs == Some(true) || self.top_logprobs.is_some() {
-            return Err(unsupported_feature(
-                "logprobs / top_logprobs are not implemented yet (see docs/API.md)",
-            ));
-        }
+        // Served (`crate::logprobs::render_chat`); what is refused is
+        // a `top_logprobs` above upstream's cap, which is a 400 on the
+        // value rather than a 501 on the field.
+        self.n_logprobs()?;
         // `n` moved into `crate::unimplemented_fields` with the rest of
         // the surface: it was refused HERE and dropped on
         // `/v1/completions`, which is the split that module exists for.
@@ -1449,6 +1480,12 @@ struct ChatCompletionChoice {
     index: usize,
     message: ChatCompletionResponseMessage,
     finish_reason: &'static str,
+    /// OpenAI's chat `logprobs` object, absent unless the request
+    /// asked (`crate::logprobs::render_chat`). `null` and absent mean
+    /// the same thing to a client here, and absent is the smaller
+    /// answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logprobs: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -2745,6 +2782,15 @@ async fn chat_completions_full(
     params.lora = lora::resolve_request(active.generative()?, req.lora.as_deref())?;
     let key = req.is_cacheable().then(|| req.cache_key(&prompt, &params));
 
+    // Per choice, alongside `completion`: a cache HIT carries none,
+    // and cannot -- which is safe only because a request that asked
+    // for logprobs is uncacheable (`is_cacheable`).
+    let mut generated_logprobs: Vec<crate::sampling_loop::PerTokenProbs> = Vec::new();
+    // Parsed before the generation so a bad `top_logprobs` is a 400
+    // rather than a wasted decode.
+    let n_logprobs = req.n_logprobs()?;
+    // The same detokenizer `/v1/detokenize` answers with.
+    let decode_piece = |id: usize| active.decode_any(&[id]);
     let (completion, cache_status) = if let Some(cached) = key
         .as_ref()
         .and_then(|key| lock_cache(&state.response_cache).get(key))
@@ -2759,6 +2805,11 @@ async fn chat_completions_full(
         )
         .await?;
 
+        // The distributions do not go into the cache (see
+        // `CachedCompletion`) and do not need to: a request that asked
+        // for them is uncacheable, so this branch only ever stores
+        // entries nobody will ask logprobs of.
+        generated_logprobs = choices.iter().map(|c| c.logprobs.clone()).collect();
         let completion = response_cache::CachedCompletion {
             choices: choices.into_iter().map(|c| (c.finish, c.text)).collect(),
             usage,
@@ -2829,6 +2880,13 @@ async fn chat_completions_full(
                 index,
                 message,
                 finish_reason,
+                logprobs: n_logprobs.map(|k| {
+                    crate::logprobs::render_chat(
+                        generated_logprobs.get(index).unwrap_or(&Vec::new()),
+                        Some(k),
+                        &decode_piece,
+                    )
+                }),
             }
         })
         .collect();
@@ -5386,6 +5444,101 @@ pub(crate) mod tests {
     /// llama.cpp's native endpoint is a different WIRE, not a shorter
     /// path to the OpenAI one. If this ever starts answering `choices`,
     /// every llama.cpp client reading `content` breaks silently.
+    /// Chat logprobs: the CHAT shape (`content[]` with `token`,
+    /// `logprob`, `bytes` and a nested `top_logprobs`), not the
+    /// completions wire's parallel arrays, and a request that asks for
+    /// them must MISS the response cache -- which stores text and
+    /// finish reasons, never distributions.
+    #[tokio::test]
+    async fn chat_logprobs_are_rendered_and_are_never_served_from_cache() {
+        let app = test_app();
+        let body = |logprobs: Option<(bool, Option<u32>)>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 4
+            });
+            if let Some((on, top)) = logprobs {
+                b["logprobs"] = serde_json::json!(on);
+                if let Some(n) = top {
+                    b["top_logprobs"] = serde_json::json!(n);
+                }
+            }
+            b
+        };
+
+        // Without: absent, not an empty object.
+        let (status, plain) =
+            post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, body(None)).await;
+        assert_eq!(status, StatusCode::OK, "{plain}");
+        assert!(plain["choices"][0]["logprobs"].is_null(), "{plain}");
+
+        // With: the chat object, and never a cache hit -- twice in a
+        // row, because the second is exactly when a cacheable request
+        // would replay.
+        for attempt in 0..2 {
+            let (status, with) = post_json_uri(
+                &app,
+                frink_api::routes::V1_CHAT_COMPLETIONS,
+                body(Some((true, Some(2)))),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{with}");
+            assert_ne!(
+                with["frink_cache"], "hit",
+                "attempt {attempt} replayed a cached answer for a logprobs request: {with}"
+            );
+            let lp = &with["choices"][0]["logprobs"];
+            assert!(lp.is_object(), "attempt {attempt}: {with}");
+            let content = lp["content"].as_array().expect("content");
+            // It is the CHAT shape, so there are no parallel arrays.
+            assert!(lp["tokens"].is_null(), "completions shape leaked: {lp}");
+            for entry in content {
+                assert!(entry["token"].is_string(), "{entry}");
+                assert!(entry["bytes"].is_array(), "{entry}");
+                let v = entry["logprob"].as_f64().expect("a real number");
+                assert!(v <= 0.0 && v.is_finite(), "{entry}");
+                let top = entry["top_logprobs"].as_array().expect("top_logprobs");
+                assert!(top.len() <= 2, "asked for 2, got {}", top.len());
+            }
+        }
+    }
+
+    /// `top_logprobs` without `logprobs: true` is not a valid request
+    /// upstream, and is refused here rather than read as an implied
+    /// `true` -- guessing which of two fields the caller meant is how
+    /// a server answers a question nobody asked. A count above the cap
+    /// is a 400 on the VALUE, not a 501 on the field.
+    #[tokio::test]
+    async fn the_chat_logprobs_pair_is_validated() {
+        let app = test_app();
+        for (extra, why) in [
+            (serde_json::json!({"top_logprobs": 3}), "without logprobs"),
+            (
+                serde_json::json!({"logprobs": true, "top_logprobs": 21}),
+                "above the cap",
+            ),
+        ] {
+            let mut body = serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 2
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            let (status, answer) =
+                post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {answer}");
+            assert!(
+                answer["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("top_logprobs")),
+                "{why}: {answer}"
+            );
+        }
+    }
+
     /// `n` on the chat route: several choices from one prefill, each
     /// parsed for tool calls and reasoning in its own right, and the
     /// STREAMING pair refused by name because the choices would arrive
