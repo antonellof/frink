@@ -78,6 +78,14 @@ pub struct GenerationKey {
     /// four, and vice versa -- they are different answers, not the same
     /// answer at a different size.
     pub n: usize,
+    /// `allowed_token_ids` and `bad_words`. KEYED: they change which
+    /// tokens may come back, so two requests that steer differently
+    /// are two different questions and must not share an answer.
+    ///
+    /// The RESOLVED sets, not the caller's strings: a bad word is
+    /// forbidden as tokens, and two spellings that tokenize the same
+    /// are the same constraint.
+    pub token_mask: crate::token_mask::TokenMask,
     pub sampling: SamplingKey,
     pub stop: Vec<String>,
     pub stop_token_ids: Vec<usize>,
@@ -180,6 +188,12 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // cache such a request at all (`CachedCompletion` stores no
         // distributions), so this never decides a hit.
         prompt_logprobs: _,
+        // NOT KEYED as a field of its own: it changes which tokens
+        // come back, so it MUST reach the key -- and it does, through
+        // `GenerationKey::token_mask` below, which carries the
+        // resolved sets. Two requests that forbid different words are
+        // two different questions.
+        token_mask,
         cache_salt,
         sampling,
         // NOT KEYED. The resolved seed is a clock reading for any
@@ -214,6 +228,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         max_tokens: *max_tokens,
         cache_salt: *cache_salt,
         n: *n,
+        token_mask: token_mask.clone(),
         sampling: sampling_key(sampling),
         stop: stop.clone(),
         // Keyed even though it is EMPTY at every current call site (the
@@ -585,6 +600,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens: 16,
             sampling: SamplingParams::default(),

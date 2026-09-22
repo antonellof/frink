@@ -551,6 +551,8 @@ pub(crate) async fn completion(
         // Set by the STREAMING routes, which are the only ones whose
         // delivery order a client can observe (`crate::round_robin`).
         interleave_choices: false,
+        // llama.cpp's native wire carries neither field.
+        token_mask: crate::token_mask::TokenMask::default(),
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.

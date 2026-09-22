@@ -120,6 +120,7 @@ mod tests {
             wants_logprobs: false,
             n: 2,
             interleave_choices: true,
+            token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens,
             sampling: frink_models::sampling::SamplingParams {

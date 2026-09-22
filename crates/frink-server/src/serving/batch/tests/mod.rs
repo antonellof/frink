@@ -53,6 +53,7 @@ fn greedy_params(max_tokens: usize, seed: u64) -> GenerationParams {
         wants_logprobs: false,
         n: 1,
         interleave_choices: false,
+        token_mask: crate::token_mask::TokenMask::default(),
         reasoning: None,
         max_tokens,
         // `SamplingParams::default()` IS greedy with every filter

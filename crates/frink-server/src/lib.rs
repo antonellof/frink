@@ -85,6 +85,7 @@ mod stats;
 mod stop;
 mod stream_events;
 mod tasks;
+mod token_mask;
 mod tool_grammar;
 mod unimplemented_fields;
 mod unsupported_sampling;
@@ -2277,6 +2278,13 @@ fn run_generation_emit(
         resolved.stop_token_ids = crate::stop::resolve_stop_tokens(&resolved.stop, |text| {
             model.encode(text, SpecialTokens::Parse)
         });
+        // `bad_words` are STRINGS on the wire and TOKENS at the
+        // sampler, and this is the one layer that has both the request
+        // and the model's tokenizer. Same seam, same reason, as the
+        // two lines above.
+        resolved
+            .token_mask
+            .resolve(|text| model.encode(text, SpecialTokens::Parse));
         // The reasoning budget's markers, for the same reason and at
         // the same seam: `<think>` is a token id only to this model,
         // and whether the prompt already opened the block is a fact
@@ -4893,6 +4901,7 @@ pub(crate) mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens,
             sampling: SamplingParams::default(),
@@ -5881,6 +5890,147 @@ pub(crate) mod tests {
         );
     }
 
+    /// **`allowed_token_ids` restricts what can come back.**
+    ///
+    /// Byte tokenizer, so a token id IS a byte and the answer can be
+    /// read directly: restrict to `A` and `B` and every character of
+    /// the completion must be one of them. A server that dropped the
+    /// field answers ordinary text and a 200, which is exactly the
+    /// failure the refusal existed to avoid.
+    #[tokio::test]
+    async fn allowed_token_ids_restricts_the_draw() {
+        let app = streaming_test_app();
+        let body = |allowed: Option<serde_json::Value>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 16,
+                "temperature": 1.0,
+                "seed": 3
+            });
+            if let Some(ids) = allowed {
+                b["allowed_token_ids"] = ids;
+            }
+            b
+        };
+
+        // Unrestricted first, so the restriction below is measured
+        // against what this model actually says.
+        let (status, free) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, body(None)).await;
+        assert_eq!(status, StatusCode::OK, "{free}");
+        let free_text = free["choices"][0]["text"].as_str().unwrap_or_default();
+
+        let (status, restricted) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            // 'A' and 'B'.
+            body(Some(serde_json::json!([65, 66]))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{restricted}");
+        let text = restricted["choices"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(!text.is_empty(), "nothing was generated: {restricted}");
+        assert!(
+            text.chars().all(|c| c == 'A' || c == 'B'),
+            "a token outside `allowed_token_ids` was drawn: {text:?}"
+        );
+        // The premise: an unrestricted draw is not already all As and
+        // Bs, or the assertion above holds for free.
+        assert!(
+            !free_text.chars().all(|c| c == 'A' || c == 'B'),
+            "the unrestricted answer was already inside the allowed set: {free_text:?}"
+        );
+    }
+
+    /// **An empty `allowed_token_ids` is a 400, not a 501.**
+    ///
+    /// The field IS implemented; asking to draw from nothing is not a
+    /// request any server can serve, and honouring it would produce a
+    /// row of `-inf` and a token that is an artefact of argmax over
+    /// negative infinity.
+    #[tokio::test]
+    async fn an_empty_allowed_token_ids_is_a_bad_request() {
+        let app = streaming_test_app();
+        let (status, body) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 4,
+                "allowed_token_ids": []
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("allowed_token_ids"),
+            "{body}"
+        );
+    }
+
+    /// **`bad_words` steers around a token without ending the answer.**
+    ///
+    /// The distinction from `stop`, stated as behaviour: the forbidden
+    /// byte must not appear, AND the generation must run to its budget
+    /// rather than stopping the first time the model wanted it.
+    #[tokio::test]
+    async fn bad_words_removes_a_token_without_ending_the_generation() {
+        let app = streaming_test_app();
+        let ask = |bad: Option<serde_json::Value>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 24,
+                "temperature": 1.0,
+                "seed": 11
+            });
+            if let Some(words) = bad {
+                b["bad_words"] = words;
+            }
+            b
+        };
+
+        let (status, free) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(None)).await;
+        assert_eq!(status, StatusCode::OK, "{free}");
+        let free_text = free["choices"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        // Forbid a character the unrestricted answer really produced,
+        // or the test proves nothing.
+        let target = free_text
+            .chars()
+            .find(|c| c.is_ascii() && !c.is_control())
+            .expect("the model produced some ascii");
+
+        let (status, steered) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            ask(Some(serde_json::json!([target.to_string()]))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{steered}");
+        let text = steered["choices"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            !text.contains(target),
+            "the forbidden {target:?} came back anyway: {text:?}"
+        );
+        // Steered, not stopped: `stop` would have ended the answer at
+        // the first occurrence.
+        assert_eq!(
+            steered["usage"]["completion_tokens"], free["usage"]["completion_tokens"],
+            "the generation ended early, so `bad_words` acted like `stop`: {steered}"
+        );
+    }
+
     /// The three generation routes must agree about every field this
     /// server does not implement. They did not: `n: 3` was a 501 on
     /// `/v1/chat/completions` and a 200 on `/v1/completions`, measured
@@ -5901,8 +6051,6 @@ pub(crate) mod tests {
             ("use_beam_search", serde_json::json!(true)),
             ("truncate_prompt_tokens", serde_json::json!(8)),
             ("prompt_embeds", serde_json::json!("AA==")),
-            ("allowed_token_ids", serde_json::json!([1, 2])),
-            ("bad_words", serde_json::json!(["x"])),
             ("skip_special_tokens", serde_json::json!(false)),
             ("return_tokens_as_token_ids", serde_json::json!(true)),
         ];

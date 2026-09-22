@@ -15,6 +15,37 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`allowed_token_ids` and `bad_words`.** Two fields, one mask,
+  applied in the closure the grammar, JSON mode and the reasoning
+  budget already share. No mask there ever clears another's `-inf`, so
+  the result is the intersection whichever runs first.
+
+  Both steer the draw rather than ending it, which is what separates
+  them from `stop`: a stop string ENDS a generation once it has been
+  produced, and these make sure it never is. A test pins exactly that
+  difference -- the forbidden token does not appear AND the generation
+  still runs to its budget.
+
+  **`bad_words` is tokenized, not a string filter.** What is forbidden
+  is a word's LAST token, and only when the tokens before it are
+  exactly what has just been generated, which is upstream's rule.
+  Masking every token of the word would forbid every word that merely
+  starts the same way. The rule is about tokens, so it is exact only
+  for the tokenization the model would have produced, and the module
+  says so rather than implying a guarantee the mechanism cannot give.
+
+  An empty `allowed_token_ids` is a **400**, not a 501: it asks for a
+  draw from nothing, and honouring it would return a token that is an
+  artefact of argmax over negative infinity.
+
+  The strings are resolved where `stop_token_ids` already is, and a
+  mask that reaches the sampler unresolved STOPS the generation rather
+  than answering unfiltered -- the same refusal shape an unresolved
+  reasoning budget has.
+
+
 ## [0.43.0] - 2026-09-22
 
 ### Added
