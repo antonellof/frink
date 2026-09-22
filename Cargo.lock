@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "frink-api"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "frink-cli"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "frink-core"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "frink-cuda"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "cudarc",
  "frink-quant",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "frink-gguf"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "frink-inference"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "frink-api",
  "frink-core",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "frink-metal"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "frink-quant",
  "half",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "frink-models"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "base64 0.23.0",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "frink-moe"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "frink-core",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "frink-quant"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "half",
  "thiserror",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "frink-safetensors"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "byteorder",
  "memmap2",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "frink-server"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "frink-vulkan"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "ash",
  "frink-quant",

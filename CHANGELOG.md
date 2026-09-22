@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-22
+
 ### Fixed
 
 - **A hybrid model's recurrent layers were charged for a KV cache they
