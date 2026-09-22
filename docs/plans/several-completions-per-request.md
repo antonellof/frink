@@ -111,6 +111,39 @@ Why this beats the alternatives:
   name. Refuse first, measure second.
 * **Cancellation** has to cancel all `k`.
 
+## The prerequisite, found by trying it
+
+`generate::generate` returns `(FinishReason, Usage)` and emits through
+an `impl FnMut(&str)`. `n` makes both plural: the return grows a choice
+dimension and `emit` grows a choice index. There is exactly ONE
+production caller (`lib.rs:2235`), which is the good news; there are
+about thirty call sites inside `generate.rs` itself, all tests, which
+is the bad.
+
+`generate.rs` is **4784 lines**. This repo's most expensive lesson says
+a change that would grow a file past roughly a thousand lines splits
+the file first, and the reason is written down: the same decode layer
+was once spelled out eleven times across two big files and lost eight
+model features one at a time, each silently. Threading a choice index
+through thirty call sites of a 4.8k-line file is how that happens
+again.
+
+So the order is:
+
+1. **Split `generate.rs`.** The request tail alone -- usage assembly,
+   reasoning counting, the radix publish, the prefix-cache write-back
+   -- is a module, and it is exactly the part that must run for choice
+   0 and not for the rest. Splitting it is what makes that rule
+   expressible instead of an `if` in the middle of a long function.
+2. **Parameterise by `n`** against the split file, with the fork and
+   the derived seeds.
+3. **Wire `n` from the three request bodies** and drop its row from
+   `crate::unimplemented_fields`, which is the one-line change that
+   turns the 501 into a served request.
+
+Step 1 is worth doing whether or not `n` ever lands, which is the test
+of whether a prerequisite is real or an excuse.
+
 ## How it would be measured
 
 The acceptance number is not tok/s, it is **prefills per request**:
