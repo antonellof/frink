@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-22
+
 ### Added
 
 - **`n` > 1 on `/v1/completions`**: several completions of one prompt,
