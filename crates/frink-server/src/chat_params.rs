@@ -91,6 +91,10 @@ impl ChatCompletionRequest {
             // `allowed_token_ids` and `bad_words`, both steering the
             // draw. The bad words are still STRINGS here; the layer
             // with the tokenizer resolves them (`run_generation_emit`).
+            logit_bias: crate::logit_bias::LogitBias::parse(
+                self.logit_bias.as_ref(),
+                "/v1/chat/completions",
+            )?,
             keep_special_tokens: self.unimplemented.keep_special_tokens(),
             truncate_prompt_tokens: None,
             token_mask: self.unimplemented.token_mask(),

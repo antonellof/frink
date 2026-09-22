@@ -1420,6 +1420,9 @@ pub struct GenerationParams {
     /// radix tree already holds, so it has no rows for those
     /// positions).
     pub prompt_logprobs: Option<usize>,
+    /// `logit_bias`: a per-token additive shift, applied BEFORE every
+    /// mask (`crate::logit_bias`).
+    pub logit_bias: crate::logit_bias::LogitBias,
     /// `skip_special_tokens: false`: keep the model's
     /// end-of-generation token in the answer.
     ///
@@ -1591,6 +1594,7 @@ impl GenerationParams {
     /// `temperature: 0`.
     pub(crate) fn needs_vocab_logits(&self) -> bool {
         self.json_object
+            || !self.logit_bias.is_empty()
             || !self.token_mask.is_empty()
             || self.grammar.is_some()
             || self.reasoning_budget.needs_vocab_logits()
@@ -2943,6 +2947,7 @@ mod tests {
             seed: 1,
             n: 1,
             interleave_choices: false,
+            logit_bias: crate::logit_bias::LogitBias::default(),
             keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
@@ -3331,6 +3336,7 @@ mod tests {
                 seed: 1,
                 n: 1,
                 interleave_choices: false,
+                logit_bias: crate::logit_bias::LogitBias::default(),
                 keep_special_tokens: false,
                 truncate_prompt_tokens: None,
                 token_mask: crate::token_mask::TokenMask::default(),
@@ -3505,6 +3511,7 @@ mod tests {
             seed: 1,
             n: 1,
             interleave_choices: false,
+            logit_bias: crate::logit_bias::LogitBias::default(),
             keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
@@ -3810,6 +3817,7 @@ mod tests {
                 seed: 1,
                 n: 1,
                 interleave_choices: false,
+                logit_bias: crate::logit_bias::LogitBias::default(),
                 keep_special_tokens: false,
                 truncate_prompt_tokens: None,
                 token_mask: crate::token_mask::TokenMask::default(),

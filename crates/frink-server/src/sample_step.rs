@@ -212,6 +212,14 @@ pub(crate) fn sample_next(
     let mut outcome = MaskOutcome::Allowed;
     let (next, drawn_probs) = {
         let mut mask = |scores: &mut [f32]| {
+            // First because llama.cpp applies it first, and NOT
+            // because the result depends on it: a bias is finite and
+            // every mask below writes `-f32::INFINITY`, so the
+            // intersection is the same whichever runs first. That is
+            // the same argument the comment below makes for the three
+            // masks, and `crate::logit_bias` records the sabotage that
+            // proved it.
+            params.logit_bias.apply(scores);
             // Order does not matter and must not: no mask here ever
             // clears a `-inf`, so the result is the intersection either
             // way. The budget goes first only because llama.cpp applies
@@ -350,6 +358,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            logit_bias: crate::logit_bias::LogitBias::default(),
             keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
