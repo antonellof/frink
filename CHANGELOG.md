@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-09-22
+
 ### Added
 
 - **`cache_salt`: per-caller isolation for the shared caches.** Named

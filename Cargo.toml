@@ -17,7 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.37.0"
+version = "0.38.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/antonellof/frink"
@@ -57,22 +57,22 @@ minijinja = { version = "2.21", features = ["loop_controls", "json"] }
 libc = "0.2"
 
 # Internal crates — path for local builds, version for crates.io.
-frink-api = { version = "0.37.0", path = "crates/frink-api" }
-frink-gguf = { version = "0.37.0", path = "crates/frink-gguf" }
-frink-quant = { version = "0.37.0", path = "crates/frink-quant" }
-frink-safetensors = { version = "0.37.0", path = "crates/frink-safetensors" }
-frink-cuda = { version = "0.37.0", path = "crates/frink-cuda" }
-frink-metal = { version = "0.37.0", path = "crates/frink-metal" }
-frink-vulkan = { version = "0.37.0", path = "crates/frink-vulkan" }
-frink-core = { version = "0.37.0", path = "crates/frink-core" }
-frink-moe = { version = "0.37.0", path = "crates/frink-moe" }
-frink-models = { version = "0.37.0", path = "crates/frink-models" }
-frink-inference = { version = "0.37.0", path = "crates/frink-inference" }
+frink-api = { version = "0.38.0", path = "crates/frink-api" }
+frink-gguf = { version = "0.38.0", path = "crates/frink-gguf" }
+frink-quant = { version = "0.38.0", path = "crates/frink-quant" }
+frink-safetensors = { version = "0.38.0", path = "crates/frink-safetensors" }
+frink-cuda = { version = "0.38.0", path = "crates/frink-cuda" }
+frink-metal = { version = "0.38.0", path = "crates/frink-metal" }
+frink-vulkan = { version = "0.38.0", path = "crates/frink-vulkan" }
+frink-core = { version = "0.38.0", path = "crates/frink-core" }
+frink-moe = { version = "0.38.0", path = "crates/frink-moe" }
+frink-models = { version = "0.38.0", path = "crates/frink-models" }
+frink-inference = { version = "0.38.0", path = "crates/frink-inference" }
 # Only frink-cli depends on this, and only behind its optional `serve`
 # feature. The server's dependency set is a strict superset of the CLI's
 # (+98 crates, +6 MB), so an unconditional dependency would make
 # `cargo install frink-cli` compile an HTTP and TLS stack it never runs.
-frink-server = { version = "0.37.0", path = "crates/frink-server" }
+frink-server = { version = "0.38.0", path = "crates/frink-server" }
 
 # Test and dev builds optimise the NUMERIC crates.
 #
