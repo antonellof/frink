@@ -49,7 +49,14 @@ pub(crate) struct RequestTail<'a> {
     /// The prompt's ids. CONSUMED: the prefix-cache store extends them
     /// with the generated ids and keeps the whole sequence.
     pub(crate) tokens: Vec<usize>,
+    /// CHOICE 0's ids. The prefix cache stores one continuation and
+    /// the reasoning split describes one answer, so both read this.
     pub(crate) generated_ids: Vec<usize>,
+    /// Tokens generated across EVERY choice. Separate from
+    /// `generated_ids.len()` because a request may have produced `n` of
+    /// them, and the bill is the sum while the stored continuation is
+    /// choice 0 (`docs/plans/several-completions-per-request.md`).
+    pub(crate) completion_tokens: usize,
     /// The prediction for whatever would come next, which is what a
     /// later prefix restore needs alongside the rows.
     pub(crate) logits: Vec<f32>,
@@ -82,6 +89,7 @@ impl RequestTail<'_> {
             prompt,
             mut tokens,
             generated_ids,
+            completion_tokens,
             logits,
             mut kv,
             prompt_tokens,
@@ -98,7 +106,7 @@ impl RequestTail<'_> {
         } = self;
 
         let mut usage =
-            Usage::new(prompt_tokens, generated_ids.len()).with_timings(prefill_secs, decode_secs);
+            Usage::new(prompt_tokens, completion_tokens).with_timings(prefill_secs, decode_secs);
         // The producer this metric never had. Reported only when a round
         // actually ran, so the fields stay ABSENT for a request that did
         // not speculate rather than reporting a zero that reads as "the

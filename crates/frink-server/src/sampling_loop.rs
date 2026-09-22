@@ -521,6 +521,7 @@ mod tests {
 
     fn greedy_params() -> GenerationParams {
         GenerationParams {
+            n: 1,
             reasoning: None,
             max_tokens: 64,
             sampling: SamplingParams {

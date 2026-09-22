@@ -1,6 +1,8 @@
 # Several completions per request (`n` > 1)
 
-Status: **design decided 2026-09-22, see (3); implementation next.**
+Status: **steps 1 and 2 landed 2026-09-22; step 3 (wire the field) next.**
+The engine forks and serves `n` choices, tested; the wire still refuses
+the field, so nothing reaches it but the tests.
 
 `n` is the OpenAI field for "give me `k` samples of this prompt". Until
 2026-09-22 frink answered it with a 200 and one choice on two of its
@@ -130,14 +132,25 @@ again.
 
 So the order is:
 
-1. **Split `generate.rs`.** The request tail alone -- usage assembly,
+1. ~~**Split `generate.rs`.**~~ Done: `crate::request_tail`. The request tail alone -- usage assembly,
    reasoning counting, the radix publish, the prefix-cache write-back
    -- is a module, and it is exactly the part that must run for choice
    0 and not for the rest. Splitting it is what makes that rule
    expressible instead of an `if` in the middle of a long function.
-2. **Parameterise by `n`** against the split file, with the fork and
-   the derived seeds.
-3. **Wire `n` from the three request bodies** and drop its row from
+2. ~~**Parameterise by `n`**~~ Done. `generate` returns
+   `Vec<FinishReason>` and emits with a choice index; the contiguous
+   store forks from the post-prefill state, the paged store and the
+   recurrent engines are refused by name, and `prompt_tokens` is
+   counted once while `completion_tokens` sums.
+
+   One thing the tests found that the plan had not: the seed
+   derivation cannot be pinned by comparing choice 0 to `n = 1`.
+   Choice 0 runs on the request's own `params`, so no change to
+   `seed + i` can move it -- a sabotage of the derivation leaves that
+   comparison green. The derivation needs its own test, and it is the
+   one that asserts the other choices DIFFER from choice 0 and that
+   two runs of the same seeded request agree.
+3. **Wire `n` from the three request bodies** (next) and drop its row from
    `crate::unimplemented_fields`, which is the one-line change that
    turns the 501 into a served request.
 

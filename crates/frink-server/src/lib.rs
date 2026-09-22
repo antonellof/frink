@@ -2091,6 +2091,10 @@ pub(crate) fn unsupported_feature(message: &str) -> ApiError {
 pub(crate) fn decode_error_response(e: generate::DecodeError) -> ApiError {
     let status = match e {
         generate::DecodeError::TokenOutOfVocab { .. } => StatusCode::BAD_REQUEST,
+        // Well-formed, and this deployment cannot serve it: 501, the
+        // same answer `crate::unimplemented_fields` gives a field this
+        // server does not implement.
+        generate::DecodeError::Unsupported(_) => StatusCode::NOT_IMPLEMENTED,
         // The request is bigger than the server can ever serve. That
         // is a property of the request, so it is the client's 400 --
         // answering 503 would send it into a retry loop that cannot
@@ -2208,7 +2212,7 @@ fn run_generation_emit(
     let used_batcher = matches!((model, continuous_batcher), (Model::Gguf(_), Some(_)));
     let _metal_private_guard =
         acquire_metal_private_decode_gate(metal_private_decode_gate, used_batcher);
-    let (finish, usage) = match model {
+    let (finishes, usage) = match model {
         Model::Gguf(m) => {
             if let Some(batcher) = continuous_batcher {
                 let mut tokens = m.tokenizer.encode(prompt, SpecialTokens::Parse);
@@ -2231,7 +2235,10 @@ fn run_generation_emit(
                 if !text.is_empty() && chunks.is_empty() {
                     chunks.push(text);
                 }
-                (finish, usage)
+                // One choice: the batch scheduler serves `n = 1` only,
+                // and `crate::unimplemented_fields` refuses the rest on
+                // the wire.
+                (vec![finish], usage)
             } else {
                 generate::generate(
                     &m.decoder,
@@ -2244,7 +2251,13 @@ fn run_generation_emit(
                     paged_kv,
                     prefix_cache,
                     ceiling,
-                    |chunk| {
+                    |_choice, chunk| {
+                        // `n` is still refused on the wire
+                        // (`crate::unimplemented_fields`), so every
+                        // request that reaches here has exactly one
+                        // choice and the index is always 0. Wiring the
+                        // field is step 3 of
+                        // `docs/plans/several-completions-per-request.md`.
                         chunks.push(chunk.to_string());
                         if !synthetic {
                             emit(chunk);
@@ -2322,6 +2335,15 @@ fn run_generation_emit(
         emit(&full);
     }
 
+    // One choice today: `n` is refused on the wire
+    // (`crate::unimplemented_fields`) and every engine above answers
+    // with exactly one. Step 3 of
+    // `docs/plans/several-completions-per-request.md` is what makes this
+    // a list the caller reads.
+    let finish = finishes
+        .into_iter()
+        .next()
+        .expect("a generation always produces at least one choice");
     Ok((finish, usage, full))
 }
 
@@ -4690,6 +4712,7 @@ pub(crate) mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            n: 1,
             reasoning: None,
             max_tokens,
             sampling: SamplingParams::default(),

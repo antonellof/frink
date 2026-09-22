@@ -66,6 +66,11 @@ pub struct CacheKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GenerationKey {
     pub max_tokens: usize,
+    /// How many completions the caller asked for. KEYED: a stored
+    /// single answer must never be served to a request that asked for
+    /// four, and vice versa -- they are different answers, not the same
+    /// answer at a different size.
+    pub n: usize,
     pub sampling: SamplingKey,
     pub stop: Vec<String>,
     pub stop_token_ids: Vec<usize>,
@@ -125,7 +130,7 @@ impl Hash for GrammarKey {
 /// The destructure below is exhaustive ON PURPOSE, for the same reason
 /// [`sampling_key`]'s is: a field added to `GenerationParams` stops this
 /// crate compiling, HERE, until someone decides whether it belongs in
-/// the cache key. Three of the eleven fields are deliberately NOT keyed and
+/// the cache key. Three of the twelve fields are deliberately NOT keyed and
 /// each says why at its `_` binding -- an exclusion on the record is a
 /// decision; a field nobody looked at is the bug in #35.
 pub fn generation_key(params: &GenerationParams) -> GenerationKey {
@@ -139,6 +144,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // stricter than it is rather than a cache that is safer.
         reasoning: _,
         max_tokens,
+        n,
         sampling,
         // NOT KEYED. The resolved seed is a clock reading for any
         // request that named none, which would give every greedy
@@ -170,6 +176,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
     } = params;
     GenerationKey {
         max_tokens: *max_tokens,
+        n: *n,
         sampling: sampling_key(sampling),
         stop: stop.clone(),
         // Keyed even though it is EMPTY at every current call site (the
@@ -502,6 +509,7 @@ mod tests {
     /// field at its do-nothing value.
     fn params() -> GenerationParams {
         GenerationParams {
+            n: 1,
             reasoning: None,
             max_tokens: 16,
             sampling: SamplingParams::default(),
