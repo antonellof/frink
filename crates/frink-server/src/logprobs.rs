@@ -101,6 +101,102 @@ pub(crate) fn render(
     })
 }
 
+/// [`render`] with the ECHOED prompt in front of the completion.
+///
+/// `echo` returns the prompt and the completion as one string, so the
+/// parallel arrays have to cover both or a client lining `text_offset`
+/// up against `text` reads the wrong span. The prompt's entries are
+/// exactly what [`render_prompt`] reports -- the PLAIN softmax, since
+/// a prompt token was supplied rather than drawn -- and the
+/// completion's are the sampler's own distributions, which is the one
+/// place this wire carries two different kinds of number in one array.
+///
+/// The first entry is `null`: nothing predicted the first prompt
+/// token. Offsets run over `prompt_text ++ completion`, so the
+/// completion's offsets are the ordinary ones shifted by the prompt's
+/// length in BYTES rather than in tokens.
+pub(crate) fn render_echoed(
+    prompt: &[usize],
+    prompt_rows: &[Vec<f32>],
+    prompt_text: &str,
+    per_token: &PerTokenProbs,
+    top_k: Option<usize>,
+    decode: &dyn Fn(usize) -> String,
+) -> Value {
+    let Some(top_k) = top_k else {
+        return Value::Null;
+    };
+    let mut tokens: Vec<Value> = Vec::with_capacity(prompt.len() + per_token.len());
+    let mut token_logprobs: Vec<Value> = Vec::with_capacity(prompt.len() + per_token.len());
+    let mut top_logprobs: Vec<Value> = Vec::with_capacity(prompt.len() + per_token.len());
+    let mut text_offset: Vec<usize> = Vec::with_capacity(prompt.len() + per_token.len());
+    let mut offset = 0usize;
+
+    for (i, id) in prompt.iter().enumerate() {
+        let piece = decode(*id);
+        text_offset.push(offset);
+        offset += piece.len();
+        tokens.push(Value::from(piece));
+        // Row `i - 1` predicted position `i`; position 0 had nothing
+        // before it.
+        match i.checked_sub(1).and_then(|r| prompt_rows.get(r)) {
+            Some(logits) => {
+                let probs = softmax(logits);
+                token_logprobs.push(Value::from(logprob(probs.get(*id).copied().unwrap_or(0.0))));
+                top_logprobs.push(top_map(&probs, top_k, decode));
+            }
+            None => {
+                token_logprobs.push(Value::Null);
+                top_logprobs.push(Value::Null);
+            }
+        }
+    }
+    // The prompt's pieces are detokenized one at a time above, and the
+    // text the caller gets is the prompt string. Those agree in length
+    // for a lossless tokenizer and can differ by a byte for one that
+    // is not, so the completion's offsets are anchored to the STRING
+    // rather than to the sum of the pieces.
+    offset = prompt_text.len();
+
+    for (id, probs) in per_token {
+        let piece = decode(*id);
+        text_offset.push(offset);
+        offset += piece.len();
+        tokens.push(Value::from(piece));
+        token_logprobs.push(Value::from(logprob(probs.get(*id).copied().unwrap_or(0.0))));
+        top_logprobs.push(top_map(probs, top_k, decode));
+    }
+
+    serde_json::json!({
+        "tokens": tokens,
+        "token_logprobs": token_logprobs,
+        "top_logprobs": top_logprobs,
+        "text_offset": text_offset,
+    })
+}
+
+/// The `top_k` most likely ids of `probs`, as `{piece: ln p}`.
+///
+/// Shared by the two renderers above, which sorted and truncated the
+/// same way in two places until `echo` needed a third.
+fn top_map(probs: &[f32], top_k: usize, decode: &dyn Fn(usize) -> String) -> Value {
+    let mut alternatives: Vec<(usize, f32)> = probs
+        .iter()
+        .enumerate()
+        // A zero is a candidate the chain removed, and `ln(0)` is not
+        // a number JSON can carry. Omitted, not stand-in'd.
+        .filter(|(_, p)| **p > 0.0)
+        .map(|(i, p)| (i, *p))
+        .collect();
+    alternatives.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    alternatives.truncate(top_k);
+    let mut map = serde_json::Map::new();
+    for (alt, p) in alternatives {
+        map.insert(decode(alt), Value::from(logprob(p)));
+    }
+    Value::Object(map)
+}
+
 /// `ln(p)` in f64, so the value survives JSON.
 ///
 /// A zero cannot reach here from the chosen token, and is filtered out

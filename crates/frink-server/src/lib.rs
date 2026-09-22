@@ -2301,7 +2301,7 @@ fn run_generation_emit(
     let used_batcher = matches!((model, continuous_batcher), (Model::Gguf(_), Some(_)));
     let _metal_private_guard =
         acquire_metal_private_decode_gate(metal_private_decode_gate, used_batcher);
-    let (finishes, prompt_rows, prompt_ids, usage) = match model {
+    let (finishes, prompt_rows, prompt_ids, truncated_prompt, usage) = match model {
         Model::Gguf(m) => {
             if let Some(batcher) = continuous_batcher {
                 let mut tokens = m.tokenizer.encode(prompt, SpecialTokens::Parse);
@@ -2333,7 +2333,16 @@ fn run_generation_emit(
                 // No prompt rows: the batch scheduler serves one
                 // choice and `prompt_logprobs` is refused for it at
                 // the route.
-                (vec![(finish, Vec::new())], Vec::new(), Vec::new(), usage)
+                // The batch scheduler tokenizes its own prompt and
+                // `truncate_prompt_tokens` is not wired through it, so
+                // there is no truncation for `echo` to report.
+                (
+                    vec![(finish, Vec::new())],
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    usage,
+                )
             } else {
                 generate::generate(
                     &m.decoder,
@@ -2459,6 +2468,7 @@ fn run_generation_emit(
         choices: out,
         prompt_rows,
         prompt_ids,
+        truncated_prompt,
         usage,
     })
 }
@@ -4901,6 +4911,7 @@ pub(crate) mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens,
@@ -5890,6 +5901,144 @@ pub(crate) mod tests {
         );
     }
 
+    /// **`echo` returns the prompt and the completion as one string,
+    /// and the logprobs arrays cover both.**
+    ///
+    /// The half that is easy to get wrong is `text_offset`: a client
+    /// slices `text` with it, so an offset computed over the
+    /// completion alone points into the middle of the echoed prompt.
+    /// Checked by SLICING the returned text at each offset and
+    /// comparing it against the token it names.
+    #[tokio::test]
+    async fn echo_returns_the_prompt_with_offsets_that_index_it() {
+        let app = streaming_test_app();
+        let prompt = "hello";
+        let (status, body) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "prompt": prompt,
+                "max_tokens": 6,
+                "temperature": 0,
+                "echo": true,
+                "logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let text = body["choices"][0]["text"].as_str().expect("text");
+        assert!(
+            text.starts_with(prompt),
+            "the prompt was not echoed: {text:?}"
+        );
+        assert!(
+            text.len() > prompt.len(),
+            "nothing was generated after the echo: {text:?}"
+        );
+
+        let lp = &body["choices"][0]["logprobs"];
+        let tokens = lp["tokens"].as_array().expect("tokens");
+        let offsets = lp["text_offset"].as_array().expect("text_offset");
+        let scores = lp["token_logprobs"].as_array().expect("token_logprobs");
+        assert_eq!(tokens.len(), offsets.len());
+        assert_eq!(tokens.len(), scores.len());
+        assert!(
+            tokens.len() > 6,
+            "the arrays cover only the completion: {}",
+            tokens.len()
+        );
+        // Nothing predicted the first prompt token.
+        assert!(scores[0].is_null(), "{lp}");
+        // Every offset names the token that starts there.
+        for (i, (tok, off)) in tokens.iter().zip(offsets).enumerate() {
+            let (piece, at) = (
+                tok.as_str().expect("a piece"),
+                off.as_u64().unwrap() as usize,
+            );
+            assert!(
+                text[at..].starts_with(piece),
+                "entry {i}: offset {at} does not start {piece:?} in {text:?}"
+            );
+        }
+    }
+
+    /// **`truncate_prompt_tokens` answers the prompt it kept, and
+    /// `echo` says so.**
+    ///
+    /// The field was the most dangerous refusal in the table because
+    /// IGNORING it answers a different prompt with no error. Serving
+    /// it has the mirror risk: echoing the caller's full string after
+    /// truncating would report a prompt the model never saw. Both are
+    /// pinned here -- the usage counts the kept tokens, and the echo
+    /// is the kept tokens.
+    #[tokio::test]
+    async fn truncate_prompt_tokens_keeps_the_last_k_and_echo_reports_them() {
+        let app = streaming_test_app();
+        let prompt = "abcdefghij";
+        let ask = |k: Option<u32>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "prompt": prompt,
+                "max_tokens": 2,
+                "temperature": 0,
+                "echo": true
+            });
+            if let Some(k) = k {
+                b["truncate_prompt_tokens"] = serde_json::json!(k);
+            }
+            b
+        };
+
+        let (status, full) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(None)).await;
+        assert_eq!(status, StatusCode::OK, "{full}");
+        let full_prompt_tokens = full["usage"]["prompt_tokens"].as_u64().expect("usage");
+        assert!(full_prompt_tokens > 4, "the prompt is too short to cut");
+
+        let (status, cut) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(Some(4))).await;
+        assert_eq!(status, StatusCode::OK, "{cut}");
+        assert_eq!(
+            cut["usage"]["prompt_tokens"].as_u64(),
+            Some(4),
+            "the prompt was not truncated: {cut}"
+        );
+        // A byte tokenizer, so four tokens are the last four bytes.
+        let text = cut["choices"][0]["text"].as_str().expect("text");
+        assert!(
+            text.starts_with("ghij"),
+            "echo reported a prompt the model never saw: {text:?}"
+        );
+        assert!(
+            !text.starts_with(prompt),
+            "the full prompt was echoed after a truncation: {text:?}"
+        );
+    }
+
+    /// Zero and negative counts are a 400: the field IS implemented,
+    /// and asking to keep none of the prompt is not a request any
+    /// server can serve.
+    #[tokio::test]
+    async fn a_truncation_below_one_is_a_bad_request() {
+        let app = streaming_test_app();
+        for k in [0i64, -1] {
+            let (status, body) = post_json_uri(
+                &app,
+                frink_api::routes::V1_COMPLETIONS,
+                serde_json::json!({
+                    "model": "x",
+                    "prompt": "hi",
+                    "max_tokens": 2,
+                    "truncate_prompt_tokens": k
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "k = {k}: {body}");
+        }
+    }
+
     /// **`allowed_token_ids` restricts what can come back.**
     ///
     /// Byte tokenizer, so a token id IS a byte and the answer can be
@@ -6087,6 +6236,32 @@ pub(crate) mod tests {
                     assert!(
                         answer["prompt_logprobs"].is_array(),
                         "served without the field: {answer}"
+                    );
+                    continue;
+                }
+                // `echo` is served on the one wire that returns a
+                // continuation of the prompt, and refused on the two
+                // that return a message.
+                if field == "echo" && uri == frink_api::routes::V1_COMPLETIONS {
+                    let (status, answer) = post_json_uri(&app, uri, body).await;
+                    assert_eq!(status, StatusCode::OK, "{uri} refused `echo`: {answer}");
+                    assert!(
+                        answer["choices"][0]["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .starts_with("hi"),
+                        "served without echoing the prompt: {answer}"
+                    );
+                    continue;
+                }
+                // `truncate_prompt_tokens` is served on every wire that
+                // tokenizes a prompt here, which is all three.
+                if field == "truncate_prompt_tokens" {
+                    let (status, answer) = post_json_uri(&app, uri, body).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "{uri} refused `truncate_prompt_tokens`: {answer}"
                     );
                     continue;
                 }

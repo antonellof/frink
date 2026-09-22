@@ -15,6 +15,42 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`echo` and `truncate_prompt_tokens`.** Both are prompt-boundary
+  work, so they landed together.
+
+  `truncate_prompt_tokens` keeps the prompt's LAST `k` tokens, applied
+  after the BOS is prepended and before anything is prefilled, so the
+  truncated sequence is the only one that ever exists: the KV,
+  `usage.prompt_tokens`, the prefix cache and `echo` all see the
+  prompt that was ANSWERED. It was the most dangerous refusal in the
+  table because IGNORING it answers a different prompt with no error,
+  and serving it has the mirror risk -- echoing the caller's full
+  string after truncating would report a prompt the model never saw.
+  Both are pinned by one test.
+
+  `echo` returns the prompt and the completion as one `text`, and with
+  `logprobs` the parallel arrays cover BOTH. The half that is easy to
+  get wrong is `text_offset`: a client slices `text` with it, so an
+  offset computed over the completion alone points into the middle of
+  the echoed prompt. The test slices the returned text at every offset
+  and compares it against the token it names.
+
+  Below 1, `truncate_prompt_tokens` is a **400** rather than a 501:
+  the field is implemented, and keeping none of the prompt is not a
+  request any server can serve.
+
+### Fixed
+
+- **`/v1/completions` carried TWO `echo` fields** -- one on the route's
+  own request struct with a hand-written refusal, one on the shared
+  table every route reads from -- so the shared table could never
+  serve it however it answered. Two structures that had to agree about
+  one field with nothing enforcing it, which is this repo's dominant
+  bug shape. The route's copy is gone.
+
+
 ## [0.44.0] - 2026-09-22
 
 ### Added
