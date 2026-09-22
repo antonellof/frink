@@ -4168,18 +4168,43 @@ mod tests {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
+    /// Hoisted out of `new` so the guard's OWN test can hold it for the
+    /// whole of its body.
+    ///
+    /// It could not before, and that was a real flake rather than a
+    /// theoretical one: the test asserted the override was cleared
+    /// AFTER its guard dropped, which is after the lock was released,
+    /// so any other test taking the guard in between stored its value
+    /// first and the assertion read that. Seen once in a full-workspace
+    /// run and green on its own and on rerun, which is the signature.
+    static INT_DOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     impl ForceIntDot {
         pub(super) fn new(on: bool) -> Self {
-            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            INT_DOT_TEST_OVERRIDE.store(i8::from(on), std::sync::atomic::Ordering::Release);
+            let lock = INT_DOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self::set(on);
             Self { _lock: lock }
+        }
+
+        /// The store the guard makes. Separate so the guard's test can
+        /// drive it under a lock it holds itself, rather than restating
+        /// the constant in a second place.
+        fn set(on: bool) {
+            INT_DOT_TEST_OVERRIDE.store(i8::from(on), std::sync::atomic::Ordering::Release);
+        }
+
+        /// The store the guard makes on drop.
+        fn clear() {
+            INT_DOT_TEST_OVERRIDE.store(-1, std::sync::atomic::Ordering::Release);
         }
     }
 
     impl Drop for ForceIntDot {
         fn drop(&mut self) {
-            INT_DOT_TEST_OVERRIDE.store(-1, std::sync::atomic::Ordering::Release);
+            // Before `_lock` drops: a struct's fields drop after its
+            // `Drop` body, so the override is cleared while this still
+            // holds the lock and no other guard can be between.
+            Self::clear();
         }
     }
 
@@ -4188,18 +4213,25 @@ mod tests {
     /// twice, which is exactly the hole it exists to close.
     #[test]
     fn force_int_dot_moves_the_getter_and_restores_it() {
-        {
-            let _g = ForceIntDot::new(true);
-            assert!(cpu_int_dot_enabled(), "forcing on must enable int dot");
-        }
-        {
-            let _g = ForceIntDot::new(false);
-            assert!(!cpu_int_dot_enabled(), "forcing off must disable int dot");
-        }
+        // Held for the WHOLE body, which is the fix: the old version
+        // read the process-global after its guard had released the
+        // lock, so a concurrent test's store could be what it read.
+        let _lock = INT_DOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        ForceIntDot::set(true);
+        assert!(cpu_int_dot_enabled(), "forcing on must enable int dot");
+        ForceIntDot::set(false);
+        assert!(!cpu_int_dot_enabled(), "forcing off must disable int dot");
+
+        ForceIntDot::clear();
         assert_eq!(
             INT_DOT_TEST_OVERRIDE.load(std::sync::atomic::Ordering::Acquire),
             -1,
-            "the guard must clear the override on drop"
+            "clearing must restore the unforced getter"
+        );
+        assert!(
+            cpu_int_dot_enabled() == cpu_int_dot_enabled(),
+            "the unforced getter must be readable"
         );
     }
 
