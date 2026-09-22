@@ -15,6 +15,31 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`n` and `best_of` on the paged KV store, by copy-on-write.** The
+  fork SHARES every page whose positions are all written and COPIES
+  only the part-written tail, which is the single page two forks would
+  both append to. A 6000-token prompt forked four ways prefills once
+  and copies four pages, not four prompts.
+
+  Sharing the tail as well would put one choice's token in another's
+  context: a wrong answer served with a 200, which no text comparison
+  here could see. That is measured rather than asserted -- with the
+  copy removed, four choices still agreed on every token, so the test
+  that pins it compares the original's and the fork's LOGITS and
+  demands they are bit-identical.
+
+  The fork takes its generation pages up front, as admission does for
+  the first choice, because the decode loop has nowhere to report a
+  store that ran dry at token 300 of 400. Two refusals, named apart
+  because they send an operator to different places: a checkpoint that
+  slides a window over its KV cannot fork (a slid page is recycled
+  privately, and two sequences recycling out of one set would read
+  each other's later positions), and a store with no free pages is
+  retryable.
+
+
 ## [0.39.0] - 2026-09-22
 
 ### Added
