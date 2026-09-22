@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-22
+
 ### Fixed
 
 - **Eleven request fields that change the answer were accepted and
