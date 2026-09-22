@@ -9,7 +9,7 @@
 //! XTC's -- has to come off this one stream in this one order.
 
 use super::penalties::apply_history_penalties;
-use super::{filtered_distribution, greedy_choice, SamplingParams};
+use super::{argmax, filtered_distribution, greedy_choice, SamplingParams};
 use crate::penalty_window::PenaltyWindow;
 
 /// Sets logits a caller wants to forbid to `-inf`, in place, before the
@@ -119,16 +119,82 @@ impl Sampler {
         logits: &[f32],
         params: &SamplingParams,
         history: PenaltyWindow<'_>,
-        mut mask: Option<LogitMask<'_>>,
+        mask: Option<LogitMask<'_>>,
     ) -> usize {
+        self.sample_inner(logits, params, history, mask, false).0
+    }
+
+    /// The token AND the distribution it was drawn from, normalised to
+    /// sum to 1 over the whole vocabulary.
+    ///
+    /// This is what `logprobs` has to report: not the raw logits, but
+    /// the distribution the sampler actually drew from, with the
+    /// penalties applied over the `penalty_last_n` window and
+    /// llama.cpp's chain run in `params.sampler_order`. A filtered-out
+    /// candidate is a zero, which is what "this token could not have
+    /// been chosen" means.
+    ///
+    /// `None` for a vocabulary this sampler never saw: a backend that
+    /// folded `lm_head` and `argmax` onto the device hands back a
+    /// one-element vector holding the chosen id, and there is no
+    /// distribution to report for it. A caller that needs one must ask
+    /// for the vocabulary (`GenerationParams::needs_vocab_logits`)
+    /// rather than be given a fabricated single-candidate answer.
+    ///
+    /// It is the SAME vector [`Self::sample_with_mask`] draws from --
+    /// both go through `sample_inner` -- so a reported logprob cannot
+    /// describe a distribution other than the one that was sampled.
+    ///
+    /// **Not `sampling_distribution`**, and the difference is the
+    /// point. That function recomputes the pipeline from the logits
+    /// WITHOUT drawing, which is right for speculative verification
+    /// (it needs `p_target(x)` for a token someone else proposed) and
+    /// wrong here for two reasons: it takes `xtc_roll` as an argument,
+    /// so a caller who passed a fresh roll would report a distribution
+    /// the draw never saw; and for a greedy request it returns a
+    /// ONE-HOT, which as a logprob would claim the model was certain
+    /// when nobody asked it. This reports the real distribution in
+    /// both cases, because "how confident was the model" is a question
+    /// a greedy caller is entitled to ask.
+    pub fn sample_reporting(
+        &mut self,
+        logits: &[f32],
+        params: &SamplingParams,
+        history: PenaltyWindow<'_>,
+        mask: Option<LogitMask<'_>>,
+    ) -> (usize, Option<Vec<f32>>) {
+        self.sample_inner(logits, params, history, mask, true)
+    }
+
+    /// One pipeline, parameterised by whether the caller wants the
+    /// distribution back.
+    ///
+    /// `want_probs` costs the greedy fast path: with it set, even a
+    /// chain that keeps the argmax builds the full distribution,
+    /// because there is nothing to report otherwise. Unset, every path
+    /// is exactly what it was.
+    fn sample_inner(
+        &mut self,
+        logits: &[f32],
+        params: &SamplingParams,
+        history: PenaltyWindow<'_>,
+        mut mask: Option<LogitMask<'_>>,
+        want_probs: bool,
+    ) -> (usize, Option<Vec<f32>>) {
         let xtc_roll = self.xtc_roll(params);
-        if params.temperature <= 0.0 && mask.is_none() {
-            if logits.len() == 1 {
-                return logits[0] as usize;
-            }
-            let mut scores = logits.to_vec();
-            apply_history_penalties(&mut scores, params, history);
-            return greedy_choice(scores, params, history, xtc_roll);
+        // A device-folded argmax: one element holding the chosen id,
+        // no vocabulary behind it.
+        //
+        // Gated on GREEDY, and that gate is load-bearing rather than
+        // incidental: only the greedy device fold produces this shape,
+        // and a SAMPLED request with a one-token vocabulary is a real
+        // distribution whose only candidate is token 0. Hoisting this
+        // check above the temperature test made `sample(&[42.0])` at
+        // temperature 0.8 answer 42 instead of 0, which
+        // `temperature_zero_accepts_precomputed_argmax_singleton`
+        // catches.
+        if params.temperature <= 0.0 && mask.is_none() && logits.len() == 1 {
+            return (logits[0] as usize, None);
         }
 
         let mut scores: Vec<f32> = logits.to_vec();
@@ -140,13 +206,21 @@ impl Sampler {
 
         if params.temperature <= 0.0 {
             if scores.len() == 1 {
-                return scores[0] as usize;
+                return (scores[0] as usize, None);
             }
-            return greedy_choice(scores, params, history, xtc_roll);
+            if !want_probs {
+                return (greedy_choice(scores, params, history, xtc_roll), None);
+            }
+            // The greedy answer read off the distribution it is the
+            // argmax OF, so the reported probabilities and the chosen
+            // token cannot disagree.
+            let probs = filtered_distribution(scores, params, history, xtc_roll);
+            return (argmax(&probs), Some(probs));
         }
 
         let probs = filtered_distribution(scores, params, history, xtc_roll);
-        self.sample_from(&probs)
+        let chosen = self.sample_from(&probs);
+        (chosen, want_probs.then_some(probs))
     }
 
     /// A uniform draw in `[0.0, 1.0)`.
@@ -239,6 +313,91 @@ mod tests {
     /// A hot temperature flattens the distribution, so a top-p applied
     /// after it sums smaller probabilities and reaches `p` later,
     /// keeping MORE candidates.
+    ///
+    /// The reported distribution must be the one that was DRAWN from,
+    /// not a second opinion computed beside it. Both go through
+    /// `sample_inner`, and this pins the consequence: the same seed
+    /// gives the same token whether or not the caller asked to see the
+    /// probabilities, and the token always has nonzero probability in
+    /// what is reported.
+    #[test]
+    fn the_reported_distribution_is_the_one_that_was_sampled() {
+        let logits: Vec<f32> = (0..64).map(|i| ((i * 7) % 13) as f32 * 0.4).collect();
+        let params = SamplingParams {
+            temperature: 0.9,
+            top_p: 0.95,
+            ..SamplingParams::default()
+        };
+
+        let quiet = Sampler::new(7).sample(&logits, &params, PenaltyWindow::new(&[], &[]));
+        let (loud, probs) =
+            Sampler::new(7).sample_reporting(&logits, &params, PenaltyWindow::new(&[], &[]), None);
+        assert_eq!(
+            quiet, loud,
+            "asking for the probabilities changed which token was drawn"
+        );
+
+        let probs = probs.expect("a real vocabulary reports a distribution");
+        assert_eq!(probs.len(), logits.len(), "one entry per vocabulary slot");
+        let total: f32 = probs.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-4,
+            "must be normalised, got {total}"
+        );
+        assert!(
+            probs[loud] > 0.0,
+            "the chosen token has zero probability in the distribution it came from"
+        );
+        // A filtered-out candidate is a zero, which is what "could not
+        // have been chosen" means, so top-p really did remove some.
+        assert!(
+            probs.contains(&0.0),
+            "top_p 0.95 kept every candidate, so this proves nothing"
+        );
+    }
+
+    /// Greedy reports too, and the token it reports is the argmax OF
+    /// the reported distribution -- read off the same vector rather
+    /// than decided separately, so the two cannot disagree.
+    #[test]
+    fn greedy_reports_the_distribution_its_answer_is_the_argmax_of() {
+        let logits = vec![0.1f32, 3.0, 0.2, 2.9];
+        let params = SamplingParams::default();
+        assert!(params.temperature <= 0.0, "default is greedy");
+
+        let (chosen, probs) =
+            Sampler::new(1).sample_reporting(&logits, &params, PenaltyWindow::new(&[], &[]), None);
+        let probs = probs.expect("a real vocabulary reports a distribution");
+        assert_eq!(chosen, 1, "the largest logit wins");
+        let best = probs
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+        assert_eq!(chosen, best, "the answer is not the argmax of the report");
+        // And it agrees with the plain entry point.
+        assert_eq!(
+            Sampler::new(1).sample(&logits, &params, PenaltyWindow::new(&[], &[])),
+            chosen
+        );
+    }
+
+    /// A device-folded argmax has no vocabulary behind it, so there is
+    /// nothing to report. `None` rather than a fabricated
+    /// single-candidate distribution, which would read as "the model
+    /// was certain" when nobody asked the model.
+    #[test]
+    fn a_device_folded_argmax_reports_no_distribution() {
+        let params = SamplingParams::default();
+        let (chosen, probs) =
+            Sampler::new(1).sample_reporting(&[42.0], &params, PenaltyWindow::new(&[], &[]), None);
+        assert_eq!(chosen, 42, "the singleton is the chosen id");
+        assert!(
+            probs.is_none(),
+            "a folded argmax must not fabricate a distribution"
+        );
+    }
 
     #[test]
     fn temperature_zero_accepts_precomputed_argmax_singleton() {
