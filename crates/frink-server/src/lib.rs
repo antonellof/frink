@@ -62,6 +62,7 @@ mod policy;
 mod prefill_batch;
 mod reasoning_budget;
 mod reasoning_tokens;
+mod request_tail;
 mod rerank;
 mod response_cache;
 pub(crate) mod responses;
