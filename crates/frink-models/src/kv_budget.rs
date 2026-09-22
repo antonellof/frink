@@ -307,7 +307,23 @@ impl KvLayout {
 /// restating this multiplication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvShape {
+    /// Every layer the decoder walks, which is what a per-layer table
+    /// (a window policy, a residency plan) is indexed by.
     pub n_layers: usize,
+    /// The layers that actually KEEP ROWS, which is what a token costs.
+    ///
+    /// Not the same number on a hybrid. A recurrent layer -- a gated
+    /// delta net, a Mamba block, a short convolution -- holds a
+    /// fixed-size state rather than one K and one V per position, and
+    /// `AttnShape::cache_geometry` answers `n_kv_heads = 0` for it.
+    /// Charging those layers a token's worth of K and V is how a
+    /// Qwen3.5-shaped checkpoint (`full_attention_interval 4`, so three
+    /// layers in four are recurrent) was priced at FOUR TIMES its real
+    /// per-token cost, and refused a prompt the box could serve.
+    ///
+    /// Equal to [`Self::n_layers`] for every pure-attention model,
+    /// which is why nothing noticed.
+    pub kv_layers: usize,
     pub layout: KvLayout,
     pub elem: KvElem,
 }
@@ -330,8 +346,23 @@ impl KvShape {
     /// `MlaConfig`) and should build their shape with
     /// [`KvShape::mla_expanded`].
     pub fn from_config(config: &ModelConfig, elem: KvElem) -> Self {
+        // The SAME question `ModelConfig::new_kv_caches` asks per layer
+        // before it allocates one. It asked it there and not here, and
+        // the two disagreed about every hybrid: this module multiplied
+        // by `n_layers` while the constructor built empty caches for
+        // the recurrent ones.
+        let kv_layers = (0..config.n_layers)
+            .filter(|&l| config.layer_shape(l).attention.n_kv_heads() > 0)
+            .count();
+        debug_assert!(
+            kv_layers == config.n_layers
+                || (0..config.n_layers).all(|l| config.layer_sliding_window(l).is_none()),
+            "a windowed hybrid would need a per-layer mask here, not a count; \
+             no architecture produces that pair today"
+        );
         KvShape {
             n_layers: config.n_layers,
+            kv_layers,
             layout: KvLayout::Gqa {
                 n_kv_heads: config.n_kv_heads,
                 head_dim: config.head_dim,
@@ -353,6 +384,8 @@ impl KvShape {
     ) -> Self {
         KvShape {
             n_layers,
+            // Every layer of an MLA stack caches.
+            kv_layers: n_layers,
             layout: KvLayout::MlaExpanded {
                 n_heads,
                 k_head_dim: qk_nope_head_dim + qk_rope_head_dim,
@@ -374,7 +407,7 @@ impl KvShape {
     /// per-token cost would mean some layer stops growing, and none
     /// does.
     pub fn per_token_kv_bytes(&self) -> u64 {
-        (self.n_layers as u64)
+        (self.kv_layers as u64)
             .saturating_mul(self.elem.bytes_for(self.layout.elems_per_token_per_layer()))
     }
 
@@ -383,7 +416,7 @@ impl KvShape {
         // Every multiplication here saturates, for the reason on
         // `KvElem::bytes_for`: `tokens` can arrive from an HTTP body.
         let per_layer = self.layout.elems_per_token_per_layer();
-        (self.n_layers as u64)
+        (self.kv_layers as u64)
             .saturating_mul(self.elem.bytes_for(per_layer.saturating_mul(tokens as u64)))
     }
 
@@ -403,7 +436,7 @@ impl KvShape {
     pub fn resident_kv_bytes_for_tokens(&self, tokens: usize, residency: &KvResidency) -> u64 {
         let per_layer = self.layout.elems_per_token_per_layer();
         residency
-            .rows_per_layer(self.n_layers, tokens)
+            .rows_per_layer(self.kv_layers, tokens)
             .map(|rows| self.elem.bytes_for(per_layer.saturating_mul(rows as u64)))
             .fold(0u64, |acc, b| acc.saturating_add(b))
     }
@@ -444,11 +477,11 @@ impl KvShape {
         let per_layer = self.layout.elems_per_token_per_layer();
         let full = self.elem.bytes_for(per_layer.saturating_mul(tokens as u64));
         let resting = residency
-            .ceiling_rows_per_layer(self.n_layers, tokens)
+            .ceiling_rows_per_layer(self.kv_layers, tokens)
             .map(|rows| self.elem.bytes_for(per_layer.saturating_mul(rows as u64)))
             .fold(0u64, |acc, b| acc.saturating_add(b));
         let transient = residency
-            .ceiling_rows_per_layer(self.n_layers, tokens)
+            .ceiling_rows_per_layer(self.kv_layers, tokens)
             .map(|rows| {
                 full.saturating_sub(self.elem.bytes_for(per_layer.saturating_mul(rows as u64)))
             })
@@ -460,9 +493,18 @@ impl KvShape {
     /// The sentence a user should be able to read and reproduce with a
     /// calculator.
     pub fn describe(&self) -> String {
+        // The CACHING layer count, and on a hybrid it says so: a
+        // reader who checks "64 layers" against the model card and
+        // gets a number four times the real cost has been told a
+        // true-sounding falsehood.
+        let of_total = if self.kv_layers == self.n_layers {
+            String::new()
+        } else {
+            format!(" of {}", self.n_layers)
+        };
         format!(
-            "{} layers x [{}] x {} = {} bytes/token",
-            self.n_layers,
+            "{}{of_total} layers x [{}] x {} = {} bytes/token",
+            self.kv_layers,
             self.layout.describe(),
             self.elem.as_str(),
             self.per_token_kv_bytes()
@@ -889,6 +931,7 @@ mod tests {
     fn llama31_8b() -> KvShape {
         KvShape {
             n_layers: 32,
+            kv_layers: 32,
             layout: KvLayout::Gqa {
                 n_kv_heads: 8,
                 head_dim: 128,
@@ -976,6 +1019,104 @@ mod tests {
         cfg.sliding_window = Some(4);
         cfg.swa_layers = crate::swa_layers::SwaLayers::period(3, false);
         cfg
+    }
+
+    /// **A hybrid's recurrent layers keep NO rows, and this module used
+    /// to charge them anyway.**
+    ///
+    /// Found on a real deployment, not in a test: Ternary-Bonsai-2-27B
+    /// is a `qwen35` graph with `full_attention_interval 4` over 64
+    /// blocks, so 16 layers cache and 48 run a gated delta net whose
+    /// state is fixed-size. `KvShape::from_config` multiplied by
+    /// `n_layers`, priced the checkpoint at 524288 bytes/token instead
+    /// of 131072, and a CPU-only host refused a 6415-token prompt at a
+    /// derived ceiling of 4096 that should have been four times that.
+    ///
+    /// This is the repo's dominant shape once more: two structures that
+    /// must agree about how wide a layer's cache is.
+    /// `ModelConfig::new_kv_caches` asks `AttnShape::cache_geometry`
+    /// per layer and builds an EMPTY cache for a recurrent one; this
+    /// module multiplied by a scalar. Nothing compared them.
+    #[test]
+    fn a_hybrid_charges_only_the_layers_that_keep_rows() {
+        let mut cfg = crate::config::test_dense_fixture();
+        cfg.n_layers = 8;
+        cfg.n_kv_heads = 2;
+        cfg.head_dim = 16;
+        // Qwen3.5's own rule over eight layers: one in four attends.
+        let mask = crate::gdn::RecurrentMask {
+            layers: (0..8usize).map(|i| !(i + 1).is_multiple_of(4)).collect(),
+            block: crate::layer_shapes::AttnShape::Gdn,
+        };
+        cfg.layer_shapes = crate::layer_shapes::LayerShapes::resolve(
+            "qwen35",
+            &[2; 8],
+            &[2; 8],
+            None,
+            cfg.moe.expert_ffn_dim,
+            Some(&mask),
+        )
+        .expect("the hybrid resolves");
+
+        let shape = KvShape::from_config(&cfg, KvElem::F32);
+        assert_eq!(shape.n_layers, 8, "the decoder still walks eight");
+        assert_eq!(shape.kv_layers, 2, "only two of them keep rows");
+
+        // The arithmetic a reader can redo: 2 layers x 2 (K+V) x 2
+        // kv-heads x 16 head-dim x 4 bytes.
+        assert_eq!(shape.per_token_kv_bytes(), 2 * 2 * 2 * 16 * 4);
+
+        // And it is exactly a quarter of what the scalar would have
+        // charged, which is the size of the defect.
+        let as_if_every_layer_cached = KvShape {
+            kv_layers: shape.n_layers,
+            ..shape
+        };
+        assert_eq!(
+            as_if_every_layer_cached.per_token_kv_bytes(),
+            shape.per_token_kv_bytes() * 4
+        );
+
+        // The report says so rather than printing a true-sounding "8".
+        assert!(
+            shape.describe().starts_with("2 of 8 layers"),
+            "{}",
+            shape.describe()
+        );
+    }
+
+    /// The pricing agrees with the STORES the same config builds, which
+    /// is the check that would have caught the original defect: a
+    /// recurrent layer's cache is constructed with zero KV heads, so a
+    /// token pushed into it adds no rows.
+    #[test]
+    fn the_priced_layers_are_the_ones_that_allocate() {
+        let mut cfg = crate::config::test_dense_fixture();
+        cfg.n_layers = 8;
+        cfg.n_kv_heads = 2;
+        cfg.head_dim = 16;
+        let mask = crate::gdn::RecurrentMask {
+            layers: (0..8usize).map(|i| !(i + 1).is_multiple_of(4)).collect(),
+            block: crate::layer_shapes::AttnShape::Gdn,
+        };
+        cfg.layer_shapes = crate::layer_shapes::LayerShapes::resolve(
+            "qwen35",
+            &[2; 8],
+            &[2; 8],
+            None,
+            cfg.moe.expert_ffn_dim,
+            Some(&mask),
+        )
+        .expect("the hybrid resolves");
+
+        let allocating = (0..cfg.n_layers)
+            .filter(|&l| cfg.layer_shape(l).attention.n_kv_heads() > 0)
+            .count();
+        assert_eq!(
+            KvShape::from_config(&cfg, KvElem::F32).kv_layers,
+            allocating,
+            "the budget must price exactly the layers that allocate"
+        );
     }
 
     /// **The property this module got wrong, measured rather than
@@ -1274,6 +1415,7 @@ mod tests {
         // 128 heads, 60 layers.
         let latent = KvShape {
             n_layers: 60,
+            kv_layers: 60,
             layout: KvLayout::MlaLatent {
                 kv_lora_rank: 512,
                 qk_rope_head_dim: 64,
