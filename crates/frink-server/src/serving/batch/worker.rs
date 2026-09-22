@@ -558,7 +558,7 @@ pub(super) fn accept(
                 config,
                 &job.prompt_tokens,
                 max_seq_len,
-                job.params.cache_salt,
+                crate::generate::PrefixIntent::sharing(job.params.cache_salt),
             ) {
                 Ok(lease) => PrefillState::new_paged(
                     Arc::clone(decoder),

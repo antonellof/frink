@@ -15,6 +15,30 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`prompt_logprobs` on the paged KV store.** The last field-level
+  refusal on the completion wires.
+
+  The refusal was right about the cause: a paged prefill SKIPS
+  whatever the radix tree already holds, so it has no rows for those
+  positions. The answer is not to report holes. A request that scores
+  its prompt now declines the tree at admission and runs every
+  position of its own prompt, which is what it is paying for anyway.
+
+  `PrefixIntent` carries the two facts that must travel together --
+  WHOSE pages may be matched, and whether any may be -- and its
+  `Default` is written out rather than derived, because
+  `bool::default()` is false and a default that declined the tree
+  would quietly turn prefix sharing off for every caller that took it.
+
+  The scoring prefill is the same function as the ordinary one with
+  one parameter: the gather into contiguous scratch, the up-front
+  reservation and the scatter back into the pages are identical, and
+  only the lm_head projection differs. A request that did not ask
+  still pays for ONE projection rather than one per position.
+
+
 ## [0.42.0] - 2026-09-22
 
 ### Added

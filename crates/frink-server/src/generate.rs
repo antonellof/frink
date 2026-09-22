@@ -31,10 +31,9 @@ pub enum DecodeError {
     #[error("server is at capacity: the shared KV cache block pool has no free blocks for a new request; retry shortly")]
     KvPoolExhausted,
     /// A well-formed request this deployment cannot serve, named rather
-    /// than approximated. `prompt_logprobs` and `cache_salt` on the
-    /// paged store are the standing cases, and `n` > 1 there when the
-    /// checkpoint slides a window or the store has no pages left for
-    /// the fork.
+    /// than approximated. The standing case is `n` > 1 on the paged
+    /// store when the checkpoint slides a window, and on an engine
+    /// whose recurrent state cannot be forked at all.
     #[error("{0}")]
     Unsupported(String),
     /// The batch scheduler's admission queue is full. Distinct from
@@ -205,6 +204,50 @@ struct WindowSlide {
 ///   down to a page boundary.
 fn slide_hold_bound(window: usize, policy: &WindowPolicy) -> usize {
     2 * (window + SWA_RETAIN_GAP) + policy.eviction_interval + 2 * policy.page_size
+}
+
+/// What a request may do with the shared prefix tree.
+///
+/// Two facts that must travel together. The salt says WHOSE pages may
+/// be matched (`crate::cache_salt`); `adopt` says whether any may be,
+/// and it is false for exactly one kind of request: one scoring its
+/// own prompt.
+///
+/// `prompt_logprobs` needs a logit row for every prompt position, and
+/// a paged prefill SKIPS whatever the tree already holds -- those
+/// positions were computed by somebody else's request, so there are no
+/// rows for them and scoring them would be an invention. Declining the
+/// adoption makes the request prefill its whole prompt, which is what
+/// it is paying for anyway. The alternative, reporting holes, was
+/// refused by name for a year and is worse: a caller asked for a
+/// number per position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixIntent {
+    pub salt: Option<u64>,
+    pub adopt: bool,
+}
+
+impl Default for PrefixIntent {
+    /// The SHARED namespace, adopting. Written out rather than
+    /// derived: `bool::default()` is false, and a default that
+    /// declined the tree would quietly turn prefix sharing off for
+    /// every caller that took it.
+    fn default() -> Self {
+        PrefixIntent::sharing(None)
+    }
+}
+
+impl PrefixIntent {
+    /// The ordinary request: match in this caller's namespace and
+    /// adopt whatever is there.
+    pub fn sharing(salt: Option<u64>) -> Self {
+        PrefixIntent { salt, adopt: true }
+    }
+
+    /// A request that must run every position of its own prompt.
+    pub fn own_prompt_only(salt: Option<u64>) -> Self {
+        PrefixIntent { salt, adopt: false }
+    }
 }
 
 /// Why a [`PagedLease::fork`] could not be taken.
@@ -677,11 +720,11 @@ pub(crate) fn acquire_paged_caches(
     config: &PagedKvConfig,
     tokens: &[usize],
     max_seq_len: usize,
-    // Which caller's prefix namespace this request may match in
-    // (`crate::cache_salt`). `None` is the shared one, which is what
-    // every request got before the field existed.
-    salt: Option<u64>,
+    // Which caller's prefix namespace this request may match in, and
+    // whether it may match at all.
+    intent: PrefixIntent,
 ) -> Result<PagedLease, PagedStoreExhausted> {
+    let salt = intent.salt;
     let block_size = config.store.read(0).block_size();
     let deadline = Instant::now() + config.queue_wait;
 
@@ -689,7 +732,7 @@ pub(crate) fn acquire_paged_caches(
     // node, so re-matching per attempt would take a second lock on the
     // same node and the unlock on drop would balance only one of them,
     // leaving the prefix pinned forever.
-    let adopted = match config.radix.as_ref() {
+    let adopted = match config.radix.as_ref().filter(|_| intent.adopt) {
         Some(radix) => {
             let ids: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
             let mut tree = radix.lock().unwrap_or_else(|p| p.into_inner());
@@ -957,15 +1000,29 @@ impl Kv {
     /// a request that did not ask for prompt logprobs must not pay for
     /// them.
     ///
-    /// `None` for the paged store: its prefill skips whatever the
-    /// radix tree already computed, so the positions it returns are
-    /// the ones it recomputed rather than the whole prompt, and
-    /// scoring a prefix nobody ran would be an invention. Refused by
-    /// name at the route instead.
+    /// Served on BOTH stores. The paged arm has rows for every
+    /// position because a request that scores its prompt declines the
+    /// prefix tree at admission (`PrefixIntent::own_prompt_only`):
+    /// adopted positions were computed by another request, so there
+    /// would be no rows for them and scoring them would be an
+    /// invention. The lease's own assertion is what holds that -- a
+    /// lease that adopted anything cannot be scored, and saying so
+    /// here rather than reporting holes is the whole argument.
     fn prefill_scored(&mut self, decoder: &Decoder, tokens: &[usize]) -> Option<Vec<Vec<f32>>> {
         match self {
             Kv::Contiguous(caches) => Some(decoder.forward_batch(tokens, 0, caches)),
-            Kv::Paged(_) => None,
+            Kv::Paged(lease) => {
+                let block_size = lease.block_size();
+                assert_eq!(
+                    lease.adopted_positions(block_size),
+                    0,
+                    "a scored prompt must not adopt a prefix: the adopted positions have no \
+                     logit rows, and a hole is not a score"
+                );
+                decoder
+                    .forward_batch_paged(tokens, 0, &mut lease.caches, &lease.store)
+                    .ok()
+            }
         }
     }
 
@@ -1980,8 +2037,21 @@ pub fn generate(
     } else {
         kv = match (paged_kv, kv_pool) {
             (Some(config), _) => Kv::Paged(
-                acquire_paged_caches(decoder, config, &tokens, max_seq_len, params.cache_salt)
-                    .map_err(|_| DecodeError::KvPoolExhausted)?,
+                acquire_paged_caches(
+                    decoder,
+                    config,
+                    &tokens,
+                    max_seq_len,
+                    // A request scoring its prompt must run every
+                    // position of it, so it declines the adoption
+                    // rather than reporting holes.
+                    if params.prompt_logprobs.is_some() {
+                        PrefixIntent::own_prompt_only(params.cache_salt)
+                    } else {
+                        PrefixIntent::sharing(params.cache_salt)
+                    },
+                )
+                .map_err(|_| DecodeError::KvPoolExhausted)?,
             ),
             (None, Some(config)) => Kv::Contiguous(
                 acquire_pooled_caches(decoder, config, max_seq_len)
@@ -2014,17 +2084,11 @@ pub fn generate(
             // the cheap path exactly as it was.
             if params.prompt_logprobs.is_some() {
                 let Some(rows) = kv.prefill_scored(decoder, &tokens) else {
-                    // The paged store's prefill SKIPS whatever the
-                    // radix tree already holds, so it has no rows for
-                    // those positions and scoring them would be an
-                    // invention. Refused by name rather than reported
-                    // with holes.
-                    return Err(DecodeError::Unsupported(
-                        "`prompt_logprobs` needs a logit row for every prompt position, and a \
-                         paged request's prefill skips the positions the prefix tree already \
-                         holds. Serve it without `--paged-kv`."
-                            .to_string(),
-                    ));
+                    // The paged store ran out of pages between
+                    // admission and here. Typed rather than a panic:
+                    // the store is shared, and another request taking
+                    // the last page is a retry, not a defect.
+                    return Err(DecodeError::KvPoolExhausted);
                 };
                 let last = rows.last().cloned().unwrap_or_default();
                 tokens_for_scoring = tokens.clone();
@@ -3993,9 +4057,14 @@ mod tests {
         // dry.
         for round in 0..40u32 {
             let tokens: Vec<usize> = (0..12).map(|i| (round * 100 + i) as usize).collect();
-            let mut lease =
-                acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 8, None)
-                    .expect("admission must keep succeeding once the tree can be evicted");
+            let mut lease = acquire_paged_caches(
+                &decoder,
+                &config,
+                &tokens,
+                tokens.len() + 8,
+                PrefixIntent::default(),
+            )
+            .expect("admission must keep succeeding once the tree can be evicted");
             publish_to_radix(&mut lease, &tokens, block_size);
             drop(lease);
         }
@@ -4144,6 +4213,70 @@ mod tests {
         }
     }
 
+    /// **`prompt_logprobs` on the PAGED store, through `generate`.**
+    ///
+    /// The unit test beside the lease pins that a declining request
+    /// scores every position; this pins that `generate` DECIDES to
+    /// decline. With a prefix in the tree and the sharing intent, the
+    /// request adopts pages it has no rows for, and scoring it would
+    /// report holes -- which is what the refusal this replaces existed
+    /// to avoid.
+    #[test]
+    fn a_paged_request_scoring_its_prompt_declines_the_prefix_tree() {
+        let decoder = small_decoder();
+        let block_size = 4;
+        let config = paged_config_with_radix(&decoder, block_size, /* blocks = */ 2_000, true);
+        let prompt = "abcabcabcabcabcabc";
+
+        let run = |prompt_logprobs: Option<usize>| {
+            let mut params = greedy_params(4);
+            params.prompt_logprobs = prompt_logprobs;
+            let (_finishes, rows, ids, _usage) = generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                prompt,
+                &params,
+                None,
+                Some(&config),
+                None,
+                None,
+                |_, _| {},
+            )
+            .expect("paged");
+            (rows, ids)
+        };
+
+        // First request publishes its prefix.
+        let (rows, _) = run(None);
+        assert!(rows.is_empty(), "a request that did not ask was scored");
+        assert!(
+            config
+                .radix
+                .as_ref()
+                .expect("configured with a tree")
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .total_size()
+                > 0,
+            "nothing was published, so declining the tree proves nothing"
+        );
+
+        // Second asks to score its prompt: every position, no holes.
+        let (rows, ids) = run(Some(3));
+        assert_eq!(
+            rows.len(),
+            ids.len(),
+            "one logit row per prompt token, or a position has no score"
+        );
+        assert!(rows.len() > block_size, "the prompt is shorter than a page");
+        assert!(
+            rows[0] != rows[rows.len() - 1],
+            "every position scored identically, so this proved nothing"
+        );
+    }
+
     /// **`n` > 1 on the PAGED store answers what the contiguous store
     /// answers**, and prefills once.
     ///
@@ -4253,8 +4386,14 @@ mod tests {
         let max_seq_len = tokens.len() + 8;
 
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
-                .expect("the store is large enough"),
+            acquire_paged_caches(
+                &decoder,
+                &config,
+                &tokens,
+                max_seq_len,
+                PrefixIntent::default(),
+            )
+            .expect("the store is large enough"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
         let Kv::Paged(lease) = kv else { unreachable!() };
@@ -4299,8 +4438,14 @@ mod tests {
 
         // Prefill really writes the positions, so `seq_len` is ragged.
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
-                .expect("the store is large enough"),
+            acquire_paged_caches(
+                &decoder,
+                &config,
+                &tokens,
+                max_seq_len,
+                PrefixIntent::default(),
+            )
+            .expect("the store is large enough"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
         let Kv::Paged(lease) = kv else { unreachable!() };
@@ -4360,8 +4505,14 @@ mod tests {
         let max_seq_len = tokens.len() + 8;
 
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
-                .expect("the store is large enough"),
+            acquire_paged_caches(
+                &decoder,
+                &config,
+                &tokens,
+                max_seq_len,
+                PrefixIntent::default(),
+            )
+            .expect("the store is large enough"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
         let Kv::Paged(lease) = kv else { unreachable!() };
@@ -4415,7 +4566,14 @@ mod tests {
 
         {
             let mut kv = Kv::Paged(
-                acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None).unwrap(),
+                acquire_paged_caches(
+                    &decoder,
+                    &config,
+                    &tokens,
+                    max_seq_len,
+                    PrefixIntent::default(),
+                )
+                .unwrap(),
             );
             let _ = kv.prefill(&decoder, &tokens, false);
             let Kv::Paged(lease) = kv else { unreachable!() };
@@ -4442,8 +4600,14 @@ mod tests {
         let decoder = windowed_decoder(8);
         let config = paged_config(&decoder, 4, /* blocks = */ 200);
         let tokens: Vec<usize> = vec![1, 2, 3];
-        let lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 64, None)
-            .expect("the store is large enough");
+        let lease = acquire_paged_caches(
+            &decoder,
+            &config,
+            &tokens,
+            tokens.len() + 64,
+            PrefixIntent::default(),
+        )
+        .expect("the store is large enough");
         assert!(
             lease.window.is_some(),
             "not a windowed request, so this proved nothing"
@@ -4467,13 +4631,26 @@ mod tests {
         // taken and must try, take some, and give them back.
         let need = {
             let sized = paged_config(&decoder, block_size, 1_000);
-            let lease = acquire_paged_caches(&decoder, &sized, &tokens, max_seq_len, None).unwrap();
+            let lease = acquire_paged_caches(
+                &decoder,
+                &sized,
+                &tokens,
+                max_seq_len,
+                PrefixIntent::default(),
+            )
+            .unwrap();
             lease.groups.len()
         };
         let config = paged_config(&decoder, block_size, need);
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
-                .expect("sized to exactly one request"),
+            acquire_paged_caches(
+                &decoder,
+                &config,
+                &tokens,
+                max_seq_len,
+                PrefixIntent::default(),
+            )
+            .expect("sized to exactly one request"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
         let Kv::Paged(lease) = kv else { unreachable!() };
@@ -4696,9 +4873,14 @@ mod tests {
         let config = paged_config(&decoder, block_size, /* blocks = */ 200);
         let tokens: Vec<usize> = vec![1, 2, 3];
 
-        let mut lease =
-            acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 4_000, None)
-                .expect("the store holds a window's worth");
+        let mut lease = acquire_paged_caches(
+            &decoder,
+            &config,
+            &tokens,
+            tokens.len() + 4_000,
+            PrefixIntent::default(),
+        )
+        .expect("the store holds a window's worth");
         let after_admission = config.store.free_groups();
         let held = lease.groups.len();
 
@@ -4753,9 +4935,14 @@ mod tests {
             // position rather than at the next multiple of the default.
             config.slide_interval = 4;
             config.anchor_token = armed.then_some(anchor_token as u32);
-            let mut lease =
-                acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 1_000, None)
-                    .expect("the store is large enough");
+            let mut lease = acquire_paged_caches(
+                &decoder,
+                &config,
+                &tokens,
+                tokens.len() + 1_000,
+                PrefixIntent::default(),
+            )
+            .expect("the store is large enough");
             for pos in tokens.len()..check {
                 if at.contains(&(pos + 1)) {
                     lease.observe_sampled(anchor_token, pos + 1, false);
@@ -4865,9 +5052,14 @@ mod tests {
         let config = paged_config(&decoder, block_size, /* blocks = */ 200);
         let tokens: Vec<usize> = vec![1, 2, 3];
 
-        let mut lease =
-            acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 4_000, None)
-                .expect("the store holds a window's worth");
+        let mut lease = acquire_paged_caches(
+            &decoder,
+            &config,
+            &tokens,
+            tokens.len() + 4_000,
+            PrefixIntent::default(),
+        )
+        .expect("the store holds a window's worth");
 
         for pos in tokens.len()..tokens.len() + 4_000 {
             lease.before_step(pos);
@@ -4921,9 +5113,14 @@ mod tests {
 
         // A second request off that prefix, driven long past the window.
         let tokens: Vec<usize> = shared.iter().map(|&b| b as usize).collect();
-        let mut lease =
-            acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 3_000, None)
-                .expect("the store is large enough");
+        let mut lease = acquire_paged_caches(
+            &decoder,
+            &config,
+            &tokens,
+            tokens.len() + 3_000,
+            PrefixIntent::default(),
+        )
+        .expect("the store is large enough");
         let locked = lease.adopted_positions(block_size);
         assert!(locked > 0, "this test needs a real prefix match");
 
