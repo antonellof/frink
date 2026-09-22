@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-22
+
 ### Added
 
 - **`prompt_logprobs` on `/v1/completions`.** Scores the PROMPT rather
