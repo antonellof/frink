@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use frink_core::cache::{PageGroup, SharedPagedKv};
 
 use crate::generate::acquire_paged_caches;
-use crate::policy::radix::RadixCache;
+use crate::policy::radix::SaltedRadix;
 
 use super::super::row::{Job, RowKv, Rows};
 use super::super::worker::accept;
@@ -31,8 +31,8 @@ const BLOCK: usize = 4;
 fn paged_with_radix(
     decoder: &Arc<Decoder>,
     groups: usize,
-) -> (PagedKvConfig, Arc<SharedPagedKv>, Arc<Mutex<RadixCache>>) {
-    let radix = Arc::new(Mutex::new(RadixCache::new(BLOCK)));
+) -> (PagedKvConfig, Arc<SharedPagedKv>, Arc<Mutex<SaltedRadix>>) {
+    let radix = Arc::new(Mutex::new(SaltedRadix::new(BLOCK)));
     let store = Arc::new(SharedPagedKv::new(
         decoder.layers.len(),
         BLOCK,
@@ -94,14 +94,14 @@ fn finish_row(slot: Slot) {
 }
 
 /// The page groups the tree holds for `prompt`, one per block.
-fn published_groups(radix: &Arc<Mutex<RadixCache>>, prompt: &[usize]) -> (usize, Vec<u32>) {
+fn published_groups(radix: &Arc<Mutex<SaltedRadix>>, prompt: &[usize]) -> (usize, Vec<u32>) {
     let ids: Vec<u32> = prompt.iter().map(|&t| t as u32).collect();
     let mut tree = radix.lock().unwrap();
-    let m = tree.match_prefix(&ids);
+    let m = tree.match_prefix(None, &ids);
     if m.cached_len == 0 {
         return (0, Vec::new());
     }
-    let per_token = tree.matched_indices(m.node);
+    let per_token = tree.matched_indices(m.handle);
     (
         m.cached_len,
         per_token[..m.cached_len]
@@ -316,7 +316,7 @@ fn the_leases_adopted_count_and_its_seeded_kv_rows_agree() {
     let (first, _rx1) = admit_prefilled(&decoder, &config, prompt.clone(), 4).expect("admitted");
     finish_row(first);
 
-    let mut lease = acquire_paged_caches(&decoder, &config, &prompt, prompt.len() + 4)
+    let mut lease = acquire_paged_caches(&decoder, &config, &prompt, prompt.len() + 4, None)
         .expect("the store has pages to spare");
     let claimed = lease.adopted_positions(BLOCK);
     assert!(claimed > 0, "the second request must adopt something");
@@ -376,4 +376,58 @@ fn batched_publishing_does_not_starve_the_page_pool() {
     // The pages the tree keeps are the whole point, so the pool does
     // NOT return to its starting size -- it just must not reach zero.
     assert!(store.free_groups() <= free_at_start);
+}
+
+/// **`cache_salt` on the PAGED store: two callers, one prompt, no
+/// sharing.**
+///
+/// The refusal this replaces said the tree had no namespace to scope a
+/// lookup to, so serving the field would tell a caller they had
+/// isolation they did not. Asserted at the level the isolation is
+/// real: a second request under the SAME salt adopts pages, and one
+/// under a different salt adopts nothing.
+#[test]
+fn a_salted_paged_request_adopts_only_its_own_callers_pages() {
+    let decoder = tiny_decoder();
+    let (config, _store, _radix) = paged_with_radix(&decoder, 128);
+    let prompt = vec![1usize, 2, 3, 4, 5, 6, 7, 8];
+    let long = prompt.len() + 4;
+
+    // Caller A publishes its prefix.
+    {
+        let mut lease = acquire_paged_caches(&decoder, &config, &prompt, long, Some(1))
+            .expect("the store has pages");
+        for cache in lease.caches_mut().iter_mut() {
+            cache.adopt_blocks(cache.block_table().to_vec(), prompt.len(), BLOCK);
+        }
+        crate::generate::publish_to_radix(&mut lease, &prompt, BLOCK);
+    }
+
+    // The same caller adopts them.
+    let same = acquire_paged_caches(&decoder, &config, &prompt, long, Some(1))
+        .expect("the store has pages");
+    assert!(
+        same.adopted_positions(BLOCK) > 0,
+        "a caller was not served its own published prefix"
+    );
+    drop(same);
+
+    // A different caller does not.
+    let other = acquire_paged_caches(&decoder, &config, &prompt, long, Some(2))
+        .expect("the store has pages");
+    assert_eq!(
+        other.adopted_positions(BLOCK),
+        0,
+        "a different `cache_salt` was served the first caller's pages"
+    );
+    drop(other);
+
+    // Nor does an unsalted one, which is the shared namespace.
+    let shared =
+        acquire_paged_caches(&decoder, &config, &prompt, long, None).expect("the store has pages");
+    assert_eq!(
+        shared.adopted_positions(BLOCK),
+        0,
+        "an unsalted request was served a salted caller's pages"
+    );
 }

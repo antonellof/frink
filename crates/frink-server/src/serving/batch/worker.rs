@@ -553,7 +553,13 @@ pub(super) fn accept(
             // Worst case for this row: its prompt plus everything it
             // may generate.
             let max_seq_len = job.prompt_tokens.len() + job.params.max_tokens;
-            match acquire_paged_caches(decoder, config, &job.prompt_tokens, max_seq_len) {
+            match acquire_paged_caches(
+                decoder,
+                config,
+                &job.prompt_tokens,
+                max_seq_len,
+                job.params.cache_salt,
+            ) {
                 Ok(lease) => PrefillState::new_paged(
                     Arc::clone(decoder),
                     &job.prompt_tokens,
