@@ -649,26 +649,15 @@ mod tests {
         );
     }
 
-    /// The wires with no `choices` array still refuse it BY NAME
+    /// The wire with no `choices` array still refuses it BY NAME
     /// rather than quietly answering with one.
     #[tokio::test]
     async fn a_wire_without_a_choices_array_still_refuses_n() {
         let app = crate::tests::test_app();
-        for (uri, body) in [
-            (
-                frink_api::routes::COMPLETION,
-                serde_json::json!({"prompt": "hi", "n_predict": 2, "n": 3}),
-            ),
-            (
-                frink_api::routes::V1_CHAT_COMPLETIONS,
-                serde_json::json!({
-                    "model": "x",
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "max_tokens": 2,
-                    "n": 3
-                }),
-            ),
-        ] {
+        for (uri, body) in [(
+            frink_api::routes::COMPLETION,
+            serde_json::json!({"prompt": "hi", "n_predict": 2, "n": 3}),
+        )] {
             let (status, answer) = crate::tests::post_json_uri(&app, uri, body).await;
             assert_eq!(
                 status,

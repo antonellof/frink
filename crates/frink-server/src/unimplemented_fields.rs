@@ -60,11 +60,19 @@ use crate::{unsupported_feature, ApiError};
 
 /// The routes whose response shape can carry more than one answer.
 ///
+/// STREAMING is a separate question and is refused where it applies:
+/// `choices[].index` interleaving needs a steppable sampler, so a
+/// streaming request with `n` > 1 is refused at the route that streams
+/// rather than here (see `chat_completions_stream`).
+///
 /// Not "every OpenAI route": llama.cpp's native `/completion` returns a
 /// single `content` string, and neither the Anthropic nor the Responses
 /// wire has a `choices` array, so `n` has nowhere to go on them and is
 /// refused by name rather than silently collapsed to one.
-const SERVES_SEVERAL_CHOICES: &[&str] = &[frink_api::routes::V1_COMPLETIONS];
+const SERVES_SEVERAL_CHOICES: &[&str] = &[
+    frink_api::routes::V1_COMPLETIONS,
+    frink_api::routes::V1_CHAT_COMPLETIONS,
+];
 
 /// Fields deserialized purely in order to be refused.
 ///
@@ -328,17 +336,21 @@ mod tests {
     #[test]
     fn a_route_with_a_choices_array_serves_n() {
         let four = parse(serde_json::json!({ "n": 4 }));
-        assert!(
-            four.refuse(frink_api::routes::V1_COMPLETIONS).is_ok(),
-            "the route that renders several choices must serve `n`"
-        );
         for route in [
-            frink_api::routes::COMPLETION,
+            frink_api::routes::V1_COMPLETIONS,
             frink_api::routes::V1_CHAT_COMPLETIONS,
         ] {
-            let err = four.refuse(route).expect_err("no choices array");
-            assert!(format!("{err:?}").contains('n'), "{route}");
+            assert!(
+                four.refuse(route).is_ok(),
+                "{route} renders several choices and must serve `n`"
+            );
         }
+        // llama.cpp's native wire returns a single `content`, so there
+        // is nowhere to put a second answer.
+        let err = four
+            .refuse(frink_api::routes::COMPLETION)
+            .expect_err("no choices array");
+        assert!(format!("{err:?}").contains('n'));
         // And `n: 1` is every route, including the ones that refuse
         // more: a caller spelling out the default asked for what they
         // are getting.
@@ -357,7 +369,7 @@ mod tests {
     /// reading the error should not have to guess which one refused.
     #[test]
     fn the_message_names_the_route() {
-        let err = parse(serde_json::json!({ "n": 4 }))
+        let err = parse(serde_json::json!({ "echo": true }))
             .refuse("/v1/chat/completions")
             .expect_err("refuses");
         assert!(format!("{err:?}").contains("/v1/chat/completions"));
