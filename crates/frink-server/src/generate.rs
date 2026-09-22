@@ -31,9 +31,10 @@ pub enum DecodeError {
     #[error("server is at capacity: the shared KV cache block pool has no free blocks for a new request; retry shortly")]
     KvPoolExhausted,
     /// A well-formed request this deployment cannot serve, named rather
-    /// than approximated. The one case today is `n` > 1 on the paged
-    /// store, whose block lists have no copy-on-write, so the forks the
-    /// feature is FOR cannot be taken.
+    /// than approximated. `prompt_logprobs` and `cache_salt` on the
+    /// paged store are the standing cases, and `n` > 1 there when the
+    /// checkpoint slides a window or the store has no pages left for
+    /// the fork.
     #[error("{0}")]
     Unsupported(String),
     /// The batch scheduler's admission queue is full. Distinct from
@@ -206,6 +207,41 @@ fn slide_hold_bound(window: usize, policy: &WindowPolicy) -> usize {
     2 * (window + SWA_RETAIN_GAP) + policy.eviction_interval + 2 * policy.page_size
 }
 
+/// Why a [`PagedLease::fork`] could not be taken.
+///
+/// Two reasons, and they send an operator to different places: one is
+/// a model this deployment cannot fork at all, the other is a store
+/// that is momentarily full. A single "cannot fork" would read as the
+/// first when it was the second, and the second clears on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkRefused {
+    /// The request runs a sliding window, whose slide recycles pages
+    /// into a private spare list. Two sequences recycling out of one
+    /// set of shared pages would read each other's later positions.
+    SlidingWindow,
+    /// No page groups left. Retryable, unlike the other.
+    StoreExhausted,
+}
+
+impl std::fmt::Display for ForkRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ForkRefused::SlidingWindow => write!(
+                f,
+                "this checkpoint slides a window over its KV, and a slid page is recycled \
+                 privately rather than shared, so two sequences cannot be forked from one. \
+                 Serve it without `--paged-kv`, or send the request n times"
+            ),
+            ForkRefused::StoreExhausted => write!(
+                f,
+                "the paged KV store has no free page groups for the fork; each choice past the \
+                 first reserves its own generation pages up front, as admission does for the \
+                 first. Retry shortly, lower `n`, or raise the page budget"
+            ),
+        }
+    }
+}
+
 /// One request's paged KV, which returns its pages when dropped.
 ///
 /// `PagedKvCache` has no `Drop` of its own -- releasing needs a
@@ -301,6 +337,111 @@ impl PagedLease {
         self.adopted
             .map(|(groups, _)| groups * block_size)
             .unwrap_or(0)
+    }
+
+    /// A second sequence starting from exactly this one's state.
+    ///
+    /// **Copy-on-write, at the one block that needs it.** The fork
+    /// SHARES every page group whose positions are all written -- they
+    /// are finished, nothing will write them again, and a refcount is
+    /// what keeps them alive for both holders. What it does not share
+    /// is the group holding the part-written tail: two forks both
+    /// append there, and the second write would land in the first
+    /// fork's context. That one group is copied, and the groups beyond
+    /// it, which are reserved capacity rather than content, are taken
+    /// fresh.
+    ///
+    /// So the cost is one page group per layer plus the generation
+    /// reservation, not the whole prompt, which is the entire reason
+    /// `n` exists: a 6000-token prompt forked four ways prefills once
+    /// and copies four tail pages.
+    ///
+    /// **Every group is taken here, before a token is generated.** The
+    /// decode loop's forward closure returns `Vec<f32>` and has nowhere
+    /// to report a store that ran dry at token 300 of 400, which is why
+    /// admission reserves a whole request's pages up front; a fork is
+    /// held to the same rule and refuses in the caller's hand instead.
+    ///
+    /// `Err` names which of the three reasons applies, because they
+    /// send an operator to different places.
+    pub fn fork(&self) -> Result<PagedLease, ForkRefused> {
+        if self.window.is_some() {
+            // A fork would slide on its own schedule, and the slide
+            // recycles groups into a PRIVATE spare list. Two sequences
+            // recycling out of one set of shared pages is a
+            // use-after-free that reads as another position's tokens.
+            return Err(ForkRefused::SlidingWindow);
+        }
+        let block_size = self.block_size();
+        let seq_len = self.caches.first().map(|c| c.seq_len()).unwrap_or(0);
+        // Groups whose every position is written, and so are safe to
+        // share. A ragged tail is NOT in this count, which is what
+        // makes the copy below the only one needed.
+        let shared = seq_len / block_size;
+        if shared > self.groups.len() {
+            return Err(ForkRefused::SlidingWindow);
+        }
+        let fresh_needed = self.groups.len() - shared;
+        let mut fresh: Vec<PageGroup> = Vec::with_capacity(fresh_needed);
+        for _ in 0..fresh_needed {
+            let Some(group) = self.store.acquire_group() else {
+                // Hand back what this attempt took: a partial fork
+                // would hold pages nothing will ever release.
+                for group in fresh {
+                    self.store.release_group(group);
+                }
+                return Err(ForkRefused::StoreExhausted);
+            };
+            fresh.push(group);
+        }
+        let mut groups: Vec<Option<PageGroup>> = Vec::with_capacity(self.groups.len());
+        for slot in &self.groups[..shared] {
+            let Some(group) = *slot else {
+                // A hole below the written length means a slide took a
+                // page this fork would have to read.
+                for group in fresh {
+                    self.store.release_group(group);
+                }
+                return Err(ForkRefused::SlidingWindow);
+            };
+            self.store.retain_group(group);
+            groups.push(Some(group));
+        }
+        // The tail group, when the length is ragged: copied rather than
+        // shared, which is the whole of copy-on-write here.
+        if !seq_len.is_multiple_of(block_size) {
+            if let Some(Some(tail)) = self.groups.get(shared) {
+                self.store.copy_group(*tail, fresh[0]);
+            }
+        }
+        groups.extend(fresh.iter().copied().map(Some));
+
+        let mut caches = self.caches.clone();
+        for (layer, cache) in caches.iter_mut().enumerate() {
+            let table: Vec<usize> = groups
+                .iter()
+                .map(|g| {
+                    self.store
+                        .group_blocks(g.expect("every slot was just filled"))[layer]
+                })
+                .collect();
+            cache.retable(table);
+        }
+
+        Ok(PagedLease {
+            caches,
+            store: Arc::clone(&self.store),
+            groups,
+            spare: Vec::new(),
+            // NOT inherited. The lock is one holder's, released by that
+            // lease's `Drop`, and a fork that copied the field would
+            // unlock a node it never locked. The adopted pages stay
+            // alive for the fork through their own refcounts, which is
+            // what refcounts are for.
+            adopted: None,
+            radix: None,
+            window: None,
+        })
     }
 
     /// Whether this request's window has taken any page away.
@@ -1924,19 +2065,32 @@ pub fn generate(
     // is a different prompt.
     let mut forks: Vec<Kv> = Vec::new();
     if n > 1 {
-        let Some(caches) = kv.contiguous_mut() else {
-            // Refused rather than re-prefilled per choice. A caller who
-            // asked for four and silently got four prefills paid four
-            // times for the thing the field exists to avoid, with
-            // nothing in the response saying so.
-            return Err(DecodeError::Unsupported(
-                "`n` > 1 needs a forkable KV cache; this request is on the paged store, whose \
-                 block lists have no copy-on-write yet. Serve it without `--paged-kv`, or send \
-                 the request n times."
-                    .to_string(),
-            ));
-        };
-        forks = (1..n).map(|_| Kv::Contiguous(caches.clone())).collect();
+        // Forked rather than re-prefilled per choice. A caller who
+        // asked for four and silently got four prefills paid four
+        // times for the thing the field exists to avoid, with nothing
+        // in the response saying so.
+        match &mut kv {
+            Kv::Contiguous(caches) => {
+                forks = (1..n).map(|_| Kv::Contiguous(caches.clone())).collect();
+            }
+            Kv::Paged(lease) => {
+                // Copy-on-write: the full pages are shared and only the
+                // part-written tail is copied, so the prompt is held
+                // ONCE however many choices were asked for.
+                for _ in 1..n {
+                    match lease.fork() {
+                        Ok(fork) => forks.push(Kv::Paged(fork)),
+                        // The forks taken so far drop here, returning
+                        // their groups, so a refusal costs nothing.
+                        Err(why) => {
+                            return Err(DecodeError::Unsupported(format!(
+                                "`n` > 1 on the paged KV store: {why}"
+                            )))
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut finishes: Vec<FinishReason> = Vec::with_capacity(n);
@@ -3889,6 +4043,350 @@ mod tests {
                 "layer {l} leaked pages across repeated requests"
             );
         }
+    }
+
+    /// **`n` > 1 on the PAGED store answers what the contiguous store
+    /// answers**, and prefills once.
+    ///
+    /// The end-to-end property the page arithmetic is in service of. A
+    /// fork that shared the ragged tail page produces plausible text
+    /// with one choice's token in another's context, which nothing but
+    /// a comparison against the unforked path can see; and a fork that
+    /// re-prefilled per choice produces the RIGHT text while billing
+    /// four prompts for one, which nothing but the usage can see. Both
+    /// are checked here, because each hides the other's failure.
+    #[test]
+    fn several_choices_on_the_paged_store_match_the_contiguous_ones() {
+        let decoder = small_decoder();
+        let prompt = "abcabcabcabcabcabc";
+        let mut four = greedy_params(6);
+        // Temperature, not greedy: at temperature 0 every choice is the
+        // same sequence by design, and four identical answers cannot
+        // show a tail page one choice wrote into another's.
+        four.sampling.temperature = 1.0;
+        four.n = 4;
+
+        let run = |paged: Option<&PagedKvConfig>, params: &GenerationParams| {
+            let mut per_choice = vec![String::new(); 4];
+            let (finishes, _rows, _ids, usage) = generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                prompt,
+                params,
+                None,
+                paged,
+                None,
+                None,
+                |choice, s| per_choice[choice].push_str(s),
+            )
+            .expect("n = 4");
+            assert_eq!(finishes.len(), 4, "one finish reason per choice");
+            (per_choice, usage)
+        };
+
+        let config = paged_config(
+            &decoder, /* block_size = */ 4, /* blocks = */ 4_000,
+        );
+        let (contiguous, contiguous_usage) = run(None, &four);
+        let (paged, paged_usage) = run(Some(&config), &four);
+
+        assert_eq!(
+            paged, contiguous,
+            "the paged forks answered differently from the contiguous ones"
+        );
+        // The premise, or the comparison above holds trivially.
+        assert!(
+            contiguous[1..].iter().any(|t| *t != contiguous[0]),
+            "every choice matched choice 0, so the derived seeds did nothing: {contiguous:?}"
+        );
+        // Prefilled ONCE, which is the whole reason the field exists.
+        assert_eq!(
+            paged_usage.prompt_tokens, contiguous_usage.prompt_tokens,
+            "the paged path billed a different number of prompts"
+        );
+
+        // **The sensitive half.** At temperature 0 the sampler is
+        // deterministic, so every choice MUST be the same sequence: a
+        // fork whose pages carry anything but the original's KV shows
+        // up here as a choice that differs from choice 0, which the
+        // comparison above can miss -- a small logit change crosses a
+        // sampling boundary only sometimes, and this one has none to
+        // cross.
+        let mut greedy = greedy_params(6);
+        greedy.n = 4;
+        let (greedy_paged, _) = run(Some(&config), &greedy);
+        assert!(
+            greedy_paged.iter().all(|t| *t == greedy_paged[0]),
+            "at temperature 0 the choices must be identical, so a fork read pages that were \
+             not the original's: {greedy_paged:?}"
+        );
+        let (greedy_contiguous, _) = run(None, &greedy);
+        assert_eq!(
+            greedy_paged[0], greedy_contiguous[0],
+            "the paged answer differs from the contiguous one before any fork is involved"
+        );
+        assert!(!greedy_paged[0].is_empty(), "nothing was generated");
+    }
+
+    /// **A fork predicts exactly what the original predicts.**
+    ///
+    /// The property every other test here is circumstantial evidence
+    /// for, stated where it is sharp: feed the same token to the
+    /// original and to its fork and the logit vectors must be
+    /// BIT-IDENTICAL, because the two sequences have the same history.
+    ///
+    /// Text cannot say this. A tiny random decoder's greedy answer
+    /// survives a zeroed page -- measured, not assumed: with the tail
+    /// copy removed, four choices still agreed on every token -- so a
+    /// text comparison is evidence that the plumbing runs and no
+    /// evidence at all about which bytes it read.
+    #[test]
+    fn a_fork_predicts_exactly_what_the_original_predicts() {
+        let decoder = small_decoder();
+        let block_size = 4;
+        let config = paged_config(&decoder, block_size, /* blocks = */ 400);
+        // Ragged on purpose: the tail page is the only one a fork
+        // copies, so a prompt ending on a boundary cannot see the copy.
+        let tokens: Vec<usize> = (1..=9).collect();
+        assert_ne!(tokens.len() % block_size, 0, "a ragged tail is the point");
+        let max_seq_len = tokens.len() + 8;
+
+        let mut kv = Kv::Paged(
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+                .expect("the store is large enough"),
+        );
+        let _ = kv.prefill(&decoder, &tokens, false);
+        let Kv::Paged(lease) = kv else { unreachable!() };
+
+        let mut fork = Kv::Paged(lease.fork().expect("the store has room"));
+        let mut original = Kv::Paged(lease);
+
+        let next = 7usize;
+        let pos = tokens.len();
+        let want = original.step(&decoder, next, pos);
+        let got = fork.step(&decoder, next, pos);
+
+        assert!(
+            want.iter().any(|x| *x != 0.0),
+            "no logits, so nothing is pinned"
+        );
+        assert_eq!(
+            want, got,
+            "the fork predicted something else, so its pages do not carry the original's KV"
+        );
+    }
+
+    /// **The fork SHARES the full pages and COPIES only the tail.**
+    ///
+    /// The whole point of copy-on-write, stated as page arithmetic
+    /// rather than as text: a fork that copied the prompt would cost
+    /// one group per prompt page, and a fork that shared everything
+    /// would put the second choice's tokens in the first's context.
+    /// The right answer is in between, and only an accounting test can
+    /// see which one happened -- both wrong versions generate
+    /// plausible text.
+    #[test]
+    fn a_fork_shares_the_full_pages_and_copies_only_the_ragged_tail() {
+        let decoder = small_decoder();
+        let block_size = 4;
+        let config = paged_config(&decoder, block_size, /* blocks = */ 400);
+        // Nine positions over pages of four: two full pages and a tail
+        // holding one. A prompt that ended on a boundary could not tell
+        // a copied tail from a shared one.
+        let tokens: Vec<usize> = (1..=9).collect();
+        let max_seq_len = tokens.len() + 8;
+
+        // Prefill really writes the positions, so `seq_len` is ragged.
+        let mut kv = Kv::Paged(
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+                .expect("the store is large enough"),
+        );
+        let _ = kv.prefill(&decoder, &tokens, false);
+        let Kv::Paged(lease) = kv else { unreachable!() };
+        assert_eq!(
+            lease.caches[0].seq_len(),
+            tokens.len(),
+            "prefill did not run"
+        );
+
+        let held = lease.groups.len();
+        let free_before = config.store.free_groups();
+        let fork = lease.fork().expect("the store has room");
+
+        // Every page but the shared prefix is fresh, and the shared
+        // prefix cost nothing.
+        let shared = tokens.len() / block_size;
+        assert_eq!(
+            free_before - config.store.free_groups(),
+            held - shared,
+            "the fork took the wrong number of pages: it should share {shared} full pages \
+             of {held} and take the rest"
+        );
+        assert!(shared > 0, "no page was shared, so this proved nothing");
+
+        // The shared ones are the SAME groups, with two holders each.
+        for i in 0..shared {
+            assert_eq!(
+                lease.groups[i], fork.groups[i],
+                "page {i} was copied where it should have been shared"
+            );
+            assert_eq!(
+                config.store.group_refs(lease.groups[i].unwrap()),
+                2,
+                "shared page {i} has the wrong holder count"
+            );
+        }
+        // The tail is NOT, or the two choices write into one page.
+        assert_ne!(
+            lease.groups[shared], fork.groups[shared],
+            "the part-written tail page was shared, so the second choice's token would \
+             land in the first choice's context"
+        );
+    }
+
+    /// **The copied tail carries the original's CONTENT.**
+    ///
+    /// A fork that allocated a fresh tail page and forgot to copy it
+    /// would pass the accounting test above exactly -- same page
+    /// counts, same sharing -- and answer from zeroed keys for the
+    /// positions inside that page. So the bytes are compared directly.
+    #[test]
+    fn the_copied_tail_page_holds_the_same_keys_as_the_original() {
+        let decoder = small_decoder();
+        let block_size = 4;
+        let config = paged_config(&decoder, block_size, /* blocks = */ 400);
+        let tokens: Vec<usize> = (1..=9).collect();
+        let max_seq_len = tokens.len() + 8;
+
+        let mut kv = Kv::Paged(
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+                .expect("the store is large enough"),
+        );
+        let _ = kv.prefill(&decoder, &tokens, false);
+        let Kv::Paged(lease) = kv else { unreachable!() };
+
+        let fork = lease.fork().expect("the store has room");
+        let tail = tokens.len() / block_size;
+        let (src, dst) = (lease.groups[tail].unwrap(), fork.groups[tail].unwrap());
+        assert_ne!(src, dst, "the tail was shared, so this proved nothing");
+
+        let a = config.store.group_blocks(src);
+        let b = config.store.group_blocks(dst);
+        let mut compared = 0usize;
+        for layer in 0..a.len() {
+            let store = config.store.read(layer);
+            // Only the written offsets: the rest of the page is
+            // whatever it was, and a copy of it is not load-bearing.
+            for offset in 0..tokens.len() % block_size {
+                assert_eq!(
+                    store.k_row(a[layer], offset),
+                    store.k_row(b[layer], offset),
+                    "layer {layer} offset {offset}: the fork's tail page was not copied"
+                );
+                assert_eq!(store.v_row(a[layer], offset), store.v_row(b[layer], offset),);
+                compared += 1;
+            }
+        }
+        assert!(compared > 0, "nothing was compared");
+        // And the rows really carry something, or two zeroed pages
+        // would compare equal and prove nothing.
+        let store = config.store.read(0);
+        assert!(
+            store.k_row(a[0], 0).iter().any(|x| *x != 0.0),
+            "the original's tail page is all zeros, so equality proves nothing"
+        );
+    }
+
+    /// A fork releases its pages when it drops, like every other lease.
+    ///
+    /// The failure this catches is the expensive one: a fork that held
+    /// the shared prefix without retaining it would let the ORIGINAL's
+    /// drop free pages the fork still reads, and a fork that retained
+    /// without releasing would leak the whole prompt once per choice.
+    #[test]
+    fn forks_return_every_page_they_took_and_no_more() {
+        let decoder = small_decoder();
+        let block_size = 4;
+        let config = paged_config(&decoder, block_size, /* blocks = */ 400);
+        let tokens: Vec<usize> = (1..=9).collect();
+        let max_seq_len = tokens.len() + 8;
+        let free_at_rest = config.store.free_groups();
+
+        {
+            let mut kv =
+                Kv::Paged(acquire_paged_caches(&decoder, &config, &tokens, max_seq_len).unwrap());
+            let _ = kv.prefill(&decoder, &tokens, false);
+            let Kv::Paged(lease) = kv else { unreachable!() };
+            let forks: Vec<PagedLease> = (0..3).map(|_| lease.fork().expect("room")).collect();
+            assert_eq!(forks.len(), 3);
+            assert_eq!(
+                config.store.group_refs(lease.groups[0].unwrap()),
+                4,
+                "one original and three forks should hold the first page"
+            );
+        }
+
+        assert_eq!(
+            config.store.free_groups(),
+            free_at_rest,
+            "a fork leaked pages, or released one it did not hold"
+        );
+    }
+
+    /// A windowed request refuses to fork BY NAME rather than forking
+    /// into two sequences that recycle out of one set of pages.
+    #[test]
+    fn a_sliding_window_request_refuses_to_fork() {
+        let decoder = windowed_decoder(8);
+        let config = paged_config(&decoder, 4, /* blocks = */ 200);
+        let tokens: Vec<usize> = vec![1, 2, 3];
+        let lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 64)
+            .expect("the store is large enough");
+        assert!(
+            lease.window.is_some(),
+            "not a windowed request, so this proved nothing"
+        );
+        assert_eq!(lease.fork().err(), Some(ForkRefused::SlidingWindow));
+    }
+
+    /// A store with no room refuses in the caller's hand and gives back
+    /// what the attempt took.
+    ///
+    /// The half that matters is the second: a fork that ran out on its
+    /// last page and returned early would strand every page it had
+    /// already taken, and the server would lose them until it restarted.
+    #[test]
+    fn a_fork_that_cannot_be_taken_returns_the_pages_it_took() {
+        let decoder = small_decoder();
+        let block_size = 4;
+        let tokens: Vec<usize> = (1..=9).collect();
+        let max_seq_len = tokens.len() + 40;
+        // Exactly one request's worth, so the first fork cannot be
+        // taken and must try, take some, and give them back.
+        let need = {
+            let sized = paged_config(&decoder, block_size, 1_000);
+            let lease = acquire_paged_caches(&decoder, &sized, &tokens, max_seq_len).unwrap();
+            lease.groups.len()
+        };
+        let config = paged_config(&decoder, block_size, need);
+        let mut kv = Kv::Paged(
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+                .expect("sized to exactly one request"),
+        );
+        let _ = kv.prefill(&decoder, &tokens, false);
+        let Kv::Paged(lease) = kv else { unreachable!() };
+
+        assert_eq!(config.store.free_groups(), 0, "the store should be full");
+        assert_eq!(lease.fork().err(), Some(ForkRefused::StoreExhausted));
+        assert_eq!(
+            config.store.free_groups(),
+            0,
+            "the failed fork should have given back exactly what it took"
+        );
+        // And the original is untouched: it still holds every page.
+        assert_eq!(lease.groups.len(), need);
     }
 
     /// A model where EVERY layer slides by the same window, which is

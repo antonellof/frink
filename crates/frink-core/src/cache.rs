@@ -791,6 +791,29 @@ impl PagedKvStore {
         &self.v[start..start + width]
     }
 
+    /// Copies every position of block `src` over block `dst`.
+    ///
+    /// The one operation copy-on-write needs and nothing else does. A
+    /// sequence that forks shares its full blocks and copies only the
+    /// PART-FULL tail, because that is the single block two forks would
+    /// both write into. Sharing it instead would let one fork's token
+    /// appear in the other's context, which is a wrong answer served
+    /// with a 200 rather than a crash.
+    ///
+    /// The whole block is copied rather than the written prefix of it:
+    /// the unwritten rows are within the block either way, and a
+    /// length-aware copy would need the caller's `seq_len`, which is
+    /// the one number this type deliberately does not hold.
+    pub fn copy_block(&mut self, src: usize, dst: usize) {
+        assert_ne!(src, dst, "copy_block onto itself");
+        let k_span = self.k_elems_per_block();
+        let (ks, kd) = (src * k_span, dst * k_span);
+        self.k.copy_within(ks..ks + k_span, kd);
+        let v_span = self.v_elems_per_block();
+        let (vs, vd) = (src * v_span, dst * v_span);
+        self.v.copy_within(vs..vs + v_span, vd);
+    }
+
     fn k_row_mut(&mut self, id: usize, offset: usize) -> &mut [f32] {
         let width = self.k_width();
         let start = id * self.k_elems_per_block() + offset * width;
@@ -906,6 +929,30 @@ impl PagedKvCache {
     /// neither of which this type can check for itself.
     pub fn append_block(&mut self, block_id: usize) {
         self.block_table.push(block_id);
+    }
+
+    /// Points this sequence at a different set of physical blocks,
+    /// keeping its length.
+    ///
+    /// What a FORK installs. The forked sequence is at the same
+    /// position with the same history, and the only thing that differs
+    /// is where some of those bytes live: the full blocks are the
+    /// original's, shared, and the tail is a copy. The caller owns
+    /// establishing that the new table really holds this sequence's
+    /// content, which is why this is a plain setter and not a `fork`
+    /// method here -- the copying happens a layer up, where the page
+    /// GROUP is the unit and one call covers every layer at once.
+    ///
+    /// The new table must be at least as long as the old, because a
+    /// shorter one would drop blocks the caller still accounts for.
+    pub fn retable(&mut self, block_table: Vec<usize>) {
+        assert!(
+            block_table.len() >= self.block_table.len(),
+            "a retable must not shorten the block table: {} to {}",
+            self.block_table.len(),
+            block_table.len()
+        );
+        self.block_table = block_table;
     }
 
     /// Releases every block this sequence holds back to `store`. Must be
@@ -1287,6 +1334,28 @@ impl SharedPagedKv {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         groups.refs(group.0)
+    }
+
+    /// Copies every layer's block from `src` into `dst`.
+    ///
+    /// The group-level form of [`PagedKvStore::copy_block`], which is
+    /// the unit a sequence forks at: a position's KV lives in one block
+    /// per layer, and a fork that copied some layers and shared others
+    /// would answer with half of each.
+    pub fn copy_group(&self, src: PageGroup, dst: PageGroup) {
+        let (from, to) = {
+            let groups = self
+                .groups
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (groups.blocks(src.0).to_vec(), groups.blocks(dst.0).to_vec())
+        };
+        // Groups lock released before the layer guards, as everywhere
+        // else here: see the type docs on deadlock.
+        let mut guards = self.write_all();
+        for ((store, &s), &d) in guards.iter_mut().zip(&from).zip(&to) {
+            store.copy_block(s, d);
+        }
     }
 
     /// Groups that could still be allocated, bounded by the layer with
