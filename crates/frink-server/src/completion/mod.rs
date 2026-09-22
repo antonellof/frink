@@ -609,9 +609,14 @@ pub(crate) async fn completion(
         .await;
     }
 
-    let (chunks, finish, usage) =
-        decode_task::buffered(handles, prompt.clone(), params.clone()).await?;
-    let content = chunks.concat();
+    let (choices, usage) = decode_task::buffered(handles, prompt.clone(), params.clone()).await?;
+    // Choice 0: this wire has no `n`, and `crate::unimplemented_fields`
+    // refuses the field.
+    let (finish, content) = choices
+        .into_iter()
+        .next()
+        .expect("a generation produces at least one choice");
+
     state.record_request(stats::Record {
         request_id: &request_id,
         route: &route,
@@ -682,7 +687,12 @@ async fn stream(
             }
         });
         match result {
-            Ok((finish, usage, content)) => {
+            // Streaming, so exactly one choice.
+            Ok((choices, usage)) => {
+                let (finish, content) = choices
+                    .into_iter()
+                    .next()
+                    .expect("a generation produces at least one choice");
                 stats_state.record_request(stats::Record {
                     request_id: &stats_request_id,
                     route: &route,

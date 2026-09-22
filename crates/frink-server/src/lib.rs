@@ -2178,14 +2178,19 @@ fn run_generation_emit(
     ceiling: Option<&budget::ContextCeiling>,
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
     mut emit: impl FnMut(&str),
-) -> Result<(FinishReason, generate::Usage, String), generate::DecodeError> {
+    // One entry per choice. `n` is 1 for every streaming request --
+    // `n` > 1 with `stream` is refused at the route, because emitting
+    // choice 0 entirely and then choice 1 is not what a client reading
+    // `choices[].index` expects, and round-robin needs a steppable
+    // sampler (`docs/plans/several-completions-per-request.md`).
+) -> Result<(Vec<(FinishReason, String)>, generate::Usage), generate::DecodeError> {
     let synthetic = model.is_synthetic();
     // Held for the whole generation: a `POST /lora-adapters`, or a
     // request whose `lora` field overrides the scales, waits for this
     // one to finish rather than changing the weights under it. See
     // `crate::lora`.
     let _lora_lease = lora::lease(model, params.lora.as_deref());
-    let mut chunks = Vec::new();
+    let mut chunks: Vec<Vec<String>> = vec![Vec::new(); params.n.max(1)];
     // Layer 1 of the stop machinery is resolved exactly here, because
     // this is the one place that has both the request's stop strings
     // and the model's tokenizer. Both the batched and the private
@@ -2226,14 +2231,14 @@ fn run_generation_emit(
                         m.stop_tokens.clone(),
                         Some(|chunk: &str| {
                             if !chunk.is_empty() {
-                                chunks.push(chunk.to_string());
+                                chunks[0].push(chunk.to_string());
                                 emit(chunk);
                             }
                         }),
                     )?
                 };
-                if !text.is_empty() && chunks.is_empty() {
-                    chunks.push(text);
+                if !text.is_empty() && chunks[0].is_empty() {
+                    chunks[0].push(text);
                 }
                 // One choice: the batch scheduler serves `n = 1` only,
                 // and `crate::unimplemented_fields` refuses the rest on
@@ -2251,15 +2256,12 @@ fn run_generation_emit(
                     paged_kv,
                     prefix_cache,
                     ceiling,
-                    |_choice, chunk| {
-                        // `n` is still refused on the wire
-                        // (`crate::unimplemented_fields`), so every
-                        // request that reaches here has exactly one
-                        // choice and the index is always 0. Wiring the
-                        // field is step 3 of
-                        // `docs/plans/several-completions-per-request.md`.
-                        chunks.push(chunk.to_string());
-                        if !synthetic {
+                    |choice, chunk| {
+                        chunks[choice].push(chunk.to_string());
+                        // Only choice 0 streams, and only a request
+                        // with one choice streams at all: `n` > 1 with
+                        // `stream` is refused at the route.
+                        if !synthetic && choice == 0 {
                             emit(chunk);
                         }
                     },
@@ -2274,7 +2276,7 @@ fn run_generation_emit(
             prompt,
             params,
             |chunk| {
-                chunks.push(chunk.to_string());
+                chunks[0].push(chunk.to_string());
                 if !synthetic {
                     emit(chunk);
                 }
@@ -2288,7 +2290,7 @@ fn run_generation_emit(
             prompt,
             params,
             |chunk| {
-                chunks.push(chunk.to_string());
+                chunks[0].push(chunk.to_string());
                 if !synthetic {
                     emit(chunk);
                 }
@@ -2302,7 +2304,7 @@ fn run_generation_emit(
             prompt,
             params,
             |chunk| {
-                chunks.push(chunk.to_string());
+                chunks[0].push(chunk.to_string());
                 if !synthetic {
                     emit(chunk);
                 }
@@ -2316,7 +2318,7 @@ fn run_generation_emit(
             prompt,
             params,
             |chunk| {
-                chunks.push(chunk.to_string());
+                chunks[0].push(chunk.to_string());
                 if !synthetic {
                     emit(chunk);
                 }
@@ -2324,27 +2326,31 @@ fn run_generation_emit(
         )?,
     };
 
-    let mut full = chunks.concat();
+    let mut full = chunks[0].concat();
     if synthetic {
         full = format!(
             "[frink synthetic-weight demo: no real checkpoint loaded -- set FRINK_MODEL_PATH \
              to serve a real model. Decoded ids -> {full:?}]"
         );
         emit(&full);
-    } else if used_batcher && !full.is_empty() && chunks.is_empty() {
+    } else if used_batcher && !full.is_empty() && chunks[0].is_empty() {
         emit(&full);
     }
 
-    // One choice today: `n` is refused on the wire
-    // (`crate::unimplemented_fields`) and every engine above answers
-    // with exactly one. Step 3 of
-    // `docs/plans/several-completions-per-request.md` is what makes this
-    // a list the caller reads.
-    let finish = finishes
+    // One `(finish_reason, text)` per choice, choice 0 first. Zipped
+    // rather than indexed so a mismatch between the two lists is a
+    // short result rather than a panic -- and the assert says the two
+    // must agree, because a choice with no finish reason is a bug and
+    // not a shape.
+    debug_assert_eq!(finishes.len(), chunks.len(), "one finish reason per choice");
+    let mut out: Vec<(FinishReason, String)> = finishes
         .into_iter()
-        .next()
-        .expect("a generation always produces at least one choice");
-    Ok((finish, usage, full))
+        .zip(chunks.into_iter().map(|c| c.concat()))
+        .collect();
+    if let Some(first) = out.first_mut() {
+        first.1 = full;
+    }
+    Ok((out, usage))
 }
 
 /// Collecting wrapper around [`run_generation_emit`] for non-streaming
@@ -2361,8 +2367,10 @@ pub(crate) fn run_generation(
     continuous_batcher: Option<&serving::batch::ContinuousBatcher>,
     ceiling: Option<&budget::ContextCeiling>,
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
-) -> Result<(Vec<String>, FinishReason, generate::Usage), generate::DecodeError> {
-    let (finish, usage, full) = run_generation_emit(
+    // One `(finish_reason, text)` per choice, choice 0 first. See
+    // `run_generation_emit`.
+) -> Result<(Vec<(FinishReason, String)>, generate::Usage), generate::DecodeError> {
+    run_generation_emit(
         model,
         prompt,
         params,
@@ -2373,16 +2381,7 @@ pub(crate) fn run_generation(
         ceiling,
         metal_private_decode_gate,
         |_| {},
-    )?;
-    Ok((
-        if full.is_empty() {
-            Vec::new()
-        } else {
-            vec![full]
-        },
-        finish,
-        usage,
-    ))
+    )
 }
 
 /// Render a conversation into the prompt the served checkpoint expects.
@@ -2724,15 +2723,21 @@ async fn chat_completions_full(
         tracing::debug!("cache hit for key {}", key.as_ref().unwrap().digest());
         (cached, "hit")
     } else {
-        let (chunks, finish, usage) = decode_task::buffered(
+        let (choices, usage) = decode_task::buffered(
             decode_task::DecodeHandles::take(&state, &active)?,
             prompt.clone(),
             params,
         )
         .await?;
 
+        // Choice 0: `n` > 1 is still refused on this wire, and the
+        // response cache stores ONE answer per key.
+        let (finish, content) = choices
+            .into_iter()
+            .next()
+            .expect("a generation produces at least one choice");
         let completion = response_cache::CachedCompletion {
-            content: chunks.concat(),
+            content,
             finish,
             usage,
         };
@@ -3053,7 +3058,13 @@ async fn chat_completions_stream(
         let mut pending_request_id = first.then(|| request_id.clone());
 
         match result {
-            Ok((finish, usage, full_text)) => {
+            // Streaming, so exactly one choice: `n` > 1 with `stream`
+            // is refused at the route.
+            Ok((choices, usage)) => {
+                let (finish, full_text) = choices
+                    .into_iter()
+                    .next()
+                    .expect("a generation produces at least one choice");
                 if let Some(id) = &session_id {
                     sessions.store_reply(
                         id,
@@ -4803,7 +4814,7 @@ pub(crate) mod tests {
     /// (de)serialization, routing, handler wiring, chat-template
     /// rendering) via `tower::ServiceExt::oneshot`, not just the inner
     /// functions directly.
-    fn test_app() -> Router {
+    pub(crate) fn test_app() -> Router {
         test_app_with_state(Arc::new(test_state(
             test_model_full_byte_vocab(),
             ResponseCache::new(1000, Duration::from_secs(3600)),
@@ -5007,7 +5018,7 @@ pub(crate) mod tests {
         assert_eq!(state.active().unwrap().name(), "model-b");
         // ...and completely invisible to the request already running.
         assert_eq!(in_flight.name(), "model-a");
-        let (_chunks, finish, _usage) = run_generation(
+        let (choices, _usage) = run_generation(
             in_flight.generative().unwrap(),
             "hi",
             &greedy_params(3),
@@ -5019,7 +5030,10 @@ pub(crate) mod tests {
             None,
         )
         .expect("the old model must still decode after being swapped out");
-        assert!(matches!(finish, FinishReason::Length | FinishReason::Stop));
+        assert!(matches!(
+            choices[0].0,
+            FinishReason::Length | FinishReason::Stop
+        ));
     }
 
     /// The other half of the same guarantee: the old model is not freed
@@ -5367,6 +5381,24 @@ pub(crate) mod tests {
             ] {
                 let mut body = base;
                 body[field] = value.clone();
+                // `n` is SERVED where the response has a `choices`
+                // array to carry the answers, which is the one
+                // per-route exception in the table
+                // (`unimplemented_fields::SERVES_SEVERAL_CHOICES`).
+                if field == "n" && uri == frink_api::routes::V1_COMPLETIONS {
+                    let (status, answer) = post_json_uri(&app, uri, body).await;
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "{uri} refused a served `n`: {answer}"
+                    );
+                    assert_eq!(
+                        answer["choices"].as_array().map(Vec::len),
+                        Some(3),
+                        "{answer}"
+                    );
+                    continue;
+                }
                 let (status, answer) = post_json_uri(&app, uri, body).await;
                 assert_eq!(
                     status,
@@ -8602,7 +8634,7 @@ pub(crate) mod tests {
             queue_wait: Duration::ZERO,
         };
 
-        let (_, finish, _usage) = run_generation(
+        let (choices, _usage) = run_generation(
             &model,
             &prompt,
             &greedy_params(4),
@@ -8614,7 +8646,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(choices[0].0, FinishReason::Length);
         assert_eq!(
             pool.lock().unwrap().free_blocks(),
             2,
@@ -8660,14 +8692,16 @@ pub(crate) mod tests {
         // identical output, proving no request's KV cache leaked into
         // another's.
         for r in &results[1..] {
-            assert_eq!(r.0, results[0].0, "decoded chunks must match");
-            assert_eq!(r.1, results[0].1, "finish reason must match");
+            // `.0` is the per-choice `(finish_reason, text)` list and
+            // `.1` the usage, so this one comparison covers both the
+            // text and the reason it stopped.
+            assert_eq!(r.0, results[0].0, "choices must match");
             assert_eq!(
-                r.2.prompt_tokens, results[0].2.prompt_tokens,
+                r.1.prompt_tokens, results[0].1.prompt_tokens,
                 "prompt token count must match"
             );
             assert_eq!(
-                r.2.completion_tokens, results[0].2.completion_tokens,
+                r.1.completion_tokens, results[0].1.completion_tokens,
                 "completion token count must match"
             );
         }
@@ -9098,7 +9132,7 @@ pub(crate) mod tests {
         assert_eq!(active.tokenizer_kind(), "kimi-tiktoken-bpe");
         assert!(!active.is_synthetic());
 
-        let (_chunks, finish, _usage) = run_generation(
+        let (choices, _usage) = run_generation(
             active.generative().unwrap(),
             "hi",
             &greedy_params(5),
@@ -9110,7 +9144,10 @@ pub(crate) mod tests {
             None,
         )
         .expect("a real Kimi checkpoint must generate without error");
-        assert!(matches!(finish, FinishReason::Length | FinishReason::Stop));
+        assert!(matches!(
+            choices[0].0,
+            FinishReason::Length | FinishReason::Stop
+        ));
     }
 
     /// The THIRD decode path: `generate_engine`, which serves every
@@ -9163,17 +9200,17 @@ pub(crate) mod tests {
             )
         };
 
-        let (chunks, _, _) = run(None).expect("the unconstrained run must serve");
-        let unconstrained = chunks.concat();
+        let (choices, _) = run(None).expect("the unconstrained run must serve");
+        let unconstrained = choices[0].1.clone();
         assert!(
             unconstrained.chars().any(|c| c != 'a'),
             "the unconstrained run produced only `a` ({unconstrained:?}), so the \
              constrained run below would prove nothing"
         );
 
-        let (chunks, finish, _) =
+        let (choices, _) =
             run(Some(r#"root ::= "a"+"#)).expect("a grammar this vocabulary can spell must serve");
-        let constrained = chunks.concat();
+        let (finish, constrained) = choices.into_iter().next().unwrap();
         assert!(
             !constrained.is_empty() && constrained.chars().all(|c| c == 'a'),
             "the engine decode path served text its grammar forbids ({constrained:?}): \

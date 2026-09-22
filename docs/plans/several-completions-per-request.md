@@ -1,8 +1,11 @@
 # Several completions per request (`n` > 1)
 
-Status: **steps 1 and 2 landed 2026-09-22; step 3 (wire the field) next.**
-The engine forks and serves `n` choices, tested; the wire still refuses
-the field, so nothing reaches it but the tests.
+Status: **served on `/v1/completions` since 2026-09-22.** Verified on a
+real model: `n: 3` returns three distinct completions and bills the
+prompt ONCE. `/v1/chat/completions` and the native `/completion` still
+refuse the field by name; chat is the remaining row and needs the
+response cache to hold `k` answers per key, streaming to interleave
+`choices[].index`, or a refusal for the streaming pair.
 
 `n` is the OpenAI field for "give me `k` samples of this prompt". Until
 2026-09-22 frink answered it with a 200 and one choice on two of its
@@ -150,9 +153,20 @@ So the order is:
    comparison green. The derivation needs its own test, and it is the
    one that asserts the other choices DIFFER from choice 0 and that
    two runs of the same seeded request agree.
-3. **Wire `n` from the three request bodies** (next) and drop its row from
-   `crate::unimplemented_fields`, which is the one-line change that
-   turns the 501 into a served request.
+3. ~~**Wire `n`**~~ Done for the one OpenAI route whose response has a
+   `choices` array to put the answers in.
+   `unimplemented_fields::SERVES_SEVERAL_CHOICES` is that list, so the
+   field is served where it has a home and refused BY NAME where it
+   does not -- llama.cpp's native `/completion` returns one `content`,
+   and neither the Anthropic nor the Responses wire has the array at
+   all.
+
+4. **`/v1/chat/completions`** (next). Not a copy of step 3: its
+   non-streaming path goes through the response cache, which stores ONE
+   answer per key and would have to hold `k`; and its streaming path
+   needs either round-robin interleaving of `choices[].index` or a
+   refusal for the `n` > 1 + `stream` pair. `/v1/completions` is
+   buffered, which is why it went first.
 
 Step 1 is worth doing whether or not `n` ever lands, which is the test
 of whether a prerequisite is real or an excuse.

@@ -15,6 +15,36 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`n` > 1 on `/v1/completions`**: several completions of one prompt,
+  with the prompt **prefilled once**. Verified on a real model --
+  `n: 3` returns three distinct completions and bills
+  `prompt_tokens: 6`, not 18.
+
+  That billing is the acceptance test, not the wall clock. A caller who
+  wanted `k` independent generations could already send `k` requests;
+  the only thing the field buys is the shared prefill, so a version
+  that re-prefilled per choice would be the feature in name only with
+  nothing in the response saying so. The forks are taken from the
+  post-prefill KV state, before choice 0 decodes into it.
+
+  Choice `i` samples from `seed + i`, derived rather than drawn, so a
+  seeded request stays reproducible and choice 0 is byte-identical to
+  the single answer at the same seed. `completion_tokens` sums over
+  choices; the prefix cache still stores choice 0's continuation,
+  which is the one a later `n = 1` reproduces.
+
+  **Refused by name where it has no home**, rather than collapsed to
+  one: llama.cpp's native `/completion` returns a single `content`,
+  and neither the Anthropic nor the Responses wire has a `choices`
+  array. `/v1/chat/completions` is the remaining row -- its
+  non-streaming path goes through a response cache that stores one
+  answer per key, and its streaming path needs interleaved
+  `choices[].index`. Also refused by name: the paged KV store, whose
+  block lists have no copy-on-write, and the Kimi/MLA engines, whose
+  recurrent state has no cache to clone.
+
 ## [0.31.0] - 2026-09-22
 
 ### Fixed
