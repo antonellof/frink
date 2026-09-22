@@ -538,6 +538,7 @@ pub(crate) async fn completion(
 
     let prompt = req.prompt_text()?.to_string();
     let mut params = GenerationParams {
+        prompt_logprobs: None,
         // Wired per route once a wire renders them; see
         // `docs/plans/per-token-logprobs.md`.
         wants_logprobs: false,
@@ -612,10 +613,12 @@ pub(crate) async fn completion(
         .await;
     }
 
-    let (choices, usage) = decode_task::buffered(handles, prompt.clone(), params.clone()).await?;
+    let produced = decode_task::buffered(handles, prompt.clone(), params.clone()).await?;
+    let usage = produced.usage;
     // Choice 0: this wire has no `n`, and `crate::unimplemented_fields`
     // refuses the field.
-    let one = choices
+    let one = produced
+        .choices
         .into_iter()
         .next()
         .expect("a generation produces at least one choice");
@@ -692,8 +695,10 @@ async fn stream(
         });
         match result {
             // Streaming, so exactly one choice.
-            Ok((choices, usage)) => {
-                let one = choices
+            Ok(generated) => {
+                let usage = generated.usage;
+                let one = generated
+                    .choices
                     .into_iter()
                     .next()
                     .expect("a generation produces at least one choice");

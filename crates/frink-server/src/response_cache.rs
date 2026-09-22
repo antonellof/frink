@@ -157,6 +157,11 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // distributions, so a request that wants logprobs must MISS.
         // `ChatCompletionRequest::is_cacheable` is where that lives.
         wants_logprobs: _,
+        // NOT KEYED, and for the same reason: scoring the prompt does
+        // not change which tokens come back. `is_cacheable` refuses to
+        // cache such a request at all (`CachedCompletion` stores no
+        // distributions), so this never decides a hit.
+        prompt_logprobs: _,
         sampling,
         // NOT KEYED. The resolved seed is a clock reading for any
         // request that named none, which would give every greedy
@@ -555,6 +560,7 @@ mod tests {
     /// field at its do-nothing value.
     fn params() -> GenerationParams {
         GenerationParams {
+            prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
             reasoning: None,

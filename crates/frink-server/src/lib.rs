@@ -2232,7 +2232,7 @@ fn run_generation_emit(
     // choice 0 entirely and then choice 1 is not what a client reading
     // `choices[].index` expects, and round-robin needs a steppable
     // sampler (`docs/plans/several-completions-per-request.md`).
-) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), generate::DecodeError> {
+) -> Result<generate::Generated, generate::DecodeError> {
     let synthetic = model.is_synthetic();
     // Held for the whole generation: a `POST /lora-adapters`, or a
     // request whose `lora` field overrides the scales, waits for this
@@ -2266,7 +2266,7 @@ fn run_generation_emit(
     let used_batcher = matches!((model, continuous_batcher), (Model::Gguf(_), Some(_)));
     let _metal_private_guard =
         acquire_metal_private_decode_gate(metal_private_decode_gate, used_batcher);
-    let (finishes, usage) = match model {
+    let (finishes, prompt_rows, prompt_ids, usage) = match model {
         Model::Gguf(m) => {
             if let Some(batcher) = continuous_batcher {
                 let mut tokens = m.tokenizer.encode(prompt, SpecialTokens::Parse);
@@ -2295,7 +2295,10 @@ fn run_generation_emit(
                 // The batch scheduler serves one choice and publishes
                 // no distributions; `wants_logprobs` is refused for a
                 // batched request at the route.
-                (vec![(finish, Vec::new())], usage)
+                // No prompt rows: the batch scheduler serves one
+                // choice and `prompt_logprobs` is refused for it at
+                // the route.
+                (vec![(finish, Vec::new())], Vec::new(), Vec::new(), usage)
             } else {
                 generate::generate(
                     &m.decoder,
@@ -2417,7 +2420,12 @@ fn run_generation_emit(
         }
         first.text = full;
     }
-    Ok((out, usage))
+    Ok(generate::Generated {
+        choices: out,
+        prompt_rows,
+        prompt_ids,
+        usage,
+    })
 }
 
 /// Collecting wrapper around [`run_generation_emit`] for non-streaming
@@ -2436,7 +2444,7 @@ pub(crate) fn run_generation(
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
     // One `(finish_reason, text)` per choice, choice 0 first. See
     // `run_generation_emit`.
-) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), generate::DecodeError> {
+) -> Result<generate::Generated, generate::DecodeError> {
     run_generation_emit(
         model,
         prompt,
@@ -2799,12 +2807,14 @@ async fn chat_completions_full(
         tracing::debug!("cache hit for key {}", key.as_ref().unwrap().digest());
         (cached, "hit")
     } else {
-        let (choices, usage) = decode_task::buffered(
+        let produced = decode_task::buffered(
             decode_task::DecodeHandles::take(&state, &active)?,
             prompt.clone(),
             params,
         )
         .await?;
+        let usage = produced.usage;
+        let choices = produced.choices;
 
         // The distributions do not go into the cache (see
         // `CachedCompletion`) and do not need to: a request that asked
@@ -3195,8 +3205,10 @@ async fn chat_completions_stream(
         match result {
             // Streaming, so exactly one choice: `n` > 1 with `stream`
             // is refused at the route.
-            Ok((choices, usage)) => {
-                let one = choices
+            Ok(generated) => {
+                let usage = generated.usage;
+                let one = generated
+                    .choices
                     .into_iter()
                     .next()
                     .expect("a generation produces at least one choice");
@@ -4859,6 +4871,7 @@ pub(crate) mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
             reasoning: None,
@@ -5155,7 +5168,7 @@ pub(crate) mod tests {
         assert_eq!(state.active().unwrap().name(), "model-b");
         // ...and completely invisible to the request already running.
         assert_eq!(in_flight.name(), "model-a");
-        let (choices, _usage) = run_generation(
+        let produced = run_generation(
             in_flight.generative().unwrap(),
             "hi",
             &greedy_params(3),
@@ -5168,7 +5181,7 @@ pub(crate) mod tests {
         )
         .expect("the old model must still decode after being swapped out");
         assert!(matches!(
-            choices[0].finish,
+            produced.choices[0].finish,
             FinishReason::Length | FinishReason::Stop
         ));
     }
@@ -5667,6 +5680,17 @@ pub(crate) mod tests {
                 // array to carry the answers, which is the one
                 // per-route exception in the table
                 // (`unimplemented_fields::SERVES_SEVERAL_CHOICES`).
+                // `prompt_logprobs` is served on the one wire with a
+                // field for it, and is not a choices-array question.
+                if field == "prompt_logprobs" && uri == frink_api::routes::V1_COMPLETIONS {
+                    let (status, answer) = post_json_uri(&app, uri, body).await;
+                    assert_eq!(status, StatusCode::OK, "{uri} refused it: {answer}");
+                    assert!(
+                        answer["prompt_logprobs"].is_array(),
+                        "served without the field: {answer}"
+                    );
+                    continue;
+                }
                 if (field == "n" || field == "best_of")
                     && (uri == frink_api::routes::V1_COMPLETIONS
                         || uri == frink_api::routes::V1_CHAT_COMPLETIONS)
@@ -8923,7 +8947,7 @@ pub(crate) mod tests {
             queue_wait: Duration::ZERO,
         };
 
-        let (choices, _usage) = run_generation(
+        let produced = run_generation(
             &model,
             &prompt,
             &greedy_params(4),
@@ -8935,7 +8959,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(choices[0].finish, FinishReason::Length);
+        assert_eq!(produced.choices[0].finish, FinishReason::Length);
         assert_eq!(
             pool.lock().unwrap().free_blocks(),
             2,
@@ -8984,13 +9008,13 @@ pub(crate) mod tests {
             // `.0` is the per-choice `(finish_reason, text)` list and
             // `.1` the usage, so this one comparison covers both the
             // text and the reason it stopped.
-            assert_eq!(r.0, results[0].0, "choices must match");
+            assert_eq!(r.choices, results[0].choices, "choices must match");
             assert_eq!(
-                r.1.prompt_tokens, results[0].1.prompt_tokens,
+                r.usage.prompt_tokens, results[0].usage.prompt_tokens,
                 "prompt token count must match"
             );
             assert_eq!(
-                r.1.completion_tokens, results[0].1.completion_tokens,
+                r.usage.completion_tokens, results[0].usage.completion_tokens,
                 "completion token count must match"
             );
         }
@@ -9421,7 +9445,7 @@ pub(crate) mod tests {
         assert_eq!(active.tokenizer_kind(), "kimi-tiktoken-bpe");
         assert!(!active.is_synthetic());
 
-        let (choices, _usage) = run_generation(
+        let produced = run_generation(
             active.generative().unwrap(),
             "hi",
             &greedy_params(5),
@@ -9434,7 +9458,7 @@ pub(crate) mod tests {
         )
         .expect("a real Kimi checkpoint must generate without error");
         assert!(matches!(
-            choices[0].finish,
+            produced.choices[0].finish,
             FinishReason::Length | FinishReason::Stop
         ));
     }
@@ -9489,17 +9513,17 @@ pub(crate) mod tests {
             )
         };
 
-        let (choices, _) = run(None).expect("the unconstrained run must serve");
-        let unconstrained = choices[0].text.clone();
+        let produced = run(None).expect("the unconstrained run must serve");
+        let unconstrained = produced.choices[0].text.clone();
         assert!(
             unconstrained.chars().any(|c| c != 'a'),
             "the unconstrained run produced only `a` ({unconstrained:?}), so the \
              constrained run below would prove nothing"
         );
 
-        let (choices, _) =
+        let produced =
             run(Some(r#"root ::= "a"+"#)).expect("a grammar this vocabulary can spell must serve");
-        let one = choices.into_iter().next().unwrap();
+        let one = produced.choices.into_iter().next().unwrap();
         let (finish, constrained) = (one.finish, one.text);
         assert!(
             !constrained.is_empty() && constrained.chars().all(|c| c == 'a'),

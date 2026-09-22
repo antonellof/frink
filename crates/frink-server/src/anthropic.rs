@@ -1480,7 +1480,7 @@ async fn messages_full(
     let params =
         chat.generation_params_for_template(&template, active.name(), active.sampler_model())?;
 
-    let (choices, usage) = crate::decode_task::buffered(
+    let produced = crate::decode_task::buffered(
         crate::decode_task::DecodeHandles::take(&state, &active).map_err(anthropic_shape)?,
         prompt,
         params,
@@ -1490,7 +1490,9 @@ async fn messages_full(
 
     // Choice 0: this wire has no `n`, and `crate::unimplemented_fields`
     // refuses the field.
-    let one = choices
+    let usage = produced.usage;
+    let one = produced
+        .choices
         .into_iter()
         .next()
         .expect("a generation produces at least one choice");
@@ -1628,8 +1630,10 @@ async fn messages_stream(
         match result {
             // Streaming, so exactly one choice: `n` > 1 with `stream`
             // is refused at the route.
-            Ok((choices, usage)) => {
-                let one = choices
+            Ok(generated) => {
+                let usage = generated.usage;
+                let one = generated
+                    .choices
                     .into_iter()
                     .next()
                     .expect("a generation produces at least one choice");

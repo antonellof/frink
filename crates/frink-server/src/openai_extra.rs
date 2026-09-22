@@ -255,6 +255,11 @@ pub(crate) struct CompletionsRequest {
     /// caller has to guess at.
     #[serde(default)]
     logprobs: Option<serde_json::Value>,
+    /// vLLM's `prompt_logprobs: N`: score the PROMPT rather than the
+    /// completion. Read as a `Value` so a non-integer is refused by
+    /// name.
+    #[serde(default)]
+    prompt_logprobs: Option<serde_json::Value>,
     #[serde(default)]
     echo: Option<bool>,
     #[serde(default)]
@@ -368,6 +373,37 @@ impl CompletionsRequest {
         }
     }
 
+    /// `prompt_logprobs: N` as a count, or a refusal naming the field.
+    ///
+    /// The same cap as `logprobs`, for the same reason: one request
+    /// must not ask for a whole vocabulary at every prompt position.
+    /// On a 6000-token prompt that is 6000 entries either way, which
+    /// is why this is opt-in and why the cap is small.
+    pub(crate) fn n_prompt_logprobs(&self) -> Result<Option<usize>, ApiError> {
+        const MAX: u64 = 5;
+        match &self.prompt_logprobs {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                Some(v) if v <= MAX => Ok(Some(v as usize)),
+                Some(v) => Err(crate::invalid_request(
+                    &format!(
+                        "`prompt_logprobs` is {v}; this server reports at most {MAX} \
+                         alternatives per position"
+                    ),
+                    "prompt_logprobs",
+                )),
+                None => Err(crate::invalid_request(
+                    "`prompt_logprobs` must be a non-negative whole number",
+                    "prompt_logprobs",
+                )),
+            },
+            Some(other) => Err(crate::invalid_request(
+                &format!("`prompt_logprobs` must be a number, not {other}"),
+                "prompt_logprobs",
+            )),
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ApiError> {
         // `logit_bias` decides in `unsupported_sampling`, shared with
         // `/v1/chat/completions`: the two routes disagreed about this
@@ -384,6 +420,7 @@ impl CompletionsRequest {
         // `logprobs` is SERVED here now (`crate::logprobs`); what is
         // refused is a value the field cannot take.
         self.n_logprobs()?;
+        self.n_prompt_logprobs()?;
         let unsupported = [
             (self.echo == Some(true), "echo"),
             (self.suffix.is_some(), "suffix"),
@@ -540,11 +577,13 @@ pub async fn completions(
     // a wasted decode, and so the sampler is told to report only when
     // this wire will render it.
     let n_logprobs = req.n_logprobs()?;
+    let n_prompt = req.n_prompt_logprobs()?;
     let params = GenerationParams {
         // Also on when `best_of` is ranking, because the score IS the
         // logprobs: there is nothing to rank by without them. The
         // caller still only SEES what they asked for.
         wants_logprobs: n_logprobs.is_some() || req.unimplemented.ranks_candidates(),
+        prompt_logprobs: n_prompt,
         // The prompt is prefilled once and the KV forked per choice
         // (`crate::generate`). Streaming is refused above for `n` > 1,
         // so a streaming request always lands on 1.
@@ -579,12 +618,16 @@ pub async fn completions(
         lora: crate::lora::resolve_request(active.generative()?, req.lora.as_deref())?,
     };
     let wanted = req.unimplemented.n.unwrap_or(1).max(1) as usize;
-    let (choices, usage) = crate::decode_task::buffered(
+    let produced = crate::decode_task::buffered(
         crate::decode_task::DecodeHandles::take(&state, &active)?,
         prompt,
         params,
     )
     .await?;
+    let usage = produced.usage;
+    let prompt_rows = produced.prompt_rows;
+    let prompt_ids = produced.prompt_ids;
+    let choices = produced.choices;
 
     // One entry per choice, in order, which is what `n` asked for.
     // The same detokenizer `/v1/detokenize` answers with, so a client
@@ -641,6 +684,17 @@ pub async fn completions(
         "model": model_name,
         "choices": rendered,
         "usage": usage,
+        // vLLM's field: one entry per PROMPT token, the first `null`
+        // because nothing predicted it. Absent unless asked.
+        "prompt_logprobs": match n_prompt {
+            Some(k) => crate::logprobs::render_prompt(
+                &prompt_ids,
+                &prompt_rows,
+                k,
+                &decode_piece,
+            ),
+            None => serde_json::Value::Null,
+        },
     })))
 }
 
@@ -1004,6 +1058,91 @@ mod tests {
             assert!(
                 text.len() >= off && text[off..].starts_with(piece),
                 "offset {off} does not point at {piece:?} in {text:?}"
+            );
+        }
+    }
+
+    /// `prompt_logprobs` scores the PROMPT: one entry per prompt
+    /// token, the first `null` because nothing predicted it, and every
+    /// later one carrying the log-probability the model gave the token
+    /// that actually followed -- WHATEVER its rank.
+    ///
+    /// That last part is the whole field: a supplied token no sampler
+    /// would have picked still gets its number.
+    #[tokio::test]
+    async fn the_prompt_is_scored_including_tokens_no_sampler_would_pick() {
+        let app = crate::tests::test_app();
+        let (status, without) = crate::tests::post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({"model": "x", "prompt": "hello there", "max_tokens": 1}),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{without}");
+        assert!(
+            without["prompt_logprobs"].is_null(),
+            "reported without being asked: {without}"
+        );
+
+        let (status, with) = crate::tests::post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "prompt": "hello there",
+                "max_tokens": 1,
+                "prompt_logprobs": 2
+            }),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{with}");
+        let arr = with["prompt_logprobs"].as_array().expect("an array");
+        assert!(arr.len() > 1, "a one-token prompt proves nothing: {with}");
+        assert!(
+            arr[0].is_null(),
+            "something predicted the first token: {with}"
+        );
+
+        for (i, entry) in arr.iter().enumerate().skip(1) {
+            let e = entry
+                .as_object()
+                .unwrap_or_else(|| panic!("position {i}: {entry}"));
+            assert!(!e.is_empty(), "position {i} scored nothing: {entry}");
+            for v in e.values() {
+                let lp = v["logprob"].as_f64().expect("a real number");
+                assert!(lp <= 0.0 && lp.is_finite(), "position {i}: {v}");
+                assert!(
+                    v["rank"].as_u64().is_some_and(|r| r >= 1),
+                    "rank is 1-based: {v}"
+                );
+                assert!(v["decoded_token"].is_string(), "{v}");
+            }
+        }
+    }
+
+    /// The count is validated rather than trusted, same cap and same
+    /// shape as `logprobs`.
+    #[tokio::test]
+    async fn the_prompt_logprobs_count_is_validated() {
+        let app = crate::tests::test_app();
+        for bad in [serde_json::json!(6), serde_json::json!("two")] {
+            let (status, answer) = crate::tests::post_json_uri(
+                &app,
+                frink_api::routes::V1_COMPLETIONS,
+                serde_json::json!({
+                    "model": "x",
+                    "prompt": "hi",
+                    "max_tokens": 1,
+                    "prompt_logprobs": bad
+                }),
+            )
+            .await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{answer}");
+            assert!(
+                answer["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("prompt_logprobs")),
+                "{answer}"
             );
         }
     }

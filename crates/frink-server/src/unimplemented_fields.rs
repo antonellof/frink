@@ -188,11 +188,14 @@ impl UnimplementedFields {
                 ));
             }
         }
-        if prompt_logprobs.is_some() {
+        // Served on `/v1/completions` (`crate::logprobs::render_prompt`).
+        // Elsewhere it is refused by name: the chat wire has no field
+        // for it, and the native `/completion` returns one `content`.
+        if prompt_logprobs.is_some() && route != frink_api::routes::V1_COMPLETIONS {
             return Err(refusal(
                 route,
                 "prompt_logprobs",
-                "logprobs for the PROMPT's own tokens",
+                "logprobs for the PROMPT's own tokens on this wire, which has no field for them",
             ));
         }
         if echo == &Some(true) {
