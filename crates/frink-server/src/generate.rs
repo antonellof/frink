@@ -769,7 +769,7 @@ pub(crate) fn publish_to_radix(lease: &mut PagedLease, tokens: &[usize], block_s
 /// would duplicate the sampling, the stop matching and the usage
 /// accounting, which is how the paged DECODER path lost five model
 /// features one at a time.
-enum Kv {
+pub(crate) enum Kv {
     Contiguous(Vec<KvCache>),
     Paged(PagedLease),
 }
@@ -886,14 +886,14 @@ impl Kv {
     /// request has nothing to hand it. That is why the two are refused
     /// together at startup rather than silently producing a cache that
     /// never hits -- and it is what `wire-radix-prefix-cache` removes.
-    fn contiguous_mut(&mut self) -> Option<&mut Vec<KvCache>> {
+    pub(crate) fn contiguous_mut(&mut self) -> Option<&mut Vec<KvCache>> {
         match self {
             Kv::Contiguous(caches) => Some(caches),
             Kv::Paged(_) => None,
         }
     }
 
-    fn into_contiguous(self) -> Option<Vec<KvCache>> {
+    pub(crate) fn into_contiguous(self) -> Option<Vec<KvCache>> {
         match self {
             Kv::Contiguous(caches) => Some(caches),
             Kv::Paged(_) => None,
@@ -1763,112 +1763,40 @@ pub fn generate(
         draft_max,
     )?;
     let decode_secs = decode_start.elapsed().as_secs_f64();
-    let (spec_forwards, spec_accepted, spec_drafted) =
-        (engine.forwards, engine.accepted, engine.drafted);
+    // Read the counters out BEFORE the tail, because this is the
+    // engine's last use and the tail takes by value the two things it
+    // borrows mutably (`kv`, `first_token_at`). Reading them inside the
+    // struct literal below would keep the borrow alive past the move.
+    let speculation = (engine.forwards, engine.accepted, engine.drafted);
     logits = final_logits;
-    let mut usage =
-        Usage::new(prompt_tokens, generated_ids.len()).with_timings(prefill_secs, decode_secs);
-    // The producer this metric never had. Reported only when a round
-    // actually ran, so the fields stay ABSENT for a request that did
-    // not speculate rather than reporting a zero that reads as "the
-    // drafter was useless".
-    if spec_drafted > 0 {
-        usage = usage.with_speculation(spec_forwards, spec_accepted, spec_drafted, Vec::new());
+    // Everything after the last token -- the usage block and the three
+    // places this request's KV may be published -- is
+    // `crate::request_tail`. It is lifted out unchanged, and the seam
+    // is not arbitrary: it is exactly the part that runs ONCE per
+    // request rather than once per completion, which is what
+    // `docs/plans/several-completions-per-request.md` needs next.
+    let usage = crate::request_tail::RequestTail {
+        decoder,
+        tokenizer,
+        params,
+        prompt,
+        tokens,
+        generated_ids,
+        logits,
+        kv,
+        prompt_tokens,
+        vocab_size,
+        prefill_secs,
+        decode_secs,
+        prefill_start,
+        first_token_at,
+        cached_tokens,
+        speculation,
+        kv_pool_configured: kv_pool.is_some(),
+        radix_enabled: paged_kv.is_some_and(|c| c.radix.is_some()),
+        prefix_cache,
     }
-    if let Some(at) = first_token_at {
-        usage = usage.with_ttft(at.duration_since(prefill_start).as_secs_f64());
-    }
-    if let Some(cached) = cached_tokens {
-        usage = usage.with_cached_tokens(cached);
-    }
-    // How much of the answer was thinking. `None` when this checkpoint
-    // has no reasoning format, which leaves `completion_tokens_details`
-    // ABSENT -- a zero there reads as "this model did not think" rather
-    // than "nobody counted", and `/v1/responses` shipped exactly that
-    // confusion (#120).
-    //
-    // Whether the prompt already opened the block is read off the
-    // rendered prompt, not guessed from the family: a template asked to
-    // think opens it itself, and then the first generated token is
-    // already reasoning with no marker to find.
-    if let Some(reasoning) = crate::reasoning_tokens::count(
-        params.reasoning,
-        params
-            .reasoning
-            .is_some_and(|f| f.prompt_opens_reasoning(prompt)),
-        &generated_ids,
-        |ids| tokenizer.decode(ids),
-    ) {
-        usage = usage.with_reasoning_tokens(reasoning);
-    }
-    // A paged request's reuse is the radix tree's, not the contiguous
-    // prefix cache's, so it is counted here instead. Reported through
-    // the same field because it means the same thing to a caller:
-    // prompt positions this request did not have to compute.
-    if let Kv::Paged(lease) = &kv {
-        let adopted = lease.adopted_positions(lease.block_size());
-        if paged_kv.is_some_and(|c| c.radix.is_some()) {
-            usage = usage.with_cached_tokens(adopted);
-        }
-    }
-
-    // Store the full sequence this request actually processed (prompt
-    // plus everything generated) so a future request sharing this
-    // prefix -- the common multi-turn-chat case, where each turn's
-    // prompt is the previous turn's full prompt+reply plus a little
-    // more -- can skip recomputing it. `caches`/`logits` are exactly
-    // in the right state for this: `logits` predicts whatever would
-    // come after this sequence (the token that triggered an EOS/stop
-    // match, if generation stopped that way, or the natural next
-    // prediction if it ran to `max_tokens`), and every token in
-    // `tokens`/`generated_ids` has exactly one corresponding cache
-    // entry -- see the per-token push above. Skipped whenever a KV
-    // pool is configured, for the same reason restoration is (see this
-    // function's earlier comment).
-    //
-    // Metal dense-stack decode may leave host KvCache lagging the
-    // Metal-resident KV; flush before storing so prefix restore gets
-    // complete K/V.
-    // Before the contiguous store below, which consumes `kv`,
-    // `tokens` and `generated_ids`. Independent of `kv_pool`, which a
-    // paged request never has: it is the paged store that holds this
-    // request's KV, and the tree that decides whether the next request
-    // can reuse it. The two are mutually exclusive at startup, so only
-    // one of these ever runs.
-    if let Kv::Paged(lease) = &mut kv {
-        // Publish under the sequence actually processed, prompt plus
-        // everything generated, so the next request sharing that prefix
-        // adopts the pages rather than recomputing them. The lease
-        // keeps holding them either way; what changes is that the tree
-        // now holds them too, so they outlive this request.
-        let mut full = tokens.clone();
-        full.extend(generated_ids.iter().copied());
-        let block_size = lease.block_size();
-        publish_to_radix(lease, &full, block_size);
-    }
-
-    if kv_pool.is_none() {
-        if let Some(pc) = prefix_cache {
-            // Greedy Metal argmax returns a 1-element "logits" vec; that is
-            // not a full pending distribution and must not be stored for
-            // later (possibly non-greedy) prefix restores.
-            if logits.len() == vocab_size {
-                #[cfg(feature = "metal")]
-                if let Some(caches) = kv.contiguous_mut() {
-                    decoder.sync_metal_attn_kv_to_host(caches);
-                }
-                // `None` only for a paged request, which is refused
-                // alongside a prefix cache at startup; storing nothing
-                // is the honest answer either way.
-                if let Some(caches) = kv.into_contiguous() {
-                    tokens.extend(generated_ids);
-                    pc.lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .store(tokens, caches, logits);
-                }
-            }
-        }
-    }
+    .finish();
 
     Ok((finish, usage))
 }
