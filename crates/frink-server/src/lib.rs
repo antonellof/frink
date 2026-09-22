@@ -2844,7 +2844,7 @@ async fn chat_completions_full(
     // rather than a wasted decode.
     let n_logprobs = req.n_logprobs()?;
     // The same detokenizer `/v1/detokenize` answers with.
-    let decode_piece = |id: usize| active.decode_any(&[id]);
+    let decode_any = |id: usize| active.decode_any(&[id]);
     let (completion, cache_status) = if let Some(cached) = key
         .as_ref()
         .and_then(|key| lock_cache(&state.response_cache).get(key))
@@ -2953,6 +2953,13 @@ async fn chat_completions_full(
     } else {
         completion.choices
     };
+    // `return_tokens_as_token_ids`: a reported token is spelled by its
+    // id rather than its text (`crate::logprobs::piece_renderer`).
+    // Built HERE rather than beside `decode_any` above, because a
+    // trait object held across the `await` would have to be `Send` and
+    // this one has nothing to gain from being it.
+    let render_piece =
+        crate::logprobs::piece_renderer(req.unimplemented.tokens_as_ids(), &decode_any);
     let rendered: Vec<ChatCompletionChoice> = ranked
         .into_iter()
         .enumerate()
@@ -2967,7 +2974,7 @@ async fn chat_completions_full(
                     crate::logprobs::render_chat(
                         generated_logprobs.get(index).unwrap_or(&Vec::new()),
                         Some(k),
-                        &decode_piece,
+                        render_piece.as_ref(),
                     )
                 }),
             }
@@ -4911,6 +4918,7 @@ pub(crate) mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
@@ -4942,6 +4950,16 @@ pub(crate) mod tests {
     /// Parameterised rather than copied: a second `Model` literal here
     /// is one more place a field has to be remembered.
     fn test_model_full_byte_vocab_with_eos(eos: Option<usize>) -> Model {
+        test_byte_model(eos, /* synthetic = */ true)
+    }
+
+    /// The byte-vocabulary fixture, with the two things that vary.
+    ///
+    /// `synthetic` replaces the returned TEXT with a banner, which is
+    /// right for tests about plumbing and wrong for any test that
+    /// reads the answer. `eos` is what lets a turn the MODEL ended be
+    /// told from one that ran out of budget.
+    fn test_byte_model(eos: Option<usize>, synthetic: bool) -> Model {
         let mut cfg = test_dense_fixture();
         cfg.vocab_size = 256;
         Model::Gguf(GgufModel {
@@ -4949,7 +4967,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::from_eos(eos),
             bos_id: None,
-            is_synthetic: true,
+            is_synthetic: synthetic,
             chat_template: chat_template::PromptTemplate::plain(),
         })
     }
@@ -5901,6 +5919,164 @@ pub(crate) mod tests {
         );
     }
 
+    /// **`skip_special_tokens: false` keeps the marker that ended the
+    /// answer.**
+    ///
+    /// It still ENDS the answer -- the field is about what comes
+    /// back, not about when to stop -- so both halves are checked: the
+    /// end token's text is in the string, and the finish reason is
+    /// still `stop`.
+    ///
+    /// `0x77` is the id this model greedily emits SECOND for the
+    /// prompt below, so the EOS really fires rather than the budget
+    /// running out, which is the only case the field is about.
+    #[tokio::test]
+    async fn skip_special_tokens_false_keeps_the_end_marker() {
+        // Which id this model emits SECOND is a property of random
+        // weights, so it is MEASURED rather than hard-coded: a
+        // constant tuned on one route silently stops firing on
+        // another, and a test whose EOS never fires passes for the
+        // wrong reason. `return_tokens_as_token_ids` is what makes the
+        // ids readable over HTTP, which is the other field in this PR.
+        let probe = test_app_with_state(Arc::new(test_state(
+            test_byte_model(None, /* synthetic = */ false),
+            ResponseCache::new(1000, Duration::from_secs(3600)),
+        )));
+        let (_, seen) = post_json_uri(
+            &probe,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "prompt": "\u{1}\u{2}",
+                "max_tokens": 6,
+                "temperature": 0,
+                "logprobs": 1,
+                "return_tokens_as_token_ids": true
+            }),
+        )
+        .await;
+        let eos: usize = seen["choices"][0]["logprobs"]["tokens"][1]
+            .as_str()
+            .and_then(|s| s.strip_prefix("token_id:"))
+            .and_then(|s| s.parse().ok())
+            .expect("a second generated token");
+
+        let app = test_app_with_state(Arc::new(test_state(
+            test_byte_model(Some(eos), /* synthetic = */ false),
+            ResponseCache::new(1000, Duration::from_secs(3600)),
+        )));
+        let ask = |skip: bool| {
+            serde_json::json!({
+                "model": "x",
+                "prompt": "\u{1}\u{2}",
+                "max_tokens": 6,
+                "temperature": 0,
+                "skip_special_tokens": skip
+            })
+        };
+
+        let (status, kept) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(false)).await;
+        assert_eq!(status, StatusCode::OK, "{kept}");
+        let (status, skipped) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(true)).await;
+        assert_eq!(status, StatusCode::OK, "{skipped}");
+
+        // The model has to have ENDED the turn, or neither answer
+        // carries a marker and this proves nothing.
+        assert_eq!(
+            kept["choices"][0]["finish_reason"], "stop",
+            "the model did not end the turn: {kept}"
+        );
+        assert_eq!(
+            skipped["choices"][0]["finish_reason"], "stop",
+            "keeping the marker must not change WHEN it stops: {skipped}"
+        );
+
+        let with = kept["choices"][0]["text"].as_str().expect("text");
+        let without = skipped["choices"][0]["text"].as_str().expect("text");
+        // A byte tokenizer: the id IS the byte.
+        let marker = char::from(eos as u8);
+        assert!(
+            with.ends_with(marker),
+            "the end marker was dropped: {with:?}"
+        );
+        assert!(
+            !without.ends_with(marker),
+            "the default must still skip it: {without:?}"
+        );
+        assert_eq!(
+            with.len(),
+            without.len() + marker.len_utf8(),
+            "the two answers differ by more than the marker"
+        );
+        // Counted as well as rendered: it is a token the model
+        // produced.
+        assert_eq!(
+            kept["usage"]["completion_tokens"].as_u64().unwrap(),
+            skipped["usage"]["completion_tokens"].as_u64().unwrap() + 1,
+            "the kept marker was not counted"
+        );
+    }
+
+    /// **`return_tokens_as_token_ids` spells a REPORTED token by id.**
+    ///
+    /// The completion's own `text` is unchanged: it is the answer
+    /// rather than a report about it, and a caller who wants the ids
+    /// of the answer asks `/v1/tokenize`.
+    #[tokio::test]
+    async fn return_tokens_as_token_ids_renames_reported_tokens_only() {
+        let app = streaming_test_app();
+        let ask = |as_ids: bool| {
+            serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 4,
+                "temperature": 0,
+                "logprobs": 2,
+                "return_tokens_as_token_ids": as_ids
+            })
+        };
+
+        let (status, plain) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(false)).await;
+        assert_eq!(status, StatusCode::OK, "{plain}");
+        let (status, by_id) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(true)).await;
+        assert_eq!(status, StatusCode::OK, "{by_id}");
+
+        let tokens = by_id["choices"][0]["logprobs"]["tokens"]
+            .as_array()
+            .expect("tokens");
+        assert!(!tokens.is_empty(), "nothing was reported: {by_id}");
+        for t in tokens {
+            let s = t.as_str().expect("a piece");
+            assert!(
+                s.starts_with("token_id:") && s["token_id:".len()..].parse::<usize>().is_ok(),
+                "reported as text rather than by id: {s:?}"
+            );
+        }
+        // The alternatives are keyed the same way, which is the point:
+        // two ids can detokenize to one string and a map keyed by text
+        // loses one of them.
+        let top = &by_id["choices"][0]["logprobs"]["top_logprobs"][0];
+        for key in top.as_object().expect("a map").keys() {
+            assert!(key.starts_with("token_id:"), "{key:?}");
+        }
+        // The ANSWER is untouched.
+        assert_eq!(
+            by_id["choices"][0]["text"], plain["choices"][0]["text"],
+            "the completion's text changed, which the field does not do"
+        );
+        assert!(
+            !plain["choices"][0]["logprobs"]["tokens"][0]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("token_id:"),
+            "the default already reported ids, so this proved nothing"
+        );
+    }
+
     /// **`echo` returns the prompt and the completion as one string,
     /// and the logprobs arrays cover both.**
     ///
@@ -6252,6 +6428,14 @@ pub(crate) mod tests {
                             .starts_with("hi"),
                         "served without echoing the prompt: {answer}"
                     );
+                    continue;
+                }
+                // Both rendering fields are served on every wire that
+                // takes them: one changes the text, the other how a
+                // reported token is spelled.
+                if field == "skip_special_tokens" || field == "return_tokens_as_token_ids" {
+                    let (status, answer) = post_json_uri(&app, uri, body).await;
+                    assert_eq!(status, StatusCode::OK, "{uri} refused `{field}`: {answer}");
                     continue;
                 }
                 // `truncate_prompt_tokens` is served on every wire that

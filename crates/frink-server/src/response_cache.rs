@@ -86,6 +86,9 @@ pub struct GenerationKey {
     /// forbidden as tokens, and two spellings that tokenize the same
     /// are the same constraint.
     pub token_mask: crate::token_mask::TokenMask,
+    /// Whether the end-of-generation marker is part of the answer.
+    /// KEYED: it changes the text.
+    pub keep_special_tokens: bool,
     pub sampling: SamplingKey,
     pub stop: Vec<String>,
     pub stop_token_ids: Vec<usize>,
@@ -199,6 +202,10 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // different truncations are two different prompts by the time
         // a key is built, so keying this as well would add a field
         // that can never differ when the rest matches.
+        // KEYED: it changes the TEXT that comes back, so a request
+        // that wants the end marker must not be served an answer
+        // stored without it.
+        keep_special_tokens,
         truncate_prompt_tokens: _,
         token_mask,
         cache_salt,
@@ -236,6 +243,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         cache_salt: *cache_salt,
         n: *n,
         token_mask: token_mask.clone(),
+        keep_special_tokens: *keep_special_tokens,
         sampling: sampling_key(sampling),
         stop: stop.clone(),
         // Keyed even though it is EMPTY at every current call site (the
@@ -607,6 +615,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,

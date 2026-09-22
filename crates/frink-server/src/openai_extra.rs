@@ -604,6 +604,7 @@ pub async fn completions(
         // `allowed_token_ids` and `bad_words`, both steering the
         // draw. The bad words are still STRINGS here; the layer
         // with the tokenizer resolves them (`run_generation_emit`).
+        keep_special_tokens: req.unimplemented.keep_special_tokens(),
         truncate_prompt_tokens: req.unimplemented.truncate_prompt_tokens(),
         token_mask: req.unimplemented.token_mask(),
         // This endpoint returns the text verbatim and never splits a
@@ -660,7 +661,11 @@ pub async fn completions(
     // One entry per choice, in order, which is what `n` asked for.
     // The same detokenizer `/v1/detokenize` answers with, so a client
     // that asks what a reported token means gets the same string back.
-    let decode_piece = |id: usize| active.decode_any(&[id]);
+    let decode_any = |id: usize| active.decode_any(&[id]);
+    // `return_tokens_as_token_ids`: a reported token is spelled by its
+    // id rather than its text (`crate::logprobs::piece_renderer`).
+    let decode_piece =
+        crate::logprobs::piece_renderer(req.unimplemented.tokens_as_ids(), &decode_any);
     // The winners, in descending score, when `best_of` generated more
     // than the caller asked back (`crate::best_of`). A no-op when it
     // did not, so the ordinary path keeps generation order.
@@ -699,9 +704,9 @@ pub async fn completions(
                     prefix,
                     &logprobs,
                     n_logprobs,
-                    &decode_piece,
+                    decode_piece.as_ref(),
                 ),
-                None => crate::logprobs::render(&logprobs, n_logprobs, &decode_piece),
+                None => crate::logprobs::render(&logprobs, n_logprobs, decode_piece.as_ref()),
             };
             let text = match echoed {
                 Some(prefix) => format!("{prefix}{text}"),
@@ -738,7 +743,7 @@ pub async fn completions(
                 &prompt_ids,
                 &prompt_rows,
                 k,
-                &decode_piece,
+                decode_piece.as_ref(),
             ),
             None => serde_json::Value::Null,
         },

@@ -142,6 +142,18 @@ impl ChoiceStream {
         emit: &mut impl FnMut(&str),
     ) -> Committed {
         if !ctx.params.ignore_eos && ctx.stop_tokens.contains(next) {
+            // `skip_special_tokens: false`: the marker that ended the
+            // answer is part of the answer. It still ends it -- the
+            // field is about what comes back, not about when to stop.
+            if ctx.params.keep_special_tokens {
+                self.generated_ids.push(next);
+                let text = self
+                    .matcher
+                    .flush_with(&self.utf8.push(&decode_one(&[next])));
+                if !text.is_empty() {
+                    emit(&text);
+                }
+            }
             return Committed::Stopped(FinishReason::Stop);
         }
         // Layer 1: before the token is detokenized or counted. A

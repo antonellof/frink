@@ -129,10 +129,13 @@ pub(crate) struct UnimplementedFields {
     /// route, because the store is a property of the deployment rather
     /// than of the field.
     pub(crate) cache_salt: Option<String>,
-    /// Include special tokens in the returned text. frink always skips
-    /// them, so `true` is accepted and `false` is refused.
+    /// Include the model's end-of-generation token in the returned
+    /// text. SERVED (`GenerationParams::keep_special_tokens`); `true`
+    /// is the default and means what this server already did.
     pub(crate) skip_special_tokens: Option<bool>,
-    /// Return `"token_id:123"` strings in place of text pieces.
+    /// Render each reported token as `"token_id:123"` instead of its
+    /// text. SERVED, in the logprobs arrays, which is the only place
+    /// a token is reported one at a time.
     pub(crate) return_tokens_as_token_ids: Option<bool>,
 }
 
@@ -144,6 +147,18 @@ impl UnimplementedFields {
         let n = self.n.unwrap_or(1).max(1) as usize;
         let k = self.best_of.unwrap_or(0) as usize;
         n.max(k)
+    }
+
+    /// Whether the model's end-of-generation token belongs in the
+    /// answer. `skip_special_tokens` defaults to true, so this is
+    /// false unless the caller spelled the other value.
+    pub(crate) fn keep_special_tokens(&self) -> bool {
+        self.skip_special_tokens == Some(false)
+    }
+
+    /// Whether a reported token is rendered as `token_id:N`.
+    pub(crate) fn tokens_as_ids(&self) -> bool {
+        self.return_tokens_as_token_ids == Some(true)
     }
 
     /// How many of the prompt's last tokens to keep, if the caller
@@ -290,20 +305,9 @@ impl UnimplementedFields {
         // Served, not refused; see the field. Named here so the
         // exhaustive destructure stays exhaustive.
         let _ = cache_salt;
-        if skip_special_tokens == &Some(false) {
-            return Err(refusal(
-                route,
-                "skip_special_tokens",
-                "returning special tokens in the text; this server always skips them",
-            ));
-        }
-        if return_tokens_as_token_ids == &Some(true) {
-            return Err(refusal(
-                route,
-                "return_tokens_as_token_ids",
-                "returning token ids in place of text pieces; `/v1/tokenize` returns ids",
-            ));
-        }
+        // Both served; see the fields. Named so the exhaustive
+        // destructure stays exhaustive.
+        let _ = (skip_special_tokens, return_tokens_as_token_ids);
         Ok(())
     }
 }
@@ -354,7 +358,7 @@ mod tests {
     /// is visible as a count.
     #[test]
     fn every_field_refuses_by_name() {
-        let cases: [(&str, serde_json::Value); 7] = [
+        let cases: [(&str, serde_json::Value); 5] = [
             ("n", serde_json::json!({ "n": 2 })),
             ("best_of", serde_json::json!({ "best_of": 2 })),
             (
@@ -369,25 +373,19 @@ mod tests {
                 "prompt_embeds",
                 serde_json::json!({ "prompt_embeds": "AA==" }),
             ),
-            (
-                "skip_special_tokens",
-                serde_json::json!({ "skip_special_tokens": false }),
-            ),
-            (
-                "return_tokens_as_token_ids",
-                serde_json::json!({ "return_tokens_as_token_ids": true }),
-            ),
         ];
         // Every field of the struct is accounted for: refused above,
         // or named here as SERVED. A member added to the struct and
         // forgotten in both places changes the count and fails, which
         // is the whole reason this assertion exists.
-        const SERVED: [&str; 5] = [
+        const SERVED: [&str; 7] = [
             "cache_salt",
             "allowed_token_ids",
             "bad_words",
             "echo",
             "truncate_prompt_tokens",
+            "skip_special_tokens",
+            "return_tokens_as_token_ids",
         ];
         assert_eq!(
             cases.len() + SERVED.len(),

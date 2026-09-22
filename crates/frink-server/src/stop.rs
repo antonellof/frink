@@ -159,6 +159,19 @@ impl StopMatcher {
     pub(crate) fn flush(&mut self) -> String {
         std::mem::take(&mut self.pending)
     }
+
+    /// Everything withheld, plus `tail`, as one string.
+    ///
+    /// For the LAST piece of an answer, where there is nothing after
+    /// it that could still turn the held bytes into a stop string.
+    /// `push` would withhold a suffix against a match that can no
+    /// longer arrive, so the final token of a `skip_special_tokens:
+    /// false` answer would vanish.
+    pub(crate) fn flush_with(&mut self, tail: &str) -> String {
+        let mut out = std::mem::take(&mut self.pending);
+        out.push_str(tail);
+        out
+    }
 }
 
 /// The length, in bytes, of the longest suffix of `pending` that is a

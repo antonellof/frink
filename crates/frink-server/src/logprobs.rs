@@ -197,6 +197,29 @@ fn top_map(probs: &[f32], top_k: usize, decode: &dyn Fn(usize) -> String) -> Val
     Value::Object(map)
 }
 
+/// How a reported token is spelled.
+///
+/// `return_tokens_as_token_ids` renders `token_id:123` in place of the
+/// token's text, everywhere a token is reported ONE AT A TIME -- the
+/// `tokens` array, the `top_logprobs` keys, and the chat wire's
+/// `content[].token`. It does NOT change the completion's `text`,
+/// which is the answer rather than a report about it; a caller who
+/// wants the ids of the answer asks `/v1/tokenize`.
+///
+/// It exists because a piece is not a unique name: two ids can
+/// detokenize to the same string, and a `top_logprobs` map keyed by
+/// text silently loses one of them. Keyed by id, nothing is lost.
+pub(crate) fn piece_renderer<'a>(
+    as_ids: bool,
+    decode: &'a dyn Fn(usize) -> String,
+) -> Box<dyn Fn(usize) -> String + 'a> {
+    if as_ids {
+        Box::new(|id| format!("token_id:{id}"))
+    } else {
+        Box::new(decode)
+    }
+}
+
 /// `ln(p)` in f64, so the value survives JSON.
 ///
 /// A zero cannot reach here from the chosen token, and is filtered out
