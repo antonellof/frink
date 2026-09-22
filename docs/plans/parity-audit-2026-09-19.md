@@ -213,15 +213,15 @@ each checked against frink by grep rather than by memory:
 | chunked prefill (CP) | **yes** | `frink-server/src/generate.rs` |
 | automatic prefix caching (APC) | **yes** | `policy/radix`, over paged KV |
 | LoRA, per request | **yes** | `frink-server/src/lora.rs`, with a reader/writer gate llama.cpp does not have |
-| speculative decoding (SD) | **in the engine, NOT in the server** | `frink_models::speculative` + `draft_model`; the only caller is `frink-cli/src/main.rs:1468` |
+| speculative decoding (SD) | **yes, since 0.28.0** | verified by agreement with the server's own sampler, so lossless at any temperature; `frink-server/src/sampling_loop.rs` |
 | structured outputs | **yes** | `grammar_request.rs`, `json_mode.rs`, `tool_grammar/`, `frink_models::grammar` |
 | tool calling | **yes** | and 0.25.0 fixed the format being chosen by the served NAME |
 | reasoning outputs | **yes** | `reasoning_tokens.rs`, `reasoning_budget.rs` |
 | pooling / embeddings | **partial** | `/v1/embeddings`, `/v1/rerank` from a decoder; no BERT-family encoder |
 | logprobs / top_logprobs | **yes** | `responses.rs`, `openai_extra.rs` |
-| prompt logprobs | **no** | no match anywhere |
-| `n` > 1 / best-of / beam search | **no** | no match anywhere |
-| prompt embeds as input | **no** | no match anywhere |
+| prompt logprobs | **no, refused by name** | was a silent 200 until 2026-09-22 |
+| `n` > 1 / best-of / beam search | **no, refused by name** | was a silent 200 on two of three routes until 2026-09-22 |
+| prompt embeds as input | **no, refused by name** | was a silent 200 until 2026-09-22 |
 | encoder-decoder | **no** | `t5` and friends are deferred |
 | multimodal | **no** | 10 deferred rows |
 | CUDA graph capture | **no** | and on Metal the equivalent -- one encoded graph per token -- is exactly what 0.25.0's submission collapsing approximates by hand |
@@ -229,7 +229,8 @@ each checked against frink by grep rather than by memory:
 | disaggregated prefill, KV connectors, KV offload | **no** | `docs/plans/out-of-core-moe.md` is the nearest thing and is groundwork |
 | sleep mode | **no** | |
 | per-request metrics | **yes** | `stats/` |
-| quantized KV cache | **yes** | `--cache-type-k` / `-v` |
+| quantized KV cache | **Metal only** | `--ctk` reaches `frink-metal`'s device store; the host cache is f32 (see 2.4) |
+| per-caller cache isolation (`cache_salt`) | **no** | the radix cache is keyed by token ids and shared; see 2.5 |
 
 ### 2.3 The finding worth acting on
 
@@ -259,12 +260,59 @@ over the API, and a multi-token-prediction arm is one `Drafter` impl
 away for the seventeen architectures whose MTP blocks frink already
 SKIPS by name (`crate::mtp_blocks::NEXTN_READERS`).
 
+### 2.4 The host KV store is f32 where llama.cpp's is f16
+
+Found on 2026-09-22 from a real deployment, not from reading. A
+CPU-only host running Ternary-Bonsai-2-27B refused a 6415-token prompt
+at a derived ceiling of 4096.
+
+The arithmetic is honest -- `kv_elem_for` prices the CPU backend as
+`KvElem::F32` and the store really is `Vec<f32>`
+(`frink-core/src/cache.rs:138`) -- but the WIDTH is twice the
+reference's. `llama_context_default_params` sets `type_k` and `type_v`
+to `GGML_TYPE_F16` (`llama-context.cpp:3672-3673`), so llama.cpp holds
+2 bytes per element where frink holds 4.
+
+For that checkpoint the KV is 524288 bytes/token (64 layers x 2 x 4
+kv-heads x 256 head-dim x f32), so the 4096 ceiling is exactly 2.0 GiB
+of KV. At llama.cpp's default width the same budget buys 8192.
+
+`--ctk` does not help: `run.rs:815` selects
+`KvElem::from_ctk` for `BudgetBackend::Metal` only, and pins CPU and
+CUDA to `F32`. So the flag parses, is documented as llama.cpp's
+`-ctk`, and cannot change the host store. It is not a misprice -- the
+budget agrees with the store -- but it is a flag that does not do what
+its name says on two of the three backends.
+
+**This is a llama.cpp parity gap of the largest practical kind**: it
+halves the context of every CPU deployment against the reference, and
+it ranks above every row in section 2.2 that no llama.cpp user can ask
+for.
+
+### 2.5 `cache_salt` names an isolation property, not a knob
+
+Refused by name since 2026-09-22 along with the rest of the
+unimplemented surface -- except it is not in that table, deliberately.
+The field selects which cached prefixes a request may reuse. A server
+that IGNORES it can serve one caller from another caller's cached
+prefix, and frink's radix cache is keyed by token ids and shared
+across requests (`policy::radix`). So the honest statement is not
+"frink lacks a knob" but "frink offers no per-caller cache isolation",
+which is a design row rather than a field to wire.
+
 ## 3. Ranked, against the north star
 
 The north star is "the Rust alternative to llama.cpp: same models,
 same command shapes, same or better performance". A serving feature no
 llama.cpp user can ask for ranks below a llama.cpp gap of the same
 size.
+
+0. **An f16 host KV store** (2.4). Found 2026-09-22 from a real CPU
+   deployment. llama.cpp's default KV width is f16 and frink's host
+   cache is f32, so every CPU deployment gets HALF the context of the
+   reference on the same box, and `--ctk` cannot reach that store. It
+   goes above everything below it because it is a llama.cpp gap that
+   a llama.cpp user hits on their first long prompt.
 
 1. **Update the llama.cpp pin and re-run every census.** Everything
    below is measured against a tree that is 792 commits old, and two
