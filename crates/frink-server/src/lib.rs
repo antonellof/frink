@@ -57,6 +57,7 @@ mod journal;
 mod json_mode;
 mod limits;
 mod loaded;
+mod logit_bias;
 mod logprobs;
 mod lora;
 mod mcp;
@@ -1410,7 +1411,10 @@ impl ChatCompletionRequest {
         // the surface: it was refused HERE and dropped on
         // `/v1/completions`, which is the split that module exists for.
         self.unimplemented.refuse("/v1/chat/completions")?;
-        unsupported_sampling::refuse_logit_bias(self.logit_bias.as_ref(), "/v1/chat/completions")?;
+        // Parsed to VALIDATE here, so a malformed bias is a 400
+        // before any prompt is tokenized; the value itself is built
+        // again where the params are.
+        logit_bias::LogitBias::parse(self.logit_bias.as_ref(), "/v1/chat/completions")?;
         // Parsed here as well as in `sampling_knobs` so a bad chain is
         // a 400/501 before any prompt is rendered. The same function
         // both times, so there is no second opinion to drift from.
@@ -4918,6 +4922,7 @@ pub(crate) mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            logit_bias: crate::logit_bias::LogitBias::default(),
             keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
@@ -5916,6 +5921,139 @@ pub(crate) mod tests {
         assert!(
             first_of_two < last_of_zero,
             "the choices arrived one after another rather than interleaved: {order:?}"
+        );
+    }
+
+    /// **`logit_bias` moves the draw, on both wires.**
+    ///
+    /// Byte tokenizer, so a token id IS a byte: bias `A` hard enough
+    /// and every character of a greedy answer is `A`. A server that
+    /// dropped the field answers ordinary text and a 200, which is the
+    /// silence the refusal existed to avoid.
+    #[tokio::test]
+    async fn logit_bias_moves_the_draw() {
+        let app = streaming_test_app();
+        let ask = |bias: Option<serde_json::Value>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 8,
+                "temperature": 0
+            });
+            if let Some(v) = bias {
+                b["logit_bias"] = v;
+            }
+            b
+        };
+
+        let (status, plain) =
+            post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, ask(None)).await;
+        assert_eq!(status, StatusCode::OK, "{plain}");
+        let free = plain["choices"][0]["text"].as_str().unwrap_or_default();
+
+        // 'A' is 65.
+        let (status, biased) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            ask(Some(serde_json::json!({"65": 100.0}))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{biased}");
+        let text = biased["choices"][0]["text"].as_str().expect("text");
+        assert!(!text.is_empty(), "nothing was generated: {biased}");
+        assert!(
+            text.chars().all(|c| c == 'A'),
+            "the bias did not reach the sampler: {text:?}"
+        );
+        assert!(
+            !free.chars().all(|c| c == 'A'),
+            "the unbiased answer was already all As, so this proved nothing: {free:?}"
+        );
+
+        // The chat wire declares the field too, and used to disagree
+        // with this one about it.
+        let (status, chat) = post_json_uri(
+            &app,
+            frink_api::routes::V1_CHAT_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+                "temperature": 0,
+                "logit_bias": {"65": 100.0}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{chat}");
+        let content = chat["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !content.is_empty() && content.chars().all(|c| c == 'A'),
+            "the chat wire ignored the bias: {content:?}"
+        );
+    }
+
+    /// **A bias cannot lift a token a constraint forbade.**
+    ///
+    /// A bias is finite and a mask is `-f32::INFINITY`, so the
+    /// intersection holds whichever runs first -- which is worth a
+    /// test rather than an assertion, because the first draft of
+    /// `crate::logit_bias` claimed the ORDER was what made it so and a
+    /// sabotage that reversed the order left every test green.
+    #[tokio::test]
+    async fn a_bias_cannot_beat_allowed_token_ids() {
+        let app = streaming_test_app();
+        let (status, body) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 8,
+                "temperature": 0,
+                // 'A' is forced by the bias and forbidden by the set.
+                "logit_bias": {"65": 100.0},
+                "allowed_token_ids": [66, 67]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let text = body["choices"][0]["text"].as_str().expect("text");
+        assert!(!text.is_empty(), "nothing was generated: {body}");
+        assert!(
+            !text.contains('A'),
+            "a bias produced a token the constraint forbade: {text:?}"
+        );
+        assert!(
+            text.chars().all(|c| c == 'B' || c == 'C'),
+            "the allowed set was not honoured: {text:?}"
+        );
+    }
+
+    /// A bias outside upstream's range is a 400 rather than a clamp:
+    /// clamping answers a question the caller did not ask.
+    #[tokio::test]
+    async fn a_bias_outside_the_range_is_a_bad_request() {
+        let app = streaming_test_app();
+        let (status, body) = post_json_uri(
+            &app,
+            frink_api::routes::V1_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "prompt": "hi",
+                "max_tokens": 2,
+                "logit_bias": {"65": 1000.0}
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("logit_bias"),
+            "{body}"
         );
     }
 

@@ -406,10 +406,7 @@ impl CompletionsRequest {
         // `logit_bias` decides in `unsupported_sampling`, shared with
         // `/v1/chat/completions`: the two routes disagreed about this
         // field for as long as each held its own copy of the rule.
-        crate::unsupported_sampling::refuse_logit_bias(
-            self.logit_bias.as_ref(),
-            "/v1/completions",
-        )?;
+        crate::logit_bias::LogitBias::parse(self.logit_bias.as_ref(), "/v1/completions")?;
         crate::unsupported_sampling::parse_sampler_order(
             self.samplers.as_ref(),
             "/v1/completions",
@@ -604,6 +601,10 @@ pub async fn completions(
         // `allowed_token_ids` and `bad_words`, both steering the
         // draw. The bad words are still STRINGS here; the layer
         // with the tokenizer resolves them (`run_generation_emit`).
+        logit_bias: crate::logit_bias::LogitBias::parse(
+            req.logit_bias.as_ref(),
+            "/v1/completions",
+        )?,
         keep_special_tokens: req.unimplemented.keep_special_tokens(),
         truncate_prompt_tokens: req.unimplemented.truncate_prompt_tokens(),
         token_mask: req.unimplemented.token_mask(),
@@ -1315,36 +1316,26 @@ mod tests {
         }
     }
 
-    /// Each of these is a real OpenAI field this server does not
-    /// implement. Serde drops an undeclared field silently, which a
-    /// caller cannot tell apart from having had it honoured -- so each
-    /// is declared purely in order to be refused BY NAME.
+    /// `suffix` is the last OpenAI field this route declares purely
+    /// in order to refuse it BY NAME.
+    ///
+    /// Serde drops an undeclared field silently, which a caller cannot
+    /// tell apart from having had it honoured. The list this loop ran
+    /// over is down to one: `logprobs`, `echo` and `logit_bias` are
+    /// all served now, each with its own test.
     #[test]
-    fn every_unimplemented_completion_field_is_refused_by_name() {
-        for (field, value) in [
-            // `logprobs` is SERVED now (`crate::logprobs`); its own
-            // tests are below. What stays refused is a value the field
-            // cannot take, which is a 400 rather than a 501.
-            // `echo` is SERVED here now, and was the reason this
-            // struct carried a second copy of the field beside the
-            // shared table's. Its own test is below.
-            ("suffix", serde_json::json!("tail")),
-            ("logit_bias", serde_json::json!({"5": -100})),
-        ] {
-            let mut body = serde_json::json!({"prompt": "hi"});
-            body[field] = value;
-            let (status, payload) = request(body)
-                .validate()
-                .expect_err(&format!("`{field}` must be refused"));
-            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-            assert!(
-                payload["error"]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains(field),
-                "the refusal must name `{field}`"
-            );
-        }
+    fn suffix_is_refused_by_name() {
+        let (status, payload) = request(serde_json::json!({"prompt": "hi", "suffix": "tail"}))
+            .validate()
+            .expect_err("`suffix` must be refused");
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("suffix"),
+            "the refusal must name `suffix`"
+        );
     }
 
     /// `{"type": "text"}` is the default and means nothing to refuse;

@@ -89,6 +89,9 @@ pub struct GenerationKey {
     /// Whether the end-of-generation marker is part of the answer.
     /// KEYED: it changes the text.
     pub keep_special_tokens: bool,
+    /// Per-token additive shifts. KEYED: they change which token is
+    /// drawn.
+    pub logit_bias: crate::logit_bias::LogitBias,
     pub sampling: SamplingKey,
     pub stop: Vec<String>,
     pub stop_token_ids: Vec<usize>,
@@ -205,6 +208,10 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // KEYED: it changes the TEXT that comes back, so a request
         // that wants the end marker must not be served an answer
         // stored without it.
+        // KEYED: it changes which token is drawn, so two requests
+        // differing only in their bias must not share one answer.
+        // That was one of the three blockers the refusal named.
+        logit_bias,
         keep_special_tokens,
         truncate_prompt_tokens: _,
         token_mask,
@@ -244,6 +251,7 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         n: *n,
         token_mask: token_mask.clone(),
         keep_special_tokens: *keep_special_tokens,
+        logit_bias: logit_bias.clone(),
         sampling: sampling_key(sampling),
         stop: stop.clone(),
         // Keyed even though it is EMPTY at every current call site (the
@@ -615,6 +623,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            logit_bias: crate::logit_bias::LogitBias::default(),
             keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),

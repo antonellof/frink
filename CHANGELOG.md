@@ -15,6 +15,36 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`logit_bias`.** The last sampler knob this server refused, and the
+  refusal named three blockers that are all closed now:
+
+  - the whole-response cache keys on the sampler settings, and a bias
+    outside that key would let two requests differing only in their
+    bias share one answer. `GenerationKey` carries it;
+  - the continuous-batching worker sampled through its own call site,
+    so a bias wired into the private decode loop alone would be
+    honoured or ignored depending on `FRINK_CONTINUOUS_BATCHING`. Both
+    loops go through one `sample_next` now;
+  - on Metal at `temperature <= 0` the decoder folds `lm_head` and
+    argmax onto the device and returns a one-element vector with no
+    vocabulary left to bias. `needs_vocab_logits` answers true for a
+    biased request, which refuses the fold.
+
+  Outside `-100` to `100` is a **400** rather than a clamp, because
+  clamping answers a question the caller did not ask. `{}` and `null`
+  are accepted: several clients send them as a default and there is no
+  token they would move.
+
+  A bias cannot lift a token a grammar, JSON mode, `allowed_token_ids`
+  or `bad_words` forbade -- a bias is finite and a mask is `-inf`, so
+  the intersection holds **whichever runs first**. The first draft of
+  the module claimed the ORDER was what made that true; a sabotage
+  that reversed the order left every test green, and the claim was
+  wrong. It is recorded where it was made.
+
+
 ## [0.46.0] - 2026-09-23
 
 ### Added

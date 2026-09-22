@@ -441,10 +441,7 @@ impl CompletionRequest {
     /// Refuse everything this server does not implement, by name,
     /// before any prompt is tokenized.
     pub(crate) fn validate(&self, has_prefix_cache: bool) -> Result<(), ApiError> {
-        crate::unsupported_sampling::refuse_logit_bias(
-            self.logit_bias.as_ref(),
-            frink_api::routes::COMPLETION,
-        )?;
+        crate::logit_bias::LogitBias::parse(self.logit_bias.as_ref(), "/completion")?;
         // Parsed here as well as in `sampling_knobs` -- the same
         // function both times -- so a chain naming a sampler this
         // engine lacks is refused before any prompt is tokenized.
@@ -552,6 +549,7 @@ pub(crate) async fn completion(
         // delivery order a client can observe (`crate::round_robin`).
         interleave_choices: false,
         // llama.cpp's native wire carries neither field.
+        logit_bias: crate::logit_bias::LogitBias::parse(req.logit_bias.as_ref(), "/completion")?,
         keep_special_tokens: false,
         truncate_prompt_tokens: None,
         token_mask: crate::token_mask::TokenMask::default(),

@@ -411,6 +411,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            logit_bias: crate::logit_bias::LogitBias::default(),
             keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
