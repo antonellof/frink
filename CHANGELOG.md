@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-22
+
 ### Added
 
 - **`cache_salt` on the paged KV store.** The last place the field was
