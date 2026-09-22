@@ -1420,6 +1420,20 @@ pub struct GenerationParams {
     /// radix tree already holds, so it has no rows for those
     /// positions).
     pub prompt_logprobs: Option<usize>,
+    /// `skip_special_tokens: false`: keep the model's
+    /// end-of-generation token in the answer.
+    ///
+    /// It ENDS the generation either way -- this is about whether the
+    /// marker that ended it is part of what comes back. A caller
+    /// debugging a chat template wants to see the `<|im_end|>` the
+    /// model actually produced; every other caller wants the text
+    /// without it, which is why `true` (skip) stays the default.
+    ///
+    /// A caller-supplied `stop_token_ids` entry is NOT affected. They
+    /// asked to stop ON it, which means before it, exactly as a stop
+    /// STRING is excluded from the text it ends. Only the model's own
+    /// marker is a special token in the sense this field names.
+    pub keep_special_tokens: bool,
     /// Keep only the LAST `k` tokens of the prompt.
     ///
     /// The most dangerous field this server takes, which is why it was
@@ -2929,6 +2943,7 @@ mod tests {
             seed: 1,
             n: 1,
             interleave_choices: false,
+            keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             stop: Vec::new(),
@@ -3316,6 +3331,7 @@ mod tests {
                 seed: 1,
                 n: 1,
                 interleave_choices: false,
+                keep_special_tokens: false,
                 truncate_prompt_tokens: None,
                 token_mask: crate::token_mask::TokenMask::default(),
                 stop: vec!["ZZ_NEVER_MATCHES_ZZ".to_string()],
@@ -3489,6 +3505,7 @@ mod tests {
             seed: 1,
             n: 1,
             interleave_choices: false,
+            keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             stop: Vec::new(),
@@ -3793,6 +3810,7 @@ mod tests {
                 seed: 1,
                 n: 1,
                 interleave_choices: false,
+                keep_special_tokens: false,
                 truncate_prompt_tokens: None,
                 token_mask: crate::token_mask::TokenMask::default(),
                 stop: vec![stop_str.clone()],

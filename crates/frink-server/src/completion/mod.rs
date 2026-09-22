@@ -552,6 +552,7 @@ pub(crate) async fn completion(
         // delivery order a client can observe (`crate::round_robin`).
         interleave_choices: false,
         // llama.cpp's native wire carries neither field.
+        keep_special_tokens: false,
         truncate_prompt_tokens: None,
         token_mask: crate::token_mask::TokenMask::default(),
         // This endpoint returns the text verbatim and never splits a

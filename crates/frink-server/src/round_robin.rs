@@ -120,6 +120,7 @@ mod tests {
             wants_logprobs: false,
             n: 2,
             interleave_choices: true,
+            keep_special_tokens: false,
             truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,

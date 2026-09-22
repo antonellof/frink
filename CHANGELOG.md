@@ -15,6 +15,38 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`skip_special_tokens: false` and `return_tokens_as_token_ids`.**
+  Both are rendering, so they landed together.
+
+  `skip_special_tokens: false` keeps the model's end-of-generation
+  token in the returned text and counts it in `usage`. It still ENDS
+  the answer: the field is about what comes back, not about when to
+  stop. A caller-supplied `stop_token_ids` entry is deliberately NOT
+  affected -- they asked to stop ON it, which means before it, exactly
+  as a stop STRING is excluded from the text it ends.
+
+  `return_tokens_as_token_ids` spells a REPORTED token by its id
+  everywhere one is reported on its own: the `tokens` array, the
+  `top_logprobs` keys, and the chat wire's `content[].token`. It does
+  not change the completion's `text`. It exists because a piece is not
+  a unique name -- two ids can detokenize to the same string, and a
+  `top_logprobs` map keyed by text silently loses one of them.
+
+  **Only `use_beam_search` and `prompt_embeds` are still refused on
+  the generation wires**, and both on their merits rather than for
+  want of work: beam search is not what this server does, and
+  `prompt_embeds` is a different input path rather than a knob on this
+  one.
+
+  The end-marker test MEASURES which id the fixture emits second
+  rather than hard-coding one, because a constant tuned on one route
+  silently stops firing on another and a test whose EOS never fires
+  passes for the wrong reason. It reads the id through
+  `return_tokens_as_token_ids`, which is the other field here.
+
+
 ## [0.45.0] - 2026-09-23
 
 ### Added
