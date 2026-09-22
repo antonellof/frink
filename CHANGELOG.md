@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-09-22
+
 ### Added
 
 - **Sleep mode: `POST /sleep`, `POST /wake_up`, `GET /is_sleeping`.**
