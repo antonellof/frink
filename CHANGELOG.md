@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-09-23
+
 ### Added
 
 - **`logit_bias`.** The last sampler knob this server refused, and the
