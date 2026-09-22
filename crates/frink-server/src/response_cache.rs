@@ -193,6 +193,13 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // `GenerationKey::token_mask` below, which carries the
         // resolved sets. Two requests that forbid different words are
         // two different questions.
+        // NOT KEYED as a field: it changes the PROMPT, and the
+        // prompt is already the cache key's main component
+        // (`CacheKey::prompt`). Two requests with the same prompt and
+        // different truncations are two different prompts by the time
+        // a key is built, so keying this as well would add a field
+        // that can never differ when the rest matches.
+        truncate_prompt_tokens: _,
         token_mask,
         cache_salt,
         sampling,
@@ -600,6 +607,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            truncate_prompt_tokens: None,
             token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens: 16,

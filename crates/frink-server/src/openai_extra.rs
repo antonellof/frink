@@ -261,8 +261,6 @@ pub(crate) struct CompletionsRequest {
     #[serde(default)]
     prompt_logprobs: Option<serde_json::Value>,
     #[serde(default)]
-    echo: Option<bool>,
-    #[serde(default)]
     suffix: Option<String>,
     #[serde(default)]
     logit_bias: Option<serde_json::Value>,
@@ -421,16 +419,15 @@ impl CompletionsRequest {
         // refused is a value the field cannot take.
         self.n_logprobs()?;
         self.n_prompt_logprobs()?;
-        let unsupported = [
-            (self.echo == Some(true), "echo"),
-            (self.suffix.is_some(), "suffix"),
-        ];
-        for (present, name) in unsupported {
-            if present {
-                return Err(crate::unsupported_feature(&format!(
-                    "`{name}` is not implemented on /v1/completions (see docs/API.md)"
-                )));
-            }
+        // `echo` used to be refused HERE, on a second `echo` field
+        // this struct declared beside the flattened table's -- two
+        // structures that had to agree about one field, with nothing
+        // enforcing it, which is this repo's dominant bug shape. The
+        // table is the only source now, and it SERVES the field.
+        if self.suffix.is_some() {
+            return Err(crate::unsupported_feature(
+                "`suffix` is not implemented on /v1/completions (see docs/API.md)",
+            ));
         }
         // Compiled here so an unparseable grammar is a 400 before any
         // prompt is tokenized. `response_format` is not passed: this
@@ -584,7 +581,16 @@ pub async fn completions(
         // logprobs: there is nothing to rank by without them. The
         // caller still only SEES what they asked for.
         wants_logprobs: n_logprobs.is_some() || req.unimplemented.ranks_candidates(),
-        prompt_logprobs: n_prompt,
+        // Scoring the prompt is also what `echo` + `logprobs` needs:
+        // the echoed span's entries come from these rows. Requested
+        // internally, which does not put a `prompt_logprobs` field in
+        // the response -- that is rendered from `n_prompt` below, and
+        // a caller who did not ask for it does not get it.
+        prompt_logprobs: n_prompt.or_else(|| {
+            (req.unimplemented.echo == Some(true))
+                .then_some(n_logprobs)
+                .flatten()
+        }),
         // The prompt is prefilled once and the KV forked per choice
         // (`crate::generate`). Streaming is refused above for `n` > 1,
         // so a streaming request always lands on 1.
@@ -598,6 +604,7 @@ pub async fn completions(
         // `allowed_token_ids` and `bad_words`, both steering the
         // draw. The bad words are still STRINGS here; the layer
         // with the tokenizer resolves them (`run_generation_emit`).
+        truncate_prompt_tokens: req.unimplemented.truncate_prompt_tokens(),
         token_mask: req.unimplemented.token_mask(),
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
@@ -626,6 +633,9 @@ pub async fn completions(
         lora: crate::lora::resolve_request(active.generative()?, req.lora.as_deref())?,
     };
     let wanted = req.unimplemented.n.unwrap_or(1).max(1) as usize;
+    let echo = req.unimplemented.echo == Some(true);
+    // Kept because `prompt` is moved into the decode below.
+    let echo_source = if echo { prompt.clone() } else { String::new() };
     let produced = crate::decode_task::buffered(
         crate::decode_task::DecodeHandles::take(&state, &active)?,
         prompt,
@@ -636,6 +646,16 @@ pub async fn completions(
     let prompt_rows = produced.prompt_rows;
     let prompt_ids = produced.prompt_ids;
     let choices = produced.choices;
+    // The prompt that was ANSWERED. After a truncation that is not
+    // the string the caller sent, and echoing the full string would
+    // report a prompt the model never saw -- the same defect ignoring
+    // `truncate_prompt_tokens` would be.
+    let echoed: Option<&str> = echo.then(|| {
+        produced
+            .truncated_prompt
+            .as_deref()
+            .unwrap_or(echo_source.as_str())
+    });
 
     // One entry per choice, in order, which is what `n` asked for.
     // The same detokenizer `/v1/detokenize` answers with, so a client
@@ -668,13 +688,32 @@ pub async fn completions(
                 // silently reported as finished.
                 FinishReason::Cancelled => "cancelled",
             };
+            // `echo` returns the prompt and the completion as ONE
+            // string, and the logprobs arrays have to cover both or a
+            // client lining `text_offset` up against `text` reads the
+            // wrong span.
+            let rendered_logprobs = match echoed {
+                Some(prefix) => crate::logprobs::render_echoed(
+                    &prompt_ids,
+                    &prompt_rows,
+                    prefix,
+                    &logprobs,
+                    n_logprobs,
+                    &decode_piece,
+                ),
+                None => crate::logprobs::render(&logprobs, n_logprobs, &decode_piece),
+            };
+            let text = match echoed {
+                Some(prefix) => format!("{prefix}{text}"),
+                None => text,
+            };
             serde_json::json!({
                 "index": index,
                 "text": text,
                 "finish_reason": finish_reason,
                 // Absent rather than null when the request did not ask,
                 // which is what OpenAI's own shape does.
-                "logprobs": crate::logprobs::render(&logprobs, n_logprobs, &decode_piece),
+                "logprobs": rendered_logprobs,
             })
         })
         .collect();
@@ -1281,7 +1320,9 @@ mod tests {
             // `logprobs` is SERVED now (`crate::logprobs`); its own
             // tests are below. What stays refused is a value the field
             // cannot take, which is a 400 rather than a 501.
-            ("echo", serde_json::json!(true)),
+            // `echo` is SERVED here now, and was the reason this
+            // struct carried a second copy of the field beside the
+            // shared table's. Its own test is below.
             ("suffix", serde_json::json!("tail")),
             ("logit_bias", serde_json::json!({"5": -100})),
         ] {

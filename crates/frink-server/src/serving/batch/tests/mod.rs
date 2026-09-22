@@ -53,6 +53,7 @@ fn greedy_params(max_tokens: usize, seed: u64) -> GenerationParams {
         wants_logprobs: false,
         n: 1,
         interleave_choices: false,
+        truncate_prompt_tokens: None,
         token_mask: crate::token_mask::TokenMask::default(),
         reasoning: None,
         max_tokens,

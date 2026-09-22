@@ -94,14 +94,17 @@ pub(crate) struct UnimplementedFields {
     /// scores prompt tokens in `frink perplexity` but exposes nothing
     /// for them over HTTP.
     pub(crate) prompt_logprobs: Option<Value>,
-    /// Prepend the prompt to the returned text. Refused when true.
+    /// Prepend the prompt to the returned text. SERVED on
+    /// `/v1/completions`, which is the wire that has it.
     pub(crate) echo: Option<bool>,
     /// Beam search instead of the sampler chain.
     pub(crate) use_beam_search: Option<bool>,
-    /// Silently drop the prompt to the last `k` tokens. The most
-    /// dangerous member of this table: ignoring it answers a DIFFERENT
-    /// prompt than the caller believes they sent, with no error.
-    pub(crate) truncate_prompt_tokens: Option<Value>,
+    /// Drop the prompt to its last `k` tokens. SERVED
+    /// (`GenerationParams::truncate_prompt_tokens`); it was the most
+    /// dangerous member of this table while it was refused, because
+    /// IGNORING it answers a different prompt than the caller believes
+    /// they sent, with no error.
+    pub(crate) truncate_prompt_tokens: Option<i64>,
     /// Pre-computed embeddings in place of text. A different input
     /// path entirely, not a knob on this one.
     pub(crate) prompt_embeds: Option<Value>,
@@ -141,6 +144,14 @@ impl UnimplementedFields {
         let n = self.n.unwrap_or(1).max(1) as usize;
         let k = self.best_of.unwrap_or(0) as usize;
         n.max(k)
+    }
+
+    /// How many of the prompt's last tokens to keep, if the caller
+    /// asked. Validated by [`Self::refuse`] before this is read.
+    pub(crate) fn truncate_prompt_tokens(&self) -> Option<usize> {
+        self.truncate_prompt_tokens
+            .filter(|&k| k >= 1)
+            .map(|k| k as usize)
     }
 
     /// The two steering fields as one mask, with the bad words still
@@ -226,11 +237,15 @@ impl UnimplementedFields {
                 "logprobs for the PROMPT's own tokens on this wire, which has no field for them",
             ));
         }
-        if echo == &Some(true) {
+        // Served on `/v1/completions` and nowhere else: the chat wire
+        // returns a message rather than a continuation of the prompt,
+        // and llama.cpp's native `/completion` has no such field.
+        if echo == &Some(true) && route != frink_api::routes::V1_COMPLETIONS {
             return Err(refusal(
                 route,
                 "echo",
-                "prepending the prompt to the completion",
+                "prepending the prompt to the completion on this wire, which returns a message \
+                 rather than a continuation of the prompt",
             ));
         }
         if use_beam_search == &Some(true) {
@@ -240,11 +255,17 @@ impl UnimplementedFields {
                 "beam search; this server samples",
             ));
         }
-        if truncate_prompt_tokens.is_some() {
-            return Err(refusal(
-                route,
+        // Served. A 400 rather than a 501 for the values no server can
+        // serve: zero asks for a prompt of nothing, and a negative
+        // count is not a length. `-1` is upstream's "the model's
+        // maximum", which this server does not spell that way because
+        // its ceiling is a deployment setting rather than a property
+        // of the checkpoint -- naming the number is the honest form.
+        if truncate_prompt_tokens.is_some_and(|k| k < 1) {
+            return Err(crate::invalid_request(
+                "`truncate_prompt_tokens` must be at least 1: it is how many of the prompt's \
+                 last tokens to keep",
                 "truncate_prompt_tokens",
-                "truncating the prompt server-side -- send the prompt you want answered",
             ));
         }
         if prompt_embeds.is_some() {
@@ -333,21 +354,16 @@ mod tests {
     /// is visible as a count.
     #[test]
     fn every_field_refuses_by_name() {
-        let cases: [(&str, serde_json::Value); 9] = [
+        let cases: [(&str, serde_json::Value); 7] = [
             ("n", serde_json::json!({ "n": 2 })),
             ("best_of", serde_json::json!({ "best_of": 2 })),
             (
                 "prompt_logprobs",
                 serde_json::json!({ "prompt_logprobs": 1 }),
             ),
-            ("echo", serde_json::json!({ "echo": true })),
             (
                 "use_beam_search",
                 serde_json::json!({ "use_beam_search": true }),
-            ),
-            (
-                "truncate_prompt_tokens",
-                serde_json::json!({ "truncate_prompt_tokens": 8 }),
             ),
             (
                 "prompt_embeds",
@@ -366,7 +382,13 @@ mod tests {
         // or named here as SERVED. A member added to the struct and
         // forgotten in both places changes the count and fails, which
         // is the whole reason this assertion exists.
-        const SERVED: [&str; 3] = ["cache_salt", "allowed_token_ids", "bad_words"];
+        const SERVED: [&str; 5] = [
+            "cache_salt",
+            "allowed_token_ids",
+            "bad_words",
+            "echo",
+            "truncate_prompt_tokens",
+        ];
         assert_eq!(
             cases.len() + SERVED.len(),
             serde_json::to_value(UnimplementedFields::default())

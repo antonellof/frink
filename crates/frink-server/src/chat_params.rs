@@ -91,6 +91,7 @@ impl ChatCompletionRequest {
             // `allowed_token_ids` and `bad_words`, both steering the
             // draw. The bad words are still STRINGS here; the layer
             // with the tokenizer resolves them (`run_generation_emit`).
+            truncate_prompt_tokens: None,
             token_mask: self.unimplemented.token_mask(),
             // Reporting costs the greedy fast path, so only a request
             // that will render them asks for them.
