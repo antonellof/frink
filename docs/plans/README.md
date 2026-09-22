@@ -56,6 +56,7 @@ Parity inventory and deltas against llama.cpp:
 
 - **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the current re-measurement of the llama.cpp surface and the serving-feature gaps
 - **[`server-speculative-decoding.md`](server-speculative-decoding.md)** — the engine has it, the server cannot reach it
+- **[`several-completions-per-request.md`](several-completions-per-request.md)** — `n` > 1 as a KV fork, not as a loop that re-prefills
 - **[`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md)** — evidence-backed differential (not a plan)
 - **[`llama-cpp-full-parity-audit-2026-09-02.md`](llama-cpp-full-parity-audit-2026-09-02.md)** — file map + sweep + priority plan
 - **[`llama-cpp-parity-update-2026-09-03.md`](llama-cpp-parity-update-2026-09-03.md)** — post-merge delta (Qwen MoE Metal, Phi-4 LongRoPE, sweep)
