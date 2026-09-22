@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-09-22
+
 ### Added
 
 - **`best_of` on both OpenAI routes.** Generates `best_of` completions
