@@ -15,6 +15,29 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`POST /v1/score` and `POST /score`**: sentence-pair scoring, one
+  number per pair.
+
+  It admits BOTH kinds of encoder and says which one answered. A
+  cross-encoder reports its classification head; a bi-encoder reports
+  the cosine of two embeddings. `/v1/rerank` refuses to substitute a
+  cosine and is right to -- a rerank promises the model's own ranking
+  -- but a SCORE is exactly what a bi-encoder computes, so serving it
+  is the honest answer rather than a stand-in for one. The two are not
+  on the same scale, so `frink_score_kind` travels with the numbers
+  for the same reason `/v1/rerank` carries `frink_score_head`.
+
+  Two lists of different lengths are a **400** naming both counts,
+  rather than a zip that silently drops the tail -- the one mistake in
+  this route shape that returns a plausible shorter answer.
+
+  Embeddings are memoised per TEXT rather than per pair, because the
+  common shape is one query against many candidates and embedding it
+  once per pair would run the encoder `n` times for one vector.
+
+
 ## [0.47.0] - 2026-09-23
 
 ### Added
