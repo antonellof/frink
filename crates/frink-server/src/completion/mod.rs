@@ -265,6 +265,10 @@ pub(crate) struct CompletionRequest {
     /// llama.cpp's `typ_p`, `top_n_sigma`, `xtc_*` and `dry_*`, in ONE
     /// struct shared with the other two routes that take them. See
     /// `sampling_knobs::ExtraSamplerFields`.
+    /// See `crate::unimplemented_fields`: shared with both OpenAI
+    /// generation routes so no wire can drop what another refuses.
+    #[serde(flatten)]
+    unimplemented: crate::unimplemented_fields::UnimplementedFields,
     #[serde(flatten)]
     extra_samplers: crate::sampling_knobs::ExtraSamplerFields,
     /// llama.cpp's spelling of `repetition_penalty`.
@@ -448,6 +452,7 @@ impl CompletionRequest {
             self.samplers.as_ref(),
             frink_api::routes::COMPLETION,
         )?;
+        self.unimplemented.refuse(frink_api::routes::COMPLETION)?;
         for option in UNSUPPORTED {
             let sent = self.extra.get(option.field);
             let asked_for_something = match sent {

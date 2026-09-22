@@ -79,6 +79,7 @@ mod stop;
 mod stream_events;
 mod tasks;
 mod tool_grammar;
+mod unimplemented_fields;
 mod unsupported_sampling;
 mod utf8_stream;
 
@@ -891,6 +892,11 @@ struct ChatCompletionRequest {
     /// `sampling_knobs::ExtraSamplerFields`.
     #[serde(flatten)]
     extra_samplers: crate::sampling_knobs::ExtraSamplerFields,
+    /// Fields that change what comes back and that this server does not
+    /// implement, in ONE struct shared with the other two generation
+    /// routes. See `crate::unimplemented_fields`.
+    #[serde(flatten)]
+    unimplemented: crate::unimplemented_fields::UnimplementedFields,
     #[serde(default)]
     seed: Option<u64>,
     #[serde(default)]
@@ -979,8 +985,6 @@ struct ChatCompletionRequest {
     logprobs: Option<bool>,
     #[serde(default)]
     top_logprobs: Option<u32>,
-    #[serde(default)]
-    n: Option<u32>,
     #[serde(default)]
     presence_penalty: Option<f32>,
     #[serde(default)]
@@ -1329,11 +1333,10 @@ impl ChatCompletionRequest {
                 "logprobs / top_logprobs are not implemented yet (see docs/API.md)",
             ));
         }
-        if self.n.is_some_and(|n| n > 1) {
-            return Err(unsupported_feature(
-                "n > 1 is not implemented (single completion only)",
-            ));
-        }
+        // `n` moved into `crate::unimplemented_fields` with the rest of
+        // the surface: it was refused HERE and dropped on
+        // `/v1/completions`, which is the split that module exists for.
+        self.unimplemented.refuse("/v1/chat/completions")?;
         unsupported_sampling::refuse_logit_bias(self.logit_bias.as_ref(), "/v1/chat/completions")?;
         // Parsed here as well as in `sampling_knobs` so a bad chain is
         // a 400/501 before any prompt is rendered. The same function
@@ -5294,6 +5297,68 @@ pub(crate) mod tests {
     /// llama.cpp's native endpoint is a different WIRE, not a shorter
     /// path to the OpenAI one. If this ever starts answering `choices`,
     /// every llama.cpp client reading `content` breaks silently.
+    /// The three generation routes must agree about every field this
+    /// server does not implement. They did not: `n: 3` was a 501 on
+    /// `/v1/chat/completions` and a 200 on `/v1/completions`, measured
+    /// on a running server, because the chat route hand-wrote its own
+    /// check and the other two never learned it.
+    ///
+    /// This is the test that would have caught that, and it is driven
+    /// from one list so a field added to `unimplemented_fields` is
+    /// checked on all three wires at once.
+    #[tokio::test]
+    async fn every_route_refuses_the_same_unimplemented_fields() {
+        let app = test_app();
+        let fields = [
+            ("n", serde_json::json!(3)),
+            ("best_of", serde_json::json!(2)),
+            ("prompt_logprobs", serde_json::json!(1)),
+            ("echo", serde_json::json!(true)),
+            ("use_beam_search", serde_json::json!(true)),
+            ("truncate_prompt_tokens", serde_json::json!(8)),
+            ("prompt_embeds", serde_json::json!("AA==")),
+            ("allowed_token_ids", serde_json::json!([1, 2])),
+            ("bad_words", serde_json::json!(["x"])),
+            ("skip_special_tokens", serde_json::json!(false)),
+            ("return_tokens_as_token_ids", serde_json::json!(true)),
+        ];
+        for (field, value) in fields {
+            for (uri, base) in [
+                (
+                    frink_api::routes::V1_CHAT_COMPLETIONS,
+                    serde_json::json!({
+                        "model": "x",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 2
+                    }),
+                ),
+                (
+                    frink_api::routes::V1_COMPLETIONS,
+                    serde_json::json!({"prompt": "hi", "max_tokens": 2}),
+                ),
+                (
+                    frink_api::routes::COMPLETION,
+                    serde_json::json!({"prompt": "hi", "n_predict": 2}),
+                ),
+            ] {
+                let mut body = base;
+                body[field] = value.clone();
+                let (status, answer) = post_json_uri(&app, uri, body).await;
+                assert_eq!(
+                    status,
+                    StatusCode::NOT_IMPLEMENTED,
+                    "{uri} served `{field}` instead of refusing it: {answer}"
+                );
+                assert!(
+                    answer["error"]["message"]
+                        .as_str()
+                        .is_some_and(|m| m.contains(field)),
+                    "{uri} refused `{field}` without naming it: {answer}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_native_completion_wire_is_not_the_openai_one() {
         let app = test_app();

@@ -69,7 +69,8 @@ conversation or a large `/v1/embeddings` batch past that comes back
 | `stream` | Supported (overlapped SSE when tools off and CB off) |
 | `tools` / `tool_choice: none\|auto` | Supported (prompt-engineered, parsed in eleven wire formats) |
 | `tool_choice: required` / named function | Supported on **ten of the eleven** wire formats, by a lazy grammar built from the same marker description the parser reads with. **501 naming the format** on the remaining one (`muse_glimmer`), for the reason the refusal states |
-| `logprobs` / `top_logprobs` / `n` (>1) | **Reject** |
+| `logprobs` / `top_logprobs` | **Reject** |
+| `n` (>1), `best_of` (>1), `prompt_logprobs`, `echo`, `use_beam_search`, `truncate_prompt_tokens`, `prompt_embeds`, `allowed_token_ids`, `bad_words`, `skip_special_tokens: false`, `return_tokens_as_token_ids` | **Reject, 501 naming the field**, on `/v1/chat/completions`, `/v1/completions` AND llama.cpp's native `/completion`. Each changes the tokens or the text returned, so ignoring one answers a question the caller did not ask. The default a caller may legitimately spell out (`n: 1`, `echo: false`, `skip_special_tokens: true`) is **served**. One table, flattened into all three request bodies, so a field cannot be refused on one wire and dropped on another again |
 | `response_format: json_object` | Supported (best-effort character mask + validate) |
 | `grammar` | Supported. llama.cpp's own field: a GBNF string, enforced per token by a real parser |
 | `response_format: json_schema` | Supported. The `json_schema.schema` is compiled to GBNF and enforced per token. `strict: false` and any unknown member of the `json_schema` object are refused **by name**; a schema the converter cannot compile is a 400 naming the keyword |

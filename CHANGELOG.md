@@ -15,6 +15,41 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Eleven request fields that change the answer were accepted and
+  ignored.** `n`, `best_of`, `prompt_logprobs`, `echo`,
+  `use_beam_search`, `truncate_prompt_tokens`, `prompt_embeds`,
+  `allowed_token_ids`, `bad_words`, `skip_special_tokens: false` and
+  `return_tokens_as_token_ids` each returned **200** with an answer
+  computed under different rules than the caller asked for. They now
+  return **501 naming the field**, on all three generation routes.
+
+  Two of them were worse than absent. `n: 3` was a **501 on
+  `/v1/chat/completions` and a 200 on `/v1/completions`**, because the
+  chat route hand-wrote its own check and the other two never learned
+  it -- the same split `logit_bias` had, and the same one
+  `sampling_knobs::ExtraSamplerFields` was built to close for the knobs
+  that ARE implemented. `truncate_prompt_tokens` was the most
+  dangerous: ignoring it answers a **different prompt** than the caller
+  believes they sent, silently.
+
+  The decision is one flattened struct shared by
+  `/v1/chat/completions`, `/v1/completions` and llama.cpp's native
+  `/completion`, destructured exhaustively with no `..`, so a field
+  added to the wire and not answered **fails the build** rather than
+  returning a 200. A test drives every field against every route;
+  removing the refusal from one route turns it red, confirmed.
+
+  A default a caller may legitimately spell out (`n: 1`, `echo: false`,
+  `skip_special_tokens: true`) is **served**, not refused: it describes
+  what this server already does.
+
+  `cache_salt` is deliberately NOT in the table and is recorded as a
+  row of its own: it selects which cached prefixes a request may reuse,
+  so a server that ignores it can serve one caller from another's
+  cached prefix. That names an isolation property, not a missing knob.
+
 ## [0.29.0] - 2026-09-20
 
 ### Added
