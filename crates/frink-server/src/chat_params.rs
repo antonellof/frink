@@ -88,6 +88,10 @@ impl ChatCompletionRequest {
             // Set by the STREAMING routes, which are the only ones whose
             // delivery order a client can observe (`crate::round_robin`).
             interleave_choices: false,
+            // `allowed_token_ids` and `bad_words`, both steering the
+            // draw. The bad words are still STRINGS here; the layer
+            // with the tokenizer resolves them (`run_generation_emit`).
+            token_mask: self.unimplemented.token_mask(),
             // Reporting costs the greedy fast path, so only a request
             // that will render them asks for them.
             wants_logprobs: self.n_logprobs().is_ok_and(|n| n.is_some())

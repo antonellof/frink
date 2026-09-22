@@ -595,6 +595,10 @@ pub async fn completions(
         // Set by the STREAMING routes, which are the only ones whose
         // delivery order a client can observe (`crate::round_robin`).
         interleave_choices: false,
+        // `allowed_token_ids` and `bad_words`, both steering the
+        // draw. The bad words are still STRINGS here; the layer
+        // with the tokenizer resolves them (`run_generation_emit`).
+        token_mask: req.unimplemented.token_mask(),
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.

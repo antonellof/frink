@@ -106,10 +106,16 @@ pub(crate) struct UnimplementedFields {
     /// path entirely, not a knob on this one.
     pub(crate) prompt_embeds: Option<Value>,
     /// Restrict sampling to these ids.
-    pub(crate) allowed_token_ids: Option<Value>,
+    ///
+    /// SERVED (`crate::token_mask`), like `cache_salt` below: named
+    /// here because this table is where every route reads its shared
+    /// fields from, and typed rather than `Value` because a served
+    /// field has a shape.
+    pub(crate) allowed_token_ids: Option<Vec<u32>>,
     /// Forbid these strings. `stop` is implemented and is not this:
     /// `stop` ENDS the generation, this one steers around a token.
-    pub(crate) bad_words: Option<Value>,
+    /// SERVED; see above.
+    pub(crate) bad_words: Option<Vec<String>>,
     /// vLLM's `cache_salt`: the caller's prefix-cache namespace.
     ///
     /// Deserialized here because the table is where every route reads
@@ -135,6 +141,17 @@ impl UnimplementedFields {
         let n = self.n.unwrap_or(1).max(1) as usize;
         let k = self.best_of.unwrap_or(0) as usize;
         n.max(k)
+    }
+
+    /// The two steering fields as one mask, with the bad words still
+    /// unresolved: the route has no tokenizer.
+    pub(crate) fn token_mask(&self) -> crate::token_mask::TokenMask {
+        crate::token_mask::TokenMask::requested(
+            self.allowed_token_ids
+                .as_ref()
+                .map(|ids| ids.iter().map(|&i| i as usize).collect()),
+            self.bad_words.clone().unwrap_or_default(),
+        )
     }
 
     /// True when more will be generated than returned, which is the
@@ -237,20 +254,18 @@ impl UnimplementedFields {
                 "embeddings as input in place of text",
             ));
         }
-        if allowed_token_ids.is_some() {
-            return Err(refusal(
-                route,
+        // Served, not refused (`crate::token_mask`). An EMPTY
+        // `allowed_token_ids` is a 400 rather than a 501: it is a
+        // request to draw from nothing, which no server can serve, and
+        // honouring it would produce a row of `-inf` and a token that
+        // is an artefact of argmax over negative infinity.
+        if allowed_token_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+            return Err(crate::invalid_request(
+                "`allowed_token_ids` is empty, so there is no token this request could draw",
                 "allowed_token_ids",
-                "restricting sampling to a token-id set; `response_format` constrains output here",
             ));
         }
-        if bad_words.is_some() {
-            return Err(refusal(
-                route,
-                "bad_words",
-                "forbidding strings during sampling; `stop` ends a generation but does not steer it",
-            ));
-        }
+        let _ = bad_words;
         // Served, not refused; see the field. Named here so the
         // exhaustive destructure stays exhaustive.
         let _ = cache_salt;
@@ -318,7 +333,7 @@ mod tests {
     /// is visible as a count.
     #[test]
     fn every_field_refuses_by_name() {
-        let cases: [(&str, serde_json::Value); 11] = [
+        let cases: [(&str, serde_json::Value); 9] = [
             ("n", serde_json::json!({ "n": 2 })),
             ("best_of", serde_json::json!({ "best_of": 2 })),
             (
@@ -339,11 +354,6 @@ mod tests {
                 serde_json::json!({ "prompt_embeds": "AA==" }),
             ),
             (
-                "allowed_token_ids",
-                serde_json::json!({ "allowed_token_ids": [1, 2] }),
-            ),
-            ("bad_words", serde_json::json!({ "bad_words": ["x"] })),
-            (
                 "skip_special_tokens",
                 serde_json::json!({ "skip_special_tokens": false }),
             ),
@@ -356,7 +366,7 @@ mod tests {
         // or named here as SERVED. A member added to the struct and
         // forgotten in both places changes the count and fails, which
         // is the whole reason this assertion exists.
-        const SERVED: [&str; 1] = ["cache_salt"];
+        const SERVED: [&str; 3] = ["cache_salt", "allowed_token_ids", "bad_words"];
         assert_eq!(
             cases.len() + SERVED.len(),
             serde_json::to_value(UnimplementedFields::default())

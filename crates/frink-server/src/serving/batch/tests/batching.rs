@@ -61,6 +61,7 @@ fn continuous_batching_composes_with_paged_kv() {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens: params[i].max_tokens,
             // Cloned rather than field-by-field: a hand-written copy
@@ -252,6 +253,7 @@ fn continuous_batch_matches_sequential_generate_token_ids() {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens: params[i].max_tokens,
             // Cloned rather than field-by-field: a hand-written copy

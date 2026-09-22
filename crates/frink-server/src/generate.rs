@@ -1420,6 +1420,14 @@ pub struct GenerationParams {
     /// radix tree already holds, so it has no rows for those
     /// positions).
     pub prompt_logprobs: Option<usize>,
+    /// `allowed_token_ids` and `bad_words`, as one mask
+    /// (`crate::token_mask`). Both steer the draw rather than ending
+    /// it, which is what separates them from `stop`.
+    ///
+    /// Resolved where `stop_token_ids` is, because `bad_words` are
+    /// STRINGS and turning them into ids needs the model's tokenizer:
+    /// one seam that has both, rather than two answers that can drift.
+    pub token_mask: crate::token_mask::TokenMask,
     /// vLLM's `cache_salt`: which caller's namespace this request's
     /// prefix cache entries belong to, hashed to a `u64`.
     ///
@@ -1560,6 +1568,7 @@ impl GenerationParams {
     /// `temperature: 0`.
     pub(crate) fn needs_vocab_logits(&self) -> bool {
         self.json_object
+            || !self.token_mask.is_empty()
             || self.grammar.is_some()
             || self.reasoning_budget.needs_vocab_logits()
             || !self.sampling.greedy_equals_raw_argmax()
@@ -2877,6 +2886,7 @@ mod tests {
             seed: 1,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             stop: Vec::new(),
             stop_token_ids: Vec::new(),
             json_object: false,
@@ -3262,6 +3272,7 @@ mod tests {
                 seed: 1,
                 n: 1,
                 interleave_choices: false,
+                token_mask: crate::token_mask::TokenMask::default(),
                 stop: vec!["ZZ_NEVER_MATCHES_ZZ".to_string()],
                 stop_token_ids: Vec::new(),
                 json_object: false,
@@ -3433,6 +3444,7 @@ mod tests {
             seed: 1,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             stop: Vec::new(),
             stop_token_ids: Vec::new(),
             json_object: false,
@@ -3735,6 +3747,7 @@ mod tests {
                 seed: 1,
                 n: 1,
                 interleave_choices: false,
+                token_mask: crate::token_mask::TokenMask::default(),
                 stop: vec![stop_str.clone()],
                 stop_token_ids: Vec::new(),
                 json_object: false,

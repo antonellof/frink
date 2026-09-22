@@ -163,6 +163,16 @@ pub(crate) fn sample_next(
             ));
         }
     }
+    // Bad words that never met a tokenizer. The same refusal shape as
+    // an unresolved reasoning budget below, and for the same reason:
+    // running on would serve an UNFILTERED answer to a caller who
+    // asked for a filtered one, with a 200.
+    if let [first, ..] = params.token_mask.unresolved() {
+        return Err(DecodeError::Unsupported(format!(
+            "`bad_words` reached the sampler unresolved (first: {first:?}); the decode path \
+             did not tokenize them"
+        )));
+    }
     if state.budget.is_none() {
         match &params.reasoning_budget {
             crate::reasoning_budget::ReasoningBudget::Unrestricted => {}
@@ -213,6 +223,11 @@ pub(crate) fn sample_next(
             if json_object {
                 mask_logits_for_json(scores, decode_token);
             }
+            // `allowed_token_ids` / `bad_words`. `history` rather than
+            // the window: a bad word's prefix is what THIS completion
+            // has generated, and a prompt that happens to end with one
+            // was supplied rather than drawn.
+            params.token_mask.mask(scores, history);
             if let Some(g) = grammar_ref {
                 match g.mask_logits(scores) {
                     Ok(o) => outcome = o,
@@ -335,6 +350,7 @@ mod tests {
             wants_logprobs: false,
             n: 1,
             interleave_choices: false,
+            token_mask: crate::token_mask::TokenMask::default(),
             reasoning: None,
             max_tokens: 8,
             sampling: SamplingParams {
