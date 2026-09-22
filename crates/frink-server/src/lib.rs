@@ -35,6 +35,7 @@
 mod admin;
 mod anthropic;
 mod attribution;
+mod best_of;
 mod budget;
 mod cache_admin;
 mod cancel;
@@ -2869,8 +2870,35 @@ async fn chat_completions_full(
         &prompt,
     );
     let tools: &[_] = if tools_active { &req.tools } else { &[] };
-    let rendered: Vec<ChatCompletionChoice> = completion
-        .choices
+    // The winners when `best_of` generated more than were asked back.
+    // Scored on the DISTRIBUTIONS, which is why `wants_logprobs` is on
+    // whenever `best_of` ranks even if the caller never sees them.
+    let wanted = req.unimplemented.n.unwrap_or(1).max(1) as usize;
+    let ranked: Vec<(generate::FinishReason, String)> = if completion.choices.len() > wanted {
+        let scored: Vec<crate::generate::GeneratedChoice> = completion
+            .choices
+            .into_iter()
+            .zip(
+                generated_logprobs
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::repeat(Vec::new())),
+            )
+            .map(
+                |((finish, text), logprobs)| crate::generate::GeneratedChoice {
+                    finish,
+                    text,
+                    logprobs,
+                },
+            )
+            .collect();
+        let best = crate::best_of::take_best(scored, wanted);
+        generated_logprobs = best.iter().map(|c| c.logprobs.clone()).collect();
+        best.into_iter().map(|c| (c.finish, c.text)).collect()
+    } else {
+        completion.choices
+    };
+    let rendered: Vec<ChatCompletionChoice> = ranked
         .into_iter()
         .enumerate()
         .map(|(index, (finish, text))| {
@@ -5639,7 +5667,7 @@ pub(crate) mod tests {
                 // array to carry the answers, which is the one
                 // per-route exception in the table
                 // (`unimplemented_fields::SERVES_SEVERAL_CHOICES`).
-                if field == "n"
+                if (field == "n" || field == "best_of")
                     && (uri == frink_api::routes::V1_COMPLETIONS
                         || uri == frink_api::routes::V1_CHAT_COMPLETIONS)
                 {
@@ -5647,12 +5675,16 @@ pub(crate) mod tests {
                     assert_eq!(
                         status,
                         StatusCode::OK,
-                        "{uri} refused a served `n`: {answer}"
+                        "{uri} refused a served `{field}`: {answer}"
                     );
+                    // `n: 3` returns three; `best_of: 2` generates two
+                    // and returns the best ONE, which is the whole
+                    // difference between the two fields.
+                    let want = if field == "n" { 3 } else { 1 };
                     assert_eq!(
                         answer["choices"].as_array().map(Vec::len),
-                        Some(3),
-                        "{answer}"
+                        Some(want),
+                        "{field}: {answer}"
                     );
                     continue;
                 }
