@@ -218,9 +218,9 @@ each checked against frink by grep rather than by memory:
 | tool calling | **yes** | and 0.25.0 fixed the format being chosen by the served NAME |
 | reasoning outputs | **yes** | `reasoning_tokens.rs`, `reasoning_budget.rs` |
 | pooling / embeddings | **partial** | `/v1/embeddings`, `/v1/rerank` from a decoder; no BERT-family encoder |
-| logprobs / top_logprobs | **yes** | `responses.rs`, `openai_extra.rs` |
-| prompt logprobs | **no, refused by name** | was a silent 200 until 2026-09-22 |
-| `n` > 1 / best-of / beam search | **no, refused by name** | was a silent 200 on two of three routes until 2026-09-22 |
+| logprobs / top_logprobs | **yes** on both OpenAI routes | the sampler publishes the distribution it drew from |
+| prompt logprobs | **yes** on `/v1/completions` | plain softmax, not the sampler's chain |
+| `n` > 1 / best-of | **yes** on both OpenAI routes, one shared prefill | beam search stays refused |
 | prompt embeds as input | **no, refused by name** | was a silent 200 until 2026-09-22 |
 | encoder-decoder | **no** | `t5` and friends are deferred |
 | multimodal | **no** | 10 deferred rows |
@@ -230,7 +230,7 @@ each checked against frink by grep rather than by memory:
 | sleep mode | **no** | |
 | per-request metrics | **yes** | `stats/` |
 | quantized KV cache | **Metal only** | `--ctk` reaches `frink-metal`'s device store; the host cache is f32 (see 2.4) |
-| per-caller cache isolation (`cache_salt`) | **no** | the radix cache is keyed by token ids and shared; see 2.5 |
+| per-caller cache isolation (`cache_salt`) | **yes on the contiguous caches**, refused by name on the paged store | see 2.5 |
 
 ### 2.3 The finding worth acting on
 
@@ -290,6 +290,13 @@ it ranks above every row in section 2.2 that no llama.cpp user can ask
 for.
 
 ### 2.5 `cache_salt` names an isolation property, not a knob
+
+**Served since 2026-09-22**, and building it confirmed the reading:
+the field needed BOTH shared caches scoped, not one, and a partial
+overlap across salts had to be no match rather than a shorter one. The
+paged store is refused by name, because its radix tree has no
+namespace to scope a lookup to. The original note is kept below
+because it is what made the row the right shape.
 
 Refused by name since 2026-09-22 along with the rest of the
 unimplemented surface -- except it is not in that table, deliberately.

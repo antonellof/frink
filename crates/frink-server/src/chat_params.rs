@@ -76,6 +76,7 @@ impl ChatCompletionRequest {
         model: crate::sampling_knobs::SamplerModel<'_>,
     ) -> Result<GenerationParams, ApiError> {
         Ok(GenerationParams {
+            cache_salt: crate::cache_salt::namespace(self.unimplemented.cache_salt.as_deref()),
             prompt_logprobs: None,
             // The prompt is prefilled once and the KV forked per
             // choice (`crate::generate`). A STREAMING request never

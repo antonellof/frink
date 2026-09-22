@@ -538,6 +538,7 @@ pub(crate) async fn completion(
 
     let prompt = req.prompt_text()?.to_string();
     let mut params = GenerationParams {
+        cache_salt: None,
         prompt_logprobs: None,
         // Wired per route once a wire renders them; see
         // `docs/plans/per-token-logprobs.md`.

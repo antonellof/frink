@@ -15,6 +15,45 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`cache_salt`: per-caller isolation for the shared caches.** Named
+  the caller's namespace; both shared caches key on it.
+
+  ```
+  tenant-a (warm)          cache: miss
+  tenant-a (again)         cache: hit
+  tenant-b (same prompt)   cache: miss
+  no salt  (same prompt)   cache: miss
+  ```
+
+  This was refused by name until now, and the refusal said why: a
+  prefix cache is shared state keyed by token ids, so without a salt
+  one caller's prompt can be answered from another caller's cached
+  prefix -- and the shared leading tokens are usually the system
+  prompt, the part a caller most expects to be theirs. That is an
+  isolation property, not a performance knob.
+
+  Both caches, not one: the contiguous prefix cache scopes its lookup
+  (`find_longest_prefix_salted`) and the response cache keys on it.
+  Doing only one would leave the isolation half-built, which is worse
+  than not offering it. A partial overlap across salts is **no** match
+  rather than a shorter one, because a partial overlap is exactly what
+  would leak.
+
+  The caller's string is **hashed** and only the hash is kept, so a
+  heap dump of the cache does not carry whatever they namespaced by --
+  which may be a tenant id or an account. An absent, empty or
+  whitespace salt is the shared namespace, not a private one keyed on
+  emptiness, which would silently stop such a caller sharing with
+  themselves.
+
+  **501 on a paged request.** The radix tree walks one tree keyed by
+  token ids and its nodes hold block indices the whole deployment
+  shares; there is no namespace to scope a lookup to. Serving it would
+  be the worst of three options: a caller who asked for isolation, was
+  told they got it, and shared anyway.
+
 ## [0.37.0] - 2026-09-22
 
 ### Added
