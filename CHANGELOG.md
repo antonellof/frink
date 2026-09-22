@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-22
+
 ### Added
 
 - **`logprobs` on `/v1/completions`.** Per-token log-probabilities with
