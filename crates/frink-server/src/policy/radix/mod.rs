@@ -22,7 +22,9 @@
 //! reference-counted rather than cloned.
 
 pub mod plain;
+pub mod salted;
 pub mod tree;
 
 pub use plain::RadixCache;
+pub use salted::{Handle, SaltedRadix};
 pub use tree::{align_ceil, align_down, NodeId};

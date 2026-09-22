@@ -15,6 +15,28 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`cache_salt` on the paged KV store.** The last place the field was
+  refused. A namespace is a whole radix tree there, not a synthetic
+  prefix inside one: the tree matches whole PAGES, so prepending
+  anything shifts every page boundary and the indices it stores stop
+  lining up with the positions a request adopts.
+
+  The pages stay **one pool**. A namespace does not get its own
+  memory, and eviction reaches every one of them, or an idle tenant
+  would hold pages a busy one needs. It takes from each namespace in
+  turn rather than by a global LRU, for two reasons: each tree's clock
+  ticks only on walks of that tree, so comparing two of them orders by
+  how busy a tenant is rather than by age; and a global LRU lets one
+  busy caller evict every quiet caller's prefix, which is the
+  noisy-neighbour problem the field exists to bound.
+
+  A `Handle` names the namespace with the node, because a node id from
+  one tree used against another names a different node and the error
+  is silent: the lock would land on a stranger's prefix.
+
+
 ## [0.41.0] - 2026-09-22
 
 ### Added

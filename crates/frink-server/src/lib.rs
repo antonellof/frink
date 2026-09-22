@@ -4536,9 +4536,9 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             // what makes it possible at all, since sharing means two
             // sequences pointing at one page rather than one of them
             // holding a copy.
-            let radix = Some(Arc::new(Mutex::new(crate::policy::radix::RadixCache::new(
-                block_size,
-            ))));
+            let radix = Some(Arc::new(Mutex::new(
+                crate::policy::radix::SaltedRadix::new(block_size),
+            )));
             // The anchor: the position an agentic turn will come back
             // to. Resolved ONCE here, from the served checkpoint's own
             // family and its own tokenizer, because it has to be a

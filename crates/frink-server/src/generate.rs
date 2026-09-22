@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::policy::anchor::{decode_slide, AnchorState, SlidingRequest, WindowPolicy};
 use crate::policy::pool_budget::SWA_RETAIN_GAP;
-use crate::policy::radix::{align_down, NodeId, RadixCache};
+use crate::policy::radix::{align_down, Handle, SaltedRadix};
 use frink_core::cache::{
     KvBlockPool, KvCache, KvPoolExhausted as CacheKvPoolExhausted, PageGroup, PagedKvCache,
     PagedStoreExhausted, SharedPagedKv,
@@ -145,7 +145,7 @@ pub struct PagedKvConfig {
     /// one CLONES a `Vec<KvCache>` per entry, so N conversations off
     /// one system prompt hold N copies of its KV. The radix tree stores
     /// page groups and reference-counts them, so they hold one.
-    pub radix: Option<Arc<Mutex<RadixCache>>>,
+    pub radix: Option<Arc<Mutex<SaltedRadix>>>,
     /// The single token that opens a tool call for this checkpoint, when
     /// its family has one and it encodes to exactly one token.
     ///
@@ -279,8 +279,13 @@ pub struct PagedLease {
     ///
     /// The node stays locked against eviction for as long as this lease
     /// lives, because those pages are being attended over.
-    adopted: Option<(usize, NodeId)>,
-    radix: Option<Arc<Mutex<RadixCache>>>,
+    adopted: Option<(usize, Handle)>,
+    radix: Option<Arc<Mutex<SaltedRadix>>>,
+    /// This request's prefix namespace, carried so the publish at the
+    /// end lands in the same tree the match at the start read from. A
+    /// lease that matched in one namespace and published into another
+    /// would hand a caller's continuation to everybody.
+    salt: Option<u64>,
     window: Option<WindowSlide>,
 }
 
@@ -440,6 +445,11 @@ impl PagedLease {
             // what refcounts are for.
             adopted: None,
             radix: None,
+            // A fork publishes nothing and matches nothing, so its
+            // namespace is never read. Carried anyway, because a field
+            // that says "whose request this is" should not go missing
+            // on a copy of the request.
+            salt: self.salt,
             window: None,
         })
     }
@@ -667,6 +677,10 @@ pub(crate) fn acquire_paged_caches(
     config: &PagedKvConfig,
     tokens: &[usize],
     max_seq_len: usize,
+    // Which caller's prefix namespace this request may match in
+    // (`crate::cache_salt`). `None` is the shared one, which is what
+    // every request got before the field existed.
+    salt: Option<u64>,
 ) -> Result<PagedLease, PagedStoreExhausted> {
     let block_size = config.store.read(0).block_size();
     let deadline = Instant::now() + config.queue_wait;
@@ -679,7 +693,7 @@ pub(crate) fn acquire_paged_caches(
         Some(radix) => {
             let ids: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
             let mut tree = radix.lock().unwrap_or_else(|p| p.into_inner());
-            let m = tree.match_prefix(&ids);
+            let m = tree.match_prefix(salt, &ids);
             // Never adopt the WHOLE prompt. Prefill has to run over at
             // least one token to produce the logits that predict the
             // next one, and a fully-adopted prompt leaves nothing to
@@ -692,17 +706,17 @@ pub(crate) fn acquire_paged_caches(
             if cached_len == 0 {
                 None
             } else {
-                tree.lock(m.node);
+                tree.lock(m.handle);
                 // One index per TOKEN, so consecutive tokens in a page
                 // repeat its group. Step by `block_size` to get each
                 // group once, in position order.
-                let per_token = tree.matched_indices(m.node);
+                let per_token = tree.matched_indices(m.handle);
                 let groups: Vec<PageGroup> = per_token[..cached_len]
                     .iter()
                     .step_by(block_size)
                     .map(|&g| PageGroup(g))
                     .collect();
-                Some((cached_len, m.node, groups))
+                Some((cached_len, m.handle, groups))
             }
         }
         None => None,
@@ -759,6 +773,7 @@ pub(crate) fn acquire_paged_caches(
                 spare: Vec::new(),
                 adopted: node.map(|n| (cached_len / block_size, n)),
                 radix: config.radix.clone(),
+                salt,
                 window: make_window(),
             });
         }
@@ -829,6 +844,7 @@ pub(crate) fn acquire_paged_caches(
                 spare: Vec::new(),
                 adopted: node.map(|n| (cached_len / block_size, n)),
                 radix: config.radix.clone(),
+                salt,
                 window: make_window(),
             });
             return Err(PagedStoreExhausted);
@@ -899,7 +915,7 @@ pub(crate) fn publish_to_radix(lease: &mut PagedLease, tokens: &[usize], block_s
     }
     let result = {
         let mut tree = radix.lock().unwrap_or_else(|p| p.into_inner());
-        tree.insert_prefix(&ids, &per_token[..ids.len()])
+        tree.insert_prefix(lease.salt, &ids, &per_token[..ids.len()])
     };
     // The tree now holds a reference to every group it kept, so those
     // survive this lease's own release.
@@ -1964,7 +1980,7 @@ pub fn generate(
     } else {
         kv = match (paged_kv, kv_pool) {
             (Some(config), _) => Kv::Paged(
-                acquire_paged_caches(decoder, config, &tokens, max_seq_len)
+                acquire_paged_caches(decoder, config, &tokens, max_seq_len, params.cache_salt)
                     .map_err(|_| DecodeError::KvPoolExhausted)?,
             ),
             (None, Some(config)) => Kv::Contiguous(
@@ -1996,20 +2012,6 @@ pub fn generate(
             // lm_head at every one instead of once
             // (`Kv::prefill_scored`). A request that did not ask keeps
             // the cheap path exactly as it was.
-            if params.cache_salt.is_some() && matches!(kv, Kv::Paged(_)) {
-                // The radix tree walks ONE tree keyed by token ids and
-                // its nodes hold block indices the whole deployment
-                // shares; there is no namespace to scope a lookup to.
-                // Serving this would be the worst of the three
-                // options: a caller who asked for isolation, told they
-                // got it, and sharing anyway.
-                return Err(DecodeError::Unsupported(
-                    "`cache_salt` is not implemented for the paged KV store: its prefix tree has \
-                     no per-caller namespace, so the isolation the field asks for would not \
-                     hold. Serve without `--paged-kv`."
-                        .to_string(),
-                ));
-            }
             if params.prompt_logprobs.is_some() {
                 let Some(rows) = kv.prefill_scored(decoder, &tokens) else {
                     // The paged store's prefill SKIPS whatever the
@@ -3991,8 +3993,9 @@ mod tests {
         // dry.
         for round in 0..40u32 {
             let tokens: Vec<usize> = (0..12).map(|i| (round * 100 + i) as usize).collect();
-            let mut lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 8)
-                .expect("admission must keep succeeding once the tree can be evicted");
+            let mut lease =
+                acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 8, None)
+                    .expect("admission must keep succeeding once the tree can be evicted");
             publish_to_radix(&mut lease, &tokens, block_size);
             drop(lease);
         }
@@ -4032,7 +4035,7 @@ mod tests {
             store: Arc::new(decoder.config.new_paged_kv(block_size, blocks)),
             queue_wait: Duration::ZERO,
             radix: share_prefixes.then(|| {
-                Arc::new(Mutex::new(crate::policy::radix::RadixCache::new(
+                Arc::new(Mutex::new(crate::policy::radix::SaltedRadix::new(
                     block_size,
                 )))
             }),
@@ -4250,7 +4253,7 @@ mod tests {
         let max_seq_len = tokens.len() + 8;
 
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
                 .expect("the store is large enough"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
@@ -4296,7 +4299,7 @@ mod tests {
 
         // Prefill really writes the positions, so `seq_len` is ragged.
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
                 .expect("the store is large enough"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
@@ -4357,7 +4360,7 @@ mod tests {
         let max_seq_len = tokens.len() + 8;
 
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
                 .expect("the store is large enough"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
@@ -4411,8 +4414,9 @@ mod tests {
         let free_at_rest = config.store.free_groups();
 
         {
-            let mut kv =
-                Kv::Paged(acquire_paged_caches(&decoder, &config, &tokens, max_seq_len).unwrap());
+            let mut kv = Kv::Paged(
+                acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None).unwrap(),
+            );
             let _ = kv.prefill(&decoder, &tokens, false);
             let Kv::Paged(lease) = kv else { unreachable!() };
             let forks: Vec<PagedLease> = (0..3).map(|_| lease.fork().expect("room")).collect();
@@ -4438,7 +4442,7 @@ mod tests {
         let decoder = windowed_decoder(8);
         let config = paged_config(&decoder, 4, /* blocks = */ 200);
         let tokens: Vec<usize> = vec![1, 2, 3];
-        let lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 64)
+        let lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 64, None)
             .expect("the store is large enough");
         assert!(
             lease.window.is_some(),
@@ -4463,12 +4467,12 @@ mod tests {
         // taken and must try, take some, and give them back.
         let need = {
             let sized = paged_config(&decoder, block_size, 1_000);
-            let lease = acquire_paged_caches(&decoder, &sized, &tokens, max_seq_len).unwrap();
+            let lease = acquire_paged_caches(&decoder, &sized, &tokens, max_seq_len, None).unwrap();
             lease.groups.len()
         };
         let config = paged_config(&decoder, block_size, need);
         let mut kv = Kv::Paged(
-            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len)
+            acquire_paged_caches(&decoder, &config, &tokens, max_seq_len, None)
                 .expect("sized to exactly one request"),
         );
         let _ = kv.prefill(&decoder, &tokens, false);
@@ -4692,8 +4696,9 @@ mod tests {
         let config = paged_config(&decoder, block_size, /* blocks = */ 200);
         let tokens: Vec<usize> = vec![1, 2, 3];
 
-        let mut lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 4_000)
-            .expect("the store holds a window's worth");
+        let mut lease =
+            acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 4_000, None)
+                .expect("the store holds a window's worth");
         let after_admission = config.store.free_groups();
         let held = lease.groups.len();
 
@@ -4748,8 +4753,9 @@ mod tests {
             // position rather than at the next multiple of the default.
             config.slide_interval = 4;
             config.anchor_token = armed.then_some(anchor_token as u32);
-            let mut lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 1_000)
-                .expect("the store is large enough");
+            let mut lease =
+                acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 1_000, None)
+                    .expect("the store is large enough");
             for pos in tokens.len()..check {
                 if at.contains(&(pos + 1)) {
                     lease.observe_sampled(anchor_token, pos + 1, false);
@@ -4859,8 +4865,9 @@ mod tests {
         let config = paged_config(&decoder, block_size, /* blocks = */ 200);
         let tokens: Vec<usize> = vec![1, 2, 3];
 
-        let mut lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 4_000)
-            .expect("the store holds a window's worth");
+        let mut lease =
+            acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 4_000, None)
+                .expect("the store holds a window's worth");
 
         for pos in tokens.len()..tokens.len() + 4_000 {
             lease.before_step(pos);
@@ -4914,8 +4921,9 @@ mod tests {
 
         // A second request off that prefix, driven long past the window.
         let tokens: Vec<usize> = shared.iter().map(|&b| b as usize).collect();
-        let mut lease = acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 3_000)
-            .expect("the store is large enough");
+        let mut lease =
+            acquire_paged_caches(&decoder, &config, &tokens, tokens.len() + 3_000, None)
+                .expect("the store is large enough");
         let locked = lease.adopted_positions(block_size);
         assert!(locked > 0, "this test needs a real prefix match");
 
