@@ -60,6 +60,21 @@ pub(crate) enum Loaded {
 /// separate field would let a swap leave a batcher decoding against the
 /// old weights while `Model` named the new ones. Bundling them means
 /// one `Arc` swap replaces a consistent pair.
+/// What a `POST /sleep` remembers, so `POST /wake_up` can replay the
+/// load that produced the model it put away.
+///
+/// Both halves are kept because a model reaches this server two ways:
+/// by id through `/admin/models/load`, which discovers it in the
+/// scanned directories, and by PATH at startup from
+/// `FRINK_MODEL_PATH`, which never had an id. Remembering only the id
+/// would make a startup-loaded deployment unwakeable, which is the
+/// common case for a single-model server.
+#[derive(Debug, Clone)]
+pub(crate) struct SleptModel {
+    pub(crate) id: Option<String>,
+    pub(crate) path: std::path::PathBuf,
+}
+
 pub(crate) struct ActiveModel {
     /// Admin-surface id (see `admin::discover`), or `None` for a model
     /// that was not discovered through it -- the synthetic fallback, or

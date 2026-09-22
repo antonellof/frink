@@ -116,7 +116,7 @@ use frink_models::{Decoder, Gemma4Engine, KimiEngine, MlaEngine, PrefixCache};
 #[cfg(test)]
 use generate::FinishReason;
 use generate::GenerationParams;
-pub(crate) use loaded::{ActiveModel, Loaded};
+pub(crate) use loaded::{ActiveModel, Loaded, SleptModel};
 use model::ServerTokenizer;
 use rerank::encoder_endpoints;
 use response_cache::ResponseCache;
@@ -414,6 +414,16 @@ pub(crate) struct AppState {
     /// rejected instead of racing the first. A load is not cheap and
     /// two concurrent ones would fight for the same memory.
     pub(crate) load_in_progress: std::sync::atomic::AtomicBool,
+    /// The model a `POST /sleep` put away, so `POST /wake_up` can put
+    /// it back.
+    ///
+    /// Sleep is an UNLOAD THAT REMEMBERS. That is the whole difference
+    /// from `/admin/models/unload`, which leaves the server with
+    /// nothing to serve and no idea what it used to serve, so only a
+    /// client that already knows the id can recover. A sleeping server
+    /// can wake itself, which is what makes the pair usable from a
+    /// scheduler that does not know the deployment.
+    pub(crate) slept: Mutex<Option<SleptModel>>,
     /// Long-running jobs (download, load) -- see the `tasks` module.
     pub(crate) tasks: Arc<tasks::TaskRegistry>,
     /// Generations that can currently be stopped by `POST /v1/cancel`
@@ -553,17 +563,39 @@ impl AppState {
     /// answer while nothing is loaded; the alternative -- keeping a
     /// stale model around so the endpoint never fails -- would serve
     /// tokens from a checkpoint the operator explicitly unloaded.
+    /// True while a `POST /sleep` is in effect.
+    pub(crate) fn is_sleeping(&self) -> bool {
+        self.slept
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+    }
+
     pub(crate) fn require_active(&self) -> Result<Arc<ActiveModel>, ApiError> {
-        self.active().ok_or_else(|| {
-            (
+        if let Some(active) = self.active() {
+            return Ok(active);
+        }
+        // Asleep is not the same as empty, and telling a caller to
+        // load a model they never chose would send them to the wrong
+        // knob. Distinct `type` so a client can branch on it.
+        if self.is_sleeping() {
+            return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error": {
-                    "message": "no model is loaded; POST /admin/models/load with an id from \
-                                GET /admin/models",
-                    "type": "model_not_loaded"
+                    "message": "this server is asleep; POST /wake_up to reload the model it put \
+                                away",
+                    "type": "server_sleeping"
                 }})),
-            )
-        })
+            ));
+        }
+        Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": {
+                "message": "no model is loaded; POST /admin/models/load with an id from \
+                            GET /admin/models",
+                "type": "model_not_loaded"
+            }})),
+        ))
     }
 
     /// [`AppState::active`]'s *generation* model only, for the many
@@ -3534,6 +3566,12 @@ fn protected_routes() -> Router<Arc<AppState>> {
         .route(routes::ADMIN_MODELS, get(admin::models))
         .route(routes::ADMIN_MODELS_LOAD, post(admin::load_model))
         .route(routes::ADMIN_MODELS_UNLOAD, post(admin::unload_model))
+        // Not under `/admin`: a scheduler that puts a server to sleep
+        // between jobs is not administering it, and vLLM's own routes
+        // are at the root.
+        .route(routes::SLEEP, post(admin::sleep))
+        .route(routes::WAKE_UP, post(admin::wake_up))
+        .route(routes::IS_SLEEPING, get(admin::is_sleeping))
         .route(routes::ADMIN_DOWNLOAD, post(admin::download))
         .route(routes::ADMIN_TASKS, get(admin::tasks))
         .route(&admin::cancel_route(), post(admin::cancel_task))
@@ -3902,6 +3940,7 @@ fn build_app_state(
         Some(Arc::new(std::sync::Mutex::new(())))
     };
     AppState {
+        slept: Mutex::new(None),
         embedding,
         active: std::sync::RwLock::new(Some(Arc::new(ActiveModel {
             id,
@@ -4921,7 +4960,19 @@ pub(crate) mod tests {
     /// struct is added in one place rather than in every test that
     /// builds one.
     pub(crate) fn test_state(model: Model, response_cache: ResponseCache) -> AppState {
+        test_state_at(model, response_cache, None)
+    }
+
+    /// [`test_state`] with a checkpoint path on record, which is what
+    /// makes a model SLEEPABLE: `/sleep` refuses one it could not
+    /// bring back, and the plain fixture is deliberately that case.
+    pub(crate) fn test_state_at(
+        model: Model,
+        response_cache: ResponseCache,
+        checkpoint_path: Option<std::path::PathBuf>,
+    ) -> AppState {
         AppState {
+            slept: Mutex::new(None),
             embedding: None,
             paged_kv: None,
             active: std::sync::RwLock::new(Some(Arc::new(ActiveModel {
@@ -4929,7 +4980,7 @@ pub(crate) mod tests {
                 loaded: Loaded::Generative(Arc::new(model)),
                 batcher: None,
                 ceiling: None,
-                checkpoint_path: None,
+                checkpoint_path,
             }))),
             load_in_progress: std::sync::atomic::AtomicBool::new(false),
             tasks: Arc::new(tasks::TaskRegistry::new()),
@@ -5580,6 +5631,112 @@ pub(crate) mod tests {
                 "{why}: {answer}"
             );
         }
+    }
+
+    /// **Sleep refuses a model it could not bring back.**
+    ///
+    /// A checkpoint with no path on record -- the synthetic fixture,
+    /// and any model loaded from something this server cannot replay
+    /// -- would be a one-way door dressed as a round trip. Refusing is
+    /// the honest answer, and the test server is exactly that case,
+    /// which is why the state machine below is driven over a state
+    /// carrying a path instead.
+    #[tokio::test]
+    async fn sleep_refuses_a_model_it_could_not_bring_back() {
+        let app = test_app();
+        let (status, answer) =
+            post_json_uri(&app, frink_api::routes::SLEEP, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["error"]["type"], "not_reloadable", "{answer}");
+        // And it stays awake: a refused sleep must not leave the server
+        // in a state where nothing is loaded.
+        let (_, still) = get_json_uri(&app, frink_api::routes::IS_SLEEPING).await;
+        assert_eq!(still["is_sleeping"], false, "{still}");
+        let (status, _) = post_json_uri(
+            &app,
+            frink_api::routes::V1_CHAT_COMPLETIONS,
+            serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 2
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a refused sleep unloaded the model");
+    }
+
+    /// **Sleep is an unload that REMEMBERS**, and that is the whole
+    /// difference from `/admin/models/unload`: a slept server can wake
+    /// itself, where an unloaded one needs a client that knows the id.
+    ///
+    /// The state a caller can observe is pinned end to end: asleep is
+    /// reported by `GET /is_sleeping`, a generation refused while
+    /// asleep says so with its own error `type` rather than
+    /// `model_not_loaded`, and sleeping twice is not an error.
+    #[tokio::test]
+    async fn sleep_remembers_what_unload_forgets() {
+        // A path on record is what makes a model sleepable; the plain
+        // fixture has none and `sleep` refuses that case above.
+        let state = Arc::new(test_state_at(
+            test_model_full_byte_vocab(),
+            ResponseCache::new(1000, Duration::from_secs(3600)),
+            Some(std::path::PathBuf::from("/nonexistent/fixture.gguf")),
+        ));
+        let app = test_app_with_state(Arc::clone(&state));
+        let ask = || {
+            let app = app.clone();
+            async move {
+                post_json_uri(
+                    &app,
+                    frink_api::routes::V1_CHAT_COMPLETIONS,
+                    serde_json::json!({
+                        "model": "x",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 2
+                    }),
+                )
+                .await
+            }
+        };
+
+        let (status, _) = ask().await;
+        assert_eq!(status, StatusCode::OK, "the fixture server serves");
+        let (_, awake) = get_json_uri(&app, frink_api::routes::IS_SLEEPING).await;
+        assert_eq!(awake["is_sleeping"], false, "{awake}");
+
+        let (status, slept) =
+            post_json_uri(&app, frink_api::routes::SLEEP, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{slept}");
+        assert_eq!(slept["is_sleeping"], true, "{slept}");
+        let (_, now) = get_json_uri(&app, frink_api::routes::IS_SLEEPING).await;
+        assert_eq!(now["is_sleeping"], true, "{now}");
+
+        // A generation while asleep names the state, so a client can
+        // tell "wake me" from "load something".
+        let (status, refused) = ask().await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        assert_eq!(
+            refused["error"]["type"], "server_sleeping",
+            "an asleep server reported itself as empty: {refused}"
+        );
+
+        // Sleeping twice is not an error and must not lose the record.
+        let (status, again) =
+            post_json_uri(&app, frink_api::routes::SLEEP, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(again["is_sleeping"], true, "{again}");
+    }
+
+    /// Waking a server that is not asleep is a conflict rather than a
+    /// silent no-op: a scheduler that lost track of the state should
+    /// find out, not be told everything is fine.
+    #[tokio::test]
+    async fn waking_a_server_that_is_awake_is_refused() {
+        let app = test_app();
+        let (status, answer) =
+            post_json_uri(&app, frink_api::routes::WAKE_UP, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["error"]["type"], "not_sleeping", "{answer}");
     }
 
     /// **`cache_salt` isolates one caller's cached prefixes from
@@ -6748,6 +6905,29 @@ pub(crate) mod tests {
                     .uri(uri)
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+        (status, json)
+    }
+
+    /// The GET twin of [`post_json_uri`], for the routes that report
+    /// state rather than change it.
+    pub(crate) async fn get_json_uri(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
                     .unwrap(),
             )
             .await

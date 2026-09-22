@@ -99,7 +99,19 @@ pub struct TaskAccepted {
     pub task_id: String,
 }
 
+/// The answer to `POST /sleep` and `POST /wake_up`.
+///
+/// `is_sleeping` is the state AFTER the call, so a caller does not
+/// have to follow up with `GET /is_sleeping` to learn whether the
+/// thing it asked for happened.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SleepResponse {
+    pub ok: bool,
+    pub is_sleeping: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+
 pub struct UnloadResponse {
     pub ok: bool,
     /// Always `null` on success; stated rather than omitted so the UI

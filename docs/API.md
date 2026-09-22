@@ -34,6 +34,7 @@ comes back the same way.
 | `GET /lora-adapters` · `POST /lora-adapters` | llama.cpp's LoRA listing and scale setting; the per-request `lora` field is honoured on `/v1/chat/completions`, `/v1/completions` and `/completion` (see below) |
 | `GET /cache/stats` · `GET /metrics` | Frink extensions |
 | `/admin/*` | Control surface (see below) |
+| `POST /sleep` · `POST /wake_up` · `GET /is_sleeping` | Put the model away and bring it back. `sleep` is an **unload that REMEMBERS**: it frees the KV pool, the paged store, the repack and expert caches and any device buffers, and records the checkpoint path, so the server can wake ITSELF -- `/admin/models/unload` leaves nothing behind and only a client that already knows the id can undo it. It is idempotent, and it refuses (`409 not_reloadable`) a model with no path on record rather than making a one-way door look like a round trip. While asleep, every route needing a model answers `503 server_sleeping` instead of `model_not_loaded`, so a caller can tell "put away, ask again" from "nothing here". `wake_up` returns as soon as the reload is under way and reports progress through `GET /admin/tasks`; a failed wake leaves the server asleep and retryable. **One level**, not two: frink mmaps its weights, so discarding them is what dropping the handle already does and the page cache decides how much of a reload touches disk -- a `level` parameter would be a knob with one position |
 | `GET /` | 404. The web UI in [`ui/`](../ui) is a separate app and this server does not serve it |
 | Audio / images | Not supported |
 

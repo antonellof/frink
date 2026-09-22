@@ -139,6 +139,22 @@ pub const ADMIN_MODELS_LOAD: &str = "/admin/models/load";
 /// `Arc`, and requests already decoding keep theirs.
 pub const ADMIN_MODELS_UNLOAD: &str = "/admin/models/unload";
 
+/// Free the active model's memory WITHOUT forgetting which model it
+/// was, so `WAKE_UP` can put it back.
+///
+/// The difference from `ADMIN_MODELS_UNLOAD` is the remembering: an
+/// unload leaves the server with nothing to serve and no idea what it
+/// used to serve, and a client has to know the id to bring it back.
+/// A sleep is reversible by the server itself, which is what makes it
+/// usable from a scheduler that does not know the deployment.
+pub const SLEEP: &str = "/sleep";
+
+/// Reload the model a `SLEEP` put away.
+pub const WAKE_UP: &str = "/wake_up";
+
+/// Whether this server is asleep.
+pub const IS_SLEEPING: &str = "/is_sleeping";
+
 /// Fetch a `.gguf` from the Hugging Face Hub into the model directory.
 /// Answers `202` with a task id.
 pub const ADMIN_DOWNLOAD: &str = "/admin/download";
