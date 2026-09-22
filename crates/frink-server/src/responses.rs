@@ -714,6 +714,9 @@ fn failure_code(error: &DecodeError) -> &'static str {
     match error {
         DecodeError::KvBudgetExceeded { binding, .. } => binding,
         DecodeError::TokenOutOfVocab { .. } => "invalid_prompt",
+        // A valid request this server cannot serve, which is the same
+        // thing the 501 on the wire says.
+        DecodeError::Unsupported(_) => "unsupported",
         DecodeError::KvPoolExhausted | DecodeError::QueueFull { .. } => "server_overloaded",
         // The request named a constraint this model cannot satisfy, so
         // it is the request that is invalid -- retrying it unchanged

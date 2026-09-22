@@ -538,6 +538,11 @@ pub(crate) async fn completion(
 
     let prompt = req.prompt_text()?.to_string();
     let mut params = GenerationParams {
+        // `n` is wired in a later step of
+        // `docs/plans/several-completions-per-request.md`; the field is
+        // still refused on the wire by `crate::unimplemented_fields`,
+        // so nothing can reach this with anything but 1.
+        n: 1,
         // This endpoint returns the text verbatim and never splits a
         // reasoning block out of it, so counting one would describe a
         // split that did not happen.

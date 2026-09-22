@@ -56,6 +56,7 @@ fn continuous_batching_composes_with_paged_kv() {
         let results = Arc::clone(&results);
         let prompt = prompts[i].clone();
         let par = GenerationParams {
+            n: 1,
             reasoning: None,
             max_tokens: params[i].max_tokens,
             // Cloned rather than field-by-field: a hand-written copy
@@ -242,6 +243,7 @@ fn continuous_batch_matches_sequential_generate_token_ids() {
         let results = Arc::clone(&results);
         let prompt = prompts[i].clone();
         let par = GenerationParams {
+            n: 1,
             reasoning: None,
             max_tokens: params[i].max_tokens,
             // Cloned rather than field-by-field: a hand-written copy

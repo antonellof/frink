@@ -30,6 +30,12 @@ pub enum DecodeError {
     TokenOutOfVocab { token: usize, vocab_size: usize },
     #[error("server is at capacity: the shared KV cache block pool has no free blocks for a new request; retry shortly")]
     KvPoolExhausted,
+    /// A well-formed request this deployment cannot serve, named rather
+    /// than approximated. The one case today is `n` > 1 on the paged
+    /// store, whose block lists have no copy-on-write, so the forks the
+    /// feature is FOR cannot be taken.
+    #[error("{0}")]
+    Unsupported(String),
     /// The batch scheduler's admission queue is full. Distinct from
     /// `KvPoolExhausted`: nothing is exhausted, the server is simply
     /// further behind than it is willing to queue. Naming the depth and
@@ -95,6 +101,9 @@ impl DecodeError {
     pub fn retry_after_secs(&self) -> Option<u64> {
         match self {
             DecodeError::TokenOutOfVocab { .. } => None,
+            // A feature this deployment does not have does not appear
+            // on a retry.
+            DecodeError::Unsupported(_) => None,
             // The same grammar against the same vocabulary fails the
             // same way on every retry.
             DecodeError::GrammarConstraint { .. } => None,
@@ -1128,6 +1137,19 @@ pub struct GenerationParams {
     pub max_tokens: usize,
     pub sampling: SamplingParams,
     pub seed: u64,
+    /// OpenAI's `n`: how many completions to return for ONE prompt.
+    ///
+    /// `1` is every request that says nothing, and is the path this
+    /// server has always taken. Above 1 the prompt is prefilled ONCE
+    /// and the KV cache forked per choice, which is the only reason
+    /// the field exists -- a caller who wanted `k` independent
+    /// generations could already send `k` requests
+    /// (`docs/plans/several-completions-per-request.md`).
+    ///
+    /// Choice `i` samples from `seed + i`, derived rather than drawn,
+    /// so a seeded request is reproducible and choice 0 of `n = 4` is
+    /// byte-identical to the single answer of `n = 1`.
+    pub n: usize,
     pub stop: Vec<String>,
     /// Stop strings that are exactly one token in this model's
     /// vocabulary, resolved once by whoever holds the tokenizer.
@@ -1464,8 +1486,8 @@ pub fn generate(
     paged_kv: Option<&PagedKvConfig>,
     prefix_cache: Option<&Mutex<PrefixCache>>,
     ceiling: Option<&ContextCeiling>,
-    mut emit: impl FnMut(&str),
-) -> Result<(FinishReason, Usage), DecodeError> {
+    mut emit: impl FnMut(usize, &str),
+) -> Result<(Vec<FinishReason>, Usage), DecodeError> {
     let vocab_size = decoder.config.vocab_size;
 
     // Metal greedy GPU argmax: fold final_norm+lm_head+argmax into the
@@ -1734,41 +1756,97 @@ pub fn generate(
     } else {
         crate::sampling_loop::DEFAULT_DRAFT_MAX
     };
-    let mut engine = ServerEngine {
-        decoder,
-        kv: &mut kv,
-        first_token_at: &mut first_token_at,
-        #[cfg(feature = "metal")]
-        kv_offload,
-        drafter: (draft_max > 0).then(|| {
-            frink_models::speculative::PromptLookupSpeculator::new(
-                crate::sampling_loop::DRAFT_NGRAM,
-                draft_max,
-            )
-        }),
-        accepted: 0,
-        drafted: 0,
-        forwards: 0,
-    };
-    let (finish, generated_ids, final_logits) = crate::sampling_loop::sample_until_stop(
-        logits,
-        pos,
-        &tokens,
-        stop_tokens,
-        params,
-        |ids| tokenizer.decode_bytes(ids),
-        &mut engine,
-        &mut emit,
-        &decode_token,
-        draft_max,
-    )?;
+    // `n` completions of ONE prompt, which is the whole reason the
+    // field exists: the prefill above ran once and the forks below
+    // start from it (`docs/plans/several-completions-per-request.md`).
+    let n = params.n.max(1);
+    // The forks are taken from the POST-PREFILL state, before choice 0
+    // decodes into `kv` and mutates it. Cloning after would give
+    // choices 1.. a cache that already holds choice 0's tokens, which
+    // is a different prompt.
+    let mut forks: Vec<Kv> = Vec::new();
+    if n > 1 {
+        let Some(caches) = kv.contiguous_mut() else {
+            // Refused rather than re-prefilled per choice. A caller who
+            // asked for four and silently got four prefills paid four
+            // times for the thing the field exists to avoid, with
+            // nothing in the response saying so.
+            return Err(DecodeError::Unsupported(
+                "`n` > 1 needs a forkable KV cache; this request is on the paged store, whose \
+                 block lists have no copy-on-write yet. Serve it without `--paged-kv`, or send \
+                 the request n times."
+                    .to_string(),
+            ));
+        };
+        forks = (1..n).map(|_| Kv::Contiguous(caches.clone())).collect();
+    }
+
+    let mut finishes: Vec<FinishReason> = Vec::with_capacity(n);
+    let mut completion_tokens = 0usize;
+    let mut speculation = (0usize, 0usize, 0usize);
+    // Choice 0's ids and final logits are what the request tail
+    // publishes: the prefix cache stores ONE continuation, and choice 0
+    // is the one a later `n = 1` with the same seed reproduces.
+    let mut first_generated_ids: Vec<usize> = Vec::new();
+    let mut first_logits: Vec<f32> = Vec::new();
+
+    for choice in 0..n {
+        // Derived, not drawn: `n: 4, seed: 7` is stable across runs and
+        // across `n`, so choice 0 of four is byte-identical to the
+        // single answer of one.
+        let mut choice_params = params.clone();
+        choice_params.seed = params.seed.wrapping_add(choice as u64);
+        let choice_params = if choice == 0 { params } else { &choice_params };
+
+        let choice_kv: &mut Kv = if choice == 0 {
+            &mut kv
+        } else {
+            &mut forks[choice - 1]
+        };
+        let mut engine = ServerEngine {
+            decoder,
+            kv: choice_kv,
+            first_token_at: &mut first_token_at,
+            #[cfg(feature = "metal")]
+            kv_offload,
+            drafter: (draft_max > 0).then(|| {
+                frink_models::speculative::PromptLookupSpeculator::new(
+                    crate::sampling_loop::DRAFT_NGRAM,
+                    draft_max,
+                )
+            }),
+            accepted: 0,
+            drafted: 0,
+            forwards: 0,
+        };
+        let (finish, generated_ids, final_logits) = crate::sampling_loop::sample_until_stop(
+            logits.clone(),
+            pos,
+            &tokens,
+            stop_tokens,
+            choice_params,
+            |ids| tokenizer.decode_bytes(ids),
+            &mut engine,
+            &mut |text: &str| emit(choice, text),
+            &decode_token,
+            draft_max,
+        )?;
+        // Read the counters out BEFORE the borrow ends, because this is
+        // the engine's last use and it borrows `kv` and
+        // `first_token_at` mutably.
+        speculation.0 += engine.forwards;
+        speculation.1 += engine.accepted;
+        speculation.2 += engine.drafted;
+        completion_tokens += generated_ids.len();
+        finishes.push(finish);
+        if choice == 0 {
+            first_generated_ids = generated_ids;
+            first_logits = final_logits;
+        }
+    }
     let decode_secs = decode_start.elapsed().as_secs_f64();
-    // Read the counters out BEFORE the tail, because this is the
-    // engine's last use and the tail takes by value the two things it
-    // borrows mutably (`kv`, `first_token_at`). Reading them inside the
-    // struct literal below would keep the borrow alive past the move.
-    let speculation = (engine.forwards, engine.accepted, engine.drafted);
-    logits = final_logits;
+    let generated_ids = first_generated_ids;
+    logits = first_logits;
     // Everything after the last token -- the usage block and the three
     // places this request's KV may be published -- is
     // `crate::request_tail`. It is lifted out unchanged, and the seam
@@ -1782,6 +1860,7 @@ pub fn generate(
         prompt,
         tokens,
         generated_ids,
+        completion_tokens,
         logits,
         kv,
         prompt_tokens,
@@ -1798,7 +1877,7 @@ pub fn generate(
     }
     .finish();
 
-    Ok((finish, usage))
+    Ok((finishes, usage))
 }
 
 /// Shared sampling + stop-sequence-aware emission loop, given already-
@@ -1829,7 +1908,23 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     prompt: &str,
     params: &GenerationParams,
     mut emit: impl FnMut(&str),
-) -> Result<(FinishReason, Usage), DecodeError> {
+    // A `Vec` for the same reason `generate` returns one: two shapes
+    // for "what this request produced" is one more chance for a caller
+    // to handle the simple case and forget the other. These engines
+    // hold a recurrent state that collapses history irreversibly, so
+    // they cannot fork a prefix and always answer with exactly one.
+) -> Result<(Vec<FinishReason>, Usage), DecodeError> {
+    // These engines cannot fork: a KDA / MLA recurrent state is a
+    // reduction over the whole prefix, so there is no cache to clone
+    // into a second choice. Refused by name rather than served as one.
+    if params.n > 1 {
+        return Err(DecodeError::Unsupported(
+            "`n` > 1 needs a forkable KV cache, and this checkpoint runs on an engine whose \
+             state collapses history irreversibly. Send the request n times."
+                .to_string(),
+        ));
+    }
+
     let vocab_size = engine.vocab_size();
     // `Parse`, as the GGUF path above. See `Model::encode`.
     let mut tokens = tokenizer.encode(prompt, SpecialTokens::Parse);
@@ -1889,7 +1984,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     if let Some(at) = first_token_at {
         usage = usage.with_ttft(at.duration_since(prefill_start).as_secs_f64());
     }
-    Ok((finish, usage))
+    Ok((vec![finish], usage))
 }
 
 #[cfg(test)]
@@ -1949,6 +2044,175 @@ mod tests {
     /// pins a batched forward against a per-token one at 1e-6. This
     /// test covers what those cannot: that the wiring reaches a real
     /// request at all.
+    /// The derived seeds do two things, and both need pinning: the
+    /// other choices must DIFFER from choice 0 (otherwise `n` returns
+    /// the same answer `k` times and buys nothing), and the whole set
+    /// must be REPRODUCIBLE (otherwise a seeded request is not seeded).
+    ///
+    /// This is the test that catches a change to `seed + i`.
+    #[test]
+    fn the_derived_seeds_make_the_other_choices_differ_reproducibly() {
+        let decoder = small_decoder();
+        let prompt = "abcabcabcabcabcabc";
+        let mut params = greedy_params(8);
+        params.sampling.temperature = 1.0;
+        params.n = 4;
+
+        let run = || {
+            let mut per_choice = vec![String::new(); 4];
+            generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                prompt,
+                &params,
+                None,
+                None,
+                None,
+                None,
+                |choice, s| per_choice[choice].push_str(s),
+            )
+            .expect("n = 4");
+            per_choice
+        };
+
+        let first = run();
+        let second = run();
+        assert_eq!(
+            first, second,
+            "the same seeded request gave two different sets of choices"
+        );
+        assert!(
+            first[1..].iter().any(|t| *t != first[0]),
+            "every choice matched choice 0, so the derived seeds did nothing: {first:?}"
+        );
+    }
+
+    /// **`n` > 1 prefills once and forks.** The acceptance number is
+    /// not wall clock, it is `prompt_tokens`: four choices of one
+    /// prompt must be billed for ONE prompt, because that is the only
+    /// thing the field buys. If this reads four times the `n = 1`
+    /// figure, the fork did not happen and the feature is a loop
+    /// (`docs/plans/several-completions-per-request.md`).
+    #[test]
+    fn several_choices_prefill_the_prompt_once() {
+        let decoder = small_decoder();
+        let prompt = "abcabcabcabcabcabc";
+
+        let mut one_text = String::new();
+        let (one_finish, one_usage) = generate(
+            &decoder,
+            &ServerTokenizer::Byte,
+            &StopTokens::default(),
+            None,
+            prompt,
+            &greedy_params(6),
+            None,
+            None,
+            None,
+            None,
+            |_, s| one_text.push_str(s),
+        )
+        .expect("n = 1");
+        assert_eq!(one_finish.len(), 1);
+
+        let mut four = greedy_params(6);
+        four.n = 4;
+        let mut per_choice = vec![String::new(); 4];
+        let (finishes, usage) = generate(
+            &decoder,
+            &ServerTokenizer::Byte,
+            &StopTokens::default(),
+            None,
+            prompt,
+            &four,
+            None,
+            None,
+            None,
+            None,
+            |choice, s| per_choice[choice].push_str(s),
+        )
+        .expect("n = 4");
+
+        assert_eq!(finishes.len(), 4, "one finish reason per choice");
+        // THE acceptance test: the prompt was prefilled once, so it is
+        // billed once.
+        assert_eq!(
+            usage.prompt_tokens, one_usage.prompt_tokens,
+            "n = 4 billed the prompt more than once, so the KV was not forked"
+        );
+        // And the completion side is the sum, not one choice's.
+        assert_eq!(usage.completion_tokens, one_usage.completion_tokens * 4);
+        for (i, text) in per_choice.iter().enumerate() {
+            assert!(!text.is_empty(), "choice {i} produced nothing");
+        }
+    }
+
+    /// Choice 0 is byte-identical to the single answer at the same
+    /// seed. That is what makes the derived seeds reproducible rather
+    /// than merely different: a caller can raise `n` without the answer
+    /// they already had changing underneath them.
+    ///
+    /// **Sampled, not greedy, on purpose.** At temperature 0 the seed
+    /// cannot change anything.
+    ///
+    /// This pins choice 0 ONLY, and deliberately: choice 0 runs on the
+    /// request's own `params`, so no change to the derivation can move
+    /// it -- confirmed by sabotage, `seed + i` shifted to `seed + i + 1`
+    /// leaves this green. The derivation itself is pinned by
+    /// [`the_derived_seeds_make_the_other_choices_differ_reproducibly`],
+    /// which is the test that goes red for that mutation.
+    #[test]
+    fn choice_zero_is_the_answer_n_equals_one_would_have_given() {
+        let decoder = small_decoder();
+        let prompt = "abcabcabcabcabcabc";
+        let sampled = |max_tokens: usize| {
+            let mut p = greedy_params(max_tokens);
+            p.sampling.temperature = 1.0;
+            p
+        };
+
+        let mut one = String::new();
+        generate(
+            &decoder,
+            &ServerTokenizer::Byte,
+            &StopTokens::default(),
+            None,
+            prompt,
+            &sampled(6),
+            None,
+            None,
+            None,
+            None,
+            |_, s| one.push_str(s),
+        )
+        .expect("n = 1");
+
+        let mut three = sampled(6);
+        three.n = 3;
+        let mut per_choice = vec![String::new(); 3];
+        generate(
+            &decoder,
+            &ServerTokenizer::Byte,
+            &StopTokens::default(),
+            None,
+            prompt,
+            &three,
+            None,
+            None,
+            None,
+            None,
+            |choice, s| per_choice[choice].push_str(s),
+        )
+        .expect("n = 3");
+
+        assert_eq!(
+            per_choice[0], one,
+            "choice 0 must be the answer n = 1 gives at the same seed"
+        );
+    }
+
     #[test]
     fn the_server_speculates_and_reports_it() {
         let decoder = small_decoder();
@@ -1968,11 +2232,11 @@ mod tests {
             None,
             None,
             None,
-            |s| text.push_str(s),
+            |_, s| text.push_str(s),
         )
         .expect("speculative");
 
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
         assert_eq!(usage.completion_tokens, 24);
         assert!(
             usage.draft_tokens.is_some_and(|d| d > 0),
@@ -2014,7 +2278,7 @@ mod tests {
             None,
             None,
             None,
-            |s| one_text.push_str(s),
+            |_, s| one_text.push_str(s),
         )
         .expect("single token");
         assert_eq!(one_usage.completion_tokens, 1);
@@ -2118,6 +2382,7 @@ mod tests {
             max_tokens,
             sampling: SamplingParams::default(),
             seed: 1,
+            n: 1,
             stop: Vec::new(),
             stop_token_ids: Vec::new(),
             json_object: false,
@@ -2237,7 +2502,7 @@ mod tests {
             None,
             None,
             None,
-            |s| actual_text.push_str(s),
+            |_, s| actual_text.push_str(s),
         )
         .unwrap();
 
@@ -2259,7 +2524,7 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         );
         assert!(matches!(result, Err(DecodeError::TokenOutOfVocab { .. })));
     }
@@ -2280,10 +2545,10 @@ mod tests {
             None,
             None,
             None,
-            |s| chunks.push_str(s),
+            |_, s| chunks.push_str(s),
         )
         .unwrap();
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
     }
 
     /// A cancel raised while the loop is running must actually stop it,
@@ -2311,7 +2576,7 @@ mod tests {
             None,
             None,
             None,
-            |s| {
+            |_, s| {
                 chunks.push_str(s);
                 emitted += 1;
                 // Stands in for the socket dropping (or `/v1/cancel`
@@ -2323,7 +2588,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(finish, FinishReason::Cancelled);
+        assert_eq!(finish[0], FinishReason::Cancelled);
         assert!(
             usage.completion_tokens < 200,
             "cancelling did not shorten the decode: {} tokens",
@@ -2356,10 +2621,10 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
         assert_eq!(usage.completion_tokens, 5);
     }
 
@@ -2410,11 +2675,11 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(
-            finish,
+            finish[0],
             FinishReason::Stop,
             "generation must stop as soon as the greedy-chosen token matches eos_id, not run to max_tokens"
         );
@@ -2448,10 +2713,10 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
-        assert_eq!(finish, FinishReason::Stop);
+        assert_eq!(finish[0], FinishReason::Stop);
         assert_eq!(
             usage.completion_tokens, 0,
             "the very first sampled token was the turn ender"
@@ -2482,7 +2747,7 @@ mod tests {
             None,
             None,
             None,
-            |s| baseline.push_str(s),
+            |_, s| baseline.push_str(s),
         )
         .unwrap();
 
@@ -2498,6 +2763,7 @@ mod tests {
                 max_tokens: 20,
                 sampling: SamplingParams::default(),
                 seed: 1,
+                n: 1,
                 stop: vec!["ZZ_NEVER_MATCHES_ZZ".to_string()],
                 stop_token_ids: Vec::new(),
                 json_object: false,
@@ -2511,12 +2777,12 @@ mod tests {
             None,
             None,
             None,
-            |s| with_unmatchable_stop.push_str(s),
+            |_, s| with_unmatchable_stop.push_str(s),
         )
         .unwrap();
 
-        assert_eq!(baseline_finish, FinishReason::Length);
-        assert_eq!(stop_finish, FinishReason::Length);
+        assert_eq!(baseline_finish[0], FinishReason::Length);
+        assert_eq!(stop_finish[0], FinishReason::Length);
         assert_eq!(with_unmatchable_stop, baseline);
     }
 
@@ -2664,6 +2930,7 @@ mod tests {
                 ..SamplingParams::default()
             },
             seed: 1,
+            n: 1,
             stop: Vec::new(),
             stop_token_ids: Vec::new(),
             json_object: false,
@@ -2923,7 +3190,7 @@ mod tests {
             None,
             None,
             None,
-            |s| baseline.push_str(s),
+            |_, s| baseline.push_str(s),
         )
         .unwrap();
         let Some((cut, _)) = baseline.char_indices().nth(1) else {
@@ -2961,6 +3228,7 @@ mod tests {
                 max_tokens: 20,
                 sampling: SamplingParams::default(),
                 seed: 1,
+                n: 1,
                 stop: vec![stop_str.clone()],
                 stop_token_ids: Vec::new(),
                 json_object: false,
@@ -2974,11 +3242,11 @@ mod tests {
             None,
             None,
             None,
-            |s| truncated.push_str(s),
+            |_, s| truncated.push_str(s),
         )
         .unwrap();
 
-        assert_eq!(finish, FinishReason::StopSequence(stop_str));
+        assert_eq!(finish[0], FinishReason::StopSequence(stop_str));
         assert_eq!(truncated, baseline[..cut]);
     }
 
@@ -2997,7 +3265,7 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
 
@@ -3032,7 +3300,7 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(no_cache.cached_tokens, None, "no prefix cache configured");
@@ -3049,7 +3317,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(miss.cached_tokens, Some(0), "cache consulted, missed");
@@ -3067,7 +3335,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(hit.cached_tokens, Some(3));
@@ -3091,7 +3359,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |s| out1.push_str(s),
+            |_, s| out1.push_str(s),
         )
         .unwrap();
         assert_eq!(pc.lock().unwrap().stats().misses, 1);
@@ -3112,7 +3380,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |s| out2_with_cache.push_str(s),
+            |_, s| out2_with_cache.push_str(s),
         )
         .unwrap();
         let stats = pc.lock().unwrap().stats();
@@ -3131,7 +3399,7 @@ mod tests {
             None,
             None,
             None,
-            |s| out2_fresh.push_str(s),
+            |_, s| out2_fresh.push_str(s),
         )
         .unwrap();
 
@@ -3159,7 +3427,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |s| out1.push_str(s),
+            |_, s| out1.push_str(s),
         )
         .unwrap();
 
@@ -3182,7 +3450,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |s| out2_with_cache.push_str(s),
+            |_, s| out2_with_cache.push_str(s),
         )
         .unwrap();
 
@@ -3198,7 +3466,7 @@ mod tests {
             None,
             None,
             None,
-            |s| out2_fresh.push_str(s),
+            |_, s| out2_fresh.push_str(s),
         )
         .unwrap();
 
@@ -3224,7 +3492,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         generate(
@@ -3238,7 +3506,7 @@ mod tests {
             None,
             Some(&pc),
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
 
@@ -3362,7 +3630,7 @@ mod tests {
             None,
             None,
             None,
-            |s| contiguous.push_str(s),
+            |_, s| contiguous.push_str(s),
         )
         .unwrap();
 
@@ -3379,7 +3647,7 @@ mod tests {
             Some(&config),
             None,
             None,
-            |s| paged.push_str(s),
+            |_, s| paged.push_str(s),
         )
         .unwrap();
 
@@ -3419,7 +3687,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
-                |s| out.push_str(s),
+                |_, s| out.push_str(s),
             )
             .unwrap();
         }
@@ -3535,7 +3803,7 @@ mod tests {
             Some(&win_config),
             None,
             None,
-            |s| out.push_str(s),
+            |_, s| out.push_str(s),
         )
         .expect("a window model must fit a store sized for its window");
         assert_eq!(usage.completion_tokens, max_tokens);
@@ -3566,7 +3834,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
-                |_| {},
+                |_, _| {},
             )
             .unwrap_err();
             assert!(matches!(err, DecodeError::KvPoolExhausted), "{name}: {err}");
@@ -3602,7 +3870,7 @@ mod tests {
             None,
             None,
             None,
-            |s| contiguous.push_str(s),
+            |_, s| contiguous.push_str(s),
         )
         .unwrap();
 
@@ -3619,7 +3887,7 @@ mod tests {
             Some(&config),
             None,
             None,
-            |s| paged.push_str(s),
+            |_, s| paged.push_str(s),
         )
         .unwrap();
 
@@ -3767,7 +4035,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
-                |s| out.push_str(s),
+                |_, s| out.push_str(s),
             )
             .unwrap_or_else(|e| panic!("run {run} was refused: {e}"));
         }
@@ -3856,7 +4124,7 @@ mod tests {
             Some(&config),
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
 
@@ -3912,7 +4180,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
-                |s| out.push_str(s),
+                |_, s| out.push_str(s),
             )
             .unwrap();
             // What the SECOND request adopted, which on a fresh tree is
@@ -3929,7 +4197,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
-                |s| probe.push_str(s),
+                |_, s| probe.push_str(s),
             )
             .unwrap();
             usage.cached_tokens.unwrap_or(0)
@@ -3983,7 +4251,7 @@ mod tests {
                 Some(config),
                 None,
                 None,
-                |s| out.push_str(s),
+                |_, s| out.push_str(s),
             )
             .unwrap();
             out
@@ -4026,7 +4294,7 @@ mod tests {
             Some(&cfg2),
             None,
             None,
-            |s| sink.push_str(s),
+            |_, s| sink.push_str(s),
         )
         .unwrap();
         assert_eq!(
@@ -4045,7 +4313,7 @@ mod tests {
             Some(&cfg2),
             None,
             None,
-            |s| sink.push_str(s),
+            |_, s| sink.push_str(s),
         )
         .unwrap();
         let reused = second_usage.cached_tokens.expect("a tree is configured");
@@ -4092,7 +4360,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
-                |s| out.push_str(s),
+                |_, s| out.push_str(s),
             )
             .expect("the store is sized for many of these");
             lows.push(config.store.free_groups());
@@ -4143,7 +4411,7 @@ mod tests {
             Some(&config),
             None,
             None,
-            |_| panic!("a refused request must not emit"),
+            |_, _| panic!("a refused request must not emit"),
         );
         assert!(
             matches!(result, Err(DecodeError::KvPoolExhausted)),
@@ -4177,10 +4445,10 @@ mod tests {
             None,
             None,
             None,
-            |s| out.push_str(s),
+            |_, s| out.push_str(s),
         )
         .unwrap();
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
         assert_eq!(
             pool.lock().unwrap().free_blocks(),
             2,
@@ -4220,10 +4488,10 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
         assert_eq!(pool.lock().unwrap().free_blocks(), 12);
     }
 
@@ -4258,7 +4526,7 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         );
         let err = result.expect_err("11 blocks cannot cover a 12-block worst case");
         assert!(
@@ -4358,7 +4626,7 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         );
         let err = result.expect_err("one block cannot hold two layers' caches");
         assert!(
@@ -4399,10 +4667,10 @@ mod tests {
                 None,
                 None,
                 None,
-                |_| {},
+                |_, _| {},
             )
             .unwrap();
-            assert_eq!(finish, FinishReason::Length);
+            assert_eq!(finish[0], FinishReason::Length);
         }
         assert_eq!(pool.lock().unwrap().free_blocks(), 2);
     }
@@ -4445,7 +4713,7 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         );
         assert!(
             matches!(result, Err(DecodeError::KvPoolExhausted)),
@@ -4493,7 +4761,7 @@ mod tests {
             None,
             None,
             Some(&ceiling),
-            |_| panic!("no token may be emitted by a refused request"),
+            |_, _| panic!("no token may be emitted by a refused request"),
         )
         .expect_err("a 5-token prompt must not be admitted under a 4-position ceiling");
         match &err {
@@ -4552,11 +4820,11 @@ mod tests {
             None,
             None,
             Some(&ceiling),
-            |_| emitted += 1,
+            |_, _| emitted += 1,
         )
         .expect("a prompt that fits must be served");
         assert_eq!(usage.completion_tokens, 2, "clamped to the room left");
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
         assert_eq!(ceiling.refused(), 0, "a clamp is not a refusal");
         assert!(emitted > 0);
     }
@@ -4585,10 +4853,10 @@ mod tests {
             None,
             None,
             Some(&ceiling),
-            |s| with.push_str(s),
+            |_, s| with.push_str(s),
         )
         .expect("7 positions fits a 7-position ceiling exactly");
-        assert_eq!(finish, FinishReason::Length);
+        assert_eq!(finish[0], FinishReason::Length);
 
         let mut without = String::new();
         generate(
@@ -4602,7 +4870,7 @@ mod tests {
             None,
             None,
             None,
-            |s| without.push_str(s),
+            |_, s| without.push_str(s),
         )
         .unwrap();
         assert_eq!(with, without, "an unbinding ceiling must change nothing");
@@ -4640,11 +4908,11 @@ mod tests {
             None,
             None,
             None,
-            |_| {},
+            |_, _| {},
         )
         .unwrap();
         assert_eq!(
-            finish,
+            finish[0],
             FinishReason::Length,
             "a sufficiently long queue_wait must let the request succeed once the holder releases"
         );

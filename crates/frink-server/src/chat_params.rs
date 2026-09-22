@@ -76,6 +76,11 @@ impl ChatCompletionRequest {
         model: crate::sampling_knobs::SamplerModel<'_>,
     ) -> Result<GenerationParams, ApiError> {
         Ok(GenerationParams {
+            // `n` is wired in a later step of
+            // `docs/plans/several-completions-per-request.md`; the field is
+            // still refused on the wire by `crate::unimplemented_fields`,
+            // so nothing can reach this with anything but 1.
+            n: 1,
             // Set by `generation_params_for_template`, which is the only
             // caller that knows the SERVED model name. Left `None` here
             // so a path that never resolves it reports the field absent
