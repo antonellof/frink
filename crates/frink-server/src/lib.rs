@@ -53,6 +53,7 @@ mod journal;
 mod json_mode;
 mod limits;
 mod loaded;
+mod logprobs;
 mod lora;
 mod mcp;
 mod model;
@@ -110,7 +111,9 @@ use frink_models::kimi_tokenizer::KimiTokenizer;
 use frink_models::sampling::SamplingParams;
 use frink_models::tokenizer::{SpecialTokens, StopTokens};
 use frink_models::{Decoder, Gemma4Engine, KimiEngine, MlaEngine, PrefixCache};
-use generate::{FinishReason, GenerationParams};
+#[cfg(test)]
+use generate::FinishReason;
+use generate::GenerationParams;
 pub(crate) use loaded::{ActiveModel, Loaded};
 use model::ServerTokenizer;
 use rerank::encoder_endpoints;
@@ -2191,7 +2194,7 @@ fn run_generation_emit(
     // choice 0 entirely and then choice 1 is not what a client reading
     // `choices[].index` expects, and round-robin needs a steppable
     // sampler (`docs/plans/several-completions-per-request.md`).
-) -> Result<(Vec<(FinishReason, String)>, generate::Usage), generate::DecodeError> {
+) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), generate::DecodeError> {
     let synthetic = model.is_synthetic();
     // Held for the whole generation: a `POST /lora-adapters`, or a
     // request whose `lora` field overrides the scales, waits for this
@@ -2251,7 +2254,10 @@ fn run_generation_emit(
                 // One choice: the batch scheduler serves `n = 1` only,
                 // and `crate::unimplemented_fields` refuses the rest on
                 // the wire.
-                (vec![finish], usage)
+                // The batch scheduler serves one choice and publishes
+                // no distributions; `wants_logprobs` is refused for a
+                // batched request at the route.
+                (vec![(finish, Vec::new())], usage)
             } else {
                 generate::generate(
                     &m.decoder,
@@ -2351,12 +2357,27 @@ fn run_generation_emit(
     // must agree, because a choice with no finish reason is a bug and
     // not a shape.
     debug_assert_eq!(finishes.len(), chunks.len(), "one finish reason per choice");
-    let mut out: Vec<(FinishReason, String)> = finishes
+    let mut out: Vec<generate::GeneratedChoice> = finishes
         .into_iter()
         .zip(chunks.into_iter().map(|c| c.concat()))
+        .map(|((finish, logprobs), text)| generate::GeneratedChoice {
+            finish,
+            text,
+            logprobs,
+        })
         .collect();
     if let Some(first) = out.first_mut() {
-        first.1 = full;
+        // The synthetic demo REPLACES the text with a banner, so the
+        // token pieces the distributions were collected for no longer
+        // concatenate to what is returned, and `text_offset` would
+        // index a string that does not contain them. Dropped together
+        // with the substitution, at the one site that makes it: an
+        // offset into text the caller did not get is worse than no
+        // offset.
+        if synthetic {
+            first.logprobs.clear();
+        }
+        first.text = full;
     }
     Ok((out, usage))
 }
@@ -2377,7 +2398,7 @@ pub(crate) fn run_generation(
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
     // One `(finish_reason, text)` per choice, choice 0 first. See
     // `run_generation_emit`.
-) -> Result<(Vec<(FinishReason, String)>, generate::Usage), generate::DecodeError> {
+) -> Result<(Vec<generate::GeneratedChoice>, generate::Usage), generate::DecodeError> {
     run_generation_emit(
         model,
         prompt,
@@ -2738,7 +2759,10 @@ async fn chat_completions_full(
         )
         .await?;
 
-        let completion = response_cache::CachedCompletion { choices, usage };
+        let completion = response_cache::CachedCompletion {
+            choices: choices.into_iter().map(|c| (c.finish, c.text)).collect(),
+            usage,
+        };
         // A cacheable KEY is not on its own permission to store an
         // answer: `cacheable` refuses a generation that did not run to
         // its own end, and is the only way to build the value `put`
@@ -3086,10 +3110,11 @@ async fn chat_completions_stream(
             // Streaming, so exactly one choice: `n` > 1 with `stream`
             // is refused at the route.
             Ok((choices, usage)) => {
-                let (finish, full_text) = choices
+                let one = choices
                     .into_iter()
                     .next()
                     .expect("a generation produces at least one choice");
+                let (finish, full_text) = (one.finish, one.text);
                 if let Some(id) = &session_id {
                     sessions.store_reply(
                         id,
@@ -4748,6 +4773,7 @@ pub(crate) mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            wants_logprobs: false,
             n: 1,
             reasoning: None,
             max_tokens,
@@ -5056,7 +5082,7 @@ pub(crate) mod tests {
         )
         .expect("the old model must still decode after being swapped out");
         assert!(matches!(
-            choices[0].0,
+            choices[0].finish,
             FinishReason::Length | FinishReason::Stop
         ));
     }
@@ -8724,7 +8750,7 @@ pub(crate) mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(choices[0].0, FinishReason::Length);
+        assert_eq!(choices[0].finish, FinishReason::Length);
         assert_eq!(
             pool.lock().unwrap().free_blocks(),
             2,
@@ -9223,7 +9249,7 @@ pub(crate) mod tests {
         )
         .expect("a real Kimi checkpoint must generate without error");
         assert!(matches!(
-            choices[0].0,
+            choices[0].finish,
             FinishReason::Length | FinishReason::Stop
         ));
     }
@@ -9279,7 +9305,7 @@ pub(crate) mod tests {
         };
 
         let (choices, _) = run(None).expect("the unconstrained run must serve");
-        let unconstrained = choices[0].1.clone();
+        let unconstrained = choices[0].text.clone();
         assert!(
             unconstrained.chars().any(|c| c != 'a'),
             "the unconstrained run produced only `a` ({unconstrained:?}), so the \
@@ -9288,7 +9314,8 @@ pub(crate) mod tests {
 
         let (choices, _) =
             run(Some(r#"root ::= "a"+"#)).expect("a grammar this vocabulary can spell must serve");
-        let (finish, constrained) = choices.into_iter().next().unwrap();
+        let one = choices.into_iter().next().unwrap();
+        let (finish, constrained) = (one.finish, one.text);
         assert!(
             !constrained.is_empty() && constrained.chars().all(|c| c == 'a'),
             "the engine decode path served text its grammar forbids ({constrained:?}): \

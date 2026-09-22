@@ -538,6 +538,9 @@ pub(crate) async fn completion(
 
     let prompt = req.prompt_text()?.to_string();
     let mut params = GenerationParams {
+        // Wired per route once a wire renders them; see
+        // `docs/plans/per-token-logprobs.md`.
+        wants_logprobs: false,
         // `n` is wired in a later step of
         // `docs/plans/several-completions-per-request.md`; the field is
         // still refused on the wire by `crate::unimplemented_fields`,
@@ -612,10 +615,11 @@ pub(crate) async fn completion(
     let (choices, usage) = decode_task::buffered(handles, prompt.clone(), params.clone()).await?;
     // Choice 0: this wire has no `n`, and `crate::unimplemented_fields`
     // refuses the field.
-    let (finish, content) = choices
+    let one = choices
         .into_iter()
         .next()
         .expect("a generation produces at least one choice");
+    let (finish, content) = (one.finish, one.text);
 
     state.record_request(stats::Record {
         request_id: &request_id,
@@ -689,10 +693,11 @@ async fn stream(
         match result {
             // Streaming, so exactly one choice.
             Ok((choices, usage)) => {
-                let (finish, content) = choices
+                let one = choices
                     .into_iter()
                     .next()
                     .expect("a generation produces at least one choice");
+                let (finish, content) = (one.finish, one.text);
                 stats_state.record_request(stats::Record {
                     request_id: &stats_request_id,
                     route: &route,

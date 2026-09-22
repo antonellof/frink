@@ -17,6 +17,14 @@ use frink_models::tokenizer::StopTokens;
 
 use crate::generate::{DecodeError, FinishReason, GenerationParams};
 
+/// One `(token id, distribution it was drawn from)` per KEPT token.
+///
+/// The id travels with the distribution so a renderer cannot line the
+/// two up wrongly: a stop token is dropped from the answer, and an
+/// index into `generated_ids` would then be off by one for every
+/// position after it.
+pub(crate) type PerTokenProbs = Vec<(usize, Vec<f32>)>;
+
 /// Fallible since constrained decoding landed: a grammar that cannot be
 /// continued ends the generation with an error rather than with an
 /// answer, because the alternative is to emit a token the caller's
@@ -42,7 +50,11 @@ pub(crate) fn sample_until_stop(
     // Tokens a round may draft. Zero is the ordinary path, and so is
     // an engine whose `draft` returns nothing.
     draft_max: usize,
-) -> Result<(FinishReason, Vec<usize>, Vec<f32>), DecodeError> {
+    // The finish reason, the generated ids, the final logits, and the
+    // per-token distributions when the request asked for them --
+    // EMPTY otherwise, because a request that did not ask does not pay
+    // for the vector.
+) -> Result<(FinishReason, Vec<usize>, Vec<f32>, PerTokenProbs), DecodeError> {
     let mut matcher = crate::stop::StopMatcher::new(&params.stop, &params.stop_token_ids);
     // Sits BEFORE the stop matcher: a stop string is text, so it can
     // only be matched against whole characters, and half of one is not
@@ -59,6 +71,7 @@ pub(crate) fn sample_until_stop(
     const PREALLOC_CAP: usize = 4096;
     let mut generated_ids: Vec<usize> = Vec::with_capacity(params.max_tokens.min(PREALLOC_CAP));
     let mut finish = FinishReason::Length;
+    let mut per_token_probs: PerTokenProbs = Vec::new();
 
     for _ in 0..params.max_tokens {
         // The budget is a number of TOKENS, and this loop counts
@@ -177,7 +190,7 @@ pub(crate) fn sample_until_stop(
             }
         }
 
-        let next = match crate::sample_step::sample_next(
+        let (next, next_probs) = match crate::sample_step::sample_next(
             &mut state,
             &logits,
             params,
@@ -186,7 +199,7 @@ pub(crate) fn sample_until_stop(
             stop_tokens,
             decode_token,
         )? {
-            crate::sample_step::Step::Token(next) => next,
+            crate::sample_step::Step::Token { id, probs } => (id, probs),
             // The grammar's parse is complete and nothing may follow
             // it. A finished answer, so `Stop` -- the same reason the
             // model's own end-of-generation token gives, since it is
@@ -207,7 +220,14 @@ pub(crate) fn sample_until_stop(
             &mut decode_one,
             &mut emit,
         ) {
-            Committed::Continue => {}
+            Committed::Continue => {
+                // Recorded only for tokens that were KEPT: a stop
+                // token is not part of the answer, so a logprob for it
+                // would describe a position no `choices[]` entry has.
+                if let Some(p) = next_probs {
+                    per_token_probs.push((next, p));
+                }
+            }
             Committed::Stopped(reason) => {
                 finish = reason;
                 break;
@@ -236,7 +256,7 @@ pub(crate) fn sample_until_stop(
         emit(&tail);
     }
 
-    Ok((finish, generated_ids, logits))
+    Ok((finish, generated_ids, logits, per_token_probs))
 }
 /// The earliest byte offset in `text` at which any of `stops` begins,
 /// or `None` if none match yet.
@@ -492,7 +512,7 @@ pub(crate) fn verify_block(
                 out.grammar_complete = true;
                 return Ok(out);
             }
-            crate::sample_step::Step::Token(t) => {
+            crate::sample_step::Step::Token { id: t, .. } => {
                 history.push(t);
                 out.tokens.push(t);
                 // The last iteration has no draft to compare against:
@@ -521,6 +541,7 @@ mod tests {
 
     fn greedy_params() -> GenerationParams {
         GenerationParams {
+            wants_logprobs: false,
             n: 1,
             reasoning: None,
             max_tokens: 64,
@@ -663,7 +684,7 @@ mod tests {
             let mut seq_history: Vec<usize> = Vec::new();
             for i in 0..b.tokens.len() {
                 let logits = if i == 0 { &first } else { &rows[i - 1] };
-                let Step::Token(t) = sample_next(
+                let Step::Token { id: t, .. } = sample_next(
                     &mut seq_state,
                     logits,
                     &params,
@@ -793,7 +814,7 @@ mod tests {
 
         let mut plain = Scripted::new(&script, vocab, Vec::new());
         let mut plain_text = String::new();
-        let (_, plain_ids, _) = sample_until_stop(
+        let (_, plain_ids, _, _probs) = sample_until_stop(
             peaked(vocab, script[0]),
             0,
             &[],
@@ -822,7 +843,7 @@ mod tests {
         ] {
             let mut engine = Scripted::new(&script, vocab, drafts);
             let mut spec_text = String::new();
-            let (_, spec_ids, _) = sample_until_stop(
+            let (_, spec_ids, _, _probs) = sample_until_stop(
                 peaked(vocab, script[0]),
                 0,
                 &[],

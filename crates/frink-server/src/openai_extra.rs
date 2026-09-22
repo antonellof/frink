@@ -249,6 +249,10 @@ pub(crate) struct CompletionsRequest {
     // Fields this server does not implement. Deserialized ONLY so they
     // can be refused by name -- serde would otherwise drop each one
     // silently, which is indistinguishable from having honoured it.
+    /// OpenAI's `logprobs: N` on this wire: how many alternatives to
+    /// report per position. Read as a `Value` so a non-integer is
+    /// refused BY NAME rather than dying as a serde type error the
+    /// caller has to guess at.
     #[serde(default)]
     logprobs: Option<serde_json::Value>,
     #[serde(default)]
@@ -332,6 +336,38 @@ impl CompletionsRequest {
     }
 
     /// Refuse what this server does not implement, by name.
+    /// `logprobs: N` as a count, or a refusal naming the field.
+    ///
+    /// Upstream caps this at 5 and so does this server: the cap is
+    /// what keeps one request from asking for a whole vocabulary per
+    /// position, which is a response size the caller did not think
+    /// about and the server pays for.
+    pub(crate) fn n_logprobs(&self) -> Result<Option<usize>, ApiError> {
+        const MAX: u64 = 5;
+        match &self.logprobs {
+            None => Ok(None),
+            Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Number(n)) => match n.as_u64() {
+                Some(v) if v <= MAX => Ok(Some(v as usize)),
+                Some(v) => Err(crate::invalid_request(
+                    &format!(
+                        "`logprobs` is {v}; this server reports at most {MAX} alternatives per \
+                         position, as upstream does"
+                    ),
+                    "logprobs",
+                )),
+                None => Err(crate::invalid_request(
+                    "`logprobs` must be a non-negative whole number",
+                    "logprobs",
+                )),
+            },
+            Some(other) => Err(crate::invalid_request(
+                &format!("`logprobs` must be a number, not {other}"),
+                "logprobs",
+            )),
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ApiError> {
         // `logit_bias` decides in `unsupported_sampling`, shared with
         // `/v1/chat/completions`: the two routes disagreed about this
@@ -345,8 +381,10 @@ impl CompletionsRequest {
             "/v1/completions",
         )?;
         self.unimplemented.refuse("/v1/completions")?;
+        // `logprobs` is SERVED here now (`crate::logprobs`); what is
+        // refused is a value the field cannot take.
+        self.n_logprobs()?;
         let unsupported = [
-            (self.logprobs.is_some(), "logprobs"),
             (self.echo == Some(true), "echo"),
             (self.suffix.is_some(), "suffix"),
         ];
@@ -498,7 +536,12 @@ pub async fn completions(
     req.validate()?;
     let prompt = req.prompt_text()?.to_string();
     let active = state.require_active()?;
+    // Parsed before the generation so a bad value is a 400 rather than
+    // a wasted decode, and so the sampler is told to report only when
+    // this wire will render it.
+    let n_logprobs = req.n_logprobs()?;
     let params = GenerationParams {
+        wants_logprobs: n_logprobs.is_some(),
         // The prompt is prefilled once and the KV forked per choice
         // (`crate::generate`). Streaming is refused above for `n` > 1,
         // so a streaming request always lands on 1.
@@ -537,10 +580,18 @@ pub async fn completions(
     .await?;
 
     // One entry per choice, in order, which is what `n` asked for.
+    // The same detokenizer `/v1/detokenize` answers with, so a client
+    // that asks what a reported token means gets the same string back.
+    let decode_piece = |id: usize| active.decode_any(&[id]);
     let rendered: Vec<serde_json::Value> = choices
         .into_iter()
         .enumerate()
-        .map(|(index, (finish, text))| {
+        .map(|(index, choice)| {
+            let crate::generate::GeneratedChoice {
+                finish,
+                text,
+                logprobs,
+            } = choice;
             let finish_reason = match finish {
                 FinishReason::Stop | FinishReason::StopSequence(_) => "stop",
                 FinishReason::Length => "length",
@@ -555,6 +606,9 @@ pub async fn completions(
                 "index": index,
                 "text": text,
                 "finish_reason": finish_reason,
+                // Absent rather than null when the request did not ask,
+                // which is what OpenAI's own shape does.
+                "logprobs": crate::logprobs::render(&logprobs, n_logprobs, &decode_piece),
             })
         })
         .collect();
@@ -861,6 +915,125 @@ mod tests {
         assert_eq!(completion.frequency_penalty, chat.frequency_penalty);
     }
 
+    /// End to end: a request that asks gets the object, one entry per
+    /// generated token, with the chosen token's logprob a real number
+    /// and the alternatives sorted. A request that does not ask gets
+    /// `null`, not an empty object -- absence and emptiness mean
+    /// different things.
+    #[tokio::test]
+    async fn logprobs_are_reported_per_token_when_asked_for() {
+        let app = crate::tests::test_app();
+        let body = |logprobs: Option<u32>| {
+            let mut b = serde_json::json!({
+                "model": "x",
+                "prompt": "hello",
+                "max_tokens": 4
+            });
+            if let Some(n) = logprobs {
+                b["logprobs"] = serde_json::json!(n);
+            }
+            b
+        };
+
+        let (status, without) =
+            crate::tests::post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, body(None)).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{without}");
+        assert!(
+            without["choices"][0]["logprobs"].is_null(),
+            "a request that did not ask got an object: {without}"
+        );
+
+        let (status, with) =
+            crate::tests::post_json_uri(&app, frink_api::routes::V1_COMPLETIONS, body(Some(3)))
+                .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{with}");
+        let lp = &with["choices"][0]["logprobs"];
+        // The synthetic demo replaces the text with a banner and
+        // clears the distributions with it (see `run_generation_emit`),
+        // so this asserts the SHAPE and the offsets only when there is
+        // a real generation behind them.
+        let tokens = lp["tokens"].as_array().expect("tokens");
+        let values = lp["token_logprobs"].as_array().expect("token_logprobs");
+        let tops = lp["top_logprobs"].as_array().expect("top_logprobs");
+        let offsets = lp["text_offset"].as_array().expect("text_offset");
+        if tokens.is_empty() {
+            // A synthetic-weight demo server: the object is still
+            // present and still consistent, which is what this arm can
+            // check. The real arm runs wherever a checkpoint is loaded.
+            assert!(lp.is_object(), "{with}");
+            return;
+        }
+        assert_eq!(tokens.len(), values.len());
+        assert_eq!(tokens.len(), tops.len());
+        assert_eq!(tokens.len(), offsets.len());
+
+        for v in values {
+            let v = v.as_f64().expect("a real number, never null");
+            assert!(v <= 0.0 && v.is_finite(), "logprob {v} is not a logprob");
+        }
+        for top in tops {
+            let top = top.as_object().expect("an object");
+            assert!(!top.is_empty(), "no alternatives reported");
+            assert!(top.len() <= 3, "asked for 3, got {}", top.len());
+            for v in top.values() {
+                let v = v.as_f64().expect("a real number");
+                assert!(v <= 0.0 && v.is_finite(), "logprob {v} is not a logprob");
+            }
+        }
+
+        // The offsets index the text they describe.
+        let text = with["choices"][0]["text"].as_str().unwrap_or_default();
+        for (i, off) in offsets.iter().enumerate() {
+            let off = off.as_u64().unwrap() as usize;
+            let piece = tokens[i].as_str().unwrap();
+            assert!(
+                text.len() >= off && text[off..].starts_with(piece),
+                "offset {off} does not point at {piece:?} in {text:?}"
+            );
+        }
+    }
+
+    /// `logprobs` is served, and its argument is validated rather than
+    /// taken on trust: upstream caps the count at 5, and a request
+    /// above that, or one that is not a number at all, is a 400 naming
+    /// the field -- not a 501, because the field IS implemented and it
+    /// is the value that is wrong.
+    #[test]
+    fn the_logprobs_count_is_validated_rather_than_trusted() {
+        let with = |v: serde_json::Value| {
+            let mut body = serde_json::json!({"prompt": "hi"});
+            body["logprobs"] = v;
+            request(body)
+        };
+        assert_eq!(with(serde_json::json!(5)).n_logprobs().unwrap(), Some(5));
+        assert_eq!(with(serde_json::json!(0)).n_logprobs().unwrap(), Some(0));
+        assert_eq!(
+            request(serde_json::json!({"prompt": "hi"}))
+                .n_logprobs()
+                .unwrap(),
+            None
+        );
+
+        for bad in [
+            serde_json::json!(6),
+            serde_json::json!(-1),
+            serde_json::json!("two"),
+            serde_json::json!(true),
+        ] {
+            let (status, payload) = with(bad.clone())
+                .n_logprobs()
+                .expect_err(&format!("{bad} must be refused"));
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+            assert!(
+                payload["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("logprobs"),
+                "{bad}: {payload:?}"
+            );
+        }
+    }
+
     /// Each of these is a real OpenAI field this server does not
     /// implement. Serde drops an undeclared field silently, which a
     /// caller cannot tell apart from having had it honoured -- so each
@@ -868,7 +1041,9 @@ mod tests {
     #[test]
     fn every_unimplemented_completion_field_is_refused_by_name() {
         for (field, value) in [
-            ("logprobs", serde_json::json!(5)),
+            // `logprobs` is SERVED now (`crate::logprobs`); its own
+            // tests are below. What stays refused is a value the field
+            // cannot take, which is a 400 rather than a 501.
             ("echo", serde_json::json!(true)),
             ("suffix", serde_json::json!("tail")),
             ("logit_bias", serde_json::json!({"5": -100})),

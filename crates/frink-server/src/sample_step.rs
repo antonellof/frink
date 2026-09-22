@@ -79,11 +79,17 @@ impl SampleState {
 }
 
 /// What one step of a decode loop got out of the sampler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
     /// Sampled this token id, and every constraint has been advanced
     /// over it.
-    Token(usize),
+    ///
+    /// `probs` is the distribution it was drawn from, present only
+    /// when the request asked for logprobs -- computing it costs the
+    /// greedy fast path, so it is not paid for by requests that will
+    /// not read it. `None` also for a device-folded argmax, which has
+    /// no vocabulary behind it (`Sampler::sample_reporting`).
+    Token { id: usize, probs: Option<Vec<f32>> },
     /// No token: the grammar's parse is complete and nothing may follow
     /// it, so the generation is finished with what it already has.
     ///
@@ -125,11 +131,13 @@ pub(crate) fn sample_next(
     // means (#73).
     let window = PenaltyWindow::new(prompt, history);
     if !params.needs_vocab_logits() {
-        return Ok(Step::Token(state.sampler.sample(
-            logits,
-            &params.sampling,
-            window,
-        )));
+        let (id, probs) = state
+            .sampler
+            .sample_reporting(logits, &params.sampling, window, None);
+        return Ok(Step::Token {
+            id,
+            probs: params.wants_logprobs.then_some(probs).flatten(),
+        });
     }
     // A backend that folded lm_head+argmax onto the device returns one
     // element holding the chosen id, not a vocabulary, and masking it
@@ -192,7 +200,7 @@ pub(crate) fn sample_next(
     // argmax over negative infinity, not a choice.
     let mut refusal: Option<ConstraintError> = None;
     let mut outcome = MaskOutcome::Allowed;
-    let next = {
+    let (next, drawn_probs) = {
         let mut mask = |scores: &mut [f32]| {
             // Order does not matter and must not: no mask here ever
             // clears a `-inf`, so the result is the intersection either
@@ -212,7 +220,7 @@ pub(crate) fn sample_next(
                 }
             }
         };
-        sampler.sample_with_mask(logits, &params.sampling, window, Some(&mut mask))
+        sampler.sample_reporting(logits, &params.sampling, window, Some(&mut mask))
     };
     if let Some(e) = refusal {
         return Err(DecodeError::GrammarConstraint {
@@ -246,7 +254,14 @@ pub(crate) fn sample_next(
     if let Some(b) = budget.as_mut() {
         b.accept(next, lossy_piece_is_complete(&decode_token(next)));
     }
-    Ok(Step::Token(next))
+    Ok(Step::Token {
+        id: next,
+        // The distribution AFTER every mask, which is the one the token
+        // came from: a grammar-constrained request's logprobs describe
+        // the candidates the grammar allowed, not the ones the model
+        // would have had without it.
+        probs: params.wants_logprobs.then_some(drawn_probs).flatten(),
+    })
 }
 
 #[cfg(test)]
@@ -266,8 +281,56 @@ mod tests {
         }
     }
 
+    /// **The flag is what decides whether the distribution comes
+    /// back**, on BOTH paths through `sample_next` -- the plain one
+    /// and the masked one.
+    ///
+    /// This is the test the end-to-end HTTP one cannot be: the test
+    /// server serves synthetic weights, and the synthetic banner
+    /// clears the distributions with the text it replaces, so an
+    /// HTTP-level assertion takes the empty branch and would pass with
+    /// the sampler reporting nothing at all. Confirmed by sabotage:
+    /// hard-coding `probs: None` left the HTTP test green.
+    #[test]
+    fn wants_logprobs_decides_whether_the_distribution_is_reported() {
+        let logits = vec![0.5f32, 2.0, 0.25, 1.0];
+        let stop = StopTokens::default();
+
+        for (json_object, path) in [(false, "plain"), (true, "masked")] {
+            for (wants, expect_some) in [(false, false), (true, true)] {
+                let mut p = params(json_object, 0.8);
+                p.wants_logprobs = wants;
+                let mut state = SampleState::new(p.seed);
+                let step = sample_next(
+                    &mut state,
+                    &logits,
+                    &p,
+                    &[],
+                    &[],
+                    &stop,
+                    &(decode_token as fn(usize) -> String),
+                )
+                .expect("the sampler answers");
+                let Step::Token { probs, .. } = step else {
+                    panic!("{path}: expected a token");
+                };
+                assert_eq!(
+                    probs.is_some(),
+                    expect_some,
+                    "{path} path, wants_logprobs = {wants}"
+                );
+                if let Some(probs) = probs {
+                    assert_eq!(probs.len(), logits.len(), "{path}: one entry per token");
+                    let total: f32 = probs.iter().sum();
+                    assert!((total - 1.0).abs() < 1e-4, "{path}: not normalised");
+                }
+            }
+        }
+    }
+
     fn params(json_object: bool, temperature: f32) -> GenerationParams {
         GenerationParams {
+            wants_logprobs: false,
             n: 1,
             reasoning: None,
             max_tokens: 8,
@@ -316,7 +379,7 @@ mod tests {
     /// it was written for, so it says which.
     fn token(step: Step) -> usize {
         match step {
-            Step::Token(id) => id,
+            Step::Token { id, .. } => id,
             Step::GrammarComplete => {
                 panic!("the grammar ended the generation where a token was expected")
             }

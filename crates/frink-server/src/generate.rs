@@ -1150,6 +1150,14 @@ pub struct GenerationParams {
     /// so a seeded request is reproducible and choice 0 of `n = 4` is
     /// byte-identical to the single answer of `n = 1`.
     pub n: usize,
+    /// Whether this request will READ the per-token distribution.
+    ///
+    /// A flag rather than "report always", because reporting costs the
+    /// greedy fast path: `Sampler::sample_reporting` has to build the
+    /// full filtered distribution even for a chain that would have
+    /// answered with an argmax. A request that will not read it should
+    /// not pay for it.
+    pub wants_logprobs: bool,
     pub stop: Vec<String>,
     /// Stop strings that are exactly one token in this model's
     /// vocabulary, resolved once by whoever holds the tokenizer.
@@ -1469,6 +1477,23 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
 /// bytes of decoded text (respecting UTF-8 char boundaries) until
 /// they're confirmed clean, the same buffering approach real
 /// inference servers use for this exact reason.
+/// One completion of a request, with everything a wire may render for
+/// it.
+///
+/// A struct rather than a tuple because this grew three times in one
+/// day -- `FinishReason`, then `(FinishReason, String)`, then a third
+/// member for the distributions -- and each widening was a mechanical
+/// edit across every caller. A named field is added once and read by
+/// the wires that want it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GeneratedChoice {
+    pub(crate) finish: FinishReason,
+    pub(crate) text: String,
+    /// Per-token `(id, distribution it was drawn from)`, EMPTY unless
+    /// the request set `GenerationParams::wants_logprobs`.
+    pub(crate) logprobs: crate::sampling_loop::PerTokenProbs,
+}
+
 #[allow(clippy::too_many_arguments)]
 // one clear parameter per concern; a
 // bundling struct here would just be GenerationParams's fields plus
@@ -1487,7 +1512,13 @@ pub fn generate(
     prefix_cache: Option<&Mutex<PrefixCache>>,
     ceiling: Option<&ContextCeiling>,
     mut emit: impl FnMut(usize, &str),
-) -> Result<(Vec<FinishReason>, Usage), DecodeError> {
+) -> Result<
+    (
+        Vec<(FinishReason, crate::sampling_loop::PerTokenProbs)>,
+        Usage,
+    ),
+    DecodeError,
+> {
     let vocab_size = decoder.config.vocab_size;
 
     // Metal greedy GPU argmax: fold final_norm+lm_head+argmax into the
@@ -1782,6 +1813,11 @@ pub fn generate(
     }
 
     let mut finishes: Vec<FinishReason> = Vec::with_capacity(n);
+    // One entry per choice, each the per-token distributions that
+    // choice was drawn from. EMPTY vectors when the request did not
+    // ask for logprobs, which is every request until a route wires
+    // `wants_logprobs`.
+    let mut choice_logprobs: Vec<crate::sampling_loop::PerTokenProbs> = Vec::with_capacity(n);
     let mut completion_tokens = 0usize;
     let mut speculation = (0usize, 0usize, 0usize);
     // Choice 0's ids and final logits are what the request tail
@@ -1819,18 +1855,19 @@ pub fn generate(
             drafted: 0,
             forwards: 0,
         };
-        let (finish, generated_ids, final_logits) = crate::sampling_loop::sample_until_stop(
-            logits.clone(),
-            pos,
-            &tokens,
-            stop_tokens,
-            choice_params,
-            |ids| tokenizer.decode_bytes(ids),
-            &mut engine,
-            &mut |text: &str| emit(choice, text),
-            &decode_token,
-            draft_max,
-        )?;
+        let (finish, generated_ids, final_logits, choice_probs) =
+            crate::sampling_loop::sample_until_stop(
+                logits.clone(),
+                pos,
+                &tokens,
+                stop_tokens,
+                choice_params,
+                |ids| tokenizer.decode_bytes(ids),
+                &mut engine,
+                &mut |text: &str| emit(choice, text),
+                &decode_token,
+                draft_max,
+            )?;
         // Read the counters out BEFORE the borrow ends, because this is
         // the engine's last use and it borrows `kv` and
         // `first_token_at` mutably.
@@ -1839,6 +1876,7 @@ pub fn generate(
         speculation.2 += engine.drafted;
         completion_tokens += generated_ids.len();
         finishes.push(finish);
+        choice_logprobs.push(choice_probs);
         if choice == 0 {
             first_generated_ids = generated_ids;
             first_logits = final_logits;
@@ -1877,7 +1915,7 @@ pub fn generate(
     }
     .finish();
 
-    Ok((finishes, usage))
+    Ok((finishes.into_iter().zip(choice_logprobs).collect(), usage))
 }
 
 /// Shared sampling + stop-sequence-aware emission loop, given already-
@@ -1913,7 +1951,13 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     // to handle the simple case and forget the other. These engines
     // hold a recurrent state that collapses history irreversibly, so
     // they cannot fork a prefix and always answer with exactly one.
-) -> Result<(Vec<FinishReason>, Usage), DecodeError> {
+) -> Result<
+    (
+        Vec<(FinishReason, crate::sampling_loop::PerTokenProbs)>,
+        Usage,
+    ),
+    DecodeError,
+> {
     // These engines cannot fork: a KDA / MLA recurrent state is a
     // reduction over the whole prefix, so there is no cache to clone
     // into a second choice. Refused by name rather than served as one.
@@ -1960,7 +2004,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     // decode, and Kimi/MLA prefill is sequential (one forward per prompt
     // token), so the two phases differ by more here, not less.
     let mut first_token_at: Option<std::time::Instant> = None;
-    let (finish, generated_ids, _final_logits) = crate::sampling_loop::sample_until_stop(
+    let (finish, generated_ids, _final_logits, _probs) = crate::sampling_loop::sample_until_stop(
         logits,
         pos,
         &tokens,
@@ -1984,7 +2028,9 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     if let Some(at) = first_token_at {
         usage = usage.with_ttft(at.duration_since(prefill_start).as_secs_f64());
     }
-    Ok((vec![finish], usage))
+    // No distributions: these engines refuse `n` > 1 above and their
+    // logprobs row is not wired either.
+    Ok((vec![(finish, Vec::new())], usage))
 }
 
 #[cfg(test)]
@@ -2236,7 +2282,7 @@ mod tests {
         )
         .expect("speculative");
 
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
         assert_eq!(usage.completion_tokens, 24);
         assert!(
             usage.draft_tokens.is_some_and(|d| d > 0),
@@ -2378,6 +2424,7 @@ mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            wants_logprobs: false,
             reasoning: None,
             max_tokens,
             sampling: SamplingParams::default(),
@@ -2548,7 +2595,7 @@ mod tests {
             |_, s| chunks.push_str(s),
         )
         .unwrap();
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
     }
 
     /// A cancel raised while the loop is running must actually stop it,
@@ -2588,7 +2635,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(finish[0], FinishReason::Cancelled);
+        assert_eq!(finish[0].0, FinishReason::Cancelled);
         assert!(
             usage.completion_tokens < 200,
             "cancelling did not shorten the decode: {} tokens",
@@ -2624,7 +2671,7 @@ mod tests {
             |_, _| {},
         )
         .unwrap();
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
         assert_eq!(usage.completion_tokens, 5);
     }
 
@@ -2679,7 +2726,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            finish[0],
+            finish[0].0,
             FinishReason::Stop,
             "generation must stop as soon as the greedy-chosen token matches eos_id, not run to max_tokens"
         );
@@ -2716,7 +2763,7 @@ mod tests {
             |_, _| {},
         )
         .unwrap();
-        assert_eq!(finish[0], FinishReason::Stop);
+        assert_eq!(finish[0].0, FinishReason::Stop);
         assert_eq!(
             usage.completion_tokens, 0,
             "the very first sampled token was the turn ender"
@@ -2759,6 +2806,7 @@ mod tests {
             None,
             &prompt,
             &GenerationParams {
+                wants_logprobs: false,
                 reasoning: None,
                 max_tokens: 20,
                 sampling: SamplingParams::default(),
@@ -2781,8 +2829,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(baseline_finish[0], FinishReason::Length);
-        assert_eq!(stop_finish[0], FinishReason::Length);
+        assert_eq!(baseline_finish[0].0, FinishReason::Length);
+        assert_eq!(stop_finish[0].0, FinishReason::Length);
         assert_eq!(with_unmatchable_stop, baseline);
     }
 
@@ -2839,7 +2887,7 @@ mod tests {
         };
         let first = logits_for(take());
         let mut chunks: Vec<String> = Vec::new();
-        let (finish, ids, _) = crate::sampling_loop::sample_until_stop(
+        let (finish, ids, _, _probs) = crate::sampling_loop::sample_until_stop(
             first,
             0,
             // A scripted-logits harness with no real prompt: the empty
@@ -2893,7 +2941,7 @@ mod tests {
         let first = logits_for(take());
         let bytes = smiley;
         let mut chunks: Vec<String> = Vec::new();
-        let (_finish, ids, _) = crate::sampling_loop::sample_until_stop(
+        let (_finish, ids, _, _probs) = crate::sampling_loop::sample_until_stop(
             first,
             0,
             &[],
@@ -2923,6 +2971,7 @@ mod tests {
 
     fn scripted_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            wants_logprobs: false,
             reasoning: None,
             max_tokens,
             sampling: SamplingParams {
@@ -3224,6 +3273,7 @@ mod tests {
             None,
             &prompt,
             &GenerationParams {
+                wants_logprobs: false,
                 reasoning: None,
                 max_tokens: 20,
                 sampling: SamplingParams::default(),
@@ -3246,7 +3296,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(finish[0], FinishReason::StopSequence(stop_str));
+        assert_eq!(finish[0].0, FinishReason::StopSequence(stop_str));
         assert_eq!(truncated, baseline[..cut]);
     }
 
@@ -4448,7 +4498,7 @@ mod tests {
             |_, s| out.push_str(s),
         )
         .unwrap();
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
         assert_eq!(
             pool.lock().unwrap().free_blocks(),
             2,
@@ -4491,7 +4541,7 @@ mod tests {
             |_, _| {},
         )
         .unwrap();
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
         assert_eq!(pool.lock().unwrap().free_blocks(), 12);
     }
 
@@ -4670,7 +4720,7 @@ mod tests {
                 |_, _| {},
             )
             .unwrap();
-            assert_eq!(finish[0], FinishReason::Length);
+            assert_eq!(finish[0].0, FinishReason::Length);
         }
         assert_eq!(pool.lock().unwrap().free_blocks(), 2);
     }
@@ -4824,7 +4874,7 @@ mod tests {
         )
         .expect("a prompt that fits must be served");
         assert_eq!(usage.completion_tokens, 2, "clamped to the room left");
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
         assert_eq!(ceiling.refused(), 0, "a clamp is not a refusal");
         assert!(emitted > 0);
     }
@@ -4856,7 +4906,7 @@ mod tests {
             |_, s| with.push_str(s),
         )
         .expect("7 positions fits a 7-position ceiling exactly");
-        assert_eq!(finish[0], FinishReason::Length);
+        assert_eq!(finish[0].0, FinishReason::Length);
 
         let mut without = String::new();
         generate(
@@ -4912,7 +4962,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            finish[0],
+            finish[0].0,
             FinishReason::Length,
             "a sufficiently long queue_wait must let the request succeed once the holder releases"
         );

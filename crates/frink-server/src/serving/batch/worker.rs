@@ -355,7 +355,7 @@ pub(super) fn worker_loop(
                 // own UTF-8 buffer.
                 &|id| String::from_utf8_lossy(&decode(&[id])).into_owned(),
             ) {
-                Ok(crate::sample_step::Step::Token(next)) => next,
+                Ok(crate::sample_step::Step::Token { id, .. }) => id,
                 // A complete grammar with nothing legal after it: this
                 // row is finished, exactly as the private loop treats
                 // it, and for the same reason.
