@@ -1490,10 +1490,11 @@ async fn messages_full(
 
     // Choice 0: this wire has no `n`, and `crate::unimplemented_fields`
     // refuses the field.
-    let (finish, generated) = choices
+    let one = choices
         .into_iter()
         .next()
         .expect("a generation produces at least one choice");
+    let (finish, generated) = (one.finish, one.text);
     let parsed = output::parse_output(&generated, &prepared.parser_tools, posture);
     state.record_request(stats::Record {
         request_id: &request_id,
@@ -1628,10 +1629,11 @@ async fn messages_stream(
             // Streaming, so exactly one choice: `n` > 1 with `stream`
             // is refused at the route.
             Ok((choices, usage)) => {
-                let (finish, full_text) = choices
+                let one = choices
                     .into_iter()
                     .next()
                     .expect("a generation produces at least one choice");
+                let (finish, full_text) = (one.finish, one.text);
                 if overlap {
                     // Both parsers may still be withholding a run that
                     // could have become a marker and did not. It is

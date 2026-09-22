@@ -145,6 +145,18 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         reasoning: _,
         max_tokens,
         n,
+        // NOT KEYED. Whether a caller asked to SEE the per-token
+        // distribution does not change which tokens come back: the
+        // flag only decides whether the sampler reports the vector it
+        // drew from. Two requests that agree on everything else get
+        // the same answer, and the one that asked for logprobs renders
+        // more of it.
+        //
+        // What that means for a HIT is stated where it is enforced:
+        // `CachedCompletion` stores text and finish reasons, not
+        // distributions, so a request that wants logprobs must MISS.
+        // `ChatCompletionRequest::is_cacheable` is where that lives.
+        wants_logprobs: _,
         sampling,
         // NOT KEYED. The resolved seed is a clock reading for any
         // request that named none, which would give every greedy
@@ -328,6 +340,17 @@ pub struct CachedCompletion {
     /// one. Keying `n` and then truncating the value would be a key
     /// that looks stricter than the cache is.
     pub choices: Vec<(FinishReason, String)>,
+    // NOTE: per-token distributions are deliberately NOT stored, and
+    // that is safe only while the one route with a response cache is
+    // also the one that does not serve `logprobs`.
+    //
+    // `/v1/chat/completions` caches; `/v1/completions` does not, and
+    // `/v1/completions` is where `logprobs` is served today. Wiring
+    // logprobs into the chat route therefore has to answer this first:
+    // replaying stored text for a request that asked for the
+    // distributions would return a completion with no logprobs and a
+    // 200, which is the silent-wrong class. Either store them or make
+    // such a request MISS.
     pub usage: Usage,
 }
 
@@ -532,6 +555,7 @@ mod tests {
     /// field at its do-nothing value.
     fn params() -> GenerationParams {
         GenerationParams {
+            wants_logprobs: false,
             n: 1,
             reasoning: None,
             max_tokens: 16,

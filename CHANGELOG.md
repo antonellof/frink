@@ -15,6 +15,43 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`logprobs` on `/v1/completions`.** Per-token log-probabilities with
+  up to five alternatives per position, over the distribution the
+  sampler **actually drew from** -- penalties applied over the
+  `penalty_last_n` window, llama.cpp's chain run in
+  `sampler_order`, a grammar's mask included.
+
+  ```
+  ' Paris'    logp=-0.3489  p=0.705   top: ' Paris':-0.35, ' located':-2.85, ' a':-3.44
+  '.'         logp=-0.8410  p=0.431   top: '.':-0.84, ',':-1.06, '.\n':-2.08
+  ```
+
+  The reason every logprobs field was refused until now was written in
+  the refusal: *"the sampler does not publish the candidate
+  distribution"*. `Sampler::sample_reporting` does, and it returns the
+  very vector the draw came off rather than a second opinion computed
+  beside it -- one pipeline, parameterised, so the report and the draw
+  cannot disagree.
+
+  A candidate the chain REMOVED is **omitted**, not reported as `null`
+  or as a large negative stand-in: `ln(0)` is not a number JSON can
+  carry, and it was not a candidate. The sampled token can never be one
+  of these, so `token_logprobs` always holds a real number.
+
+  `text_offset` is computed from the same pieces `tokens` reports
+  rather than by re-tokenizing the finished string, because a
+  detokenize-then-retokenize round trip is not the identity for every
+  vocabulary. The synthetic-weights demo clears the distributions along
+  with the text it replaces, at the one site that replaces it.
+
+  `logprobs: N` above 5 is a **400** naming the field, as upstream caps
+  it. Still **refused on `/v1/chat/completions`**, which caches one
+  answer per key: replaying stored text for a request that asked for
+  the distributions would return a completion with no logprobs and a
+  200.
+
 ## [0.33.0] - 2026-09-22
 
 ### Added

@@ -76,6 +76,9 @@ impl ChatCompletionRequest {
         model: crate::sampling_knobs::SamplerModel<'_>,
     ) -> Result<GenerationParams, ApiError> {
         Ok(GenerationParams {
+            // Wired per route once a wire renders them; see
+            // `docs/plans/per-token-logprobs.md`.
+            wants_logprobs: false,
             // The prompt is prefilled once and the KV forked per
             // choice (`crate::generate`). A STREAMING request never
             // reaches here with more than 1: `chat_completions_stream`
