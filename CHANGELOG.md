@@ -15,6 +15,38 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **Sleep mode: `POST /sleep`, `POST /wake_up`, `GET /is_sleeping`.**
+  An unload that REMEMBERS. `/admin/models/unload` leaves the server
+  with nothing to serve and no record of what it served, so only a
+  client that already knows the id can bring it back. A sleeping
+  server can wake itself, which is what makes the pair usable from a
+  scheduler that does not know the deployment.
+
+  What it frees is the allocations around the weights: the KV pool,
+  the paged store, the repack and expert caches, and any device
+  buffers.
+
+  ```
+  POST /sleep        {"ok": true, "is_sleeping": true}
+  GET  /v1/models    503 server_sleeping
+  POST /wake_up      {"ok": true, "is_sleeping": false}
+  ```
+
+  **One level, and it says so.** frink mmaps its weights, so
+  discarding them is what dropping the handle already does and the
+  page cache decides how much of a reload touches disk. A `level`
+  parameter would be a knob with one position.
+
+  Three refusals rather than three silences: a model with no
+  checkpoint path on record is `409 not_reloadable`, because sleeping
+  it would be a one-way door dressed as a round trip; a second
+  `/sleep` is idempotent and does not lose the first one's record; and
+  a route needing a model while asleep answers `503 server_sleeping`
+  rather than `model_not_loaded`, so a caller can tell "put away, ask
+  again" from "nothing here".
+
 ## [0.38.0] - 2026-09-22
 
 ### Added

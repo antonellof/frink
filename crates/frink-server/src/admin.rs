@@ -36,7 +36,7 @@ use axum::{
 use frink_api::{
     admin::{
         CancelResponse, DownloadRequest, LoadModelRequest, ModelEntry, ModelState, ModelsResponse,
-        StatsResponse, TaskAccepted, TaskKind, TasksResponse, UnloadResponse,
+        SleepResponse, StatsResponse, TaskAccepted, TaskKind, TasksResponse, UnloadResponse,
     },
     routes,
 };
@@ -620,6 +620,112 @@ pub(crate) async fn unload_model(State(state): State<Arc<AppState>>) -> Response
         active: None,
     })
     .into_response()
+}
+
+/// Free the active model's memory, remembering what it was.
+///
+/// An UNLOAD THAT REMEMBERS. `/admin/models/unload` leaves the server
+/// with nothing to serve and no record of what it served, so only a
+/// client that already knows the id can bring it back; a sleeping
+/// server can wake itself. That is the difference that makes the pair
+/// usable from a scheduler which does not know the deployment.
+///
+/// **One level, and it is honest about that.** vLLM offers two --
+/// offload the weights to host memory, or discard them -- because it
+/// holds them in device memory it allocated. frink mmaps its weights,
+/// so "discard" is what dropping the handle already does and the OS
+/// page cache decides how much of a reload touches disk. What sleep
+/// really frees here is the allocations around the weights: the KV
+/// pool, the paged store, the repack and expert caches, and any device
+/// buffers. A `level` parameter would be a knob with one position.
+pub(crate) async fn sleep(State(state): State<Arc<AppState>>) -> Response {
+    if state.is_sleeping() {
+        // Idempotent: a scheduler that sends two is not an error, and
+        // the second must not lose the record the first made.
+        return Json(SleepResponse {
+            ok: true,
+            is_sleeping: true,
+        })
+        .into_response();
+    }
+    let Some(active) = state.active() else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "nothing is loaded, so there is nothing to put away",
+            "model_not_loaded",
+        );
+    };
+    let Some(path) = active.checkpoint_path.clone() else {
+        // A model with no path on record cannot be reloaded, and
+        // sleeping it would be a one-way door dressed as a round trip.
+        return json_error(
+            StatusCode::CONFLICT,
+            "the active model has no checkpoint path on record, so it could not be reloaded; \
+             refusing to put away something that cannot be brought back",
+            "not_reloadable",
+        );
+    };
+    *state.slept.lock().unwrap_or_else(|p| p.into_inner()) = Some(crate::SleptModel {
+        id: active.id.clone(),
+        path,
+    });
+    // After the record, so a wake between the two cannot find an empty
+    // one.
+    let previous = state.swap_active(None);
+    drop(previous);
+    tracing::info!("asleep; POST /wake_up reloads the model");
+    Json(SleepResponse {
+        ok: true,
+        is_sleeping: true,
+    })
+    .into_response()
+}
+
+/// Reload the model a [`sleep`] put away.
+pub(crate) async fn wake_up(State(state): State<Arc<AppState>>) -> Response {
+    let slept = state
+        .slept
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    let Some(slept) = slept else {
+        return json_error(
+            StatusCode::CONFLICT,
+            "this server is not asleep",
+            "not_sleeping",
+        );
+    };
+    if state
+        .load_in_progress
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return json_error(
+            StatusCode::CONFLICT,
+            "a model load is already in progress",
+            "load_in_progress",
+        );
+    }
+    let id = slept.id.clone().unwrap_or_else(|| "<startup>".to_string());
+    let path = slept.path.display().to_string();
+    let task = state.tasks.create(TaskKind::Load, &id);
+    let handle = task.clone();
+    let inner = Arc::clone(&state);
+    tokio::task::spawn_blocking(move || run_load_task(inner, handle, id, path));
+    // The record is cleared only once the load is under way, so a
+    // failed wake leaves the server asleep and retryable rather than
+    // awake with nothing loaded.
+    *state.slept.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    Json(SleepResponse {
+        ok: true,
+        is_sleeping: false,
+    })
+    .into_response()
+}
+
+/// Whether this server is asleep.
+pub(crate) async fn is_sleeping(State(state): State<Arc<AppState>>) -> Response {
+    Json(serde_json::json!({ "is_sleeping": state.is_sleeping() })).into_response()
 }
 
 pub(crate) async fn tasks(State(state): State<Arc<AppState>>) -> Response {
