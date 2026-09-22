@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-09-22
+
 ### Added
 
 - **`allowed_token_ids` and `bad_words`.** Two fields, one mask,
