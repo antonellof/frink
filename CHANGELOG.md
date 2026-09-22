@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-09-22
+
 ### Added
 
 - **`prompt_logprobs` on the paged KV store.** The last field-level
