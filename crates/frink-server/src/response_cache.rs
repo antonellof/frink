@@ -320,9 +320,23 @@ impl CacheKey {
 /// which responses came from cache).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedCompletion {
-    pub content: String,
-    pub finish: FinishReason,
+    /// One `(finish_reason, text)` per choice, choice 0 first.
+    ///
+    /// A `Vec` because `n` is part of [`GenerationKey`]: an `n = 3`
+    /// answer and an `n = 1` answer are different entries, and storing
+    /// only the first of three would replay a three-choice request as
+    /// one. Keying `n` and then truncating the value would be a key
+    /// that looks stricter than the cache is.
+    pub choices: Vec<(FinishReason, String)>,
     pub usage: Usage,
+}
+
+impl CachedCompletion {
+    /// Choice 0's text, for the callers that have one place to put it
+    /// (a session's stored reply, a JSON-mode validation).
+    pub fn first_text(&self) -> &str {
+        self.choices.first().map_or("", |(_, t)| t.as_str())
+    }
 }
 
 impl CachedCompletion {
@@ -341,7 +355,16 @@ impl CachedCompletion {
         // what a `Completed` certifies is that the value below may
         // exist at all, so from here on the value's own existence
         // carries it.
-        let _proof: Completed = self.finish.completed()?;
+        // EVERY choice must be complete, not just the first: a
+        // request that ran three and had one cancelled mid-way would
+        // otherwise store a truncated answer under a key that promises
+        // three whole ones.
+        for (finish, _) in &self.choices {
+            let _proof: Completed = finish.completed()?;
+        }
+        if self.choices.is_empty() {
+            return None;
+        }
         Some(CacheableCompletion { completion: self })
     }
 }
@@ -534,8 +557,7 @@ mod tests {
     /// comparing by content strings.
     fn cc(text: &str) -> CachedCompletion {
         CachedCompletion {
-            content: text.to_string(),
-            finish: FinishReason::Stop,
+            choices: vec![(FinishReason::Stop, text.to_string())],
             usage: Usage::new(3, 5),
         }
     }
@@ -591,8 +613,7 @@ mod tests {
         let k = key("What is the capital of France?");
 
         let partial = CachedCompletion {
-            content: "The capital of".to_string(),
-            finish: FinishReason::Cancelled,
+            choices: vec![(FinishReason::Cancelled, "The capital of".to_string())],
             usage: Usage::new(7, 3),
         };
         let client_a = serve(&mut cache, &k, partial.clone());
@@ -602,8 +623,10 @@ mod tests {
         );
 
         let whole = CachedCompletion {
-            content: "The capital of France is Paris.".to_string(),
-            finish: FinishReason::Stop,
+            choices: vec![(
+                FinishReason::Stop,
+                "The capital of France is Paris.".to_string(),
+            )],
             usage: Usage::new(7, 9),
         };
         let client_b = serve(&mut cache, &k, whole.clone());

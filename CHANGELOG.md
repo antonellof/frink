@@ -15,6 +15,29 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`n` > 1 on `/v1/chat/completions`** as well, from one prefill.
+  Verified on a real model: `n: 3` returns three choices and bills
+  `prompt_tokens: 39`, the same as `n: 1`.
+
+  Each choice is parsed for tool calls and reasoning **in its own
+  right**: a tool call in choice 2 is a tool call, and reading only
+  choice 0 would have returned the others as raw marker text.
+
+  `CachedCompletion` holds every choice rather than one, which is what
+  the `n` already in the cache key was promising -- keying `n` and then
+  storing the first of three would have been a key stricter than the
+  cache actually is. `cacheable()` now requires EVERY choice to be
+  complete, not just the first, so a run with one cancelled choice is
+  not stored under a key that promises three whole ones.
+
+  **`n` > 1 with `stream` is refused by name.** Round-robin
+  interleaving of `choices[].index` needs a sampler that can be stepped
+  one token at a time per choice; emitting choice 0 to its end and then
+  choice 1 would be sequential delivery wearing an `index` field, and a
+  client reading those indices would be misled.
+
 ## [0.32.0] - 2026-09-22
 
 ### Added

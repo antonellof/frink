@@ -1123,6 +1123,14 @@ impl ChatCompletionRequest {
     /// the client hasn't explicitly disabled it via `tool_choice:
     /// "none"` -- see `ToolChoice`'s doc comment for what the other
     /// values do (nothing different from `"auto"`).
+    /// True when the caller asked for more than one completion.
+    ///
+    /// Read off the shared table's own field, so the route and the
+    /// refusal cannot disagree about what `n` said.
+    fn several_choices(&self) -> bool {
+        self.unimplemented.n.is_some_and(|n| n > 1)
+    }
+
     fn tools_active(&self) -> bool {
         !self.tools.is_empty()
             && !matches!(&self.tool_choice, Some(ToolChoice::Mode(m)) if m == "none")
@@ -2730,17 +2738,7 @@ async fn chat_completions_full(
         )
         .await?;
 
-        // Choice 0: `n` > 1 is still refused on this wire, and the
-        // response cache stores ONE answer per key.
-        let (finish, content) = choices
-            .into_iter()
-            .next()
-            .expect("a generation produces at least one choice");
-        let completion = response_cache::CachedCompletion {
-            content,
-            finish,
-            usage,
-        };
+        let completion = response_cache::CachedCompletion { choices, usage };
         // A cacheable KEY is not on its own permission to store an
         // answer: `cacheable` refuses a generation that did not run to
         // its own end, and is the only way to build the value `put`
@@ -2762,7 +2760,9 @@ async fn chat_completions_full(
         };
         (completion, cache_status)
     };
-    let content = completion.content;
+    // Choice 0's text is what a session stores and what JSON mode
+    // validates: both describe one reply.
+    let content = completion.first_text().to_string();
 
     if req.json_object_mode() {
         json_mode::validate_json_object_output(&content)?;
@@ -2784,16 +2784,30 @@ async fn chat_completions_full(
         );
     }
 
-    let (message, finish_reason) = build_response_message(
-        content,
-        if tools_active { &req.tools } else { &[] },
-        output::OutputPosture::resolve_full(
-            active.reasoning_format(),
-            active.tool_call_format(),
-            &prompt,
-        ),
-        completion.finish.as_str(),
+    // One `choices[]` entry per generated choice, each parsed for tool
+    // calls and reasoning in its own right: a tool call in choice 2 is
+    // a tool call, and reading only choice 0 would return the others
+    // as raw marker text.
+    let posture = output::OutputPosture::resolve_full(
+        active.reasoning_format(),
+        active.tool_call_format(),
+        &prompt,
     );
+    let tools: &[_] = if tools_active { &req.tools } else { &[] };
+    let rendered: Vec<ChatCompletionChoice> = completion
+        .choices
+        .into_iter()
+        .enumerate()
+        .map(|(index, (finish, text))| {
+            let (message, finish_reason) =
+                build_response_message(text, tools, posture, finish.as_str());
+            ChatCompletionChoice {
+                index,
+                message,
+                finish_reason,
+            }
+        })
+        .collect();
 
     state.record_request(stats::Record {
         request_id: &request_id,
@@ -2813,11 +2827,7 @@ async fn chat_completions_full(
         request_id,
         object: "chat.completion",
         model: req.model,
-        choices: vec![ChatCompletionChoice {
-            index: 0,
-            message,
-            finish_reason,
-        }],
+        choices: rendered,
         usage: completion.usage,
         frink_cache: cache_status,
     }))
@@ -2831,6 +2841,21 @@ async fn chat_completions_stream(
     attribution: attribution::Attribution,
 ) -> Result<Response, ApiError> {
     // Streaming requests are never served from or written to the response cache.
+    //
+    // And they serve one choice. Emitting choice 0 to its end and then
+    // choice 1 is not what a client reading `choices[].index` expects,
+    // and interleaving them round-robin needs a sampler that can be
+    // stepped one token at a time per choice
+    // (`docs/plans/several-completions-per-request.md`). Refused by
+    // name rather than silently collapsed to one, which is the whole
+    // argument of `crate::unimplemented_fields`.
+    if req.several_choices() {
+        return Err(unsupported_feature(
+            "`n` > 1 with `stream` is not implemented: the choices would arrive one after \
+             another rather than interleaved by `choices[].index`. Send the request without \
+             `stream`, which serves `n` on this route.",
+        ));
+    }
     let tools_active = req.tools_active();
     // See `chat_completions_full`: the handle is taken once and the
     // whole stream runs against it, so a mid-stream model swap cannot
@@ -5335,6 +5360,56 @@ pub(crate) mod tests {
     /// llama.cpp's native endpoint is a different WIRE, not a shorter
     /// path to the OpenAI one. If this ever starts answering `choices`,
     /// every llama.cpp client reading `content` breaks silently.
+    /// `n` on the chat route: several choices from one prefill, each
+    /// parsed for tool calls and reasoning in its own right, and the
+    /// STREAMING pair refused by name because the choices would arrive
+    /// one after another rather than interleaved by index.
+    #[tokio::test]
+    async fn chat_serves_several_choices_and_refuses_the_streaming_pair() {
+        let app = test_app();
+        let body = |n: u32, stream: bool| {
+            serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 4,
+                "temperature": 1.0,
+                "n": n,
+                "stream": stream
+            })
+        };
+
+        let (status, one) =
+            post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, body(1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{one}");
+
+        let (status, three) =
+            post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, body(3, false)).await;
+        assert_eq!(status, StatusCode::OK, "{three}");
+        let choices = three["choices"].as_array().expect("an array");
+        assert_eq!(choices.len(), 3, "{three}");
+        for (i, c) in choices.iter().enumerate() {
+            assert_eq!(c["index"], i);
+            assert!(c["message"]["role"].is_string(), "{c}");
+            assert!(c["finish_reason"].is_string(), "{c}");
+        }
+        // One prompt, billed once: the prefill was shared.
+        assert_eq!(
+            three["usage"]["prompt_tokens"], one["usage"]["prompt_tokens"],
+            "n = 3 billed the prompt more than once"
+        );
+
+        // Streaming with several choices is refused BY NAME, not
+        // collapsed to one.
+        let (status, refused) =
+            post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, body(3, true)).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains('n') && message.contains("stream"),
+            "{refused}"
+        );
+    }
+
     /// The three generation routes must agree about every field this
     /// server does not implement. They did not: `n: 3` was a 501 on
     /// `/v1/chat/completions` and a 200 on `/v1/completions`, measured
@@ -5385,7 +5460,10 @@ pub(crate) mod tests {
                 // array to carry the answers, which is the one
                 // per-route exception in the table
                 // (`unimplemented_fields::SERVES_SEVERAL_CHOICES`).
-                if field == "n" && uri == frink_api::routes::V1_COMPLETIONS {
+                if field == "n"
+                    && (uri == frink_api::routes::V1_COMPLETIONS
+                        || uri == frink_api::routes::V1_CHAT_COMPLETIONS)
+                {
                     let (status, answer) = post_json_uri(&app, uri, body).await;
                     assert_eq!(
                         status,

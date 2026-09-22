@@ -1,11 +1,14 @@
 # Several completions per request (`n` > 1)
 
-Status: **served on `/v1/completions` since 2026-09-22.** Verified on a
-real model: `n: 3` returns three distinct completions and bills the
-prompt ONCE. `/v1/chat/completions` and the native `/completion` still
-refuse the field by name; chat is the remaining row and needs the
-response cache to hold `k` answers per key, streaming to interleave
-`choices[].index`, or a refusal for the streaming pair.
+Status: **DONE for both OpenAI routes, 2026-09-22.** `/v1/completions`
+and `/v1/chat/completions` serve `n` from one prefill, verified on a
+real model. llama.cpp's native `/completion` refuses it by name (one
+`content`, nowhere to put a second answer), and so does the streaming
+chat path -- see (5), which is the one decision this plan changed.
+
+What is left, each its own row: copy-on-write for the paged store so a
+paged request can fork; round-robin streaming; `best_of`, which needs
+a scoring rule.
 
 `n` is the OpenAI field for "give me `k` samples of this prompt". Until
 2026-09-22 frink answered it with a 200 and one choice on two of its
@@ -84,11 +87,18 @@ Why this beats the alternatives:
    choices. This is the one place a reader can see that the prefill was
    shared, so it is also the acceptance test.
 5. **Streaming.** SSE chunks carry `choices[].index`, and a client is
-   entitled to interleaved indices. **Decoded round-robin**, one token
-   per live choice per pass, so a slow choice cannot starve the others
-   and the first token of every choice arrives at nearly the same time.
-   Sequential choice-at-a-time would make choice 3's first token arrive
-   after choices 0-2 finished, which no client expects.
+   entitled to interleaved indices. Round-robin -- one token per live
+   choice per pass -- is the right answer and is NOT what shipped:
+   `sample_until_stop` runs a choice to completion, so interleaving
+   needs a sampler that can be stepped one token at a time per choice,
+   which is a row of its own.
+
+   **So `n` > 1 with `stream` is refused BY NAME.** Emitting choice 0
+   to its end and then choice 1 would be sequential delivery wearing
+   an `index` field, and a client reading those indices would be
+   misled. Refusing is the same argument as
+   `crate::unimplemented_fields`: a 501 a caller can read beats a 200
+   they cannot check.
 6. **The prefix cache write-back.** It stores one continuation per
    prompt and cannot represent `k`. Choice 0 is written back and the
    rest are not, because choice 0 is the one a subsequent `n = 1`
@@ -161,12 +171,14 @@ So the order is:
    and neither the Anthropic nor the Responses wire has the array at
    all.
 
-4. **`/v1/chat/completions`** (next). Not a copy of step 3: its
-   non-streaming path goes through the response cache, which stores ONE
-   answer per key and would have to hold `k`; and its streaming path
-   needs either round-robin interleaving of `choices[].index` or a
-   refusal for the `n` > 1 + `stream` pair. `/v1/completions` is
-   buffered, which is why it went first.
+4. ~~**`/v1/chat/completions`**~~ Done. `CachedCompletion` holds every
+   choice rather than one, which is what the `n` already in
+   `GenerationKey` was promising -- keying `n` and then storing the
+   first of three would have been a key stricter than the cache. Each
+   choice is parsed for tool calls and reasoning in its own right,
+   because a tool call in choice 2 is a tool call and reading only
+   choice 0 would return the others as raw marker text. `cacheable()`
+   now requires EVERY choice to be complete, not just the first.
 
 Step 1 is worth doing whether or not `n` ever lands, which is the test
 of whether a prerequisite is real or an excuse.
