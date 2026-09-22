@@ -41,7 +41,9 @@ mod cache_admin;
 mod cache_salt;
 mod cancel;
 mod chat_params;
+mod chat_stream_choice;
 mod chat_template;
+mod choice_stream;
 mod cli;
 mod completion;
 mod continuation;
@@ -70,6 +72,7 @@ mod rerank;
 mod response_cache;
 pub(crate) mod responses;
 mod resume;
+mod round_robin;
 mod sample_step;
 mod sampling_knobs;
 mod sampling_loop;
@@ -1192,14 +1195,6 @@ impl ChatCompletionRequest {
         }
     }
 
-    /// True when the caller asked for more than one completion.
-    ///
-    /// Read off the shared table's own field, so the route and the
-    /// refusal cannot disagree about what `n` said.
-    fn several_choices(&self) -> bool {
-        self.unimplemented.n.is_some_and(|n| n > 1)
-    }
-
     fn tools_active(&self) -> bool {
         !self.tools.is_empty()
             && !matches!(&self.tool_choice, Some(ToolChoice::Mode(m)) if m == "none")
@@ -2259,12 +2254,11 @@ fn run_generation_emit(
     continuous_batcher: Option<&serving::batch::ContinuousBatcher>,
     ceiling: Option<&budget::ContextCeiling>,
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
-    mut emit: impl FnMut(&str),
-    // One entry per choice. `n` is 1 for every streaming request --
-    // `n` > 1 with `stream` is refused at the route, because emitting
-    // choice 0 entirely and then choice 1 is not what a client reading
-    // `choices[].index` expects, and round-robin needs a steppable
-    // sampler (`docs/plans/several-completions-per-request.md`).
+    // Takes the CHOICE INDEX with the text. A streaming `n` interleaves
+    // the choices a token at a time (`crate::round_robin`), so a piece
+    // of text that did not say which completion it belongs to could not
+    // be put on the wire at all.
+    mut emit: impl FnMut(usize, &str),
 ) -> Result<generate::Generated, generate::DecodeError> {
     let synthetic = model.is_synthetic();
     // Held for the whole generation: a `POST /lora-adapters`, or a
@@ -2314,7 +2308,7 @@ fn run_generation_emit(
                         Some(|chunk: &str| {
                             if !chunk.is_empty() {
                                 chunks[0].push(chunk.to_string());
-                                emit(chunk);
+                                emit(0, chunk);
                             }
                         }),
                     )?
@@ -2346,11 +2340,11 @@ fn run_generation_emit(
                     ceiling,
                     |choice, chunk| {
                         chunks[choice].push(chunk.to_string());
-                        // Only choice 0 streams, and only a request
-                        // with one choice streams at all: `n` > 1 with
-                        // `stream` is refused at the route.
-                        if !synthetic && choice == 0 {
-                            emit(chunk);
+                        // Every choice streams, each saying which it
+                        // is: a streamed `n` interleaves them a token
+                        // at a time (`crate::round_robin`).
+                        if !synthetic {
+                            emit(choice, chunk);
                         }
                     },
                 )?
@@ -2366,7 +2360,7 @@ fn run_generation_emit(
             |chunk| {
                 chunks[0].push(chunk.to_string());
                 if !synthetic {
-                    emit(chunk);
+                    emit(0, chunk);
                 }
             },
         )?,
@@ -2380,7 +2374,7 @@ fn run_generation_emit(
             |chunk| {
                 chunks[0].push(chunk.to_string());
                 if !synthetic {
-                    emit(chunk);
+                    emit(0, chunk);
                 }
             },
         )?,
@@ -2394,7 +2388,7 @@ fn run_generation_emit(
             |chunk| {
                 chunks[0].push(chunk.to_string());
                 if !synthetic {
-                    emit(chunk);
+                    emit(0, chunk);
                 }
             },
         )?,
@@ -2408,7 +2402,7 @@ fn run_generation_emit(
             |chunk| {
                 chunks[0].push(chunk.to_string());
                 if !synthetic {
-                    emit(chunk);
+                    emit(0, chunk);
                 }
             },
         )?,
@@ -2420,9 +2414,9 @@ fn run_generation_emit(
             "[frink synthetic-weight demo: no real checkpoint loaded -- set FRINK_MODEL_PATH \
              to serve a real model. Decoded ids -> {full:?}]"
         );
-        emit(&full);
+        emit(0, &full);
     } else if used_batcher && !full.is_empty() && chunks[0].is_empty() {
-        emit(&full);
+        emit(0, &full);
     }
 
     // One `(finish_reason, text)` per choice, choice 0 first. Zipped
@@ -2488,7 +2482,7 @@ pub(crate) fn run_generation(
         continuous_batcher,
         ceiling,
         metal_private_decode_gate,
-        |_| {},
+        |_, _| {},
     )
 }
 
@@ -3002,13 +2996,6 @@ async fn chat_completions_stream(
     // (`docs/plans/several-completions-per-request.md`). Refused by
     // name rather than silently collapsed to one, which is the whole
     // argument of `crate::unimplemented_fields`.
-    if req.several_choices() {
-        return Err(unsupported_feature(
-            "`n` > 1 with `stream` is not implemented: the choices would arrive one after \
-             another rather than interleaved by `choices[].index`. Send the request without \
-             `stream`, which serves `n` on this route.",
-        ));
-    }
     let tools_active = req.tools_active();
     // See `chat_completions_full`: the handle is taken once and the
     // whole stream runs against it, so a mid-stream model swap cannot
@@ -3032,6 +3019,12 @@ async fn chat_completions_stream(
     let mut params =
         req.generation_params_for_template(&template, active.name(), active.sampler_model())?;
     params.lora = lora::resolve_request(active.generative()?, req.lora.as_deref())?;
+    // A client reading `choices[].index` asked for the choices
+    // together, so they are decoded a token at a time rather than one
+    // completion after another (`crate::round_robin`). Set HERE and
+    // nowhere else: a buffered request collects in an order nobody can
+    // observe, and the interleaved schedule costs it the drafter.
+    params.interleave_choices = params.n > 1;
     let stats_state = Arc::clone(&state);
     // Read now, off the handle this stream will decode against. Read
     // later it would name whatever a swap had made current by then.
@@ -3110,32 +3103,28 @@ async fn chat_completions_stream(
         // thread -- and the model handle and cancel guard it holds --
         // for the life of the process.
         let orphan_timeout = sse::orphan_timeout_from_env();
-        let mut first = true;
         let head_request_id = request_id.clone();
-        // The chain-of-thought split, applied as the tokens arrive
-        // rather than at the end. Without this an overlapped stream --
-        // which is the default for a reasoning model with no tools --
-        // would deliver the whole thinking block as `content` and then
-        // the buffered path would deliver the same request's thinking
-        // as `reasoning_content`, so the same question would answer
-        // differently depending on a transport detail. Shared with the
-        // terminal flush below, which releases whatever the parser is
-        // still withholding against a marker that never arrived.
-        let stream_reasoning: Rc<RefCell<Option<crate::policy::parser::ReasoningParser>>> =
-            Rc::new(RefCell::new(posture.reasoning_parser()));
-        let emit_reasoning = Rc::clone(&stream_reasoning);
-        // The tool-call parser, fed whatever the reasoning parser
-        // classified as content. Absent when the request offered no
-        // tools, in which case marker-looking text is just text.
-        let stream_tools: Rc<RefCell<Option<crate::policy::parser::ToolCallParser>>> = Rc::new(
-            RefCell::new(tools_active.then(|| posture.tool_call_parser(&offered_tools))),
-        );
-        let emit_tools = Rc::clone(&stream_tools);
-        // How many calls have been opened on the wire, so the terminal
-        // chunk knows whether to say `tool_calls` and does not repeat
-        // what already went out.
-        let streamed_calls = Rc::new(std::cell::Cell::new(0usize));
-        let emit_streamed_calls = Rc::clone(&streamed_calls);
+        // Whether the request id has gone out yet. It names the
+        // REQUEST, so it rides the first chunk of the whole stream
+        // rather than the first chunk of each choice.
+        let announced = std::cell::Cell::new(false);
+        // One parser set per choice. A streamed `n` interleaves the
+        // choices a token at a time (`crate::round_robin`), so the
+        // reasoning split, the tool parser and the opened-call count
+        // are per COMPLETION rather than per request: two choices can
+        // be mid-marker in different places.
+        let emitters: Rc<RefCell<Vec<crate::chat_stream_choice::ChoiceEmitter>>> =
+            Rc::new(RefCell::new(
+                (0..params.n.max(1))
+                    .map(|_| {
+                        crate::chat_stream_choice::ChoiceEmitter::new(
+                            posture.reasoning_parser(),
+                            tools_active.then(|| posture.tool_call_parser(&offered_tools)),
+                        )
+                    })
+                    .collect(),
+            ));
+        let emit_choices = Rc::clone(&emitters);
         let result = run_generation_emit(
             &model,
             &prompt,
@@ -3146,51 +3135,32 @@ async fn chat_completions_stream(
             batcher.as_ref(),
             ceiling.as_deref(),
             metal_private_decode_gate.as_deref(),
-            |chunk| {
+            |choice, chunk| {
                 if !overlap || chunk.is_empty() {
                     return;
                 }
-                let (reasoning, content) = match emit_reasoning.borrow_mut().as_mut() {
-                    Some(parser) => {
-                        let delta = parser.push(chunk);
-                        (delta.reasoning, delta.content)
-                    }
-                    None => (String::new(), chunk.to_string()),
+                let mut held = emit_choices.borrow_mut();
+                let Some(emitter_state) = held.get_mut(choice) else {
+                    return;
                 };
-                // Content goes through the tool parser, which holds
-                // back anything that could still become a marker and
-                // turns a recognized call into wire deltas.
-                let (content, tool_calls) = match emit_tools.borrow_mut().as_mut() {
-                    Some(parser) => {
-                        let (text, calls) =
-                            tool_call_deltas(parser.push(&content), &emit_streamed_calls);
-                        (text, calls)
-                    }
-                    None => (content, Vec::new()),
-                };
-                // Both parsers withhold partial markers, so a chunk can
-                // legitimately produce nothing at all this time round.
-                if reasoning.is_empty() && content.is_empty() && tool_calls.is_empty() {
+                let delta = emitter_state.push(chunk);
+                if delta.is_empty() {
                     return;
                 }
-                let role = if first { Some("assistant") } else { None };
-                let request_id = first.then(|| head_request_id.clone());
-                first = false;
+                // The request id rides the first chunk of the whole
+                // STREAM, not of each choice: it names the request.
+                let request_id = (!announced.get()).then(|| {
+                    announced.set(true);
+                    head_request_id.clone()
+                });
+                let wire = delta.into_choice(choice, emitter_state.start());
+                drop(held);
                 let payload = ChatCompletionChunk {
                     id: head_request_id.clone(),
                     request_id,
                     object: "chat.completion.chunk",
                     model: model_name.clone(),
-                    choices: vec![ChatCompletionChunkChoice {
-                        index: 0,
-                        delta: ChatCompletionChunkDelta {
-                            role,
-                            content: (!content.is_empty()).then_some(content),
-                            reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
-                            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-                        },
-                        finish_reason: None,
-                    }],
+                    choices: vec![wire],
                     usage: None,
                 };
                 // Tier one of cancellation. A failed send means the SSE
@@ -3228,147 +3198,154 @@ async fn chat_completions_stream(
             },
         );
 
-        // `first` is still true when nothing was streamed from the emit
-        // closure (the buffered tool-call/batching path, or an empty
-        // generation), so the id has not gone out yet. `take()` on the
-        // way into each payload below guarantees it is announced
-        // exactly once, on whichever chunk really is first.
-        let mut pending_request_id = first.then(|| request_id.clone());
+        // Nothing may have been streamed from the emit closure (the
+        // buffered tool-call/batching path, or an empty generation), so
+        // the id may not have gone out yet. `take()` on the way into
+        // each payload below guarantees it is announced exactly once,
+        // on whichever chunk really is first.
+        let mut pending_request_id = (!announced.get()).then(|| request_id.clone());
 
         match result {
-            // Streaming, so exactly one choice: `n` > 1 with `stream`
-            // is refused at the route.
             Ok(generated) => {
                 let usage = generated.usage;
-                let one = generated
+                let produced: Vec<(generate::FinishReason, String)> = generated
                     .choices
                     .into_iter()
-                    .next()
-                    .expect("a generation produces at least one choice");
-                let (finish, full_text) = (one.finish, one.text);
+                    .map(|c| (c.finish, c.text))
+                    .collect();
+                assert!(
+                    !produced.is_empty(),
+                    "a generation produces at least one choice"
+                );
+                // The transcript keeps CHOICE 0. A server-side history
+                // is one conversation, and appending four assistant
+                // turns for one question would make the next request's
+                // prompt a conversation that never happened.
                 if let Some(id) = &session_id {
                     sessions.store_reply(
                         id,
                         ChatMessage {
                             role: "assistant".to_string(),
-                            content: Some(MessageContent::Text(full_text.clone())),
+                            content: Some(MessageContent::Text(produced[0].1.clone())),
                             tool_calls: None,
                             tool_call_id: None,
                             reasoning_content: None,
                         },
                     );
                 }
-                // Both parsers may still be holding a run that could
-                // have become a marker and did not. It is ordinary
-                // output; dropping it would truncate every answer whose
-                // tail happens to look like the start of a `</think>`
-                // or a `<tool_call>`.
-                let mut streamed_finish: Option<&'static str> = None;
-                if overlap {
-                    let tail = stream_reasoning
-                        .borrow_mut()
-                        .as_mut()
-                        .map(|parser| parser.flush())
-                        .unwrap_or_default();
-                    let (mut content, mut tool_calls) = (tail.content, Vec::new());
-                    if let Some(parser) = stream_tools.borrow_mut().as_mut() {
-                        let mut events = parser.push(&content);
-                        events.extend(parser.finish());
-                        let (text, calls) = tool_call_deltas(events, &streamed_calls);
-                        content = text;
-                        tool_calls = calls;
-                    }
-                    if !content.is_empty() || !tail.reasoning.is_empty() || !tool_calls.is_empty() {
-                        let payload = ChatCompletionChunk {
-                            id: request_id.clone(),
-                            request_id: pending_request_id.take(),
-                            object: "chat.completion.chunk",
-                            model: model_name.clone(),
-                            choices: vec![ChatCompletionChunkChoice {
-                                index: 0,
-                                delta: ChatCompletionChunkDelta {
-                                    role: None,
-                                    content: (!content.is_empty()).then_some(content),
-                                    reasoning_content: (!tail.reasoning.is_empty())
-                                        .then_some(tail.reasoning),
-                                    tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-                                },
-                                finish_reason: None,
-                            }],
-                            usage: None,
+                for (index, (finish, full_text)) in produced.iter().enumerate() {
+                    let (finish, full_text) = (finish.clone(), full_text.as_str());
+                    // Both parsers may still be holding a run that could
+                    // have become a marker and did not. It is ordinary
+                    // output; dropping it would truncate every answer whose
+                    // tail happens to look like the start of a `</think>`
+                    // or a `<tool_call>`.
+                    let mut streamed_finish: Option<&'static str> = None;
+                    if overlap {
+                        let (tail, first, opened) = {
+                            let mut held = emitters.borrow_mut();
+                            let state = &mut held[index];
+                            let tail = state.flush();
+                            (tail, state.start(), state.opened_calls())
                         };
-                        let _ =
-                            sse::send_or_orphan(&tx, Ok(emitter.event(&payload)), orphan_timeout);
-                    }
-                    if streamed_calls.get() > 0 {
-                        streamed_finish = Some("tool_calls");
-                    }
-                } else {
-                    // The batched path had no incremental stream to
-                    // ride on, so the whole answer goes out at once.
-                    let parsed = output::parse_output(&full_text, &offered_tools, posture);
-                    let tool_calls: Vec<ToolCallDelta> = parsed
-                        .calls
-                        .iter()
-                        .enumerate()
-                        .map(|(index, call)| {
-                            ToolCallDelta::whole(index, call.name.clone(), call.arguments.clone())
-                        })
-                        .collect();
-                    if !tool_calls.is_empty() {
-                        streamed_finish = Some("tool_calls");
-                    }
-                    if !tool_calls.is_empty()
-                        || !parsed.content.is_empty()
-                        || parsed.reasoning.is_some()
-                    {
-                        let payload = ChatCompletionChunk {
-                            id: request_id.clone(),
-                            request_id: pending_request_id.take(),
-                            object: "chat.completion.chunk",
-                            model: model_name.clone(),
-                            choices: vec![ChatCompletionChunkChoice {
-                                index: 0,
-                                delta: ChatCompletionChunkDelta {
-                                    role: Some("assistant"),
-                                    content: (!parsed.content.is_empty() && tool_calls.is_empty())
+                        if !tail.is_empty() {
+                            let payload = ChatCompletionChunk {
+                                id: request_id.clone(),
+                                request_id: pending_request_id.take(),
+                                object: "chat.completion.chunk",
+                                model: model_name.clone(),
+                                choices: vec![tail.into_choice(index, first)],
+                                usage: None,
+                            };
+                            let _ = sse::send_or_orphan(
+                                &tx,
+                                Ok(emitter.event(&payload)),
+                                orphan_timeout,
+                            );
+                        }
+                        if opened > 0 {
+                            streamed_finish = Some("tool_calls");
+                        }
+                    } else {
+                        // The batched path had no incremental stream to
+                        // ride on, so the whole answer goes out at once.
+                        let parsed = output::parse_output(full_text, &offered_tools, posture);
+                        let tool_calls: Vec<ToolCallDelta> = parsed
+                            .calls
+                            .iter()
+                            .enumerate()
+                            .map(|(index, call)| {
+                                ToolCallDelta::whole(
+                                    index,
+                                    call.name.clone(),
+                                    call.arguments.clone(),
+                                )
+                            })
+                            .collect();
+                        if !tool_calls.is_empty() {
+                            streamed_finish = Some("tool_calls");
+                        }
+                        if !tool_calls.is_empty()
+                            || !parsed.content.is_empty()
+                            || parsed.reasoning.is_some()
+                        {
+                            let payload = ChatCompletionChunk {
+                                id: request_id.clone(),
+                                request_id: pending_request_id.take(),
+                                object: "chat.completion.chunk",
+                                model: model_name.clone(),
+                                choices: vec![ChatCompletionChunkChoice {
+                                    index,
+                                    delta: ChatCompletionChunkDelta {
+                                        role: Some("assistant"),
+                                        content: (!parsed.content.is_empty()
+                                            && tool_calls.is_empty())
                                         .then(|| parsed.content.clone()),
-                                    reasoning_content: parsed.reasoning.clone(),
-                                    tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
-                                },
-                                finish_reason: None,
-                            }],
-                            usage: None,
-                        };
-                        let _ =
-                            sse::send_or_orphan(&tx, Ok(emitter.event(&payload)), orphan_timeout);
+                                        reasoning_content: parsed.reasoning.clone(),
+                                        tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+                                    },
+                                    finish_reason: None,
+                                }],
+                                usage: None,
+                            };
+                            let _ = sse::send_or_orphan(
+                                &tx,
+                                Ok(emitter.event(&payload)),
+                                orphan_timeout,
+                            );
+                        }
                     }
+                    // A truncated generation is `length` even if it managed
+                    // to open a call: the client must not treat a
+                    // half-written call as one it should execute.
+                    let final_finish_reason = match streamed_finish {
+                        Some(reason) if finish.as_str() != "length" => reason,
+                        _ => finish.as_str(),
+                    };
+                    // The usage block rides the LAST choice's terminal
+                    // chunk, because it is the request's total and there is
+                    // exactly one of it.
+                    let last = index + 1 == produced.len();
+                    let final_payload = ChatCompletionChunk {
+                        id: request_id.clone(),
+                        request_id: pending_request_id.take(),
+                        object: "chat.completion.chunk",
+                        model: model_name.clone(),
+                        choices: vec![ChatCompletionChunkChoice {
+                            index,
+                            delta: ChatCompletionChunkDelta {
+                                role: None,
+                                content: None,
+                                reasoning_content: None,
+                                tool_calls: None,
+                            },
+                            finish_reason: Some(final_finish_reason),
+                        }],
+                        usage: last.then(|| usage.clone()),
+                    };
+                    let _ =
+                        sse::send_or_orphan(&tx, Ok(emitter.event(&final_payload)), orphan_timeout);
                 }
-                // A truncated generation is `length` even if it managed
-                // to open a call: the client must not treat a
-                // half-written call as one it should execute.
-                let final_finish_reason = match streamed_finish {
-                    Some(reason) if finish.as_str() != "length" => reason,
-                    _ => finish.as_str(),
-                };
-                let final_payload = ChatCompletionChunk {
-                    id: request_id.clone(),
-                    request_id: pending_request_id.take(),
-                    object: "chat.completion.chunk",
-                    model: model_name,
-                    choices: vec![ChatCompletionChunkChoice {
-                        index: 0,
-                        delta: ChatCompletionChunkDelta {
-                            role: None,
-                            content: None,
-                            reasoning_content: None,
-                            tool_calls: None,
-                        },
-                        finish_reason: Some(final_finish_reason),
-                    }],
-                    usage: Some(usage.clone()),
-                };
-                let _ = sse::send_or_orphan(&tx, Ok(emitter.event(&final_payload)), orphan_timeout);
                 let _ = sse::send_or_orphan(&tx, Ok(emitter.done()), orphan_timeout);
                 // Recorded here rather than where the handler returned:
                 // the handler returns as soon as the SSE headers go out,
@@ -4915,6 +4892,7 @@ pub(crate) mod tests {
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
+            interleave_choices: false,
             reasoning: None,
             max_tokens,
             sampling: SamplingParams::default(),
@@ -5790,11 +5768,9 @@ pub(crate) mod tests {
     }
 
     /// `n` on the chat route: several choices from one prefill, each
-    /// parsed for tool calls and reasoning in its own right, and the
-    /// STREAMING pair refused by name because the choices would arrive
-    /// one after another rather than interleaved by index.
+    /// parsed for tool calls and reasoning in its own right.
     #[tokio::test]
-    async fn chat_serves_several_choices_and_refuses_the_streaming_pair() {
+    async fn chat_serves_several_choices_from_one_prefill() {
         let app = test_app();
         let body = |n: u32, stream: bool| {
             serde_json::json!({
@@ -5826,16 +5802,82 @@ pub(crate) mod tests {
             three["usage"]["prompt_tokens"], one["usage"]["prompt_tokens"],
             "n = 3 billed the prompt more than once"
         );
+    }
 
-        // Streaming with several choices is refused BY NAME, not
-        // collapsed to one.
-        let (status, refused) =
-            post_json_uri(&app, frink_api::routes::V1_CHAT_COMPLETIONS, body(3, true)).await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{refused}");
-        let message = refused["error"]["message"].as_str().unwrap_or_default();
+    /// **A streamed `n` INTERLEAVES its choices.**
+    ///
+    /// The property the route refused for, and the only one that says
+    /// the schedule is right: a client reading `choices[].index` is
+    /// handed the choices together. Emitting choice 0 to its end and
+    /// then choice 1 would satisfy "three indices appear" and satisfy
+    /// nothing else, so what is asserted is that the FIRST chunk of
+    /// choice 2 arrives before the LAST chunk of choice 0.
+    ///
+    /// Also pinned: exactly one terminal chunk per choice, and exactly
+    /// one usage block for the request.
+    #[tokio::test]
+    async fn a_streamed_n_interleaves_its_choices() {
+        let app = streaming_test_app();
+        let raw = post_sse_raw(
+            &app,
+            serde_json::json!({
+                "model": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 6,
+                "temperature": 1.0,
+                "n": 3,
+                "stream": true
+            }),
+        )
+        .await;
+
+        // The index carried by each chunk, in wire order.
+        let mut order: Vec<usize> = Vec::new();
+        let mut finished: Vec<usize> = Vec::new();
+        let mut usage_blocks = 0usize;
+        for line in raw.lines() {
+            let Some(rest) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if rest.trim() == "[DONE]" {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(rest).expect(rest);
+            if v.get("usage").is_some_and(|u| !u.is_null()) {
+                usage_blocks += 1;
+            }
+            let Some(choice) = v["choices"].as_array().and_then(|c| c.first()) else {
+                continue;
+            };
+            let index = choice["index"].as_u64().expect("an index") as usize;
+            if choice["finish_reason"].is_string() {
+                finished.push(index);
+                continue;
+            }
+            order.push(index);
+        }
+
+        assert_eq!(
+            finished,
+            vec![0, 1, 2],
+            "one terminal chunk per choice, in index order: {raw}"
+        );
+        assert_eq!(usage_blocks, 1, "the usage block is the request's: {raw}");
         assert!(
-            message.contains('n') && message.contains("stream"),
-            "{refused}"
+            order.contains(&0) && order.contains(&2),
+            "not every choice streamed: {order:?}"
+        );
+        let last_of_zero = order
+            .iter()
+            .rposition(|i| *i == 0)
+            .expect("choice 0 streamed");
+        let first_of_two = order
+            .iter()
+            .position(|i| *i == 2)
+            .expect("choice 2 streamed");
+        assert!(
+            first_of_two < last_of_zero,
+            "the choices arrived one after another rather than interleaved: {order:?}"
         );
     }
 

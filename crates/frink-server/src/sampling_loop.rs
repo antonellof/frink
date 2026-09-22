@@ -31,8 +31,8 @@ pub(crate) type PerTokenProbs = Vec<(usize, Vec<f32>)>;
 /// grammar forbids and report it as constrained output.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sample_until_stop(
-    mut logits: Vec<f32>,
-    mut pos: usize,
+    logits: Vec<f32>,
+    pos: usize,
     // The prompt this generation continues. Passed rather than derived
     // because the penalties window is the tail of `prompt ++ generated`
     // (llama-server seeds its sampler with the prompt before the first
@@ -55,209 +55,133 @@ pub(crate) fn sample_until_stop(
     // EMPTY otherwise, because a request that did not ask does not pay
     // for the vector.
 ) -> Result<(FinishReason, Vec<usize>, Vec<f32>, PerTokenProbs), DecodeError> {
-    let mut matcher = crate::stop::StopMatcher::new(&params.stop, &params.stop_token_ids);
-    // Sits BEFORE the stop matcher: a stop string is text, so it can
-    // only be matched against whole characters, and half of one is not
-    // text yet.
-    let mut utf8 = crate::utf8_stream::Utf8Stream::default();
-    let mut state = crate::sample_step::SampleState::new(params.seed);
-    // NOT `with_capacity(params.max_tokens)`. That is a caller-supplied
-    // number sizing an allocation, and it reached
-    // `Vec::with_capacity(usize::MAX)` from one unauthenticated POST.
-    // The vector grows as tokens are produced, so the reservation only
-    // ever saved reallocations on a path that performs a full model
-    // forward pass per element. A cap keeps that saving for the sizes
-    // it was worth having for, and refuses to pre-size beyond them.
-    const PREALLOC_CAP: usize = 4096;
-    let mut generated_ids: Vec<usize> = Vec::with_capacity(params.max_tokens.min(PREALLOC_CAP));
-    let mut finish = FinishReason::Length;
-    let mut per_token_probs: PerTokenProbs = Vec::new();
+    let ctx = crate::choice_stream::StepContext {
+        params,
+        prompt_ids,
+        stop_tokens,
+        decode_token,
+    };
+    let mut choice = crate::choice_stream::ChoiceStream::new(logits, pos, params);
 
-    for _ in 0..params.max_tokens {
-        // The budget is a number of TOKENS, and this loop counts
-        // iterations. Those were the same thing while every iteration
-        // produced exactly one token; a speculative round commits a
-        // whole block, so the count has to be asked directly. Without
-        // this a `max_tokens` of 6 returned nine tokens, which the
-        // test comparing speculative output against plain output is
-        // what found.
-        if generated_ids.len() >= params.max_tokens {
-            finish = FinishReason::Length;
-            break;
-        }
-        // The one place cancellation is honoured, shared by `generate`
-        // and `generate_engine`. Checked before sampling so a cancel
-        // that lands between two tokens costs no further work, and
-        // whatever `pending` already holds is still flushed below --
-        // an interrupted answer keeps the tokens it earned.
-        if params.is_cancelled() {
-            finish = FinishReason::Cancelled;
-            break;
-        }
+    while choice.check_budget(params) {
         // A speculative round commits a BLOCK: the drafts that agreed
         // with the sampler, plus one token that did not (or the bonus
         // one, when every draft agreed). Every token still goes
-        // through `commit_token` in order, so the stop rules cannot
-        // differ between the two paths.
+        // through `ChoiceStream::commit` in order, so the stop rules
+        // cannot differ between the two paths.
         //
         // The rows for accepted drafts are already in the store; the
         // LAST committed token has not been fed, exactly as in the
-        // ordinary path, so the tail of this loop feeds it.
-        if draft_max > 0 {
-            // The budget is per TOKEN and this loop counts iterations,
-            // which used to be the same thing. A block commits its
-            // accepted drafts plus one, so a round may only draft
-            // `remaining - 1`: without this a `max_tokens` of 6 with a
-            // 3-token drafter returned more than six tokens, and the
-            // test that compares speculative output against plain
-            // output caught it.
-            let remaining = params.max_tokens.saturating_sub(generated_ids.len());
-            let room = remaining.saturating_sub(1);
-            let draft = if room == 0 {
-                Vec::new()
-            } else {
-                engine.draft(prompt_ids, &generated_ids, draft_max.min(room))
-            };
-            if !draft.is_empty() {
-                if let Some(rows) = engine.batch(&draft, pos) {
-                    let block = verify_block(
-                        &mut state,
-                        &logits,
-                        &rows,
-                        &draft,
-                        params,
-                        prompt_ids,
-                        // A copy, because `commit_token` below is what
-                        // really appends: the block's own walk needs
-                        // the penalty window to include the tokens it
-                        // has committed so far, and `sample_next`
-                        // takes the history as one slice. One clone
-                        // per BLOCK, not per token.
-                        &mut generated_ids.clone(),
-                        stop_tokens,
-                        decode_token,
-                    )?;
-                    engine.observe(block.accepted, block.drafted);
-                    // Rejected drafts wrote rows that describe a prefix
-                    // that never happened.
-                    if block.accepted < draft.len() {
-                        engine.truncate(pos + block.accepted);
-                    }
-                    pos += block.accepted;
-
-                    let mut stopped = None;
-                    let mut last: Option<usize> = None;
-                    for (i, &t) in block.tokens.iter().enumerate() {
-                        match commit_token(
-                            t,
-                            params,
-                            stop_tokens,
-                            &mut matcher,
-                            &mut utf8,
-                            &mut generated_ids,
-                            &mut decode_one,
-                            &mut emit,
-                        ) {
-                            Committed::Continue => last = Some(t),
-                            Committed::Stopped(reason) => {
-                                // The tokens after this one are not part
-                                // of the answer, and neither are their
-                                // rows.
-                                let kept = pos - block.accepted + i.min(block.accepted);
-                                engine.truncate(kept);
-                                pos = kept;
-                                stopped = Some(reason);
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(reason) = stopped {
-                        finish = reason;
-                        break;
-                    }
-                    if block.grammar_complete {
-                        finish = FinishReason::Stop;
-                        break;
-                    }
-                    // Only the final committed token still needs
-                    // feeding; the accepted drafts already have rows.
-                    if let Some(t) = last {
-                        logits = engine.step(t, pos);
-                        pos += 1;
-                    }
-                    continue;
-                }
-            }
+        // ordinary path, so the tail of this branch feeds it.
+        if draft_max > 0
+            && speculate(
+                &mut choice,
+                &ctx,
+                engine,
+                &mut decode_one,
+                &mut emit,
+                draft_max,
+            )?
+        {
+            continue;
         }
-
-        let (next, next_probs) = match crate::sample_step::sample_next(
-            &mut state,
-            &logits,
-            params,
-            prompt_ids,
-            &generated_ids,
-            stop_tokens,
-            decode_token,
-        )? {
-            crate::sample_step::Step::Token { id, probs } => (id, probs),
-            // The grammar's parse is complete and nothing may follow
-            // it. A finished answer, so `Stop` -- the same reason the
-            // model's own end-of-generation token gives, since it is
-            // the same statement made by the constraint instead of by
-            // the model.
-            crate::sample_step::Step::GrammarComplete => {
-                finish = FinishReason::Stop;
-                break;
-            }
-        };
-        match commit_token(
-            next,
-            params,
-            stop_tokens,
-            &mut matcher,
-            &mut utf8,
-            &mut generated_ids,
-            &mut decode_one,
-            &mut emit,
-        ) {
-            Committed::Continue => {
-                // Recorded only for tokens that were KEPT: a stop
-                // token is not part of the answer, so a logprob for it
-                // would describe a position no `choices[]` entry has.
-                if let Some(p) = next_probs {
-                    per_token_probs.push((next, p));
-                }
-            }
-            Committed::Stopped(reason) => {
-                finish = reason;
-                break;
-            }
-        }
-        logits = engine.step(next, pos);
-        pos += 1;
+        choice.step(&ctx, engine, &mut decode_one, &mut emit)?;
     }
 
-    // A generation that stopped mid-character cannot complete it, so
-    // the held bytes surface as U+FFFD rather than vanishing -- that
-    // goes through the matcher like any other text.
-    let partial = utf8.flush();
-    if !partial.is_empty() {
-        let (crate::stop::StopStep::Emit(text) | crate::stop::StopStep::Matched { text, .. }) =
-            matcher.push(&partial);
-        if !text.is_empty() {
-            emit(&text);
-        }
-    }
-
-    // Ended for some other reason (length, EOS, a cancel): whatever is
-    // still withheld was output that no stop ever claimed.
-    let tail = matcher.flush();
-    if !tail.is_empty() {
-        emit(&tail);
-    }
-
-    Ok((finish, generated_ids, logits, per_token_probs))
+    choice.flush(&mut emit);
+    Ok(choice.into_parts())
 }
+
+/// One speculative round, or `false` when there was nothing to draft
+/// and the caller should take the ordinary step.
+///
+/// Split out when `ChoiceStream` did, because the round-robin
+/// scheduler does NOT draft: a block commits several tokens at once,
+/// and a client reading `choices[].index` asked for the choices
+/// interleaved rather than in bursts. Keeping it here rather than on
+/// the stream is what says which of the two schedules it belongs to.
+fn speculate(
+    choice: &mut crate::choice_stream::ChoiceStream,
+    ctx: &crate::choice_stream::StepContext<'_>,
+    engine: &mut dyn DecodeEngine,
+    decode_one: &mut impl FnMut(&[usize]) -> Vec<u8>,
+    emit: &mut impl FnMut(&str),
+    draft_max: usize,
+) -> Result<bool, DecodeError> {
+    // The budget is per TOKEN and the caller's loop counts iterations,
+    // which used to be the same thing. A block commits its accepted
+    // drafts plus one, so a round may only draft `remaining - 1`:
+    // without this a `max_tokens` of 6 with a 3-token drafter returned
+    // more than six tokens, and the test that compares speculative
+    // output against plain output caught it.
+    let remaining = ctx
+        .params
+        .max_tokens
+        .saturating_sub(choice.generated_ids.len());
+    let room = remaining.saturating_sub(1);
+    if room == 0 {
+        return Ok(false);
+    }
+    let draft = engine.draft(ctx.prompt_ids, &choice.generated_ids, draft_max.min(room));
+    if draft.is_empty() {
+        return Ok(false);
+    }
+    let Some(rows) = engine.batch(&draft, choice.pos) else {
+        return Ok(false);
+    };
+    let (state, logits, mut history) = choice.verify_inputs();
+    let block = verify_block(
+        state,
+        logits,
+        &rows,
+        &draft,
+        ctx.params,
+        ctx.prompt_ids,
+        &mut history,
+        ctx.stop_tokens,
+        ctx.decode_token,
+    )?;
+    engine.observe(block.accepted, block.drafted);
+    // Rejected drafts wrote rows that describe a prefix that never
+    // happened.
+    if block.accepted < draft.len() {
+        engine.truncate(choice.pos + block.accepted);
+    }
+    choice.pos += block.accepted;
+
+    let mut stopped = None;
+    let mut last: Option<usize> = None;
+    for (i, &t) in block.tokens.iter().enumerate() {
+        match choice.commit(t, ctx, decode_one, emit) {
+            crate::choice_stream::Committed::Continue => last = Some(t),
+            crate::choice_stream::Committed::Stopped(reason) => {
+                // The tokens after this one are not part of the
+                // answer, and neither are their rows.
+                let kept = choice.pos - block.accepted + i.min(block.accepted);
+                engine.truncate(kept);
+                choice.pos = kept;
+                stopped = Some(reason);
+                break;
+            }
+        }
+    }
+    if let Some(reason) = stopped {
+        choice.stop(reason);
+        return Ok(true);
+    }
+    if block.grammar_complete {
+        choice.stop(FinishReason::Stop);
+        return Ok(true);
+    }
+    // Only the final committed token still needs feeding; the accepted
+    // drafts already have rows.
+    if let Some(t) = last {
+        choice.logits = engine.step(t, choice.pos);
+        choice.pos += 1;
+    }
+    Ok(true)
+}
+
 /// The earliest byte offset in `text` at which any of `stops` begins,
 /// or `None` if none match yet.
 pub(crate) fn earliest_stop_match<'a>(text: &str, stops: &'a [String]) -> Option<(usize, &'a str)> {
@@ -282,65 +206,6 @@ pub(crate) fn earliest_stop_match<'a>(text: &str, stops: &'a [String]) -> Option
 /// applied to.
 pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
     crate::policy::detokenize::floor_char_boundary(s, idx)
-}
-
-/// What committing one token did to the generation.
-enum Committed {
-    Continue,
-    Stopped(FinishReason),
-}
-
-/// The per-token work every path shares: the two stop layers, the id,
-/// and the text.
-///
-/// Extracted when the speculative path landed, because that path
-/// commits a BLOCK of tokens and has to do exactly this to each one in
-/// order. Copying it to vary it is how this repo lost five model
-/// features from one duplicated decode path, and a stop rule that
-/// fired on one path and not the other would be a request that ignores
-/// `stop`.
-///
-/// Note what is NOT here: feeding the token forward. A speculated
-/// token's row may already exist, and the caller knows which.
-#[allow(clippy::too_many_arguments)]
-fn commit_token(
-    next: usize,
-    params: &GenerationParams,
-    stop_tokens: &StopTokens,
-    matcher: &mut crate::stop::StopMatcher,
-    utf8: &mut crate::utf8_stream::Utf8Stream,
-    generated_ids: &mut Vec<usize>,
-    decode_one: &mut impl FnMut(&[usize]) -> Vec<u8>,
-    emit: &mut impl FnMut(&str),
-) -> Committed {
-    if !params.ignore_eos && stop_tokens.contains(next) {
-        return Committed::Stopped(FinishReason::Stop);
-    }
-    // Layer 1: before the token is detokenized or counted. A control
-    // token the client asked to stop on is not part of the answer, so
-    // it contributes neither an id nor a character -- exactly how
-    // `eos_id` is treated one line above.
-    if matcher.is_stop_token(next) {
-        return Committed::Stopped(FinishReason::Stop);
-    }
-    generated_ids.push(next);
-
-    // Layer 2: only text that can no longer become part of a stop
-    // string leaves here.
-    match matcher.push(&utf8.push(&decode_one(&[next]))) {
-        crate::stop::StopStep::Emit(text) => {
-            if !text.is_empty() {
-                emit(&text);
-            }
-            Committed::Continue
-        }
-        crate::stop::StopStep::Matched { text, stop } => {
-            if !text.is_empty() {
-                emit(&text);
-            }
-            Committed::Stopped(FinishReason::StopSequence(stop))
-        }
-    }
 }
 
 /// Tokens a prompt-lookup round drafts.
@@ -545,6 +410,7 @@ mod tests {
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
+            interleave_choices: false,
             reasoning: None,
             max_tokens: 64,
             sampling: SamplingParams {

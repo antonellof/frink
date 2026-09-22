@@ -60,6 +60,7 @@ fn continuous_batching_composes_with_paged_kv() {
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
+            interleave_choices: false,
             reasoning: None,
             max_tokens: params[i].max_tokens,
             // Cloned rather than field-by-field: a hand-written copy
@@ -250,6 +251,7 @@ fn continuous_batch_matches_sequential_generate_token_ids() {
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
+            interleave_choices: false,
             reasoning: None,
             max_tokens: params[i].max_tokens,
             // Cloned rather than field-by-field: a hand-written copy

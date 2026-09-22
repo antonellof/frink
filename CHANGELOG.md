@@ -15,6 +15,43 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`n` > 1 with `stream`, interleaved.** The choices are decoded a
+  token at a time and each chunk carries its own `choices[].index`,
+  rather than choice 0's whole answer arriving before choice 1 says
+  anything. That ORDER was the whole of the refusal.
+
+  ```
+  data: {"choices":[{"index":0,"delta":{"role":"assistant",...}}]}
+  data: {"choices":[{"index":1,"delta":{"role":"assistant",...}}]}
+  data: {"choices":[{"index":2,"delta":{"role":"assistant",...}}]}
+  data: {"choices":[{"index":0,"delta":{"content":"..."}}]}
+  ```
+
+  A `role` on the first chunk of each choice, one terminal chunk per
+  choice, one `usage` block on the last. Each choice keeps its own
+  reasoning split and tool-call parser, because two choices can be
+  mid-marker in different places.
+
+### Changed
+
+- **The decode loop is a value, not a `for` loop.** One completion's
+  state -- the two stop layers, the UTF-8 stream, the sampler, the
+  ids -- was eight locals inside `sample_until_stop`, which made "run
+  this completion to its end" the only thing the sampler could do. It
+  is `ChoiceStream` now, and the SCHEDULE is the caller's: the
+  sequential order steps one to its end, the round-robin order steps
+  several a token at a time. One implementation of the per-token
+  rules, so a stop rule cannot fire on one order and not the other.
+
+- The interleaved schedule turns the prompt-lookup drafter off for
+  that request. A speculative round commits a block, and bursts of
+  five tokens per choice are what interleaving exists to avoid; a
+  buffered `n` keeps the sequential order and keeps speculation with
+  it, because the order it collects in cannot be observed.
+
+
 ## [0.40.0] - 2026-09-22
 
 ### Added

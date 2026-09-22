@@ -334,6 +334,7 @@ mod tests {
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
+            interleave_choices: false,
             reasoning: None,
             max_tokens: 8,
             sampling: SamplingParams {

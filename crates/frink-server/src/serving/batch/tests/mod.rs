@@ -52,6 +52,7 @@ fn greedy_params(max_tokens: usize, seed: u64) -> GenerationParams {
         prompt_logprobs: None,
         wants_logprobs: false,
         n: 1,
+        interleave_choices: false,
         reasoning: None,
         max_tokens,
         // `SamplingParams::default()` IS greedy with every filter

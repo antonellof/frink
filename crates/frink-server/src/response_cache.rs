@@ -152,6 +152,17 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         reasoning: _,
         max_tokens,
         n,
+        // NOT KEYED. The ORDER the choices are delivered in is not the
+        // answer. `crate::round_robin` interleaves them a token at a
+        // time and the sequential schedule runs them one after
+        // another; both produce the same text for the same seed, and
+        // this cache stores text.
+        //
+        // Nothing reaches here with it set anyway -- it is a streaming
+        // request's flag and streaming requests are never served from
+        // or written to this cache -- so keying it would add a field
+        // that is always false to every key.
+        interleave_choices: _,
         // NOT KEYED. Whether a caller asked to SEE the per-token
         // distribution does not change which tokens come back: the
         // flag only decides whether the sampler reports the vector it
@@ -573,6 +584,7 @@ mod tests {
             prompt_logprobs: None,
             wants_logprobs: false,
             n: 1,
+            interleave_choices: false,
             reasoning: None,
             max_tokens: 16,
             sampling: SamplingParams::default(),
