@@ -277,7 +277,31 @@ impl Decoder {
         stores: &SharedPagedKv,
     ) -> Result<Vec<f32>, PagedStoreExhausted> {
         par::on_workers(move || {
-            self.forward_batch_last_paged_on_worker(tokens, start_pos, kv_caches, stores)
+            Ok(self
+                .forward_batch_paged_on_worker(tokens, start_pos, kv_caches, stores, false)?
+                .pop()
+                .unwrap_or_default())
+        })
+    }
+
+    /// [`Self::forward_batch_last_paged`] returning one logit row per
+    /// POSITION, for `prompt_logprobs`.
+    ///
+    /// The paged twin of [`Self::forward_batch`], and the same
+    /// function underneath: the gather into contiguous scratch, the
+    /// up-front reservation and the scatter back into the pages are
+    /// identical, and only the lm_head projection differs. A request
+    /// that did not ask to score its prompt takes the call above and
+    /// pays for one projection rather than `tokens.len()` of them.
+    pub fn forward_batch_paged(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [PagedKvCache],
+        stores: &SharedPagedKv,
+    ) -> Result<Vec<Vec<f32>>, PagedStoreExhausted> {
+        par::on_workers(move || {
+            self.forward_batch_paged_on_worker(tokens, start_pos, kv_caches, stores, true)
         })
     }
 

@@ -4288,13 +4288,21 @@ impl Decoder {
 
     /// The body of [`Self::forward_batch_last_paged`], already running on a
     /// CPU-pool worker. See `entry.rs` for why the split exists.
-    fn forward_batch_last_paged_on_worker(
+    ///
+    /// `every_row` is the ONE difference between prefilling a paged
+    /// prompt and SCORING one: the gather, the reservation and the
+    /// scatter are identical, and what changes is whether the lm_head
+    /// is projected once or at every position. A second copy of this
+    /// function to vary that is how this repo has lost model features
+    /// before, so it is a parameter.
+    fn forward_batch_paged_on_worker(
         &self,
         tokens: &[usize],
         start_pos: usize,
         kv_caches: &mut [PagedKvCache],
         stores: &SharedPagedKv,
-    ) -> Result<Vec<f32>, PagedStoreExhausted> {
+        every_row: bool,
+    ) -> Result<Vec<Vec<f32>>, PagedStoreExhausted> {
         assert_eq!(kv_caches.len(), self.config.n_layers);
         assert_eq!(stores.layer_count(), self.config.n_layers);
         if tokens.is_empty() {
@@ -4337,7 +4345,18 @@ impl Decoder {
         // device. Copying those placeholders into the page store is
         // what made paged KV on Metal answer fluent nonsense from a
         // prompt the model never attended over.
-        let logits = self.forward_batch_last_inner(tokens, start_pos, &mut scratch, true);
+        let logits = if every_row {
+            // One logit row per POSITION, which is what scoring a
+            // prompt needs and what prefilling one must not pay for:
+            // on a 6000-token prompt this is 6000 vocabulary-wide
+            // matmuls instead of one.
+            let hiddens = self.forward_hidden_batch_inner(tokens, start_pos, &mut scratch, true);
+            let batch_size = hiddens.len();
+            let flat: Vec<f32> = hiddens.into_iter().flatten().collect();
+            self.logits_from_flat_hidden(flat, batch_size)
+        } else {
+            vec![self.forward_batch_last_inner(tokens, start_pos, &mut scratch, true)]
+        };
 
         // Scatter into blocks this sequence already owns. Nothing here
         // can fail, which is the point of reserving above.

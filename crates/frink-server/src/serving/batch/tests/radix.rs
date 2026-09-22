@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use frink_core::cache::{PageGroup, SharedPagedKv};
 
-use crate::generate::acquire_paged_caches;
+use crate::generate::{acquire_paged_caches, PrefixIntent};
 use crate::policy::radix::SaltedRadix;
 
 use super::super::row::{Job, RowKv, Rows};
@@ -316,8 +316,14 @@ fn the_leases_adopted_count_and_its_seeded_kv_rows_agree() {
     let (first, _rx1) = admit_prefilled(&decoder, &config, prompt.clone(), 4).expect("admitted");
     finish_row(first);
 
-    let mut lease = acquire_paged_caches(&decoder, &config, &prompt, prompt.len() + 4, None)
-        .expect("the store has pages to spare");
+    let mut lease = acquire_paged_caches(
+        &decoder,
+        &config,
+        &prompt,
+        prompt.len() + 4,
+        PrefixIntent::default(),
+    )
+    .expect("the store has pages to spare");
     let claimed = lease.adopted_positions(BLOCK);
     assert!(claimed > 0, "the second request must adopt something");
     for (layer, cache) in lease.caches_mut().iter().enumerate() {
@@ -395,8 +401,14 @@ fn a_salted_paged_request_adopts_only_its_own_callers_pages() {
 
     // Caller A publishes its prefix.
     {
-        let mut lease = acquire_paged_caches(&decoder, &config, &prompt, long, Some(1))
-            .expect("the store has pages");
+        let mut lease = acquire_paged_caches(
+            &decoder,
+            &config,
+            &prompt,
+            long,
+            PrefixIntent::sharing(Some(1)),
+        )
+        .expect("the store has pages");
         for cache in lease.caches_mut().iter_mut() {
             cache.adopt_blocks(cache.block_table().to_vec(), prompt.len(), BLOCK);
         }
@@ -404,8 +416,14 @@ fn a_salted_paged_request_adopts_only_its_own_callers_pages() {
     }
 
     // The same caller adopts them.
-    let same = acquire_paged_caches(&decoder, &config, &prompt, long, Some(1))
-        .expect("the store has pages");
+    let same = acquire_paged_caches(
+        &decoder,
+        &config,
+        &prompt,
+        long,
+        PrefixIntent::sharing(Some(1)),
+    )
+    .expect("the store has pages");
     assert!(
         same.adopted_positions(BLOCK) > 0,
         "a caller was not served its own published prefix"
@@ -413,8 +431,14 @@ fn a_salted_paged_request_adopts_only_its_own_callers_pages() {
     drop(same);
 
     // A different caller does not.
-    let other = acquire_paged_caches(&decoder, &config, &prompt, long, Some(2))
-        .expect("the store has pages");
+    let other = acquire_paged_caches(
+        &decoder,
+        &config,
+        &prompt,
+        long,
+        PrefixIntent::sharing(Some(2)),
+    )
+    .expect("the store has pages");
     assert_eq!(
         other.adopted_positions(BLOCK),
         0,
@@ -423,11 +447,92 @@ fn a_salted_paged_request_adopts_only_its_own_callers_pages() {
     drop(other);
 
     // Nor does an unsalted one, which is the shared namespace.
-    let shared =
-        acquire_paged_caches(&decoder, &config, &prompt, long, None).expect("the store has pages");
+    let shared = acquire_paged_caches(&decoder, &config, &prompt, long, PrefixIntent::default())
+        .expect("the store has pages");
     assert_eq!(
         shared.adopted_positions(BLOCK),
         0,
         "an unsalted request was served a salted caller's pages"
+    );
+}
+
+/// **`prompt_logprobs` on the PAGED store: a row for every position.**
+///
+/// The refusal this replaces said a paged prefill skips whatever the
+/// tree already holds, so it has no rows for those positions. It is
+/// true, and the answer is not to report holes: such a request
+/// declines the tree at admission and runs its whole prompt.
+///
+/// Asserted against the CONTIGUOUS scoring of the same prompt, which
+/// is the only comparison that can catch rows computed from the wrong
+/// positions: a shape check passes for a prompt scored off by one.
+#[test]
+fn a_scored_paged_prompt_matches_the_contiguous_scoring() {
+    let decoder = tiny_decoder();
+    let (config, _store, radix) = paged_with_radix(&decoder, 256);
+    let prompt = vec![1usize, 2, 3, 4, 5, 6, 7, 8];
+
+    // Publish a prefix, so there IS something a sharing request would
+    // adopt. Without this the test proves nothing about declining.
+    {
+        let mut lease = acquire_paged_caches(
+            &decoder,
+            &config,
+            &prompt,
+            prompt.len() + 4,
+            PrefixIntent::default(),
+        )
+        .expect("the store has pages");
+        for cache in lease.caches_mut().iter_mut() {
+            cache.adopt_blocks(cache.block_table().to_vec(), prompt.len(), BLOCK);
+        }
+        crate::generate::publish_to_radix(&mut lease, &prompt, BLOCK);
+    }
+    assert!(
+        radix.lock().unwrap().total_size() > 0,
+        "nothing was published, so declining the tree proves nothing"
+    );
+
+    // A scoring request declines it and runs every position.
+    let mut lease = acquire_paged_caches(
+        &decoder,
+        &config,
+        &prompt,
+        prompt.len() + 4,
+        PrefixIntent::own_prompt_only(None),
+    )
+    .expect("the store has pages");
+    assert_eq!(
+        lease.adopted_positions(BLOCK),
+        0,
+        "a scoring request adopted a prefix it has no rows for"
+    );
+    let paged_rows = decoder
+        .forward_batch_paged(&prompt, 0, lease.caches_mut(), config.store.as_ref())
+        .expect("the store has pages");
+
+    let mut caches = decoder.config.new_kv_caches();
+    let want = decoder.forward_batch(&prompt, 0, &mut caches);
+
+    assert_eq!(
+        paged_rows.len(),
+        prompt.len(),
+        "one row per prompt position"
+    );
+    assert_eq!(paged_rows.len(), want.len());
+    for (i, (got, expect)) in paged_rows.iter().zip(&want).enumerate() {
+        assert_eq!(got.len(), expect.len(), "position {i}: wrong vocabulary");
+        for (j, (a, b)) in got.iter().zip(expect).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "position {i} logit {j}: paged {a} against contiguous {b}"
+            );
+        }
+    }
+    // And the rows really differ by position, or comparing them to a
+    // constant would pass.
+    assert!(
+        paged_rows[0] != paged_rows[prompt.len() - 1],
+        "every position scored identically, so this proved nothing"
     );
 }
