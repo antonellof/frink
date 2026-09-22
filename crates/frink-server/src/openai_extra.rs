@@ -222,6 +222,11 @@ pub(crate) struct CompletionsRequest {
     /// `sampling_knobs::ExtraSamplerFields`.
     #[serde(flatten)]
     extra_samplers: crate::sampling_knobs::ExtraSamplerFields,
+    /// See `crate::unimplemented_fields`: the same struct the chat and
+    /// native routes flatten, so `n` cannot be refused on one wire and
+    /// dropped on this one again.
+    #[serde(flatten)]
+    unimplemented: crate::unimplemented_fields::UnimplementedFields,
     #[serde(default)]
     presence_penalty: Option<f32>,
     #[serde(default)]
@@ -339,6 +344,7 @@ impl CompletionsRequest {
             self.samplers.as_ref(),
             "/v1/completions",
         )?;
+        self.unimplemented.refuse("/v1/completions")?;
         let unsupported = [
             (self.logprobs.is_some(), "logprobs"),
             (self.echo == Some(true), "echo"),

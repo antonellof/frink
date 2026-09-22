@@ -738,7 +738,7 @@ fn prepare_prompt(
         reasoning_budget_tokens,
         logprobs: None,
         top_logprobs: None,
-        n: None,
+        unimplemented: Default::default(),
         presence_penalty: None,
         frequency_penalty: None,
         response_format: None,
