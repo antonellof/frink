@@ -2682,10 +2682,15 @@ impl Decoder {
         // Splitting them is what let `seed_oss` -- which shares the norm
         // slot and has none of the extra tensors -- be admitted without
         // also being handed attention sinks.
-        let arch = file
-            .metadata_str("general.architecture")
-            .unwrap_or_default()
-            .to_string();
+        // Canonicalised: an architecture that llama.cpp computes
+        // another one's graph for reads that one's tables, so an alias
+        // needs one entry rather than a row in each of a dozen
+        // per-architecture lists (`capability::canonical_architecture`).
+        let arch = crate::capability::canonical_architecture(
+            file.metadata_str("general.architecture")
+                .unwrap_or_default(),
+        )
+        .to_string();
         let is_gpt_oss = arch == "gpt-oss";
         // A `<projection>.scale` companion is a multiply llama.cpp
         // applies and frink does not; refused by name here, before

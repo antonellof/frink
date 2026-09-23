@@ -435,3 +435,61 @@ fn each_projection_bias_is_visible_in_the_logits() {
         assert_decoder_matches_on_all_three_paths(&d, golden, tol, "restored");
     }
 }
+
+/// **`llama-embed` is `llama`, and the fixture is the evidence.**
+///
+/// llama.cpp's `llama_model_llama_embed` INHERITS `llama_model_llama`
+/// (`models.h:175-182`): the same `load_arch_hparams`, the same
+/// `load_arch_tensors`, and a `build_arch_graph` that is `llama`'s
+/// graph with the `embed` template argument set. That flag skips the
+/// output head and changes nothing in the decoder body, so llama.cpp
+/// cannot compute a different graph for the two names.
+///
+/// frink had it DEFERRED as an "embedding variant", which was read off
+/// the name rather than the graph -- the mistake `pangu-embedded`
+/// already cost this project once.
+///
+/// The fixture is `llama_biases_tiny.gguf`'s weights written under the
+/// other architecture string (`--spelled`), so the two differ in the
+/// name and in nothing else. It is held to `llama`'s own libllama
+/// golden rather than to frink's output, which is what makes this
+/// evidence rather than a tautology.
+#[test]
+fn llama_embed_is_llama_and_meets_llamas_golden() {
+    // It is on the decoder path, not the encoder loader: it has a KV
+    // cache and it generates.
+    let path = resolve_architecture("llama-embed").expect("a catalog row");
+    assert!(
+        matches!(
+            path,
+            ArchPath::GenericGqa {
+                rope: RopeLayout::Norm,
+                ..
+            }
+        ),
+        "llama-embed must resolve on the shared decoder with llama's rotation, not as a \
+         deferred scope: {path:?}"
+    );
+
+    // The same golden the `llama` spelling is held to.
+    assert_all_three_paths_match("llama_embed", &LLAMA_BIASES_GOLDEN);
+
+    // And the two really are the same weights: identical logits, not
+    // merely both close to the golden.
+    let same = decode(&load_graph_fixture("llama_embed"));
+    let base = decode(&load_graph_fixture(LLAMA_BIASES));
+    assert_eq!(
+        same.len(),
+        base.len(),
+        "the two spellings must produce the same vocabulary"
+    );
+    let worst = same
+        .iter()
+        .zip(&base)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert_eq!(
+        worst, 0.0,
+        "the alias must compute bit-identical logits to the row it aliases"
+    );
+}

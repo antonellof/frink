@@ -57,7 +57,6 @@ const NOT_YET: &[(&str, &str)] = &[
         "its own graph (local/global alternating attention)",
     ),
     ("t5encoder", "the T5 encoder stack"),
-    ("llama-embed", "a decoder embedding path, not an encoder"),
     (
         "gemma-embedding",
         "a decoder embedding path, not an encoder",

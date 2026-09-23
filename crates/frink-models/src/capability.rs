@@ -275,7 +275,16 @@ pub fn unaudited_refusal_detail(arch: &str) -> String {
 pub const AUDITED_GENERIC_GQA: &[&str] = &[
     // Bench rows in benchmarks/suite.json, measured against llama.cpp
     // on the same host and file.
-    "llama",    // TinyLlama, Mistral, Mixtral, SmolLM2, Llama-3.x all tag llama
+    "llama", // TinyLlama, Mistral, Mixtral, SmolLM2, Llama-3.x all tag llama
+    // `llama-embed` computes `llama`'s graph BY INHERITANCE
+    // (`models.h:175-182`: same hparams loader, same tensor loader,
+    // `graph<embed>` of the same template), so llama.cpp cannot
+    // compute a different body for it. The evidence is a fixture
+    // byte-identical to a `llama` one but for the architecture string,
+    // asserted to produce the same logits -- the `granite-moe` pattern,
+    // with a stronger citation, because this alias is llama.cpp's own
+    // rather than frink's.
+    "llama-embed",
     "qwen2",    // Qwen2.5-0.5B
     "qwen2moe", // Qwen1.5-MoE-A2.7B
     "qwen3",    // Qwen3-0.6B
@@ -2022,6 +2031,24 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
         // Norm-RoPE row moved into `NORM_ROPE_TRIAGED` below when it was
         // read against llama.cpp's graph.
         v.push(gqa_norm("llama"));
+        // `llama-embed` is `llama`, and not by resemblance: llama.cpp's
+        // `llama_model_llama_embed` INHERITS `llama_model_llama`
+        // (`models.h:175-182`), reuses its `load_arch_hparams` and
+        // `load_arch_tensors` verbatim, and its whole
+        // `build_arch_graph` is `llama`'s graph with the `embed`
+        // template argument set -- which skips the output head and
+        // changes nothing in the decoder body.
+        //
+        // It was DEFERRED as an "embedding variant", read off the NAME.
+        // That is the mistake `pangu-embedded` already cost this
+        // project once: a row classified by what it is called rather
+        // than by what its converter and graph say. Reading
+        // `models.h` takes a minute.
+        //
+        // So it is the decoder path, not the encoder loader: it has a
+        // KV cache and generates. `/v1/embeddings` pools its hidden
+        // states the way it already does for any GGUF decoder.
+        v.push(gqa_norm("llama-embed"));
         // Audited too, each by a libllama-golden fixture -- see
         // `AUDITED_GENERIC_GQA` for the arm each one needed and
         // `tests/one_match_arm_graphs.rs` for the evidence.
@@ -3069,11 +3096,6 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
                 "encoder/embedding; deferred",
             ),
             (
-                "llama-embed",
-                DeferredEncoderEmbedding,
-                "embedding variant; deferred",
-            ),
-            (
                 "gemma-embedding",
                 DeferredEncoderEmbedding,
                 "embedding variant; deferred",
@@ -3155,6 +3177,36 @@ pub fn resolve_profile(arch: &str) -> Option<&'static ArchProfile> {
 
 /// Resolve a GGUF `general.architecture` value. `None` means the string
 /// is not in the registry -- callers must fail closed rather than guess.
+/// The architecture whose TABLES an alias should be read from.
+///
+/// One architecture in llama.cpp is another one's graph by
+/// inheritance, and the tables in this crate are keyed by the
+/// architecture STRING -- the bias presences, the norm slots, the
+/// activation lists, a dozen more. Adding a row to each for an alias
+/// is a dozen places that have to agree about one fact, which is this
+/// repo's dominant bug shape; the unread-tensor gate catches the first
+/// one you forget and nothing catches the rest.
+///
+/// So an alias is resolved ONCE, here, where the loader reads
+/// `general.architecture`, and every table downstream sees the row it
+/// aliases.
+///
+/// `llama-embed` is the only entry: `models.h:175-182` makes
+/// `llama_model_llama_embed` inherit `llama_model_llama`'s hparam
+/// loader, its tensor loader and its graph, with only the `embed`
+/// template argument differing -- and that skips the output head
+/// rather than changing the decoder body.
+///
+/// NOT a general aliasing mechanism. A name belongs here only when
+/// llama.cpp itself computes the other one's graph for it, which is a
+/// fact about `models.h` rather than a judgement about similarity.
+pub fn canonical_architecture(arch: &str) -> &str {
+    match arch {
+        "llama-embed" => "llama",
+        other => other,
+    }
+}
+
 pub fn resolve_architecture(arch: &str) -> Option<ArchPath> {
     resolve_profile(arch).map(|p| p.path)
 }

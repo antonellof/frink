@@ -68,7 +68,13 @@ SEEDS = {"starcoder2": 0x5C02, "codeshell": 0xC0DE, "jais2": 0x3A15, "llama": 0x
 KV_HEADS = {"starcoder2": N_HEAD_KV, "codeshell": N_HEAD_KV, "jais2": N_HEAD, "llama": N_HEAD_KV}
 
 
-def main(arch: str, out_path: str) -> None:
+def main(arch: str, out_path: str, spelled: str | None = None) -> None:
+    # `spelled` writes a DIFFERENT architecture string into the file
+    # while keeping this row's seed, shapes and weights. That is how an
+    # alias is evidenced: a file byte-identical to the row it aliases
+    # but for the name, asserted against that row's own golden. Without
+    # it the two fixtures would differ in their random draws and the
+    # comparison would prove nothing.
     rng = np.random.default_rng(SEEDS[arch])
 
     def rnd(*shape: int) -> np.ndarray:
@@ -80,7 +86,7 @@ def main(arch: str, out_path: str) -> None:
     def away_from_zero(n: int) -> np.ndarray:
         return (0.5 + rng.standard_normal(n) * 0.5).astype(np.float32)
 
-    w = gguf.GGUFWriter(out_path, arch)
+    w = gguf.GGUFWriter(out_path, spelled or arch)
     w.add_name(f"frink-{arch}-fixture")
     w.add_block_count(N_LAYER)
     w.add_context_length(CTX)
@@ -165,5 +171,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("arch", choices=sorted(SEEDS))
     ap.add_argument("out")
+    ap.add_argument(
+        "--spelled",
+        default=None,
+        help="write this architecture string instead, keeping the row's weights",
+    )
     args = ap.parse_args()
-    main(args.arch, args.out)
+    main(args.arch, args.out, args.spelled)
