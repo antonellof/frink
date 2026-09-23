@@ -3,9 +3,16 @@
 Generated from `frink_models::capability::architecture_catalog`.
 Source of truth for names: pinned llama.cpp `LLM_ARCH_NAMES`.
 
+**Every architecture name llama.cpp can write has a row here**, and `resolve_architecture` answers for all of them. That is not a claim that all of them run: most of this table is refusals and deferrals, which is coverage here and not a gap. It is the claim that no name falls through -- a file this engine cannot serve is refused by name with a reason, never answered with `None`.
+
+`crates/frink-models/tests/arch_coverage.rs` holds that, against a copy of `LLM_ARCH_NAMES` committed beside it with the pin it came from. CI has no llama.cpp checkout, and a coverage test that skips itself when the source is absent checks nothing on the one machine that matters; an `#[ignore]`d test re-derives the names from a checkout and prints the diff when the pin moves.
+
+Measured against a serving engine that loads HuggingFace checkpoints directly instead of GGUF, six text-generation architectures it names have no GGUF converter at all, in llama.cpp or in `gguf-py`: `granitemoeshared`, `longcat-flash`, `opt`, `solar`, `telechat2`, `zamba2`. No GGUF file can declare them, so they are not reachable work for this engine until a converter exists upstream. One more, `step3`, is superseded by `step35`, which runs. Everything else with a GGUF form is in the table below, so the gap between the two inventories is in the CONVERTER and not in this decoder.
+
 | GGUF arch | Scope | Family | Memory | Path |
 |---|---|---|---|---|
 | `llama` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `llama-embed` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `bailingmoe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `deepseek` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `maincoder` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
@@ -80,7 +87,7 @@ Source of truth for names: pinned llama.cpp `LLM_ARCH_NAMES`.
 | `mimo2` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `talkie` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `glm4moe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
-| `minimax-01` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `minimax-01` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `qwen4exp` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `grovemoe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `hrm_text` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
@@ -140,7 +147,6 @@ Source of truth for names: pinned llama.cpp `LLM_ARCH_NAMES`.
 | `jina-bert-v2` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `jina-bert-v3` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `eurobert` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
-| `llama-embed` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `gemma-embedding` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `yi-vl` | DeferredMultimodal | StandardGqa | None | deferred |
 | `qwen2vl` | DeferredMultimodal | StandardGqa | None | deferred |

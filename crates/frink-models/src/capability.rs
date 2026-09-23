@@ -3931,6 +3931,45 @@ pub fn coverage_report_markdown() -> String {
         "Generated from `frink_models::capability::architecture_catalog`.".to_string(),
         "Source of truth for names: pinned llama.cpp `LLM_ARCH_NAMES`.".to_string(),
         String::new(),
+        // The coverage claim, emitted by the GENERATOR rather than
+        // written into the file: a hand-edited paragraph in a
+        // generated document survives exactly until the next
+        // `frink archs --write`.
+        //
+        // No count is restated here. `tests/arch_coverage.rs` measures
+        // it and owns it; a number in two places is a number that
+        // disagrees with itself eventually, which is this repo's
+        // dominant bug shape pointed at its own documentation.
+        "**Every architecture name llama.cpp can write has a row here**, \
+         and `resolve_architecture` answers for all of them. That is not \
+         a claim that all of them run: most of this table is refusals \
+         and deferrals, which is coverage here and not a gap. It is the \
+         claim that no name falls through -- a file this engine cannot \
+         serve is refused by name with a reason, never answered with \
+         `None`."
+            .to_string(),
+        String::new(),
+        "`crates/frink-models/tests/arch_coverage.rs` holds that, against \
+         a copy of `LLM_ARCH_NAMES` committed beside it with the pin it \
+         came from. CI has no llama.cpp checkout, and a coverage test \
+         that skips itself when the source is absent checks nothing on \
+         the one machine that matters; an `#[ignore]`d test re-derives \
+         the names from a checkout and prints the diff when the pin \
+         moves."
+            .to_string(),
+        String::new(),
+        "Measured against a serving engine that loads HuggingFace \
+         checkpoints directly instead of GGUF, six text-generation \
+         architectures it names have no GGUF converter at all, in \
+         llama.cpp or in `gguf-py`: `granitemoeshared`, `longcat-flash`, \
+         `opt`, `solar`, `telechat2`, `zamba2`. No GGUF file can declare \
+         them, so they are not reachable work for this engine until a \
+         converter exists upstream. One more, `step3`, is superseded by \
+         `step35`, which runs. Everything else with a GGUF form is in \
+         the table below, so the gap between the two inventories is in \
+         the CONVERTER and not in this decoder."
+            .to_string(),
+        String::new(),
         "| GGUF arch | Scope | Family | Memory | Path |".to_string(),
         "|---|---|---|---|---|".to_string(),
     ];
