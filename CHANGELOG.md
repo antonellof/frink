@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-09-23
+
 ### Added
 
 - **`POST /v1/score` and `POST /score`**: sentence-pair scoring, one
@@ -36,6 +38,31 @@ are the ones worth reading twice.
   Embeddings are memoised per TEXT rather than per pair, because the
   common shape is one query against many candidates and embedding it
   once per pair would run the encoder `n` times for one vector.
+
+### Changed
+
+- **The docs were audited against the shipped surface, and the counts
+  are pinned.** Three numbers were wrong, all flattering: MODELS.md
+  printed the unaudited triage distribution as `new code 1 / unknown
+  1` where the catalog holds three and one; its cause-6 paragraph gave
+  three different architecture counts in one breath; and ROADMAP still
+  ranked the work as "close the 41 unaudited architectures" and called
+  six closed issues open. `documented_counts.rs` derives the
+  distribution from the catalog and fails with the file and line.
+
+- **MODELS.md 1352 lines to 359, FEATURES.md's model list 675 to 37,
+  ROADMAP 405 to 284.** What came out of each was a changelog that had
+  grown inside a reference. What stays is what a reader came for:
+  which models run on which backend, what stops the rest, and what the
+  decoder can express.
+
+- `docs/CLI.md` documented `--sampler-seq` in two places and the CLI
+  rejected it. It is an alias now, and `documented_flags.rs` checks
+  both directions: a documented flag that does not exist is worse than
+  an undocumented one that does.
+
+- `cache_salt` and sleep/wake reached AGENTS_COOKBOOK and CONFIG,
+  beside the features they qualify rather than in a field table.
 
 
 ## [0.47.0] - 2026-09-23
