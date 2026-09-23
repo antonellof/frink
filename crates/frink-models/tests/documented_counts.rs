@@ -373,3 +373,60 @@ fn docs_state_the_unaudited_triage_distribution_the_catalog_holds() {
         "docs/MODELS.md must say `All {total} have now been read ...`"
     );
 }
+
+/// **Every version README states has to be the workspace version.**
+///
+/// It went stale twice in one week, and the second time was one
+/// release after a commit that corrected it by hand: the release
+/// process bumps `Cargo.toml` and `CHANGELOG.md`, and README is a
+/// third structure that has to agree with nothing enforcing it.
+///
+/// The `frink-inference` line is the one that costs a reader
+/// something. It is the dependency they paste, so a stale one points
+/// at a release without the feature they came for.
+#[test]
+fn the_readme_states_the_version_the_workspace_holds() {
+    let manifest = read("Cargo.toml");
+    let version = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("version = \""))
+        .and_then(|l| l.split('"').next())
+        .expect("the workspace manifest carries a version");
+    let (major_minor, _) = version
+        .rsplit_once('.')
+        .expect("a semver version has two dots");
+
+    let readme = read("README.md");
+    for want in [
+        // The install script's pin, as a reader would type it.
+        format!("FRINK_VERSION=v{version}"),
+        // The crates.io dependency line, which tracks major.minor.
+        format!("frink-inference = \"{major_minor}\""),
+    ] {
+        assert!(
+            readme.contains(&want),
+            "README.md must state `{want}`; the workspace is at {version} and README has not \
+             followed. Bump it in the release commit rather than later."
+        );
+    }
+
+    // And no OTHER version is stated, or the correct line above could
+    // sit beside a stale one and this would pass.
+    for (i, line) in readme.lines().enumerate() {
+        for marker in ["FRINK_VERSION=v", "frink-inference = \""] {
+            let Some(at) = line.find(marker) else {
+                continue;
+            };
+            let tail = &line[at + marker.len()..];
+            let stated: String = tail
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            assert!(
+                stated == version || stated == major_minor,
+                "README.md:{} states version `{stated}`; the workspace is at {version}",
+                i + 1
+            );
+        }
+    }
+}
