@@ -1,0 +1,43 @@
+{
+  "kind": "serving-features",
+  "frink_version": "0.49.0",
+  "measured": "2026-09-23",
+  "host_spec": {
+    "cpu": "Apple M2 Pro",
+    "label": "Apple M2 Pro (10c/6p) macOS 26.6.2",
+    "ram_gb": 32,
+    "backend": "metal",
+    "n_gpu_layers": 99
+  },
+  "model": "Llama-3.2-1B-Instruct Q4_K_M",
+  "paged_kv": { "blocks": 8192, "block_size": 16 },
+  "method": "Each figure taken twice in interleaved order; passes agreed within 1.2%. Self-relative: one build against itself on one box. Not a cross-engine comparison.",
+  "concurrency_scaling": {
+    "output_len": 96,
+    "note": "Distinct prompt per request, so no prefix or response cache contributes.",
+    "points": [
+      { "concurrency": 1,  "tok_s": 37.82, "passes": [37.63, 38.00] },
+      { "concurrency": 2,  "tok_s": 47.95, "passes": [48.15, 47.75] },
+      { "concurrency": 4,  "tok_s": 55.00, "passes": [54.55, 55.46] },
+      { "concurrency": 8,  "tok_s": 61.75, "passes": [62.28, 61.21] },
+      { "concurrency": 16, "tok_s": 67.01, "passes": [67.29, 66.72] }
+    ]
+  },
+  "continuous_batching_ab": {
+    "concurrency": 8,
+    "output_len": 96,
+    "note": "Server restarted between arms; prompts unused by any earlier run.",
+    "off": { "tok_s": 48.42, "passes": [48.27, 48.70, 48.30] },
+    "on":  { "tok_s": 61.80, "passes": [60.81, 62.90, 61.70] }
+  },
+  "prefix_reuse": {
+    "prompt_tokens": 757,
+    "cold": { "cached_tokens": 0,   "latency_ms": 938 },
+    "warm": { "cached_tokens": 736, "latency_ms": 410 },
+    "isolation": {
+      "note": "Byte-identical prompt text under a different cache_salt.",
+      "cached_tokens": 0,
+      "latency_ms": 879
+    }
+  }
+}

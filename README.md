@@ -57,6 +57,9 @@ kernels, attention and expert routing are written here, in Rust.
   checkpoint by name, resumable streams, Anthropic and Responses
   endpoints, and speculative decoding that stays lossless at any
   temperature. Point your existing client at it.
+  [What that is worth, measured](benchmarks/RESULTS.md#serving-features-measured):
+  1.28x aggregate throughput at eight concurrent requests, and 736 of
+  757 prompt tokens reused on a shared system prompt.
 - **The sampling surface, not a subset of it.** `n` and `best_of` from
   one shared prefill, interleaved when streaming; `logprobs` and
   `prompt_logprobs`; `logit_bias`, `allowed_token_ids` and `bad_words`;
