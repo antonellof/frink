@@ -81,7 +81,7 @@ fn admit_prefilled(
 ) -> Option<(Slot, mpsc::Receiver<BatcherEvent>)> {
     let (job, rx) = paged_job(prompt, max_tokens);
     let mut prefill = accept(decoder, job, /* chunk_size = */ 1, Some(config))?;
-    while !prefill.state.step_chunk() {}
+    while !prefill.state.step_chunk(prefill.state.chunk_ceiling()) {}
     Some((prefill.into_slot(), rx))
 }
 
@@ -233,7 +233,7 @@ fn a_batched_prefill_over_an_adopted_prefix_ends_exactly_at_the_prompt_length() 
     );
     assert_eq!(prefill.state.tokens_remaining(), prompt.len() - BLOCK);
 
-    while !prefill.state.step_chunk() {}
+    while !prefill.state.step_chunk(prefill.state.chunk_ceiling()) {}
     let mut slot = prefill.into_slot();
     assert_eq!(
         slot.pos,
@@ -276,7 +276,7 @@ fn a_warm_batched_request_produces_the_same_logits_as_a_cold_one() {
             0,
             "the first request has nothing to adopt"
         );
-        while !prefill.state.step_chunk() {}
+        while !prefill.state.step_chunk(prefill.state.chunk_ceiling()) {}
         let (_kv, logits, _pos, _ids) = prefill.state.into_decode_start();
         logits
     };
@@ -290,7 +290,7 @@ fn a_warm_batched_request_produces_the_same_logits_as_a_cold_one() {
         prefill.state.tokens_processed() > 0,
         "this test proves nothing unless the second request adopted a prefix"
     );
-    while !prefill.state.step_chunk() {}
+    while !prefill.state.step_chunk(prefill.state.chunk_ceiling()) {}
     let (_kv, warm, _pos, _ids) = prefill.state.into_decode_start();
 
     assert_eq!(
