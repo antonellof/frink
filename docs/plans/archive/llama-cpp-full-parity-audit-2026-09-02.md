@@ -1,8 +1,8 @@
 # llama.cpp full parity audit (2026-09-02)
 
-**Companion to** [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) (evidence-backed differential) and [`llama-cpp-parity-review-2026-09-02.md`](llama-cpp-parity-review-2026-09-02.md) (prioritized actions). This document is the **complete audit run**: file-by-file C++→Rust mapping, live `frink parity` sweep on all local checkpoints, and a ranked priority plan.
+**Companion to** [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) (evidence-backed differential) and [`llama-cpp-parity-review-2026-09-02.md`](llama-cpp-parity-review-2026-09-02.md) (prioritized actions). This document is the **complete audit run**: file-by-file C++→Rust mapping, live `frink parity` sweep on all local checkpoints, and a ranked priority plan.
 
-**North star:** same GGUF, same command shapes, same or better performance on hardware people own ([`north-star.md`](north-star.md)).
+**North star:** same GGUF, same command shapes, same or better performance on hardware people own ([`north-star.md`](../north-star.md)).
 
 **Evidence sources:**
 - llama.cpp checkout: `.scratch/llama.cpp` (947 source files under `src/`, `ggml/src/`, `common/`, `tools/`)
@@ -166,7 +166,7 @@ frink: `decoder.rs` + `engine_factory.rs` + 4 dedicated engines:
 - **124 of 140** llama.cpp graphs have no audited frink path
 - **41** refuse as unaudited (triaged queue in `capability.rs`)
 - **58 dedicated** + **32 deferred** refuse by name
-- Prerequisite: [`model-layer-reorg.md`](model-layer-reorg.md) — split `decoder.rs` so adding an arch is a new file, not a 6700-line edit
+- Prerequisite: [`model-layer-reorg.md`](../model-layer-reorg.md) — split `decoder.rs` so adding an arch is a new file, not a 6700-line edit
 
 ### 2.3 Backend gaps (P0–P1)
 
@@ -214,7 +214,7 @@ Still missing: `dry`, `xtc`, `typ_p`, `top_n_sigma`, mirostat, infill, adaptive_
 
 ## Part 3: Priority plan
 
-Ranked per [`north-star.md`](north-star.md) and [`roadmap.md`](roadmap.md).
+Ranked per [`north-star.md`](../north-star.md) and [`roadmap.md`](../roadmap.md).
 
 ### P0 — Correctness and trust (this week)
 
@@ -287,7 +287,7 @@ For each of the 9 fixture-away architectures in `unaudited_triage.rs`:
 4. `frink parity` on fixture
 
 ### Slice D: "Model layer reorg phase 1" (2–3 weeks)
-Per [`model-layer-reorg.md`](model-layer-reorg.md):
+Per [`model-layer-reorg.md`](../model-layer-reorg.md):
 1. Extract shared block vocabulary (`AttnBlock`, `FfnBlock`, norm slots)
 2. One architecture (`olmo2` — post-norm wiring) as proof
 3. Gate: no edit to `decoder.rs` for new archs after phase 2

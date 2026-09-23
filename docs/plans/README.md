@@ -56,19 +56,22 @@ Parity inventory and deltas against llama.cpp:
 
 - **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the current re-measurement of the llama.cpp surface and the serving-feature gaps
 - **[`server-speculative-decoding.md`](server-speculative-decoding.md)** — the engine has it, the server cannot reach it
-- **[`several-completions-per-request.md`](several-completions-per-request.md)** — `n` > 1 as a KV fork, not as a loop that re-prefills
+- **[`done/several-completions-per-request.md`](done/several-completions-per-request.md)** — `n` > 1 as a KV fork, not as a loop that re-prefills
 - **[`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md)** — evidence-backed differential (not a plan)
-- **[`llama-cpp-full-parity-audit-2026-09-02.md`](llama-cpp-full-parity-audit-2026-09-02.md)** — file map + sweep + priority plan
-- **[`llama-cpp-parity-update-2026-09-03.md`](llama-cpp-parity-update-2026-09-03.md)** — post-merge delta (Qwen MoE Metal, Phi-4 LongRoPE, sweep)
+- **[`archive/llama-cpp-full-parity-audit-2026-09-02.md`](archive/llama-cpp-full-parity-audit-2026-09-02.md)** — file map + sweep + priority plan
+- **[`archive/llama-cpp-parity-update-2026-09-03.md`](archive/llama-cpp-parity-update-2026-09-03.md)** — post-merge delta (Qwen MoE Metal, Phi-4 LongRoPE, sweep)
 - **[`cpu-cuda-parity.md`](cpu-cuda-parity.md)** — the two backends that
   are not at parity, ordered by what was measured on rented hosts on
   2026-09-04 rather than by tok/s. Carries the kernel-coverage matrix,
   because a gap column cannot show a format the backend never runs
 
-Everything else is history: [`archive/`](archive/) holds the five plans
-whose items were merged into the roadmap, [`on-hold/`](on-hold/) holds
-work ranked below the goal with the condition that brings it back, and
-[`done/`](done/) holds plans whose todos are all completed.
+Everything else is history: [`archive/`](archive/) holds superseded
+plans, whose open items were merged into the roadmap by theme;
+[`on-hold/`](on-hold/) holds work ranked below the goal, each with the
+condition that brings it back; and [`done/`](done/) holds plans that
+finished. The counts in each of those READMEs are derived from the
+files by `crates/frink-models/tests/documented_counts.rs`, because two
+of them had already drifted.
 
 ## Where the project stands
 

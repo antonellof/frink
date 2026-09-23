@@ -784,7 +784,7 @@ mod tests {
     /// answers. The acceptance property is `prompt_tokens`: three
     /// completions of one prompt are billed for ONE prompt, because
     /// the prefill was shared and the KV forked
-    /// (`docs/plans/several-completions-per-request.md`).
+    /// (`docs/plans/done/several-completions-per-request.md`).
     #[tokio::test]
     async fn several_completions_share_one_prefill() {
         let app = crate::tests::test_app();

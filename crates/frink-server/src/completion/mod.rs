@@ -541,7 +541,7 @@ pub(crate) async fn completion(
         // `docs/plans/per-token-logprobs.md`.
         wants_logprobs: false,
         // `n` is wired in a later step of
-        // `docs/plans/several-completions-per-request.md`; the field is
+        // `docs/plans/done/several-completions-per-request.md`; the field is
         // still refused on the wire by `crate::unimplemented_fields`,
         // so nothing can reach this with anything but 1.
         n: 1,

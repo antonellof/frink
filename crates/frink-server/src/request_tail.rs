@@ -55,7 +55,7 @@ pub(crate) struct RequestTail<'a> {
     /// Tokens generated across EVERY choice. Separate from
     /// `generated_ids.len()` because a request may have produced `n` of
     /// them, and the bill is the sum while the stored continuation is
-    /// choice 0 (`docs/plans/several-completions-per-request.md`).
+    /// choice 0 (`docs/plans/done/several-completions-per-request.md`).
     pub(crate) completion_tokens: usize,
     /// The prediction for whatever would come next, which is what a
     /// later prefix restore needs alongside the rows.

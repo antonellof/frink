@@ -1,14 +1,17 @@
 # Several completions per request (`n` > 1)
 
-Status: **DONE for both OpenAI routes, 2026-09-22.** `/v1/completions`
-and `/v1/chat/completions` serve `n` from one prefill, verified on a
-real model. llama.cpp's native `/completion` refuses it by name (one
-`content`, nowhere to put a second answer), and so does the streaming
-chat path -- see (5), which is the one decision this plan changed.
+Status: **COMPLETE, 2026-09-23.** `/v1/completions` and
+`/v1/chat/completions` serve `n` from one prefill on both KV stores.
+llama.cpp's native `/completion` refuses it by name (one `content`,
+nowhere to put a second answer), which is the only refusal left.
 
-What is left, each its own row: copy-on-write for the paged store so a
-paged request can fork; round-robin streaming; `best_of`, which needs
-a scoring rule.
+The three rows this plan spun off have all shipped: copy-on-write on
+the paged store (0.40.0), round-robin streaming so a streamed `n`
+interleaves its choices by `choices[].index` (0.41.0), and `best_of`
+scored by summed log-probability. Section (5) below argued for
+refusing the streaming pair; that decision was reversed when the
+decode loop became a steppable value, and the reasoning on both sides
+is kept because the second half is why the first was wrong.
 
 `n` is the OpenAI field for "give me `k` samples of this prompt". Until
 2026-09-22 frink answered it with a 200 and one choice on two of its
