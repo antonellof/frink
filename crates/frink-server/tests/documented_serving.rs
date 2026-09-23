@@ -183,3 +183,155 @@ fn the_modelled_figure_is_still_marked_as_modelled() {
          which is the only thing separating it from the measured ones"
     );
 }
+
+/// The receipt the serving charts and prose are both drawn from.
+fn serving_receipt() -> serde_json::Value {
+    let p = repo_root().join("benchmarks/receipts/serving/serving_features_m2pro_0.49.0.json");
+    let text =
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()));
+    serde_json::from_str(&text).expect("the serving receipt is JSON")
+}
+
+/// A document with every run of whitespace collapsed to one space.
+///
+/// Markdown wraps. `736 of 757` is really `736 of\n  757` in the
+/// source, and a raw `contains` reports it missing -- which is exactly
+/// what happened here, and is the defect `documented_counts.rs`
+/// already carries a `flatten` for. A test that fails on line breaks
+/// teaches people to reflow prose to satisfy it.
+fn doc(rel: &str) -> String {
+    let text = std::fs::read_to_string(repo_root().join(rel))
+        .unwrap_or_else(|e| panic!("reading {rel}: {e}"));
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// **The prose quotes the numbers the receipt holds.**
+///
+/// Three documents quote these figures -- the serving audit, the
+/// benchmark ledger and the README -- and the charts are generated
+/// from a fourth place. Typing a number into any of them by hand is
+/// four structures that must agree with nothing enforcing it, which
+/// is this repo's dominant bug shape with a chart attached. The
+/// receipt is the one source; this says the prose still matches it.
+#[test]
+fn the_serving_prose_quotes_the_measured_receipt() {
+    let r = serving_receipt();
+    let audit = doc("docs/plans/serving-parity-audit.md");
+    let ledger = doc("benchmarks/RESULTS.md");
+    let readme = doc("README.md");
+
+    let points = r["concurrency_scaling"]["points"]
+        .as_array()
+        .expect("scaling points");
+    let lo = points[0]["tok_s"].as_f64().expect("first");
+    let hi = points[points.len() - 1]["tok_s"].as_f64().expect("last");
+    assert!(
+        audit.contains(&format!("{lo:.1}")) && audit.contains(&format!("{hi:.1}")),
+        "the audit no longer quotes the scaling endpoints {lo:.1} and {hi:.1}"
+    );
+
+    let off = r["continuous_batching_ab"]["off"]["tok_s"]
+        .as_f64()
+        .expect("off");
+    let on = r["continuous_batching_ab"]["on"]["tok_s"]
+        .as_f64()
+        .expect("on");
+    assert!(
+        audit.contains(&format!("{off:.1}")) && audit.contains(&format!("{on:.1}")),
+        "the audit no longer quotes the A/B pair {off:.1} / {on:.1}"
+    );
+    // The README quotes the RATIO rather than the two throughputs,
+    // because a landing page states the result and not the method.
+    let ratio = on / off;
+    assert!(
+        readme.contains(&format!("{ratio:.2}x")),
+        "README quotes a batching speedup that is not {ratio:.2}x"
+    );
+
+    let prompt = r["prefix_reuse"]["prompt_tokens"].as_u64().expect("prompt");
+    let cached = r["prefix_reuse"]["warm"]["cached_tokens"]
+        .as_u64()
+        .expect("cached");
+    let reuse = format!("{cached} of {prompt}");
+    for (name, text) in [
+        ("the audit", &audit),
+        ("the ledger", &ledger),
+        ("README", &readme),
+    ] {
+        assert!(
+            text.contains(&reuse) || text.contains(&format!("{cached}/{prompt}")),
+            "{name} no longer quotes the measured reuse `{reuse}`"
+        );
+    }
+
+    for (name, text) in [("the audit", &audit), ("the ledger", &ledger)] {
+        let cold = r["prefix_reuse"]["cold"]["latency_ms"]
+            .as_u64()
+            .expect("cold");
+        let warm = r["prefix_reuse"]["warm"]["latency_ms"]
+            .as_u64()
+            .expect("warm");
+        assert!(
+            text.contains(&format!("{cold} ms")) && text.contains(&format!("{warm} ms")),
+            "{name} no longer quotes the cold/warm latencies {cold} ms / {warm} ms"
+        );
+    }
+}
+
+/// **The committed charts are the ones the generator produces from the
+/// receipt.**
+///
+/// A committed generated file drifts the moment somebody edits the
+/// receipt and does not re-run the script -- the same defect the
+/// architecture manifest had, where two published rows described a
+/// path the catalog had moved off.
+///
+/// Checked by looking for the receipt's own values inside the SVG
+/// text rather than by re-running Python, which a Rust test should not
+/// need.
+#[test]
+fn the_committed_charts_carry_the_receipts_numbers() {
+    let r = serving_receipt();
+
+    let scaling = doc("docs/assets/serving-scaling-light.svg");
+    for p in r["concurrency_scaling"]["points"]
+        .as_array()
+        .expect("points")
+    {
+        let v = p["tok_s"].as_f64().expect("tok_s");
+        assert!(
+            scaling.contains(&format!("{v:.1}")),
+            "the scaling chart does not plot {v:.1}; regenerate with \
+             `python3 scripts/make_serving_charts.py`"
+        );
+    }
+
+    let batching = doc("docs/assets/serving-batching-light.svg");
+    for arm in ["off", "on"] {
+        let v = r["continuous_batching_ab"][arm]["tok_s"]
+            .as_f64()
+            .expect("arm");
+        assert!(
+            batching.contains(&format!("{v}")),
+            "the batching chart does not carry the {arm} arm's {v}; regenerate it"
+        );
+    }
+
+    let prefix = doc("docs/assets/serving-prefix-light.svg");
+    for arm in ["cold", "warm", "isolation"] {
+        let v = r["prefix_reuse"][arm]["latency_ms"].as_u64().expect("arm");
+        assert!(
+            prefix.contains(&format!("{v} ms")),
+            "the prefix chart does not carry the {arm} arm's {v} ms; regenerate it"
+        );
+    }
+
+    // Both themes ship, because GitHub strips media queries out of an
+    // embedded SVG and the <picture> element needs a file per scheme.
+    for name in ["scaling", "batching", "prefix"] {
+        for theme in ["light", "dark"] {
+            let p = repo_root().join(format!("docs/assets/serving-{name}-{theme}.svg"));
+            assert!(p.is_file(), "missing chart {}", p.display());
+        }
+    }
+}

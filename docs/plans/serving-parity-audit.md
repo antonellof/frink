@@ -34,6 +34,16 @@ passes: 37.8 tok/s at concurrency 1 rising to 67.0 at 16, and 48.4
 against 61.8 tok/s with batching off and on at concurrency 8. Passes
 agreed within 1.2%.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/serving-scaling-dark.svg">
+  <img alt="Aggregate throughput rises from 37.8 tok/s at concurrency 1 to 67.0 at concurrency 16." src="../assets/serving-scaling-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/serving-batching-dark.svg">
+  <img alt="Eight concurrent requests reach 48.4 tok/s with batching off and 61.8 with it on." src="../assets/serving-batching-light.svg">
+</picture>
+
 **Not implemented:** preemption. A running row is never evicted to
 make room for a waiting one; admission refuses instead and the request
 queues. `serving/mod.rs:11` records why the scheduling quantum is a
@@ -78,13 +88,26 @@ matched unlocked leaf and cascading into a newly childless parent.
   rather than charging reclamation against its deadline.
 
 **Measured**, same conditions: a 757-token shared system prompt is
-reused 736 tokens deep (97.2%), 938 ms cold against 410 ms warm. A
+reused 736 of 757 tokens deep (97.2%), 938 ms cold against 410 ms
+warm. A
 different salt with identical prompt text reuses nothing. Reported
 through `usage.cached_tokens` on both paths since 0.49.0 — before
 that the batched path adopted correctly and reported zero, which is
 what the measurement found.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../assets/serving-prefix-dark.svg">
+  <img alt="A cold request answers in 938 ms, a warm one in 410 ms, and one under a different cache salt in 879 ms." src="../assets/serving-prefix-light.svg">
+</picture>
+
 **Reproduce:** `frink serve-bench --shared-prefix 4000 --requests 32`.
+
+Every number above comes from
+[`benchmarks/receipts/serving/serving_features_m2pro_0.49.0.json`](../../benchmarks/receipts/serving/serving_features_m2pro_0.49.0.json),
+which the charts are generated from and which
+`documented_serving.rs` checks this prose against. A chart drawn from
+numbers typed in beside it is two structures that must agree with
+nothing enforcing it.
 
 ## Cache-aware admission
 
