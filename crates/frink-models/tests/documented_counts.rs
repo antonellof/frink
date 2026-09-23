@@ -278,3 +278,98 @@ fn collect_rust(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+/// The unaudited-triage distribution `docs/MODELS.md` prints has to be
+/// the one the catalog holds.
+///
+/// It was not. The table read `new code 1 / unknown 1` while the
+/// catalog held three NEW CODE rows and one UNKNOWN, so the document
+/// that exists to say how far frink is from llama.cpp on models
+/// UNDERSTATED the gap by half -- the same defect this file was
+/// written for, on the one table a reader is most likely to quote.
+///
+/// Counted from the catalog rather than from a second list, so a row
+/// that closes moves the number here and the prose has to follow.
+#[test]
+fn docs_state_the_unaudited_triage_distribution_the_catalog_holds() {
+    use frink_models::capability::{
+        architecture_catalog, ArchPath, TriageClass, AUDITED_GENERIC_GQA,
+    };
+
+    let mut counts = [0usize; 4];
+    for p in architecture_catalog() {
+        if !matches!(p.path, ArchPath::GenericGqa { .. }) {
+            continue;
+        }
+        if AUDITED_GENERIC_GQA.contains(&p.gguf_name) {
+            continue;
+        }
+        let Some(t) = p.triage else {
+            // `TRIAGE_PENDING`'s own test covers this case; an
+            // untriaged row is not part of the distribution.
+            continue;
+        };
+        counts[match t.class {
+            TriageClass::FixtureAway => 0,
+            TriageClass::OneMatchArm => 1,
+            TriageClass::NewCode => 2,
+            TriageClass::Unknown => 3,
+        }] += 1;
+    }
+
+    let doc = read("docs/MODELS.md");
+    for (label, want) in [
+        ("fixture-away", counts[0]),
+        ("one match arm", counts[1]),
+        ("new code", counts[2]),
+        ("unknown", counts[3]),
+    ] {
+        let row = format!("| {label} | {want} |");
+        assert!(
+            doc.contains(&row),
+            "docs/MODELS.md must carry the row `{row}` for the catalog's {want} {label} \
+             architecture(s); it does not. The distribution there is stale."
+        );
+    }
+
+    // The same number, stated in prose elsewhere. `docs/ROADMAP.md`
+    // ranked the work as "close the 41 unaudited architectures" long
+    // after the count reached single digits, which is the same drift
+    // in the document a reader uses to decide what to work on.
+    let total: usize = counts.iter().sum();
+    for (doc_name, doc_text) in [("docs/ROADMAP.md", read("docs/ROADMAP.md"))] {
+        for (line_no, line) in doc_text.lines().enumerate() {
+            if let Some(at) = line.find(" unaudited architectures") {
+                let claimed: String = line[..at]
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                assert_eq!(
+                    claimed.parse::<usize>().ok(),
+                    Some(total),
+                    "{doc_name}:{} claims `{claimed} unaudited architectures`; the catalog \
+                     holds {total}",
+                    line_no + 1
+                );
+            }
+        }
+    }
+    assert!(
+        total > 0,
+        "no unaudited generic architecture is triaged, so this test proved nothing"
+    );
+    // The prose states the total in two places beside the table, and
+    // both went stale with it.
+    assert!(
+        doc.contains(&format!("None of the {total} is a fixture")),
+        "docs/MODELS.md must say `None of the {total} is a fixture ...`"
+    );
+    assert!(
+        doc.contains(&format!("All {total} have now been read")),
+        "docs/MODELS.md must say `All {total} have now been read ...`"
+    );
+}
