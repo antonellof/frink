@@ -175,6 +175,12 @@ There is no aggregate hit rate on `/v1/stats` or `/metrics`, and no
 eviction knob: back pressure comes from the page store running out and
 `FRINK_KV_POOL_QUEUE_TIMEOUT_MS` turning waiting requests away.
 
+The tree is keyed by token ids and shared across the deployment, so a
+request that wants its prefixes to itself sends `cache_salt`: a
+namespace is a whole tree there, the pages stay one pool, and eviction
+takes from each namespace in turn rather than by a global LRU, so one
+busy caller cannot evict every quiet one.
+
 This is a different mechanism from `FRINK_PREFIX_CACHE_ENTRIES`, which
 stores whole contiguous KV snapshots and copies them. The two cannot be
 on at once.
