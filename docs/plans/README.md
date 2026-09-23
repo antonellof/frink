@@ -55,6 +55,7 @@ One item has a written **verdict** rather than a design:
 Parity inventory and deltas against llama.cpp:
 
 - **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the current re-measurement of the llama.cpp surface and the serving-feature gaps
+- **[`serving-parity-audit.md`](serving-parity-audit.md)** — continuous batching, paged KV, prefix caching and cache-aware admission read against the code, every claim carrying the line that decides it (`documented_serving.rs` holds the citations)
 - **[`server-speculative-decoding.md`](server-speculative-decoding.md)** — the engine has it, the server cannot reach it
 - **[`done/several-completions-per-request.md`](done/several-completions-per-request.md)** — `n` > 1 as a KV fork, not as a loop that re-prefills
 - **[`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md)** — evidence-backed differential (not a plan)
