@@ -251,6 +251,14 @@ pub(super) struct Slot {
     /// The row's own clock, started at admission. Owns the only path
     /// from a finished row to its `Usage`.
     pub(super) clock: RowClock,
+    /// Prompt positions this row adopted from the radix tree, read off
+    /// the lease at admission rather than at the end: a finished row
+    /// has already published its own prefix, so asking the lease then
+    /// would count this request's own contribution as its reuse.
+    ///
+    /// `None` when no radix tree is configured, which is the same
+    /// distinction `usage.cached_tokens` carries everywhere else.
+    pub(super) cached_tokens: Option<usize>,
     /// This row's half-finished character, if a token ended inside one.
     /// Per row: rows interleave, and one shared buffer would splice one
     /// answer's bytes into another's.
@@ -300,9 +308,11 @@ pub(super) fn reply_finished(mut slot: Slot) {
         slot.visible.push_str(&tail);
         let _ = slot.reply.send(BatcherEvent::Chunk(tail));
     }
-    let usage = slot
-        .clock
-        .usage(slot.prompt_tokens, slot.generated_ids.len());
+    let usage = slot.clock.usage(
+        slot.prompt_tokens,
+        slot.generated_ids.len(),
+        slot.cached_tokens,
+    );
     send_finished(
         &slot.reply,
         Ok((finish, slot.generated_ids, slot.visible, usage)),

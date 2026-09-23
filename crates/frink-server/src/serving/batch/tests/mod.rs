@@ -166,6 +166,7 @@ fn test_slot(max_tokens: usize, seed: u64) -> (Slot, mpsc::Receiver<BatcherEvent
             finish: None,
             error: None,
             clock: super::clock::RowClock::start(),
+            cached_tokens: None,
             utf8: Default::default(),
         },
         rx,

@@ -210,6 +210,10 @@ pub(super) struct Prefill {
     /// this seam would be two things that must agree about when prefill
     /// ended.
     pub(super) clock: RowClock,
+    /// Prompt positions adopted from the radix tree, captured where
+    /// the lease was taken. Carried through to the `Slot` so the one
+    /// `Usage` constructor can report it.
+    pub(super) cached_tokens: Option<usize>,
 }
 
 impl Prefill {
@@ -223,6 +227,7 @@ impl Prefill {
             abort,
             blocks,
             mut clock,
+            cached_tokens,
         } = self;
         let (kv, logits, pos, prompt_ids) = state.into_decode_start();
         // The handover IS the end of prefill, so it is marked here
@@ -248,6 +253,7 @@ impl Prefill {
             abort,
             blocks,
             clock,
+            cached_tokens,
             utf8: Default::default(),
         }
     }

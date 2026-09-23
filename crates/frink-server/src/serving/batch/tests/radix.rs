@@ -625,3 +625,84 @@ fn an_already_computed_prompt_is_admitted_ahead_of_a_cold_one() {
         "the job that was jumped must be one skip older, or the bound never bites"
     );
 }
+
+/// **A batched row must REPORT the prefix it reused, not only take it.**
+///
+/// The bug: continuous batching adopted correctly and answered with
+/// `cached_tokens: 0` for every request, because the private `generate`
+/// loop sets that field in `request_tail` and a batched row never
+/// reaches it. Measured on a real server before the fix -- the same
+/// 757-token prompt cost 894 ms cold and 409 ms warm, so the cache was
+/// working and only the number was wrong, which is the shape nothing
+/// catches on its own.
+///
+/// Asserts both halves, because either alone is passable by broken
+/// code: a cold request reports `Some(0)` (consulted, missed) and a
+/// warm one reports what the lease actually adopted. A fix that
+/// hardcoded `Some(0)` fails the second; one that reported the whole
+/// prompt fails the first.
+#[test]
+fn a_batched_row_reports_the_prefix_it_reused() {
+    let decoder = tiny_decoder();
+    let (config, _store, _radix) = paged_with_radix(&decoder, 64);
+    let prompt = vec![1usize, 2, 3, 4, 5, 6, 7, 8];
+
+    let (cold, cold_rx) = admit_prefilled(&decoder, &config, prompt.clone(), 2).expect("admitted");
+    let cold_adopted = cold.cached_tokens;
+    finish_row(cold);
+    let cold_usage = finished_result(cold_rx.recv().expect("a reply"))
+        .expect("the cold row finished")
+        .3;
+
+    let (warm, warm_rx) = admit_prefilled(&decoder, &config, prompt.clone(), 2).expect("admitted");
+    let warm_adopted = warm.cached_tokens.expect("a radix tree is configured");
+    finish_row(warm);
+    let warm_usage = finished_result(warm_rx.recv().expect("a reply"))
+        .expect("the warm row finished")
+        .3;
+
+    assert_eq!(
+        cold_adopted,
+        Some(0),
+        "a radix tree is configured, so a miss is Some(0) and not None"
+    );
+    assert!(
+        warm_adopted > 0,
+        "this test proves nothing unless the second row adopted a prefix"
+    );
+    assert_eq!(
+        cold_usage.cached_tokens,
+        Some(0),
+        "the cold row consulted the tree and missed"
+    );
+    assert_eq!(
+        warm_usage.cached_tokens,
+        Some(warm_adopted),
+        "the warm row adopted {warm_adopted} positions and reported \
+         {:?}",
+        warm_usage.cached_tokens
+    );
+}
+
+/// Without a radix tree there is nothing to consult, and the field must
+/// stay ABSENT rather than report a zero that reads as "the cache
+/// missed". The same distinction `request_tail` makes for the private
+/// loop.
+#[test]
+fn a_batched_row_with_no_tree_reports_no_cache_at_all() {
+    let decoder = tiny_decoder();
+    let (mut config, _store, _radix) = paged_with_radix(&decoder, 64);
+    config.radix = None;
+    let prompt = vec![1usize, 2, 3, 4];
+
+    let (slot, rx) = admit_prefilled(&decoder, &config, prompt, 2).expect("admitted");
+    finish_row(slot);
+    let usage = finished_result(rx.recv().expect("a reply"))
+        .expect("the row finished")
+        .3;
+
+    assert_eq!(
+        usage.cached_tokens, None,
+        "no tree was configured, so there is no hit rate to report"
+    );
+}
