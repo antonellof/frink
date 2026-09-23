@@ -464,20 +464,26 @@ mod ftype_tests {
 
 /// The wordmark, in the slot `llama cli` puts its own.
 ///
-/// **Deliberately a different style, and smaller.** llama.cpp draws
-/// nine characters of solid half-blocks across five rows; this is
-/// thin box-drawing across three. Sharing a slot is the point of the
-/// rest of this module, but a wordmark that imitates another
-/// project's is the one place where looking the same is wrong.
+/// **Pure ASCII, deliberately.** The two attempts before this one used
+/// Unicode drawing characters and both had rendering problems: solid
+/// half-blocks (`▀ ▄ █`) fused at terminal aspect ratio and turned
+/// `frink` into `FFIUHK`, and box-drawing (`┌ ┬ ┴`) is only as good as
+/// the font underneath it. `_ | / \\ ( ) < -` are in every font and
+/// every code page there has ever been, so this renders the same over
+/// ssh, in a CI log, and in a terminal with no Unicode coverage at
+/// all.
 ///
-/// It is also the second attempt. The first used mixed half-blocks
-/// (`▀ ▄ █`) to match llama.cpp's weight, and at terminal aspect ratio
-/// adjacent letters shared an edge: `frink` rendered as `FFIUHK`.
-/// Line glyphs have interior structure -- a stem, a join, a corner --
-/// so they read as separate letters without needing a gap column
-/// between them, which is why this style can be narrower AND clearer
-/// than the one it replaces.
-const LOGO: &[&str] = &["┌─┐┬─┐┬┌┐┌┬┌─", "├┤ ├┬┘││││├┴┐", "└  ┴└─┴┘└┘┴ ┴"];
+/// Also a different style from llama.cpp's on purpose. Sharing a slot
+/// is the point of the rest of this module; sharing a wordmark is the
+/// one place where looking the same would be wrong.
+const LOGO: &[&str] = &[
+    r"______    _       _    ",
+    r"|  ___|  (_)     | |   ",
+    r"| |_ _ __ _ _ __ | | __",
+    r"|  _| '__| | '_ \| |/ /",
+    r"| | | |  | | | | |   < ",
+    r"\_| |_|  |_|_| |_|_|\_\",
+];
 
 /// Prints the wordmark, once, before the banner.
 pub fn print_logo(w: &mut impl Write) -> std::io::Result<()> {
@@ -518,7 +524,7 @@ mod presentation_tests {
     /// is the kind of thing a copy-paste gets wrong.
     #[test]
     fn the_logo_is_frinks_own() {
-        assert_eq!(LOGO.len(), 3, "three rows");
+        assert!(LOGO.len() >= 3, "the wordmark has rows");
         assert!(
             LOGO.iter().any(|r| r.chars().any(|c| !c.is_whitespace())),
             "the wordmark is blank"
@@ -529,17 +535,15 @@ mod presentation_tests {
         );
     }
 
-    /// **The rows line up.**
+    /// **The rows line up, and every glyph is ASCII.**
     ///
-    /// The first wordmark rendered `frink` as `FFIUHK`: solid
-    /// half-blocks with no interior detail, so adjacent letters fused
-    /// and the eye read the wrong glyphs. This font is thin line
-    /// glyphs, which carry their own structure and do not need a gap
-    /// column -- so the property left to hold is that the three rows
-    /// are the same width and therefore stack into letters rather
-    /// than drifting apart.
+    /// Same width or the columns do not stack into letters. And
+    /// ASCII-only, which is the property the two previous wordmarks
+    /// lacked: solid half-blocks fused into `FFIUHK` at terminal
+    /// aspect ratio, and box-drawing depends on the font having it.
+    /// `_ | / \\ ( ) < -` render everywhere.
     #[test]
-    fn the_wordmark_rows_are_the_same_width() {
+    fn the_wordmark_stacks_and_is_pure_ascii() {
         let width = LOGO[0].chars().count();
         for (i, row) in LOGO.iter().enumerate() {
             assert_eq!(
@@ -548,11 +552,16 @@ mod presentation_tests {
                 "row {i} is {} wide against {width}; the columns do not stack",
                 row.chars().count()
             );
+            assert!(
+                row.is_ascii(),
+                "row {i} carries a non-ASCII glyph, which is what made the \
+                 previous two wordmarks font-dependent: {row:?}"
+            );
         }
-        assert_eq!(LOGO.len(), 3, "three rows, half llama.cpp's height");
         assert!(
-            width < 20,
-            "the wordmark is {width} columns; it is meant to be small"
+            LOGO.len() >= 3 && width < 60,
+            "the wordmark is {}x{width}, outside anything a terminal wants",
+            LOGO.len()
         );
     }
 
