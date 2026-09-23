@@ -3098,7 +3098,26 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
             (
                 "gemma-embedding",
                 DeferredEncoderEmbedding,
-                "embedding variant; deferred",
+                // Read against the graph rather than the name, because
+                // "embedding variant; deferred" is the wording that
+                // cost `pangu-embedded` a year in this column -- that
+                // row was a decoder all along. This one is not.
+                //
+                // `gemma-embedding.cpp:7` sets `causal_attn = false`,
+                // so it is a genuine BIDIRECTIONAL encoder and belongs
+                // on the embedding path, not the decoder. What it
+                // needs there: Gemma-3's block (`:52-65` is
+                // attn_norm / attn_post_norm / per-head Q+K norm /
+                // ffn_norm / ffn_post_norm around a gated FFN) run
+                // non-causally, symmetric SWA at a period of 6
+                // (`:4-5`), and the two OPTIONAL sentence-transformers
+                // dense heads (`:45-46`, written only by a converter
+                // run with `--sentence-transformers-dense-modules`).
+                //
+                // So it is a real piece of work and not a table row:
+                // frink's encoder path runs BERT's block, and this is
+                // Gemma-3's.
+                "bidirectional encoder (gemma-embedding.cpp:7 sets causal_attn = false),                  so it belongs on the embedding path -- but it runs GEMMA-3's block there,                  not BERT's, with symmetric SWA and two optional dense heads;                  deferred until the encoder path can carry that block",
             ),
             ("yi-vl", DeferredMultimodal, "Yi vision-language; deferred"),
             ("qwen2vl", DeferredMultimodal, "vision-language; deferred"),
