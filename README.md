@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/frink-logo.webp" alt="Frink" width="70%" />
+<img src="docs/assets/frink-logo.webp" alt="Frink" width="38%" />
 
 **A pure-Rust GGUF inference engine. Dense and MoE, on CPU, Apple Metal, or CUDA.**
 
