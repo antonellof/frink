@@ -401,8 +401,15 @@ the crates that use it rather than in a crate of its own: the expert
 residency stack in `frink-core` beside `expert_store`, and the serving
 policy in `frink-server::policy`.
 
-This table is what frink actually does against that description,
-checked against the code rather than asserted. The gap is the roadmap.
+This table is what frink actually does against that description. The
+gap is the roadmap.
+
+"Checked against the code" used to be a claim this paragraph made and
+nothing enforced: two rows were wrong when it was audited on
+2026-09-23, one of them describing a leak that had been fixed and one
+calling a named refusal an absence. The structural claims are pinned by
+`crates/frink-server/tests/documented_capabilities.rs` now, so a row
+that stops matching the code turns a test red.
 
 | Capability | In frink today |
 |---|---|
@@ -412,10 +419,10 @@ checked against the code rather than asserted. The gap is the roadmap.
 | Graph-compatible execution | **No.** Execution is eager. `ExecutionPlan` is built and read by nothing. |
 | FTW fast weight format | **No.** GGUF only. |
 | Semantic anchor checkpoints for KV | **Yes.** `anchor::decode_slide` and `WindowPolicy` are wired into `generate.rs` and the batch scheduler. |
-| Agentic context edits without recompute | **Partial, and currently leaking.** The radix prefix cache shares pages and reports `cached_tokens`, but `RadixCache::evict` has no caller, so the page pool shrinks until admission refuses. |
+| Agentic context edits without recompute | **Partial, and no longer leaking.** The radix prefix cache shares pages and reports `cached_tokens` on both the private and the batched path. `evict` is called from `acquire_paged_caches`, which both paths go through, when a request cannot find pages: the tree gives back what no live lease has locked, and the caller retries immediately rather than charging reclamation against its deadline. What is still partial is the edit itself -- a changed middle forces a recompute from that point, because the cache is a prefix tree. |
 | Elastic VRAM re-allocation without restart | **Partial.** `POST /v1/cache/rebuild` re-splits KV pool geometry at runtime. Moving bytes between an expert cache and KV is not implemented. |
 | MXFP4 / BF16 | **Yes**, executable. MXFP4 is CPU-only. |
-| NVFP4 / FP8 | **No.** Neither is parsed. |
+| NVFP4 / FP8 | **Refused by name, not executed.** NVFP4 is recognized and sized by `frink-gguf` (tag 40) and has no execution path, so a file carrying it stops instead of computing something else. FP8 appears only as a KV cache wire (`--ctk fp8`), not as a weight format. |
 | DeepSeek-V4-Flash, GLM-5.2, Kimi K3 | **Loaders and primitives only.** Nothing has run end to end on a real checkpoint. |
 | OpenAI + Anthropic compatible APIs | **Yes**, both, plus Responses. Tool calls parsed in eleven wire formats. |
 | NVIDIA RTX 30/40/50 | **Runs, correct, behind, and the published receipts are stale.** Receipts on a GTX 1080, an RTX 3060 and an RTX 3090; correct by `frink verify`. Those receipts read 22x to 43x on prefill and were taken on 0.17.1 and 0.21.0, before the resident prefill and the tensor-core GEMM; the ledger marks them stale for that reason. The last prefill number measured after those landed is 4.2x on an RTX 3090 (1932 tok/s against ~8,200), and decode is 2.2x to 5.0x. No GPU in CI, and no receipt on this build. |
