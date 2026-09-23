@@ -67,4 +67,31 @@ placeholders into the page store. Fixed, and pinned on hardware by
 `paged_metal_parity`, so Metal is supported. CUDA has no equivalent
 hardware run behind it. See [CONFIG.md](CONFIG.md).
 
+**Sharing pages is sharing, so say whose they are.** Two callers
+sending the same preamble get the same pages, which is the point and
+also a disclosure if they are different tenants. `cache_salt` on the
+request names a namespace: the contiguous prefix cache, the response
+cache and the paged radix tree all key on it, so a salted caller can
+match only its own prefixes. Absent means the shared namespace, which
+is what every request got before the field existed.
+
+## Putting a model away without losing it
+
+A scheduler that runs several models on one box can free a model's
+memory and bring it back without knowing the deployment:
+
+```bash
+curl -X POST http://127.0.0.1:8383/sleep
+curl     http://127.0.0.1:8383/is_sleeping     # {"is_sleeping": true}
+curl -X POST http://127.0.0.1:8383/wake_up
+```
+
+`/sleep` is an unload that REMEMBERS: it frees the KV pool, the paged
+store, the repack and expert caches and any device buffers, and keeps
+the checkpoint path, so the server can reload itself.
+`/admin/models/unload` leaves nothing behind. While asleep, routes that
+need a model answer `503 server_sleeping` rather than
+`model_not_loaded`, so a caller can tell "put away, ask again" from
+"nothing here".
+
 Full API matrix: [API.md](API.md).
