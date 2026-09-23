@@ -159,6 +159,7 @@ mod row;
 /// with `sched-time-debt` (roadmap `c3-serving-and-kv`).
 #[allow(dead_code)]
 mod status;
+pub(super) mod step_budget;
 mod worker;
 
 #[cfg(test)]

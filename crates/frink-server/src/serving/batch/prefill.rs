@@ -133,7 +133,15 @@ impl PrefillState {
         self.tokens_remaining() == 0
     }
 
-    /// Runs at most `chunk_size` further prompt tokens. Returns `true`
+    /// The ceiling this prompt was admitted under (`prefill_chunk`).
+    ///
+    /// Kept on the state so the worker does not have to thread the
+    /// config through to every prefill it advances.
+    pub fn chunk_ceiling(&self) -> usize {
+        self.chunk_size
+    }
+
+    /// Runs at most `budget` further prompt tokens. Returns `true`
     /// once the whole prompt has been processed. Calling it again after
     /// that is a no-op that still returns `true`.
     ///
@@ -141,8 +149,15 @@ impl PrefillState {
     /// into, so resuming across chunk boundaries is exactly the
     /// sequential `forward_token` loop it replaces, split at different
     /// points.
-    pub fn step_chunk(&mut self) -> bool {
-        let end = (self.tokens_processed + self.chunk_size).min(self.tokens.len());
+    ///
+    /// The budget is an ARGUMENT rather than the `chunk_size` field it
+    /// used to read, because how much prompt a tick may run depends on
+    /// how many rows are decoding in the same tick -- a fact this type
+    /// does not have and the worker does. See
+    /// [`super::step_budget`].
+    pub fn step_chunk(&mut self, budget: usize) -> bool {
+        debug_assert!(budget > 0, "a zero prefill budget cannot make progress");
+        let end = (self.tokens_processed + budget).min(self.tokens.len());
         if self.tokens_processed >= end {
             return self.is_done();
         }
