@@ -22,6 +22,7 @@ use super::prefill::{Prefill, PrefillState};
 use super::queue::{AbortId, AbortInbox, QueueGate};
 use super::row::{Job, RowKv, Rows, Slot, Uid};
 use super::status::{BatchStatus, PoolUsage, PrefillSnapshot, StatusReporter};
+use super::step_budget;
 
 /// Moves everything currently on the channel into the worker's own
 /// admission queue. Both are "waiting for admission" as far as
@@ -356,9 +357,20 @@ pub(super) fn worker_loop(
         // first" so a long prompt cannot starve a short one behind it;
         // one chunk rather than "advance every pending prefill" so N
         // concurrent long prompts cost decode one chunk per tick, not N.
+        //
+        // The chunk is sized against the decode step it SHARES the tick
+        // with: every decoding row waits out the whole chunk before its
+        // next token, so a constant chunk made admitting a prompt cost
+        // more the busier the server was. `rows.len()` is the decode
+        // width, known here because the decode step runs below.
         if let Some(mut prefill) = prefills.pop_front() {
+            let budget = step_budget::prefill_budget(
+                config.max_batch_tokens,
+                rows.len(),
+                prefill.state.chunk_ceiling(),
+            );
             let before = prefill.state.tokens_processed();
-            let done = prefill.state.step_chunk();
+            let done = prefill.state.step_chunk(budget);
             counters.prefill_chunks.fetch_add(1, Ordering::Relaxed);
             counters.prefill_tokens.fetch_add(
                 (prefill.state.tokens_processed() - before) as u64,
