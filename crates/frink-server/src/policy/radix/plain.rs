@@ -157,6 +157,43 @@ impl RadixCache {
         (node, prefix_len)
     }
 
+    /// How much of `input_ids` is already computed, WITHOUT touching
+    /// the tree.
+    ///
+    /// [`Self::match_prefix`] is the real lookup and it mutates: it
+    /// splits a node the query diverges inside and stamps every node
+    /// the walk touched, because a match is about to be used. An
+    /// admission policy asks about jobs it may not admit, and doing
+    /// that through the mutating walk would split nodes for queries
+    /// that never run and make the LRU clock reflect what was
+    /// CONSIDERED rather than what was served.
+    ///
+    /// So this is the same walk with both side effects removed, and it
+    /// stops at the last whole page rather than splitting: the answer
+    /// is a lower bound on what `match_prefix` would return, never an
+    /// over-estimate, which is the safe direction for a policy that
+    /// uses it to rank.
+    pub fn peek_cached_len(&self, input_ids: &[u32]) -> usize {
+        let page_size = self.tree.page_size();
+        let mut prefix_len = 0usize;
+        let mut node = ROOT;
+        while prefix_len < input_ids.len() {
+            let Some(child) = self.tree.child(node, &input_ids[prefix_len..]) else {
+                return prefix_len;
+            };
+            node = child;
+            let matched = align_down(
+                match_len(&self.tree.node(node).key, &input_ids[prefix_len..]),
+                page_size,
+            );
+            prefix_len += matched;
+            if matched != self.tree.node(node).length() {
+                return prefix_len;
+            }
+        }
+        prefix_len
+    }
+
     /// The longest already-computed prefix of `input_ids`.
     ///
     /// A ragged query is fine: the answer is truncated to whole pages,

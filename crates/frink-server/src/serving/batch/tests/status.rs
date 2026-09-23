@@ -29,6 +29,7 @@ fn a_prefill_line_counts_the_tokens_the_batch_is_about_to_compute() {
             reply: tx,
             abort: AbortId(0),
             blocks: 1,
+            skips: 0,
         });
     }
 

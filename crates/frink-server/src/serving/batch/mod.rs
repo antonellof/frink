@@ -144,6 +144,7 @@
 
 mod batcher;
 mod block_budget;
+pub(super) mod cache_aware;
 mod clock;
 mod config;
 mod counters;

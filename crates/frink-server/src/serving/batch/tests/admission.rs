@@ -403,6 +403,7 @@ fn a_head_job_that_does_not_fit_holds_the_line() {
         reply: big_tx,
         abort: AbortId(0),
         blocks: 3,
+        skips: 0,
     });
     waiting.push_back(Job {
         prompt_tokens: vec![1],
@@ -411,6 +412,7 @@ fn a_head_job_that_does_not_fit_holds_the_line() {
         reply: small_tx,
         abort: AbortId(1),
         blocks: 1,
+        skips: 0,
     });
     // The gate is counting both of them.
     queue.try_reserve().expect("cap 512");
@@ -485,6 +487,7 @@ fn the_sequence_cap_and_the_block_cap_compose() {
             reply: tx,
             abort: AbortId(i),
             blocks: 1,
+            skips: 0,
         });
         queue.try_reserve().expect("cap 512");
     }

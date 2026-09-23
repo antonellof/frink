@@ -198,6 +198,7 @@ fn abortable_job(abort: AbortId, prompt: Vec<usize>) -> (Job, mpsc::Receiver<Bat
             reply: tx,
             abort,
             blocks: 1,
+            skips: 0,
         },
         rx,
     )

@@ -115,6 +115,20 @@ impl SaltedRadix {
         }
     }
 
+    /// How much of `input_ids` this caller's namespace already holds,
+    /// without touching any tree.
+    ///
+    /// `&self`, deliberately: an admission policy ranks jobs it may
+    /// not admit, and a peek that created a namespace would make the
+    /// map grow with every salt that was ever CONSIDERED. A namespace
+    /// nobody has stored into holds nothing, which is the same answer.
+    pub fn cached_len(&self, salt: Option<u64>, input_ids: &[u32]) -> usize {
+        self.namespaces
+            .get(&salt)
+            .map(|c| c.peek_cached_len(input_ids))
+            .unwrap_or(0)
+    }
+
     pub fn insert_prefix(
         &mut self,
         salt: Option<u64>,
