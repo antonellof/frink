@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-09-23
+
 ### Added
 
 - **`llama-embed` runs.** It was deferred as an "embedding variant",
@@ -73,6 +75,61 @@ are the ones worth reading twice.
   splits a radix node nor stamps the LRU clock -- asking through the
   ordinary lookup would make the cache's recency reflect what was
   considered rather than what was served.
+
+- **`frink serve-bench --shared-prefix` measures what the prefix cache
+  saves.** An identical system message ahead of every request -- one
+  agent prompt, many questions -- with `--cache-salt` to put the run
+  in its own namespace. The figure is the server's own
+  `usage.cached_tokens`, read as a PAIR with `prompt_tokens` from one
+  terminal frame, so a fraction cannot be built from two different
+  requests, and a server with no prefix cache says so rather than
+  reporting zero.
+
+  Reuse is a share of the run's TOTAL prompt tokens rather than the
+  mean of per-request shares: one long cold prompt beside nine short
+  warm ones is mostly cold work, and averaging fractions would call it
+  90% reused.
+
+### Fixed
+
+- **Continuous batching reported `cached_tokens: 0` for every
+  request.** The prefix cache was working -- the same 757-token prompt
+  cost 894 ms cold and 409 ms warm, measured -- and only the number was
+  wrong: the field is set on the private decode path in
+  `request_tail`, and a batched row never reaches it. On Metal, where
+  batching is the default, it was always zero.
+
+  The durable half is that `cached_tokens` is now an ARGUMENT to
+  `RowClock::usage` rather than a field somebody sets. That type
+  already owned the only path from a finished row to a `Usage`, for
+  exactly this reason -- it was introduced when the throughput rates
+  went missing the same way -- so a caller that forgets it no longer
+  compiles. The count is read off the lease where the lease is taken,
+  not when the row finishes: by then the row has published its own
+  prefix, and the lease would report that back as its own reuse.
+
+- **`serve-bench` was flattering itself with reuse it was written to
+  avoid.** Its filler prompt was deliberately varied WITHIN a prompt
+  and identical ACROSS requests, so the second half of a run found the
+  first half's pages: eight requests at concurrency four reused 43.5%
+  of their prompt tokens with nothing shared asked for. Every
+  throughput the command has printed was that much too high, and
+  nothing could see it until the command started asking the server
+  what it had reused. The filler now takes the work item's index and
+  diverges at the FRONT, because a distinguishing suffix would leave
+  the whole head shareable and change nothing.
+
+- **Every row in the benchmark ledger now says which build measured
+  it.** `docs/FEATURES.md` said CUDA prefill was "about 4x" off while
+  `benchmarks/RESULTS.md` published 22x to 43x for the same backend.
+  Both were true when taken -- the receipts predate the resident
+  prefill and the tensor-core GEMM -- but the rendered table carried
+  no version, so neither document could tell a reader they describe
+  different builds. `frink bench --render` carries `frink_version` off
+  each receipt into a "Measured at" column and marks a row whose build
+  is not the current one, derived from the same receipts as the gap
+  cells. Every published row is currently stale: CPU and CUDA at
+  0.17.1 and 0.21.0, Metal at 0.20.0.
 
 
 ## [0.48.0] - 2026-09-23
