@@ -91,6 +91,47 @@ install runs, answers correctly, and should not be chosen for speed
 yet. `/health` reports the same thing per capability, with a reason
 string, instead of quietly greying a control out.
 
+## Quantization
+
+Parsed and executable on CPU: `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`,
+`Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`,
+`IQ4_NL`, `IQ4_XS`, `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`,
+`IQ3_XXS`, `IQ3_S`, `MXFP4`, `TQ1_0`, `PTQ1_0`.
+
+"Executable" is not one speed. What a format gets, read off the kernel
+tables rather than from intent:
+
+| Tier | Formats | CPU SIMD | GPU |
+|---|---|---|---|
+| Full | `Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` | AVX2 + NEON, plus the int-dot path | Metal matvec + GEMM, CUDA matvec + GEMM |
+| Metal only | `IQ4_XS`, `Q5_0` | AVX2 + NEON | Metal matvec + GEMM |
+| Metal only, scalar CPU | `PTQ1_0` (PrismML ternary) | scalar | Metal matvec + GEMM |
+| CPU-vectorized | `Q4_1`, `Q5_1`, `Q8_1`, `Q2_K`, `Q3_K`, `IQ4_NL`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none |
+| AVX2 only | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | none |
+| Scalar only | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M`, GGUF-block `MXFP4` | none | none |
+
+Metal's MoE indexed GEMM (`mul_mm_id`) is narrower still: `Q4_0`,
+`Q8_0` and `Q4_K` only.
+
+Three things worth knowing before choosing a quant:
+
+- **The bottom two tiers are correct and slow, on purpose.** They were
+  added for coverage: before them those tags could not be decoded at
+  all, which ruled out 5 of the 16 published Unsloth `UD-*` variants. A
+  vectorized path was left out rather than written without a golden
+  vector that could tell it apart from the scalar one.
+- **On an Apple machine the "AVX2 only" row IS the scalar row.**
+  `IQ1_S`, `IQ2_XXS` and `IQ3_XXS` have x86 kernels and no NEON ones.
+- **`I32`, `TQ2_0`, `NVFP4`, `Q1_0`, `Q2_0` and `PQ2_0` are recognized
+  and sized, and nothing executes them.** They parse, `frink inspect`
+  reports their real footprint, and a checkpoint needing one stops with
+  an error naming the format rather than being silently mis-measured.
+
+`IQ2_XS`, `IQ2_S`, `IQ3_S` and `IQ1_M` were validated bit-exact against
+llama.cpp's own `dequantize_row_*` by linking `ggml-quants.c`, not by
+re-reading the spec. They have not been validated end to end on a
+published `UD-*` checkpoint.
+
 ## CLI
 
 llama.cpp-style completion flags (`-m`, `-p`, `-n`, `-ngl`, `--ctk`, …),

@@ -22,6 +22,27 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// `text` with every run of whitespace collapsed to one space.
+///
+/// Markdown wraps. A phrase a document really carries is split across
+/// two source lines, and a raw `contains` reports it missing.
+fn flatten(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut ws = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            ws = true;
+            continue;
+        }
+        if ws && !out.is_empty() {
+            out.push(' ');
+        }
+        ws = false;
+        out.push(c);
+    }
+    out
+}
+
 fn read(rel: &str) -> String {
     let p = repo_root().join(rel);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
@@ -317,7 +338,12 @@ fn docs_state_the_unaudited_triage_distribution_the_catalog_holds() {
         }] += 1;
     }
 
-    let doc = read("docs/MODELS.md");
+    // Whitespace-normalised, for the reason this file's own header
+    // gives: markdown wraps, so a sentence that reads correctly on the
+    // page is split across two lines in the source. The first version
+    // of this check matched the raw text and failed on prose that was
+    // right -- the same defect it warns about, one function down.
+    let doc = flatten(&read("docs/MODELS.md"));
     for (label, want) in [
         ("fixture-away", counts[0]),
         ("one match arm", counts[1]),
