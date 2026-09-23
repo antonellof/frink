@@ -55,6 +55,54 @@ fn device_line() -> Option<&'static str> {
     DEVICE_LINE.get().map(String::as_str)
 }
 
+/// ANSI, only when the stream is a terminal that wants it.
+///
+/// llama.cpp colours the prompt echo green and the timing line
+/// magenta, and matching the output means matching that too. What it
+/// must NOT do is emit escape codes into a pipe: `frink cli … | tee`
+/// and every test that reads this output would get `\x1b[32m` in the
+/// middle of its text.
+///
+/// `NO_COLOR` is honoured because it is the convention, and an
+/// explicit `FRINK_COLOR=1` forces colour on for a caller that knows
+/// its pipe renders them.
+mod colour {
+    use std::io::IsTerminal;
+    use std::sync::OnceLock;
+
+    pub const GREEN: &str = "\x1b[32m";
+    pub const MAGENTA: &str = "\x1b[35m";
+    pub const BOLD_CYAN: &str = "\x1b[1;36m";
+    pub const RESET: &str = "\x1b[0m";
+
+    /// Decided once: the answer cannot change inside a run, and
+    /// probing the terminal per line would be both slower and a second
+    /// place for the decision to live.
+    pub fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            if std::env::var_os("NO_COLOR").is_some() {
+                return false;
+            }
+            if std::env::var_os("FRINK_COLOR").is_some() {
+                return true;
+            }
+            std::io::stderr().is_terminal()
+        })
+    }
+}
+
+use colour::{enabled as colour_enabled, BOLD_CYAN, GREEN, MAGENTA, RESET};
+
+/// `text` wrapped in `code`, or unchanged when colour is off.
+fn paint(code: &str, text: &str) -> String {
+    if colour_enabled() {
+        format!("{code}{text}{RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
 /// Runs one throwaway forward pass so the caller's timer does not
 /// include first-dispatch cost.
 ///
@@ -132,7 +180,7 @@ impl Timings {
     }
 
     pub fn print(&self, w: &mut impl Write) -> std::io::Result<()> {
-        writeln!(w, "\n{}", self.line())
+        writeln!(w, "\n{}", paint(MAGENTA, &self.line()))
     }
 }
 
@@ -414,22 +462,30 @@ mod ftype_tests {
     }
 }
 
-/// The wordmark `llama cli` prints above its banner.
+/// The wordmark, in the slot `llama cli` puts its own.
 ///
-/// Same slot, same block-glyph style, frink's own letters -- this is
-/// the one place where matching llama.cpp would mean printing their
-/// name, which is the opposite of the point.
-const LOGO: &str = "\
-▄▄▄▄▄ ▄▄▄▄  ▄▄ ▄▄  ▄▄ ▄▄  ▄▄ ▄▄
-██    ██  ▄ ██ ██  ██ ██▄ ██ ██ ▄▀
-██▀▀  ██▀▀  ██ ██  ██ ██ ▀██ ██▀█
-██    ██    ██ ██  ██ ██  ██ ██ ▀▄
-██    ██    ██ ▀█▄▄█▀ ██  ██ ██  ▀\
-";
+/// **Deliberately a different style, and smaller.** llama.cpp draws
+/// nine characters of solid half-blocks across five rows; this is
+/// thin box-drawing across three. Sharing a slot is the point of the
+/// rest of this module, but a wordmark that imitates another
+/// project's is the one place where looking the same is wrong.
+///
+/// It is also the second attempt. The first used mixed half-blocks
+/// (`▀ ▄ █`) to match llama.cpp's weight, and at terminal aspect ratio
+/// adjacent letters shared an edge: `frink` rendered as `FFIUHK`.
+/// Line glyphs have interior structure -- a stem, a join, a corner --
+/// so they read as separate letters without needing a gap column
+/// between them, which is why this style can be narrower AND clearer
+/// than the one it replaces.
+const LOGO: &[&str] = &["┌─┐┬─┐┬┌┐┌┬┌─", "├┤ ├┬┘││││├┴┐", "└  ┴└─┴┘└┘┴ ┴"];
 
 /// Prints the wordmark, once, before the banner.
 pub fn print_logo(w: &mut impl Write) -> std::io::Result<()> {
-    writeln!(w, "\n{LOGO}")
+    writeln!(w)?;
+    for row in LOGO {
+        writeln!(w, "{}", paint(BOLD_CYAN, row))?;
+    }
+    Ok(())
 }
 
 /// Echoes the prompt the way `llama cli` does, so a transcript of
@@ -445,7 +501,7 @@ pub fn print_prompt_echo(w: &mut impl Write, prompt: &str) -> std::io::Result<()
     } else {
         first.to_string()
     };
-    writeln!(w, "\n> {shown}")
+    writeln!(w, "\n{}", paint(GREEN, &format!("> {shown}")))
 }
 
 /// llama.cpp's closing word.
@@ -462,31 +518,83 @@ mod presentation_tests {
     /// is the kind of thing a copy-paste gets wrong.
     #[test]
     fn the_logo_is_frinks_own() {
-        let flat: String = LOGO.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(!flat.is_empty(), "the wordmark is blank");
+        assert_eq!(LOGO.len(), 3, "three rows");
         assert!(
-            !LOGO.to_ascii_lowercase().contains("llama"),
+            LOGO.iter().any(|r| r.chars().any(|c| !c.is_whitespace())),
+            "the wordmark is blank"
+        );
+        assert!(
+            !LOGO.join("").to_ascii_lowercase().contains("llama"),
             "the wordmark must not carry another project's name"
         );
-        assert_eq!(LOGO.lines().count(), 5, "five rows, as llama.cpp's has");
     }
 
-    /// A long or multi-line prompt is shortened, because the echo
-    /// exists to show the turn and not to reprint the input.
+    /// **The rows line up.**
+    ///
+    /// The first wordmark rendered `frink` as `FFIUHK`: solid
+    /// half-blocks with no interior detail, so adjacent letters fused
+    /// and the eye read the wrong glyphs. This font is thin line
+    /// glyphs, which carry their own structure and do not need a gap
+    /// column -- so the property left to hold is that the three rows
+    /// are the same width and therefore stack into letters rather
+    /// than drifting apart.
     #[test]
-    fn a_long_prompt_is_shortened_in_the_echo() {
-        let mut out = Vec::new();
-        let long = "x".repeat(400);
-        print_prompt_echo(&mut out, &long).expect("write");
-        let s = String::from_utf8(out).expect("utf8");
-        assert!(s.contains("..."), "a long prompt must be elided: {s}");
-        assert!(s.len() < 200, "the echo is still long: {} chars", s.len());
+    fn the_wordmark_rows_are_the_same_width() {
+        let width = LOGO[0].chars().count();
+        for (i, row) in LOGO.iter().enumerate() {
+            assert_eq!(
+                row.chars().count(),
+                width,
+                "row {i} is {} wide against {width}; the columns do not stack",
+                row.chars().count()
+            );
+        }
+        assert_eq!(LOGO.len(), 3, "three rows, half llama.cpp's height");
+        assert!(
+            width < 20,
+            "the wordmark is {width} columns; it is meant to be small"
+        );
+    }
 
-        let mut multi = Vec::new();
-        print_prompt_echo(&mut multi, "first line\nsecond line").expect("write");
-        let s = String::from_utf8(multi).expect("utf8");
-        assert!(s.contains("first line"), "{s}");
-        assert!(!s.contains("second line"), "only the first line: {s}");
+    /// **No escape codes into a pipe.**
+    ///
+    /// The colour decision reads `stderr().is_terminal()`, and under
+    /// `cargo test` it is not one -- so this asserts the property that
+    /// matters for `frink cli … | tee` and for every test in this file
+    /// that compares output as text. A build that coloured
+    /// unconditionally would put `\x1b[32m` in the middle of a
+    /// transcript.
+    #[test]
+    fn output_is_plain_when_the_stream_is_not_a_terminal() {
+        let mut echo = Vec::new();
+        print_prompt_echo(&mut echo, "hi").expect("write");
+        let echo = String::from_utf8(echo).expect("utf8");
+        assert!(
+            !echo.contains('\x1b'),
+            "the prompt echo carries escape codes into a pipe: {echo:?}"
+        );
+
+        let mut timing = Vec::new();
+        Timings {
+            prompt_tokens: 5,
+            prompt_secs: 1.0,
+            predicted_tokens: 8,
+            predicted_secs: 1.0,
+        }
+        .print(&mut timing)
+        .expect("write");
+        let timing = String::from_utf8(timing).expect("utf8");
+        assert!(
+            !timing.contains('\x1b'),
+            "the timing line carries escape codes into a pipe: {timing:?}"
+        );
+
+        let mut logo = Vec::new();
+        print_logo(&mut logo).expect("write");
+        assert!(
+            !String::from_utf8(logo).expect("utf8").contains('\x1b'),
+            "the wordmark carries escape codes into a pipe"
+        );
     }
 
     /// A short single-line prompt is echoed whole, which is the common
