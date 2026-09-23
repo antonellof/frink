@@ -14,6 +14,7 @@ use crate::generate::{acquire_paged_caches, DecodeError, FinishReason, PagedKvCo
 use crate::stop::StopStep;
 
 use super::block_budget::BlockBudget;
+use super::cache_aware;
 use super::clock::RowClock;
 use super::config::{decode_log_interval_from_env, send_finished, BatcherConfig, DecodeFn};
 use super::counters::Counters;
@@ -43,9 +44,17 @@ pub(super) fn drain_channel(rx: &Receiver<Job>, waiting: &mut VecDeque<Job>) {
 /// `blocks_needed <= blocks_free`, reserved here for the request's
 /// whole lifetime and released in `Rows::flush_finished`.
 ///
-/// Strict FIFO: a head job that does not fit stops the line rather than
-/// being skipped over. See the module note on why the skip-ahead
-/// alternative is a starvation bug, not an optimization.
+/// A head job that does not fit stops the line rather than being
+/// skipped over: the capacity rule stays strict FIFO, because skipping
+/// on SIZE is the starvation bug the module note refuses.
+///
+/// WHICH job is at the head is a separate question, and
+/// [`super::cache_aware`] answers it: when a radix prefix cache is
+/// configured, a job whose prompt is already computed may be admitted
+/// ahead of one that is not, bounded so nothing can be passed over
+/// more than a few times. With no radix cache, or on a cold one, every
+/// depth is zero and the choice is the front of the queue -- this is
+/// FIFO until the cache has something to say.
 #[allow(clippy::too_many_arguments)] // one per thing admission needs;
                                      // bundling them would only move the
                                      // same list behind a struct.
@@ -67,15 +76,29 @@ pub(super) fn admit(
     // whole prompt, which is the upstream test's planted-wrong-values
     // case exactly.
     let mut snapshot = PrefillSnapshot::default();
-    while let Some(job) = waiting.front() {
-        if decoding + prefills.len() >= config.max_seqs {
+    loop {
+        if waiting.is_empty() || decoding + prefills.len() >= config.max_seqs {
             break;
         }
-        let blocks = job.blocks;
+        // Which of the waiting jobs goes next. Both slices are built
+        // from the queue itself, so they cannot be a different length
+        // from it.
+        let pick = cache_aware_pick(waiting, paged);
+        let blocks = waiting[pick].blocks;
+        // The capacity rule is still strict FIFO with respect to the
+        // job it chose: if that one does not fit, the line stops.
+        // Trying the next one instead is the skip-on-size policy the
+        // module note refuses, and the cache policy does not license
+        // it.
         if !budget.try_reserve(blocks) {
             break;
         }
-        let job = waiting.pop_front().expect("front() just succeeded");
+        // Everything the pick jumped is one skip older. This is what
+        // makes the bound in `cache_aware` bite.
+        for job in waiting.iter_mut().take(pick) {
+            job.skips = job.skips.saturating_add(1);
+        }
+        let job = waiting.remove(pick).expect("pick indexes the queue");
         // Admitted: the job has stopped waiting, so its queue slot goes
         // back now rather than when it was pulled off the channel.
         queue.release();
@@ -92,6 +115,40 @@ pub(super) fn admit(
         }
     }
     snapshot
+}
+
+/// The index of the waiting job to admit next.
+///
+/// `0` whenever there is no radix cache to ask, which is every
+/// deployment without paged KV: the depth of every job is zero, and
+/// `cache_aware::choose` returns the front of the queue for that.
+///
+/// The peek is read-only (`SaltedRadix::cached_len`), so ranking a job
+/// that is not admitted neither splits a node nor stamps the LRU
+/// clock. Asking through the ordinary lookup would make the cache's
+/// own recency reflect what was CONSIDERED rather than what was
+/// served.
+fn cache_aware_pick(waiting: &VecDeque<Job>, paged: Option<&PagedKvConfig>) -> usize {
+    if waiting.len() < 2 {
+        return 0;
+    }
+    let Some(radix) = paged.and_then(|c| c.radix.as_ref()) else {
+        return 0;
+    };
+    let window = waiting.len().min(cache_aware::WINDOW);
+    let skips: Vec<u32> = waiting.iter().take(window).map(|j| j.skips).collect();
+    let depths: Vec<usize> = {
+        let tree = radix.lock().unwrap_or_else(|p| p.into_inner());
+        waiting
+            .iter()
+            .take(window)
+            .map(|job| {
+                let ids: Vec<u32> = job.prompt_tokens.iter().map(|&t| t as u32).collect();
+                tree.cached_len(job.params.cache_salt, &ids)
+            })
+            .collect()
+    };
+    cache_aware::choose(&depths, &skips)
 }
 
 /// Applies every pending cancellation, at a step boundary, on the

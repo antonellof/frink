@@ -76,6 +76,14 @@ pub(super) struct Job {
     /// `max_tokens`) so the worker's admission check is a comparison
     /// rather than arithmetic.
     pub(super) blocks: usize,
+    /// How many times admission has passed this job over
+    /// (`super::cache_aware`). Zero for every job that has never
+    /// waited behind another.
+    ///
+    /// On the JOB rather than in a structure beside the queue, because
+    /// the queue is mutated in four places and a parallel deque would
+    /// have to agree with all four.
+    pub(super) skips: u32,
 }
 
 /// Stable identity for one in-flight request, handed out once at

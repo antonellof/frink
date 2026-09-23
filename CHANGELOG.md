@@ -15,6 +15,40 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **Cache-aware admission.** The radix prefix cache already knew how
+  much of an incoming prompt was computed; nothing read it at
+  admission, so a job whose whole system prompt sat in the page store
+  waited behind one that had to prefill every token of its own.
+
+  Admission was strict FIFO for a stated reason -- a queue that
+  reorders by SIZE starves large requests -- with the bar for changing
+  it set at "a measured reason". This does not reorder by size, and
+  the measurement is in PREFILL TOKENS rather than seconds.
+
+  Two hard bounds make starvation impossible rather than unlikely:
+  only the first eight waiting jobs are considered, and no job may be
+  passed over more than four times, after which nothing overtakes it
+  and the scan stops at it. `a_job_cannot_be_passed_over_forever`
+  drives the queue rather than reading the constant.
+
+  **Where the saving is, and is not.** With cache depths held fixed, a
+  reordering saves nothing -- same jobs, same hits, different order --
+  and a test says so, because the first draft asserted a saving the
+  arithmetic did not support. The saving is under page pressure, the
+  state a busy server is in: cached pages are evictable, so a job
+  whose prefix is cached now loses it waiting behind enough uncached
+  work to turn the pool over. Admitting it first converts a hit that
+  would have been lost into one that is taken: 3000 prefill tokens
+  against 1200 on the modelled three-job case.
+
+  The peek is read-only, so ranking a job that is not admitted neither
+  splits a radix node nor stamps the LRU clock -- asking through the
+  ordinary lookup would make the cache's recency reflect what was
+  considered rather than what was served.
+
+
 ## [0.48.0] - 2026-09-23
 
 ### Added

@@ -258,6 +258,7 @@ impl ContinuousBatcher {
                 reply: reply_tx,
                 abort,
                 blocks,
+                skips: 0,
             })
             .is_err()
         {

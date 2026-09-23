@@ -21,7 +21,7 @@ use crate::generate::{acquire_paged_caches, PrefixIntent};
 use crate::policy::radix::SaltedRadix;
 
 use super::super::row::{Job, RowKv, Rows};
-use super::super::worker::accept;
+use super::super::worker::{accept, admit};
 use super::*;
 
 const BLOCK: usize = 4;
@@ -60,6 +60,7 @@ fn paged_job(prompt: Vec<usize>, max_tokens: usize) -> (Job, mpsc::Receiver<Batc
             reply: tx,
             abort: AbortId(0),
             blocks: 1,
+            skips: 0,
         },
         rx,
     )
@@ -534,5 +535,93 @@ fn a_scored_paged_prompt_matches_the_contiguous_scoring() {
     assert!(
         paged_rows[0] != paged_rows[prompt.len() - 1],
         "every position scored identically, so this proved nothing"
+    );
+}
+
+/// **A job whose prompt is already in the tree is admitted ahead of
+/// one that is not.**
+///
+/// The unit tests in `cache_aware` rank numbers; this one proves the
+/// numbers reach admission at all. Two jobs are queued with the
+/// UNCACHED one in front, a prefix is published for the second, and
+/// the second is the one admitted.
+///
+/// Without a radix cache configured the same two jobs admit in
+/// arrival order, which is the other half: the policy is inert on a
+/// deployment that has no prefix tree to ask.
+#[test]
+fn an_already_computed_prompt_is_admitted_ahead_of_a_cold_one() {
+    let decoder = tiny_decoder();
+    let (config, _store, _radix) = paged_with_radix(&decoder, 256);
+    let shared = vec![1usize, 2, 3, 4, 5, 6, 7, 8];
+
+    // Publish the shared prefix, so the second job below has a hit and
+    // the first does not.
+    {
+        let mut lease = crate::generate::acquire_paged_caches(
+            &decoder,
+            &config,
+            &shared,
+            shared.len() + 4,
+            crate::generate::PrefixIntent::default(),
+        )
+        .expect("the store has pages");
+        for cache in lease.caches_mut().iter_mut() {
+            cache.adopt_blocks(cache.block_table().to_vec(), shared.len(), BLOCK);
+        }
+        crate::generate::publish_to_radix(&mut lease, &shared, BLOCK);
+    }
+
+    let cold = vec![90usize, 91, 92, 93, 94, 95, 96, 97];
+    let (cold_job, _rx_cold) = paged_job(cold.clone(), 2);
+    let (warm_job, _rx_warm) = paged_job(shared.clone(), 2);
+
+    let mut waiting: VecDeque<Job> = VecDeque::new();
+    waiting.push_back(cold_job);
+    waiting.push_back(warm_job);
+
+    // Driven through `admit` itself, not through the policy helper:
+    // a test that called the helper directly passed with the wiring
+    // sabotaged to always take the front of the queue.
+    let queue = QueueGate::new(512);
+    queue.try_reserve().expect("cap 512");
+    queue.try_reserve().expect("cap 512");
+    let budget = BlockBudget::new(
+        4096,
+        None,
+        Arc::new(crate::budget::ContextCeiling::new(None, test_shape())),
+    );
+    let mut prefills: VecDeque<Prefill> = VecDeque::new();
+    let batcher_config = BatcherConfig {
+        max_seqs: 1,
+        prefill_chunk: 64,
+        ..BatcherConfig::default()
+    };
+    admit(
+        &decoder,
+        &mut waiting,
+        &mut prefills,
+        0,
+        &batcher_config,
+        &queue,
+        &budget,
+        Some(&config),
+    );
+
+    assert_eq!(
+        prefills.len(),
+        1,
+        "max_seqs is 1, so exactly one is admitted"
+    );
+    assert_eq!(
+        prefills[0].prompt_tokens,
+        shared.len(),
+        "the job whose prompt is already computed must be admitted first, not the front \
+         of the queue"
+    );
+    assert_eq!(waiting.len(), 1, "the cold job is still waiting");
+    assert_eq!(
+        waiting[0].skips, 1,
+        "the job that was jumped must be one skip older, or the bound never bites"
     );
 }

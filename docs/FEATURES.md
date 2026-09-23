@@ -324,6 +324,15 @@ OpenAI-compatible HTTP API:
   ~118 ms mean TTFT sequential. CLI: `-cb`, `-np` / `--parallel N`,
   `--no-cont-batching` for the serialized private path. See
   [`plans/metal-parallel-concurrency.md`](plans/metal-parallel-concurrency.md)
+- **Cache-aware admission.** When a radix prefix cache is configured,
+  a waiting job whose prompt is already computed may be admitted ahead
+  of one that is not. Bounded twice so it cannot starve anybody: only
+  the first eight waiting jobs are considered, and no job may be
+  passed over more than four times, after which nothing overtakes it.
+  Inert without a prefix tree, and inert on a cold one, because a tie
+  keeps arrival order. The capacity rule is still strict FIFO with
+  respect to the job it picked: if that one does not fit, the line
+  stops rather than skipping on SIZE
 - Chunked prefill (same scheduler as continuous batching). `-b` /
   `-ub` set the chunk on both decode paths from one number
 - **Slot save/restore** (llama.cpp's `POST /slots/{id}?action=save|restore`):
