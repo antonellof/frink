@@ -64,6 +64,17 @@ pub const V1_EMBEDDINGS: &str = "/v1/embeddings";
 /// mounts. Not an OpenAI endpoint at all -- OpenAI has no reranker --
 /// so the request and response shapes follow Jina/Cohere, which is what
 /// every existing client already speaks.
+/// Sentence-pair scoring: how related are these two texts?
+///
+/// The endpoint `/v1/rerank` is built on top of, exposed on its own.
+/// It differs in admitting BOTH kinds of encoder -- a cross-encoder
+/// answers with its head, a bi-encoder with the cosine of two
+/// embeddings -- and saying which one did.
+pub const V1_SCORE: &str = "/v1/score";
+
+/// The unprefixed spelling, on the same handler.
+pub const SCORE: &str = "/score";
+
 pub const V1_RERANK: &str = "/v1/rerank";
 
 /// llama.cpp's unprefixed spelling of [`V1_RERANK`], mounted on the
@@ -265,6 +276,8 @@ pub const ALL: &[&str] = &[
     TOKENIZE,
     DETOKENIZE,
     V1_EMBEDDINGS,
+    V1_SCORE,
+    SCORE,
     V1_RERANK,
     RERANK,
     V1_MESSAGES,

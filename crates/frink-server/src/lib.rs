@@ -77,6 +77,7 @@ mod round_robin;
 mod sample_step;
 mod sampling_knobs;
 mod sampling_loop;
+mod score;
 mod security;
 mod serving;
 mod session;
@@ -3562,6 +3563,9 @@ fn protected_routes() -> Router<Arc<AppState>> {
         // Jina clients use and the unprefixed one llama.cpp mounts.
         // Same handler: this really is an alias, not a second dialect.
         .route(routes::V1_RERANK, post(rerank::rerank))
+        // Both spellings on one handler, as `/tokenize` is.
+        .route(routes::V1_SCORE, post(score::score))
+        .route(routes::SCORE, post(score::score))
         .route(routes::RERANK, post(rerank::rerank))
         .route(routes::CACHE_STATS, get(cache_stats))
         .route(routes::METRICS, get(metrics))
@@ -5921,6 +5925,53 @@ pub(crate) mod tests {
         assert!(
             first_of_two < last_of_zero,
             "the choices arrived one after another rather than interleaved: {order:?}"
+        );
+    }
+
+    /// **`/v1/score` refuses a generative model by NAME**, and on both
+    /// spellings.
+    ///
+    /// The mirror of the refusal an encoder gets on a generation
+    /// route: same status, same rule that it names the checkpoint
+    /// rather than blaming a tensor. Checked on both mounts because
+    /// two spellings on one handler is exactly the shape that drifts.
+    #[tokio::test]
+    async fn score_refuses_a_generative_model_on_both_spellings() {
+        let app = test_app();
+        for uri in [frink_api::routes::V1_SCORE, frink_api::routes::SCORE] {
+            let (status, body) = post_json_uri(
+                &app,
+                uri,
+                serde_json::json!({"text_1": "a", "text_2": ["b", "c"]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{uri}: {body}");
+            let message = body["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("encoder"),
+                "{uri}: the refusal must say what it needs: {message}"
+            );
+        }
+    }
+
+    /// Two lists of different lengths are a 400 at the HTTP layer, not
+    /// just in the unit test: the check runs BEFORE the encoder is
+    /// required, so a caller gets the real reason rather than "not an
+    /// encoder".
+    #[tokio::test]
+    async fn score_refuses_mismatched_lists_before_it_needs_a_model() {
+        let app = test_app();
+        let (status, body) = post_json_uri(
+            &app,
+            frink_api::routes::V1_SCORE,
+            serde_json::json!({"text_1": ["a", "b", "c"], "text_2": ["x", "y"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains('3') && message.contains('2'),
+            "the refusal must name both counts: {message}"
         );
     }
 
