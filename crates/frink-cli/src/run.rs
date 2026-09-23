@@ -222,7 +222,16 @@ pub struct InferArgs {
     /// before the candidate list exists) and `temperature` must be
     /// present (the greedy-versus-sampled decision is taken from
     /// `--temp` before the chain runs).
-    #[arg(long = "samplers", value_name = "LIST", default_value_t = SamplerOrder::default())]
+    /// `--sampler-seq` is llama.cpp's other spelling of the same flag
+    /// (`common/arg.cpp`), and `docs/CLI.md` documented it in two
+    /// places while clap rejected it: a user copying the documented
+    /// spelling got `unexpected argument`.
+    #[arg(
+        long = "samplers",
+        alias = "sampler-seq",
+        value_name = "LIST",
+        default_value_t = SamplerOrder::default()
+    )]
     pub samplers: SamplerOrder,
 
     /// RNG seed (`-1` = time-based).
