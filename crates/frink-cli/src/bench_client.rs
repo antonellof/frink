@@ -94,6 +94,22 @@ pub struct RequestTiming {
     started_s: f64,
     tics_s: Vec<f64>,
     reported_tokens: Option<usize>,
+    /// The server's own `usage.prompt_tokens` and `usage.cached_tokens`
+    /// for this request, when it reported them.
+    ///
+    /// Both or neither: a reuse fraction needs a denominator from the
+    /// same request, and reading the two from different terminal
+    /// frames is how a 97% figure gets computed against somebody
+    /// else's prompt.
+    prefix: Option<PrefixUse>,
+}
+
+/// One request's prompt size and how much of it the server did not
+/// have to prefill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixUse {
+    pub prompt_tokens: usize,
+    pub cached_tokens: usize,
 }
 
 impl RequestTiming {
@@ -103,7 +119,24 @@ impl RequestTiming {
             started_s,
             tics_s: Vec::new(),
             reported_tokens: None,
+            prefix: None,
         }
+    }
+
+    /// Records the prompt size and prefix reuse the server stated.
+    ///
+    /// `cached_tokens` is clamped to the prompt: a reuse figure above
+    /// 100% is a server bug, and reporting it as one is more useful
+    /// than propagating it into a mean that then reads as plausible.
+    pub fn report_prefix(&mut self, prompt_tokens: usize, cached_tokens: usize) {
+        self.prefix = Some(PrefixUse {
+            prompt_tokens,
+            cached_tokens: cached_tokens.min(prompt_tokens),
+        });
+    }
+
+    pub fn prefix(&self) -> Option<PrefixUse> {
+        self.prefix
     }
 
     /// The token count the SERVER stated, from the terminal chunk's
@@ -252,6 +285,21 @@ impl Latency {
     }
 }
 
+/// Sums the per-request prefix figures, or `None` when no request
+/// reported one.
+fn prefix_totals(timings: &[RequestTiming]) -> Option<PrefixTotals> {
+    let uses: Vec<PrefixUse> = timings.iter().filter_map(RequestTiming::prefix).collect();
+    if uses.is_empty() {
+        return None;
+    }
+    Some(PrefixTotals {
+        prompt_tokens: uses.iter().map(|u| u.prompt_tokens).sum(),
+        cached_tokens: uses.iter().map(|u| u.cached_tokens).sum(),
+        requests_with_reuse: uses.iter().filter(|u| u.cached_tokens > 0).count(),
+        requests_reporting: uses.len(),
+    })
+}
+
 /// What a whole run measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BenchReport {
@@ -267,6 +315,35 @@ pub struct BenchReport {
     pub ttft: Latency,
     pub tpot: Latency,
     pub end_to_end: Latency,
+    /// Prompt positions across the run, and how many the prefix cache
+    /// covered. `None` when no request reported the pair, which is
+    /// what a server with no prefix cache configured looks like --
+    /// distinct from one that was consulted and missed, which reports
+    /// a zero numerator.
+    pub prefix: Option<PrefixTotals>,
+}
+
+/// Prefix reuse across a whole run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixTotals {
+    pub prompt_tokens: usize,
+    pub cached_tokens: usize,
+    /// Requests that reused at least one position.
+    pub requests_with_reuse: usize,
+    /// Requests that reported the pair at all.
+    pub requests_reporting: usize,
+}
+
+impl PrefixTotals {
+    /// Share of prompt positions the cache covered, 0.0 to 1.0.
+    ///
+    /// Over the run's TOTAL prompt tokens rather than the mean of
+    /// per-request fractions: a run of one long cold prompt and nine
+    /// short warm ones is mostly cold work, and averaging fractions
+    /// would call it 90% reused.
+    pub fn reuse_fraction(&self) -> Option<f64> {
+        (self.prompt_tokens > 0).then(|| self.cached_tokens as f64 / self.prompt_tokens as f64)
+    }
 }
 
 impl BenchReport {
@@ -313,6 +390,7 @@ impl BenchReport {
             ttft: Latency::of(&ttfts),
             tpot: Latency::of(&tpots),
             end_to_end: Latency::of(&e2es),
+            prefix: prefix_totals(timings),
         }
     }
 
@@ -539,5 +617,64 @@ mod tests {
             "a buffered stream has no inter-token detail, and it is \
              reported as absent rather than invented"
         );
+    }
+
+    fn with_prefix(prompt: usize, cached: usize) -> RequestTiming {
+        let mut t = RequestTiming::started(0.0);
+        t.tic(0.1);
+        t.tic(0.2);
+        t.report_prefix(prompt, cached);
+        t
+    }
+
+    /// **Reuse is a share of the run's TOTAL prompt tokens, not the
+    /// mean of per-request shares.**
+    ///
+    /// One long cold prompt beside nine short warm ones is mostly cold
+    /// work. Averaging fractions calls that 90% reused; the honest
+    /// number here is 31%.
+    #[test]
+    fn reuse_is_weighted_by_prompt_size_and_not_by_request() {
+        let mut timings = vec![with_prefix(1000, 0)];
+        timings.extend((0..9).map(|_| with_prefix(50, 50)));
+        let totals = BenchReport::of(&timings).prefix.expect("reported");
+
+        assert_eq!((totals.prompt_tokens, totals.cached_tokens), (1450, 450));
+        let f = totals.reuse_fraction().expect("a denominator");
+        assert!(
+            (f - 450.0 / 1450.0).abs() < 1e-9,
+            "weighted by request instead of by token: {f}"
+        );
+        assert!(
+            f < 0.32,
+            "the mean of per-request fractions would be 0.9 here; got {f}"
+        );
+    }
+
+    /// A server that reports nothing has no prefix cache to speak of,
+    /// which is not the same as one that was consulted and missed.
+    #[test]
+    fn no_request_reporting_is_absent_rather_than_zero() {
+        let mut t = RequestTiming::started(0.0);
+        t.tic(0.1);
+        assert_eq!(BenchReport::of(&[t]).prefix, None);
+
+        let missed = BenchReport::of(&[with_prefix(100, 0)])
+            .prefix
+            .expect("consulted");
+        assert_eq!(missed.cached_tokens, 0);
+        assert_eq!(missed.requests_with_reuse, 0);
+        assert_eq!(missed.reuse_fraction(), Some(0.0));
+    }
+
+    /// Reuse above 100% is a server bug. Clamping keeps it from
+    /// becoming a plausible-looking mean that hides one.
+    #[test]
+    fn reuse_cannot_exceed_the_prompt_it_is_a_share_of() {
+        let totals = BenchReport::of(&[with_prefix(100, 400)])
+            .prefix
+            .expect("reported");
+        assert_eq!(totals.cached_tokens, 100);
+        assert_eq!(totals.reuse_fraction(), Some(1.0));
     }
 }

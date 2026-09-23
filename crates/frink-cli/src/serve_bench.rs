@@ -22,7 +22,9 @@ use std::io::BufRead;
 use std::sync::mpsc;
 use std::time::Instant;
 
-use crate::bench_client::{is_token_chunk, BenchReport, BenchSampling, Latency, RequestTiming};
+use crate::bench_client::{
+    is_token_chunk, BenchReport, BenchSampling, Latency, PrefixTotals, RequestTiming,
+};
 use anyhow::Result;
 use clap::Parser;
 use serde_json::{json, Value};
@@ -55,6 +57,28 @@ pub struct ServeBenchArgs {
     /// run says what it really sent rather than what it meant to.
     #[arg(long, default_value_t = 512)]
     pub prompt_chars: usize,
+    /// A system prompt of this many characters, IDENTICAL across every
+    /// request, so the run measures prefix reuse instead of avoiding
+    /// it.
+    ///
+    /// Off by default, because `--prompt-chars` filler is deliberately
+    /// built to defeat a prefix cache and the two would otherwise
+    /// contradict each other. With this set, every request carries the
+    /// same system message and its own filler, which is the shape a
+    /// real deployment has: one agent prompt, many questions.
+    ///
+    /// The reported reuse is the SERVER's `usage.cached_tokens`, not
+    /// an inference from latency, so a run says what was actually
+    /// reused rather than what was probably reused.
+    #[arg(long, default_value_t = 0)]
+    pub shared_prefix: usize,
+    /// Send this `cache_salt` with every request.
+    ///
+    /// A prefix cache namespace. Two runs under different salts share
+    /// no pages even with identical prompts, which is the property
+    /// worth checking on a multi-tenant deployment.
+    #[arg(long)]
+    pub cache_salt: Option<String>,
     /// Model name to send. Optional: the server serves whatever is
     /// loaded regardless.
     #[arg(long)]
@@ -80,7 +104,10 @@ pub fn run_serve_bench(args: ServeBenchArgs) -> Result<()> {
     http::parse_url(&format!("{base}/v1/chat/completions"))?;
 
     let sampling = BenchSampling::new(args.output_len);
-    let prompt = filler_prompt(args.prompt_chars);
+    // Built once and shared by reference: a per-request copy would be
+    // the same text, but building it per request inside the timed
+    // section would charge the client's allocator to the server.
+    let shared = (args.shared_prefix > 0).then(|| filler_prompt(args.shared_prefix, 0));
     let started = Instant::now();
 
     // A shared work counter rather than a slice per worker: requests
@@ -99,17 +126,22 @@ pub fn run_serve_bench(args: ServeBenchArgs) -> Result<()> {
         let handles: Vec<_> = (0..args.concurrency.min(args.requests))
             .map(|_| {
                 let base = &base;
-                let prompt = &prompt;
+                let prompt_chars = args.prompt_chars;
                 let model = &args.model;
+                let shared = shared.as_deref();
+                let salt = args.cache_salt.as_deref();
                 let rx = &rx;
                 scope.spawn(move || {
                     let mut mine = Vec::new();
                     loop {
-                        let next = rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
-                        if next.is_err() {
+                        let Ok(index) = rx.lock().unwrap_or_else(|p| p.into_inner()).recv() else {
                             break;
-                        }
-                        let body = request_body(model.as_deref(), prompt, &sampling);
+                        };
+                        // Per request, from the work item's own index:
+                        // two requests must not share a prompt, or the
+                        // second measures the first's pages.
+                        let prompt = filler_prompt(prompt_chars, index + 1);
+                        let body = request_body(model.as_deref(), shared, salt, &prompt, &sampling);
                         let dispatched = started.elapsed().as_secs_f64();
                         let mut timing = RequestTiming::started(dispatched);
                         // A failed request contributes a timing with no
@@ -151,25 +183,57 @@ pub fn run_serve_bench(args: ServeBenchArgs) -> Result<()> {
 ///
 /// `stream: true` is not a preference: TTFT is only observable on a
 /// stream, and a buffered request can report nothing but end-to-end.
-fn request_body(model: Option<&str>, prompt: &str, sampling: &BenchSampling) -> Value {
-    json!({
+fn request_body(
+    model: Option<&str>,
+    shared_prefix: Option<&str>,
+    cache_salt: Option<&str>,
+    prompt: &str,
+    sampling: &BenchSampling,
+) -> Value {
+    let mut messages = Vec::with_capacity(2);
+    if let Some(shared) = shared_prefix {
+        messages.push(json!({"role": "system", "content": shared}));
+    }
+    messages.push(json!({"role": "user", "content": prompt}));
+    let mut body = json!({
         "model": model.unwrap_or("bench"),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "max_tokens": sampling.output_len,
         "temperature": sampling.temperature,
         "top_k": sampling.top_k,
         "ignore_eos": sampling.ignore_eos,
         "stream": true,
-    })
+        // Without this the terminal frame carries no usage block, and
+        // the prompt/cached pair the reuse figure needs is simply
+        // absent -- which reads as "no prefix cache" rather than as
+        // "nobody asked".
+        "stream_options": {"include_usage": true},
+    });
+    if let Some(salt) = cache_salt {
+        body["cache_salt"] = json!(salt);
+    }
+    body
 }
 
-/// Filler with no structure a template or a cache could shortcut.
+/// Filler with no structure a template or a cache could shortcut,
+/// DIFFERENT for every request in a run.
 ///
 /// Deliberately varied rather than one repeated word: a prompt of
 /// `"a a a a"` is the best case for any prefix cache and several
 /// tokenizers, so a run built on one measures the cache rather than the
 /// server.
-fn filler_prompt(chars: usize) -> String {
+///
+/// `seed` is why this takes an argument. The first version varied
+/// WITHIN a prompt and built the SAME prompt for every request, which
+/// is the best case for a prefix cache ACROSS requests -- the very
+/// thing the paragraph above says it avoids. Measured once the reuse
+/// figure existed to show it: eight requests at concurrency four
+/// reused 43.5% of their prompt tokens with no shared prefix asked
+/// for, because the last four found the first four's pages. Every
+/// throughput this command has ever printed was that much too
+/// flattering, and nothing could see it until the server was asked
+/// what it had reused.
+fn filler_prompt(chars: usize, seed: usize) -> String {
     const WORDS: [&str; 12] = [
         "lorem",
         "ipsum",
@@ -185,7 +249,13 @@ fn filler_prompt(chars: usize) -> String {
         "tempor",
     ];
     let mut out = String::with_capacity(chars + 16);
-    let mut i = 0usize;
+    // The seed goes FIRST, so two prompts diverge at token one rather
+    // than at the tail. A distinguishing suffix would leave the whole
+    // head shareable and the run would still be measuring the cache.
+    if chars > 0 {
+        out.push_str(&format!("{seed} "));
+    }
+    let mut i = seed;
     while out.len() < chars {
         if !out.is_empty() {
             out.push(' ');
@@ -242,6 +312,18 @@ fn stream_request(
                 {
                     timing.report_tokens(n as usize);
                 }
+                // The same terminal frame carries the prompt size and
+                // the prefix hit. Read as a PAIR from one frame: a
+                // fraction whose numerator and denominator came from
+                // different requests is a plausible-looking number
+                // with nothing behind it.
+                if let Some(usage) = chunk.get("usage") {
+                    let prompt = usage.get("prompt_tokens").and_then(Value::as_u64);
+                    let cached = usage.get("cached_tokens").and_then(Value::as_u64);
+                    if let (Some(p), Some(c)) = (prompt, cached) {
+                        timing.report_prefix(p as usize, c as usize);
+                    }
+                }
             }
         }
         line.clear();
@@ -280,7 +362,43 @@ fn report_json(report: &BenchReport, args: &ServeBenchArgs) -> Value {
         "ttft": latency_json(&report.ttft),
         "tpot": latency_json(&report.tpot),
         "end_to_end": latency_json(&report.end_to_end),
+        "shared_prefix_chars": args.shared_prefix,
+        "cache_salt": args.cache_salt,
+        "prefix": report.prefix.map(prefix_json),
     })
+}
+
+fn prefix_json(p: PrefixTotals) -> Value {
+    json!({
+        "prompt_tokens": p.prompt_tokens,
+        "cached_tokens": p.cached_tokens,
+        "reuse_fraction": p.reuse_fraction(),
+        "requests_with_reuse": p.requests_with_reuse,
+        "requests_reporting": p.requests_reporting,
+    })
+}
+
+/// The prefix-cache line, or the reason there is none.
+///
+/// Silence would be the wrong answer in every case: a run that asked
+/// for a shared prefix and got no reuse is a finding, and a server with
+/// no prefix cache is a different finding, and neither should look like
+/// the other.
+fn print_prefix(report: &BenchReport, args: &ServeBenchArgs) {
+    let Some(p) = report.prefix else {
+        if args.shared_prefix > 0 {
+            println!(
+                "prefix reuse: not reported by this server \
+                 (no prefix cache configured, or usage omitted)"
+            );
+        }
+        return;
+    };
+    let pct = p.reuse_fraction().map(|f| f * 100.0).unwrap_or(0.0);
+    println!(
+        "prefix reuse: {}/{} prompt tokens ({pct:.1}%), {} of {} requests reused something",
+        p.cached_tokens, p.prompt_tokens, p.requests_with_reuse, p.requests_reporting
+    );
 }
 
 fn print_report(report: &BenchReport, args: &ServeBenchArgs) {
@@ -296,6 +414,7 @@ fn print_report(report: &BenchReport, args: &ServeBenchArgs) {
         Some(tps) => println!("output throughput: {tps:.1} tok/s (whole run)"),
         None => println!("output throughput: - (nothing completed)"),
     }
+    print_prefix(report, args);
     println!();
     println!(
         "{:<12} {:>10} {:>10} {:>10} {:>10}",
@@ -327,7 +446,7 @@ mod tests {
     /// percentile is whichever prompt happened to run longest.
     #[test]
     fn a_bench_request_pins_everything_the_methodology_depends_on() {
-        let body = request_body(Some("m"), "hello", &BenchSampling::new(64));
+        let body = request_body(Some("m"), None, None, "hello", &BenchSampling::new(64));
         assert_eq!(body["max_tokens"], 64);
         assert_eq!(body["temperature"], 0.0);
         assert_eq!(body["top_k"], 1);
@@ -338,6 +457,34 @@ mod tests {
              report nothing but end-to-end"
         );
         assert_eq!(body["messages"][0]["content"], "hello");
+        assert_eq!(
+            body["stream_options"]["include_usage"], true,
+            "without it the terminal frame carries no usage block and the \
+             prefix figures are absent rather than zero"
+        );
+        assert!(
+            body.get("cache_salt").is_none(),
+            "an unrequested salt must not be sent: it would put the run in \
+             its own cache namespace and quietly change what it measures"
+        );
+    }
+
+    /// The shared prefix is a SYSTEM message ahead of the per-request
+    /// filler, and the salt rides beside it.
+    #[test]
+    fn a_shared_prefix_is_a_system_message_before_the_per_request_prompt() {
+        let body = request_body(
+            Some("m"),
+            Some("shared"),
+            Some("tenant-a"),
+            "mine",
+            &BenchSampling::new(8),
+        );
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "shared");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "mine");
+        assert_eq!(body["cache_salt"], "tenant-a");
     }
 
     /// Reproducible between runs, and not one repeated word: a prompt
@@ -345,11 +492,11 @@ mod tests {
     /// tokenizers, so a run built on one measures the cache.
     #[test]
     fn the_filler_prompt_is_reproducible_and_not_one_repeated_word() {
-        let a = filler_prompt(200);
+        let a = filler_prompt(200, 1);
         assert_eq!(a.len(), 200);
         assert_eq!(
             a,
-            filler_prompt(200),
+            filler_prompt(200, 1),
             "the same run twice sends the same prompt"
         );
 
@@ -359,7 +506,31 @@ mod tests {
             "a prompt of one repeated word measures the prefix cache: {a}"
         );
 
-        assert!(filler_prompt(0).is_empty());
+        assert!(filler_prompt(0, 1).is_empty());
+    }
+
+    /// **Two requests in a run must not share a prompt.**
+    ///
+    /// The defect this pins: every request sent the SAME filler, so the
+    /// second half of a run found the first half's pages and the
+    /// throughput figure included reuse the command was written to
+    /// avoid. Measured at 43.5% of prompt tokens on eight requests at
+    /// concurrency four.
+    ///
+    /// They must diverge at the FRONT: a distinguishing suffix leaves
+    /// the whole head shareable and changes nothing.
+    #[test]
+    fn two_requests_in_a_run_do_not_share_a_prompt_prefix() {
+        let a = filler_prompt(200, 1);
+        let b = filler_prompt(200, 2);
+        assert_ne!(a, b, "two requests sent the same prompt");
+
+        let shared = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+        assert!(
+            shared < 4,
+            "two prompts share their first {shared} characters, so the \
+             second request measures the first's pages"
+        );
     }
 
     /// A missing figure prints as a dash, never as a zero: a zero is

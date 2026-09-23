@@ -317,10 +317,14 @@ FRINK_MODEL_PATH=model.gguf ./target/release/frink-server &
 
 ./target/release/frink serve-bench --requests 64 --concurrency 8 --output-len 128
 ./target/release/frink serve-bench --concurrency 16 --json
+
+# What the prefix cache saves: one system prompt, many questions.
+./target/release/frink serve-bench --shared-prefix 4000 --requests 32
+./target/release/frink serve-bench --shared-prefix 4000 --cache-salt tenant-a
 ```
 
-Four rules decide whether the numbers mean anything, and all four are
-in `frink_edge::bench_client` with no socket in them, so each is
+Five rules decide whether the numbers mean anything, and all five are
+in `frink_cli::bench_client` with no socket in them, so each is
 covered by a test rather than inferred from a live run:
 
 - **Every request does exactly the requested work.** Temperature 0,
@@ -339,6 +343,28 @@ covered by a test rather than inferred from a live run:
   never does.
 - **Throughput is total tokens over the whole run's span**, not the sum
   of per-request rates, which gets *better* the worse the queueing is.
+- **Prefix reuse is a share of the run's total prompt tokens**, not the
+  mean of per-request shares. One long cold prompt beside nine short
+  warm ones is mostly cold work; averaging fractions would call it 90%
+  reused.
+
+`--shared-prefix N` puts an identical `system` message of N characters
+ahead of every request, which is the shape a real deployment has: one
+agent prompt, many questions. Without it each request gets its own
+filler and shares nothing, so the default measures the server and the
+flag measures the cache. The reported figure is the server's own
+`usage.cached_tokens`, not an inference from latency, and a server with
+no prefix cache says so rather than reporting zero. `--cache-salt`
+puts the run in its own namespace, which two runs under different salts
+do not share even with identical prompts.
+
+**Every number this command printed before 0.48.0 was flattered by
+reuse it was written to avoid.** The filler was deliberately varied
+*within* a prompt and identical *across* requests, so the second half
+of a run found the first half's pages: eight requests at concurrency
+four reused 43.5% of their prompt tokens with nothing shared asked
+for. Nothing could see it until the command started asking the server
+what it had reused.
 
 Token counts come from the server's own `usage.completion_tokens`, not
 from the chunk count: a buffered answer arrives as one chunk and was
