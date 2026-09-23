@@ -1,6 +1,6 @@
 # Speculative decoding in the server
 
-Status: **design decided 2026-09-20, see (3); implementation next**. The engine half is built, tested and lossless;
+Status: **prompt-lookup speculation ships on the server and is on by default** (`sampling_loop::DEFAULT_DRAFT_MAX`, refused for a grammar or JSON mode because a rejected block would leave the grammar machine advanced over tokens that were never emitted). What the server still cannot reach is a real DRAFT MODEL: `--model-draft` is a `frink run` flag only. The design decided 2026-09-20 in (3) is for that half.
 the server cannot reach it. This says what wiring it actually costs,
 because the obvious answer ("call the function") is wrong for a reason
 worth writing down.

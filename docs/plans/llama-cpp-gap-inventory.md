@@ -17,6 +17,25 @@ invented keys, and a quant table accurate on the lines it flagged and
 wrong by omission on a whole SIMD tier. A confident wrong count is worse
 than no count.
 
+**Read the body as a SNAPSHOT dated 2026-09-01, not as current
+state.** Rows are deliberately left as the reading found them, because
+an audit that is edited in place stops being evidence of anything. What
+has moved since is listed here and nowhere else, so a reader who checks
+this header cannot be misled by a row below it:
+
+| Row | Then | Now |
+|---|---|---|
+| `logit_bias` (§3.1, §E5) | Silently dropped on chat, refused on completions | **Served on all three generation wires**, keyed by the response cache, with the device argmax fold refused for a biased request (0.47.0) |
+| `echo`, `logprobs`, `prompt_logprobs` (§7, §E-rows) | Refused on `/v1/completions` | **Served**, `echo` with the logprobs arrays covering the echoed span (0.43.0, 0.45.0) |
+| `n`, `best_of` | Not in the inventory | **Served on both OpenAI routes** from one prefill, on both KV stores, interleaved when streamed (0.40.0, 0.41.0) |
+| `response_format: json_schema` | Converter in the tree, route answered 501 | **Served**, through the same converter a forced `tool_choice` uses |
+| `--repeat-last-n` (§632) | MISSING | Ships, at llama.cpp's default |
+| `-md` / `--model-draft`, `--draft-max`, `--draft-min` (§652) | MISSING on the run path | Ship |
+| K-quant logit drift (§10) | The reason frink's logits differ from llama.cpp's on K-quants | Unchanged, and still not a frink bug: llama.cpp quantizes activations to `Q8_K` before the dot product and frink keeps them in f32 |
+
+The last row is why this file is linked from `README.md` and is the
+part worth reading first.
+
 Line numbers are from the llama.cpp checkout in `.scratch/llama.cpp` and
 from this repo as of 2026-09-01.
 
@@ -442,9 +461,10 @@ checkout; note the file is `llama-sampler.cpp`, not
 **Seven rows of this table have moved since it was written**, all on
 2026-09-01. `min_p`, the `penalty_last_n` window, GBNF grammar and
 `logit_bias` are no longer missing; `top_p`, the repetition penalty and
-temperature ordering no longer diverge. JSON-schema-to-grammar has a
-converter in the tree but the `response_format: json_schema` route still
-answers 501. Everything else below still reads true. The per-row detail
+temperature ordering no longer diverge. JSON-schema-to-grammar had a converter in
+the tree and a route that answered 501; both have since shipped. See
+the snapshot table at the top of this file for everything else that has
+moved. The per-row detail
 is in §7 and §8; the table is left as the reading found it.
 
 | Sampler | llama.cpp | frink | Severity | Size |

@@ -3023,7 +3023,7 @@ async fn chat_completions_stream(
     // choice 1 is not what a client reading `choices[].index` expects,
     // and interleaving them round-robin needs a sampler that can be
     // stepped one token at a time per choice
-    // (`docs/plans/several-completions-per-request.md`). Refused by
+    // (`docs/plans/done/several-completions-per-request.md`). Refused by
     // name rather than silently collapsed to one, which is the whole
     // argument of `crate::unimplemented_fields`.
     let tools_active = req.tools_active();

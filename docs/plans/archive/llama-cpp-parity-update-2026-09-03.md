@@ -2,7 +2,7 @@
 
 Companion delta to [`llama-cpp-full-parity-audit-2026-09-02.md`](llama-cpp-full-parity-audit-2026-09-02.md).
 
-**North star:** [`north-star.md`](north-star.md)
+**North star:** [`north-star.md`](../north-star.md)
 
 ---
 

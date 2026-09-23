@@ -1,8 +1,8 @@
 # llama.cpp parity review (2026-09-02)
 
-Companion to [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) (evidence-backed differential). This document ranks **what to do next** for parity with llama.cpp as a serving + CLI stack.
+Companion to [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) (evidence-backed differential). This document ranks **what to do next** for parity with llama.cpp as a serving + CLI stack.
 
-**North star:** same GGUF, same command shapes, same or better performance on hardware people own ([`north-star.md`](north-star.md)).
+**North star:** same GGUF, same command shapes, same or better performance on hardware people own ([`north-star.md`](../north-star.md)).
 
 ---
 
@@ -133,15 +133,15 @@ Align: `-n` default (-1 = EOS), `-cnv`/`-no-cnv`, `-sys` spelling, `-hf` on run 
 
 ## P2 — Performance parity
 
-- **Engine bench:** `frink bench` vs `llama-bench` — keep receipt discipline ([`benchmarks/README.md`](../../benchmarks/README.md))
+- **Engine bench:** `frink bench` vs `llama-bench` — keep receipt discipline ([`benchmarks/README.md`](../../../benchmarks/README.md))
 - **HTTP bench:** `frink serve-bench` vs `llama-server` load — extend parallel/concurrency scenarios
-- **Kernel parity:** Metal/CUDA gap inventory in [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) §2
+- **Kernel parity:** Metal/CUDA gap inventory in [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) §2
 
 ---
 
 ## P2 — Architecture scale
 
-- **Model layer reorg** ([`model-layer-reorg.md`](model-layer-reorg.md)) — prerequisite for 140-arch maintenance
+- **Model layer reorg** ([`model-layer-reorg.md`](../model-layer-reorg.md)) — prerequisite for 140-arch maintenance
 - **Out-of-core MoE** — separate track
 - **Vulkan** — verdict GO; backend seam refactor pending
 
@@ -166,13 +166,13 @@ Every parity claim needs:
 2. Test that fails when reverted
 3. Receipt or HTTP bench JSON checked in
 
-Use [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) as the evidence ledger; update counts when code changes, not docs alone.
+Use [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) as the evidence ledger; update counts when code changes, not docs alone.
 
 ---
 
 ## References
 
 - Issue [#46](https://github.com/antonellof/frink/issues/46) — Metal parallel decode (closed in 0.15.2)
-- [`docs/plans/metal-parallel-concurrency.md`](metal-parallel-concurrency.md) — design
-- [`docs/CONFIG.md`](../CONFIG.md) — env vars
-- [`docs/API.md`](../API.md) — HTTP surface
+- [`docs/plans/metal-parallel-concurrency.md`](../metal-parallel-concurrency.md) — design
+- [`docs/CONFIG.md`](../../CONFIG.md) — env vars
+- [`docs/API.md`](../../API.md) — HTTP surface

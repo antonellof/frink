@@ -456,3 +456,98 @@ fn the_readme_states_the_version_the_workspace_holds() {
         }
     }
 }
+
+/// Every `.md` under a directory, recursively.
+fn walk_md(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_md(&p));
+        } else if p.extension().is_some_and(|x| x == "md") {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// `(completed, total)` todos in a plan's YAML frontmatter.
+///
+/// `None` when the file has no frontmatter: several plans state their
+/// status in prose instead, and counting those as `0/0` would report
+/// them as finished.
+fn plan_todos(text: &str) -> Option<(usize, usize)> {
+    let body = text.strip_prefix("---")?;
+    let end = body.find("\n---")?;
+    let front = &body[..end];
+    let mut total = 0;
+    let mut done = 0;
+    for line in front.lines() {
+        let t = line.trim();
+        if let Some(v) = t.strip_prefix("status:") {
+            total += 1;
+            if v.trim() == "completed" {
+                done += 1;
+            }
+        }
+    }
+    (total > 0).then_some((done, total))
+}
+
+/// **`docs/plans/done/README.md` states the counts the plans hold.**
+///
+/// It listed seven plans as being "in the parent directory" when every
+/// one of them was in `archive/` or `on-hold/`, and two of the seven
+/// counts were stale -- `freetoken-parity` read 60/73 against 63, and
+/// `llama-cpp-parity-push` read 22/38 against 30/46, so the second was
+/// wrong in both numbers.
+///
+/// A plan directory is exactly the kind of thing that drifts: nobody
+/// re-reads an index after ticking a todo.
+#[test]
+fn the_plan_index_states_the_todo_counts_the_plans_hold() {
+    let root = repo_root().join("docs/plans");
+    let index = read("docs/plans/done/README.md");
+
+    let mut checked = 0usize;
+    for path in walk_md(&root) {
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if name == "README" {
+            continue;
+        }
+        let Some((done, total)) = plan_todos(&std::fs::read_to_string(&path).expect("read")) else {
+            continue;
+        };
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        // Only the sub-directories are indexed; a live plan in the
+        // parent is work in progress and nothing states its count.
+        if parent == "plans" {
+            // A plan whose todos are ALL done belongs in `done/`, which
+            // is the rule that directory's README states.
+            assert!(
+                done < total,
+                "docs/plans/{name}.md has all {total} todos completed; move it to \
+                 docs/plans/done/ as that directory's README says"
+            );
+            continue;
+        }
+        checked += 1;
+        let row = format!("| {parent}/{name} | {done}/{total} |");
+        assert!(
+            index.contains(&row),
+            "docs/plans/done/README.md must carry the row `{row}`; it does not. The plan \
+             index is stale."
+        );
+    }
+    assert!(
+        checked >= 5,
+        "only {checked} plans were checked, so this would pass vacuously"
+    );
+}
