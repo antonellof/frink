@@ -315,6 +315,20 @@ work here, because the names and the flag spellings are the same:
 is how the other launcher spells them and being told "not a command"
 is a poor answer to a correct command line.
 
+`frink serve` logs in the same shape too: elapsed since start, a
+one-letter level, a three-letter subsystem, and a component
+right-aligned to twelve columns.
+
+```
+0.00.910.529 I srv  frink_server: model loaded
+0.00.910.553 I srv  frink_server: listening on http://127.0.0.1:8383
+```
+
+Those go to **stderr**. The `frink.server.ready` JSON line stays on
+**stdout**, untouched: it is a parsed contract, and it is what makes
+`--port 0` usable, because the supervisor learns the bound port from
+the child instead of probing for it.
+
 The run output carries the same block llama.cpp prints -- `build`,
 `model`, `ftype`, `modalities`, aligned the same way -- with a
 `device` row it does not have, and closes with llama.cpp's own
