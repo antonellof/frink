@@ -10,6 +10,7 @@ mod bench_model;
 mod bench_render;
 mod bench_suite;
 mod chat;
+mod cli_output;
 mod download;
 mod gguf_split;
 mod hf;
@@ -55,7 +56,21 @@ enum Commands {
     /// GGUF completion (llama.cpp-style `-m`/`-p`/`-n`/…).
     ///
     /// Also accepts top-level flags: `frink -m model.gguf -p "Hi" -n 64`.
+    ///
+    /// `cli` is an ALIAS, not a second command: llama.cpp's launcher
+    /// spells this `llama cli`, and a user moving between the two
+    /// should not have to learn that one calls it `run`. Both reach
+    /// the same body.
+    #[command(alias = "cli")]
     Run(run::InferArgs),
+    /// Show version.
+    ///
+    /// `--version` already exists; this is the SUBCOMMAND spelling
+    /// llama.cpp's launcher offers, and a user typing `frink version`
+    /// should not be told it is not a command.
+    Version,
+    /// Show third-party licenses.
+    Licenses,
     /// Multi-turn chat REPL against a running `frink-server` (HTTP).
     ///
     /// Reuses the server's chat-template + streaming path, start the
@@ -554,6 +569,13 @@ Or run the standalone binary:  frink-server -m model.gguf
 /// clap's own subcommand list.
 const SUBCOMMANDS: &[&str] = &[
     "run",
+    // llama.cpp's launcher spells `run` as `cli`, and the two
+    // informational commands it offers beside it. All three have to be
+    // here or the rewriter turns `frink version` into a completion
+    // whose prompt is the word "version".
+    "cli",
+    "version",
+    "licenses",
     "pull",
     "download",
     "chat",
@@ -630,6 +652,16 @@ fn rewrite_llama_style_argv(args: Vec<String>) -> Vec<String> {
             "-kvu" => "--kv-unified".into(),
             "-fa" => "--flash-attn".into(),
             "-tb" => "--threads-batch".into(),
+            // llama.cpp 0.4's `-st` / `--single-turn`. Like `-hf` it is
+            // one token to its hand-written parser and two short flags
+            // to clap, and `-s` is already `--seed` here, so it cannot
+            // be a clap short at all.
+            //
+            // It does NOT mean `--no-cnv`: `-st` runs the conversation
+            // for one turn with the chat template applied, where
+            // `--no-cnv` skips the template entirely. An early version
+            // of this row mapped them together and changed the answer.
+            "-st" => "--single-turn".into(),
             _ => arg,
         })
         .collect();
@@ -801,6 +833,8 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Run(args) => run::run_infer(args)?,
+        Commands::Version => print!("{}", crate::cli_output::version_block()),
+        Commands::Licenses => print!("{}", crate::cli_output::licenses_block()?),
         Commands::Chat(args) => chat::run_chat(args)?,
         Commands::ServeBench(args) => serve_bench::run_serve_bench(args)?,
         Commands::BatchedBench(args) => batched_bench::run(args)?,
@@ -1951,6 +1985,56 @@ mod cli_tests {
                 "--n-gpu-layers",
                 "0"
             ]
+        );
+    }
+
+    /// **`-st` is not `--no-cnv`.**
+    ///
+    /// llama.cpp 0.4 dropped `--no-cnv` and offers `-st` /
+    /// `--single-turn`, and the two are easy to read as synonyms.
+    /// They are not: `-st` runs the CONVERSATION for one turn, with
+    /// the chat template applied, where `--no-cnv` skips the template
+    /// entirely.
+    ///
+    /// An early version of that rewriter row mapped them together,
+    /// and it changed the answer -- measured on the same prompt and
+    /// the same file, the templated reply is "The capital of France
+    /// is Paris." and the raw one continues " Paris\nThe capital city
+    /// of France is...". Nothing would have caught that but reading
+    /// two outputs side by side, which is why it is a test now.
+    #[test]
+    fn single_turn_keeps_the_chat_template() {
+        let out = rewrite(&["frink", "-m", "model.gguf", "-p", "hi", "-st"]);
+        assert!(
+            out.contains(&"--single-turn".to_string()),
+            "-st must reach the single-turn flag: {out:?}"
+        );
+        assert!(
+            !out.contains(&"--no-cnv".to_string()),
+            "-st must NOT become --no-cnv: it keeps the chat template, \
+             and mapping the two together changes the generated text: {out:?}"
+        );
+    }
+
+    /// And the two flags stay distinct at the clap layer, so neither
+    /// is an alias of the other.
+    #[test]
+    fn single_turn_and_no_cnv_are_separate_flags() {
+        use clap::CommandFactory;
+        let run = crate::Cli::command();
+        let run = run
+            .get_subcommands()
+            .find(|c| c.get_name() == "run")
+            .expect("run subcommand");
+        let names: Vec<&str> = run
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|l| *l == "no-cnv" || *l == "single-turn")
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "both flags must exist independently, found {names:?}"
         );
     }
 }

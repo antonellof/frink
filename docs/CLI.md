@@ -97,6 +97,7 @@ Same via explicit subcommand: `frink run -m …`.
 | `--lora-scaled FILE:SCALE` | The same with a scale. Adapters are numbered in the order given, every `--lora` before every `--lora-scaled` |
 | `--system` | Chat mode only |
 | `--no-cnv` | Skip chat-template wrap |
+| `--single-turn` (`-st`) | Accepted and ignored: `frink run` is already one turn. llama.cpp 0.4 spells single-turn conversation this way, and it is **not** `--no-cnv` -- the chat template still applies |
 | `-e` / `--escape` | Expand `\n` `\t` `\r` `\\` in `-p`. **On by default**, as in llama.cpp |
 | `--no-escape` | Pass `-p` through literally |
 | `--ignore-eos` | Always emit up to `-n` |
@@ -245,6 +246,14 @@ machine the flag existed to accommodate. It now stops and says so. Use
   preserve the author's order. Frink cannot: `serde_json::Map` is a
   `BTreeMap` here, so the order is gone before the filter runs. It
   changes the order of keys inside a `<tools>` block, nothing else.
+- **`-st` / `--single-turn`:** accepted so a llama.cpp 0.4 command line
+  runs here unchanged, and ignored because `frink run` generates once
+  and exits. It is not a synonym for `--no-cnv`: `-st` runs the
+  conversation for one turn with the chat template applied, and
+  mapping the two together changes the answer. Measured on the same
+  prompt, the templated reply is "The capital of France is Paris."
+  and the raw one runs on into " Paris\nThe capital city of France
+  is...".
 - **`--no-cnv`:** raw prompt (classic completion). BOS is still added under the
   same rule.
 
@@ -287,9 +296,44 @@ metadata EOS alone and the model runs past its own turn, then starts
 interviewing itself. `--ignore-eos` disables all of it. `frink-server`
 uses the same set.
 
+## Matching llama.cpp's launcher
+
+llama.cpp's 0.4 launcher is `llama <command>`. The same command lines
+work here, because the names and the flag spellings are the same:
+
+| `llama` | `frink` |
+|---|---|
+| `llama cli -m model.gguf -p "Hi" -st` | `frink cli -m model.gguf -p "Hi" -st` |
+| `llama serve -m model.gguf` | `frink serve -m model.gguf` |
+| `llama download …` | `frink download …` |
+| `llama version` | `frink version` |
+| `llama licenses` | `frink licenses` |
+| `llama help` | `frink help` |
+
+`cli` is an alias of `run`, so both spellings work. `version` and
+`licenses` exist as SUBCOMMANDS as well as `--version`, because that
+is how the other launcher spells them and being told "not a command"
+is a poor answer to a correct command line.
+
+The run output carries the same block llama.cpp prints -- `build`,
+`model`, `ftype`, `modalities`, aligned the same way -- with a
+`device` row it does not have, and closes with llama.cpp's own
+`[ Prompt: X t/s | Generation: Y t/s ]`.
+
+**One number moved when this landed.** The prompt rate used to start
+its timer before the first forward pass, so one-time backend warmup
+was inside it and then divided by the prompt length: a five-token
+prompt read `12.64 t/s` against llama.cpp's `197.7` for the same file,
+which is not a real difference. Prefill takes about 0.40 s for a
+5-token prompt and 0.43 s for a 482-token one on an M2 Pro, so almost
+all of that was fixed cost. frink warms up before the timer now, as
+llama.cpp does at load, and the same prompt reads about 143 t/s.
+
 ## Other commands
 
 ```bash
+./target/release/frink version
+./target/release/frink licenses
 ./target/release/frink inspect models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf
 ./target/release/frink inspect-plan models/olmoe-1b-7b-0924-q4_0.gguf --strict
 # Plan against a backend's real memory budget (Metal
