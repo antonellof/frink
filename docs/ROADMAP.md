@@ -7,156 +7,49 @@ numbers: [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md).
 What ships today: [`FEATURES.md`](FEATURES.md) ·
 [`MODELS.md`](MODELS.md).
 
-## Closed on 2026-09-01
+## What already closed
 
-Against [`plans/llama-cpp-gap-inventory.md`](plans/llama-cpp-gap-inventory.md),
-whose §7 listed seven things that were silently wrong. All seven are
-fixed:
+A roadmap is what is NEXT. What has shipped is
+[`CHANGELOG.md`](../CHANGELOG.md), which carries every row with its
+date and its evidence; this page used to restate a month of it and went
+stale doing so.
 
-- The repetition penalty compounded as `penalty^n`, and temperature ran
-  before the truncation filters. Both were live on every `frink run` at
-  the defaults
-- `phi3` windowed every layer where llama.cpp windows none
-- `logit_bias` was dropped on `/v1/chat/completions`, and JSON-object
-  mode was dropped under continuous batching
-- `Q5_0` prefilled on the GPU and decoded on the CPU
-- The attention-softcap refusal gated on a GGUF key no converter writes,
-  so it could never fire while reading as coverage
+Two closures are worth keeping here because they changed BEHAVIOUR a
+reader may have depended on rather than adding something:
 
-Also landed: `--min-p` and `--repeat-last-n` at llama.cpp's defaults, a
-GBNF grammar engine wired to both HTTP routes and all three decode
-paths, a CUDA batched GEMM (**never run on a GPU**, see item 4 below),
-and a triage of every unaudited architecture refusal into
-fixture-away / one-match-arm / new-code / unknown.
+- **The repetition penalty compounded as `penalty^n`, and temperature
+  ran before the truncation filters.** Both were live on every
+  `frink run` at the defaults. The chain is llama.cpp's order now, and
+  the penalty is applied once per candidate rather than once per
+  occurrence, so a generation at the same seed and flags can differ
+  from one taken before 2026-09-01.
+- **Penalties now see the prompt.** llama-server seeds its sampler with
+  every prompt token before the first draw, and frink's HTTP path did
+  not, so `--repeat-last-n` meant one thing in `frink run` and another
+  over HTTP. One meaning now: the window is the tail of
+  `prompt ++ generated` on both.
 
-## Behaviour change, unreleased: penalties now see the prompt
-
-**This changes generated text for every user at the default
-`--repeat-penalty 1.1`, and belongs at the top of the next release's
-notes.**
-
-llama.cpp seeds its sampler with every prompt token before the first
-draw (`tools/server/server-context.cpp:386-390`, and `llama-cli` does
-the same), so `penalty_last_n` slides over the tail of
-`prompt ++ generated`. frink slid it over `generated` alone. Same
-checkpoint, same flags, same prompt, different text.
-
-A token that occurs in the prompt is now penalised on its FIRST
-generated occurrence rather than its second. `--repeat-penalty 1.0` or
-`--repeat-last-n 0` reproduces the old output exactly.
-
-This was taken as a parity fix rather than left as a documented
-divergence because it is a DEFINITION, not a default. This project
-already carries one deliberate deviation, `--repeat-penalty` defaulting
-to 1.1 against llama.cpp's 1.0, and that one is visible on a typed flag.
-This was the same flag meaning a different thing: invisible from the
-command line, and invisible to `frink parity`, which compares logits
-and tokenizers rather than sampled text.
-
-It also closed a five-way disagreement inside frink. The window was a
-`&[usize]` and five call sites chose four different answers, with
-`kimi_generate` quietly the only one that matched llama.cpp.
-`PenaltyWindow` has no constructor taking a single slice, so a caller
-cannot build one without saying what its prompt is, and the two places
-that genuinely have none say `&[]` visibly in the diff.
-
-## Closed on 2026-09-02
-
-- **Vulkan is a third backend**, behind `--features vulkan`. A `Q8_0`
-  matvec and nothing else, so a prefill still runs on the host. The
-  backend registry list is generated from the seam rather than
-  hand-kept, which is what caught a `Q5_0` Metal matvec that had been
-  half-wired since the previous release
-- **Encoder embeddings.** A BGE / E5 / GTE checkpoint can be the loaded
-  model, `/v1/embeddings` pools it the way the file says to, and the
-  generating routes answer 501 naming the model. Checked against
-  llama.cpp
-- **WordPiece tokenization**, verified against llama.cpp
-- **Lazy grammars**, so `tool_choice: "required"` and a named
-  `tool_choice` are enforced rather than asked for in the prompt
-- **`pattern` in the JSON-schema-to-GBNF converter**
-- **`response_format: json_schema`** is served rather than refused, and
-  the second decision site that answered it with "only json_object is
-  supported" is deleted. A forced `tool_choice` beside a schema is now
-  refused against the *resolved* grammar: the check asked `self.grammar`
-  and a schema would have walked past it
-- **The GGUF parser is bounded against a hostile file** (#24, #25, #26):
-  every count, string length, array length and nesting depth is checked
-  against what the file can actually contain, rather than against a
-  chosen constant
-- The repack cache served a dead mapping's bytes, and the CLI banner
-  reported a KV dtype the run does not keep
-
-### Second batch, same day
-
-- **`/v1/rerank`** runs the checkpoint's own classification head rather
-  than a cosine similarity. Such a checkpoint could not load at all
-  before: `assert_every_tensor_consumed` rejected the `cls.*` tensors
-  nobody read
-- **Speculative decoding with a real draft model.** `-d` /
-  `--model-draft` loads a second GGUF; the rejection rule was already
-  lossless at every temperature. Measured on a 3B target with a 1B
-  drafter: 40 tokens in 12 verification steps, acceptance length 3.33
-- **llama.cpp's `-hf user/repo:QUANT`** on `run`, `serve` and
-  `download`, with a cache under `FRINK_CACHE`. Plus the server flags a
-  copied `llama-server` command carries: `-c`, `--api-key`,
-  `--api-key-file`, `--alias`, `--ctk`, `--hf-file`, and `--jinja` /
-  `--no-warmup` / `--flash-attn` accepted rather than fatal
-- **`--presence-penalty` and `--frequency-penalty` on the CLI.** The
-  engine and the HTTP API had always honoured them while `run`
-  hardcoded both to zero
-- **Five one-match-arm architectures admitted**, so unaudited went 46 to
-  41 and audited 11 to 16
-- **Forced `tool_choice` on ten of the eleven wire formats**, up from
-  three, with the grammar's literals built from the same marker
-  description the parser reads with. `gemma4` got a shape of its own
-  (`call:NAME{k:v}` in gemma's quoting) and `minimax_m3` joined the
-  element shape; only `muse_glimmer` refuses, because its call boundary
-  is a channel header whose recipient name is a fact about a template
-  rather than about the format
-- **Gemma-2-27B and Gemma-3-4B/12B/27B numerics**, and Gemma-3 4B+ is
-  back on the fused Metal stacks with a per-layer `LayerRope`
-- **The response cache cannot store a cancelled answer**, enforced by a
-  private-field token rather than a check beside the data
-- `max_tokens` from an HTTP body reaching `Vec::with_capacity(usize::MAX)`,
-  and the batched prefill re-running the whole prompt on top of the
-  radix prefix it had just adopted
-
-Verified but NOT measured, and both need a quiet host: the speculative
-decoding speedup, and the speed recovery from Gemma-3 4B+ returning to
-the fused Metal path.
 
 ## Tracked as issues
 
-Open work now has a GitHub issue each, so nothing depends on a person
-remembering it. How work lands is written down in
+Open work has a GitHub issue each, so nothing depends on a person
+remembering it. How work lands is in
 [`plans/contribution-workflow.md`](plans/contribution-workflow.md): a
 completed feature is a branch and a pull request, a defect is an issue,
 and the two are never the same artifact.
 
-Everything open, as of 2026-09-02:
+[The open list](https://github.com/antonellof/frink/issues) is the live
+answer; a table here goes stale, and this one did -- six of its eight
+rows were closed while it still called them open. What is open today,
+and all four are performance:
 
-| # | What | Blocked on |
-|---|---|---|
-| [#27](https://github.com/antonellof/frink/issues/27) | CPU decode is scheduling-bound. **Measured 2026-09-04 on quiet rented hosts.** On 20-core aarch64 the persistent pool is **+123% at 3B and +87% at 8B**, which takes decode from losing to llama.cpp to BEATING it (23.14 vs 17.86, 12.41 vs 9.06). On 10-core x86 it is +49/+23/+15%. Still opt-in behind `FRINK_CPU_POOL=spin` | A decision, not a measurement. The pool regresses 37% at 135M on aarch64, reproducibly on a quiet host, so the default cannot simply flip. Needs a size or work rule, which is what `MIN_TASK_MACS` was |
-| [#128](https://github.com/antonellof/frink/issues/128) | Decode carries a fixed per-token cost of roughly 60 ms that no thread count or pool removes: 135M runs at 13 to 15 tok/s on 4, 8 and 19 aarch64 threads while llama.cpp does 190 to 204 | Finding what the constant IS. It is flat in thread count, so it is not fork-join, and flat in model size, so it is not arithmetic |
-| [#126](https://github.com/antonellof/frink/issues/126) | `frink bench --n-gpu-layers 0` does not force CPU, and `bench_suite.rs` uses that flag for every published `cpu` row, so the ledger's CPU numbers may include Metal | Nothing. The backend decision is cached in a `OnceLock` before the flag can apply; the fix is to stop having two answers |
-| [#127](https://github.com/antonellof/frink/issues/127) | x86_64 CPU throughput looks ~10x off llama.cpp (3B Q4_K_M at 1.03 tok/s on 10 Broadwell cores), and `benchmarks/RESULTS.md` has no x86 row to show it | A `llama-bench` comparison on the same x86 host, then finding whether the AVX2 arms are reached at all |
-| [#29](https://github.com/antonellof/frink/issues/29) | A forced `tool_choice` reaches ten of the eleven wire formats. `muse_glimmer` still answers 501 | A muse-glimmer checkpoint or its chat template. The block is already an element grammar this can write; what is missing is which recipient name the template addresses a tool with, and how much of the channel header the rendered prompt already wrote |
-| [#61](https://github.com/antonellof/frink/issues/61) | No KV store evicts behind a sliding window, so Gemma-3-4B holds 9.1 GB where 1.6 GB would do | Splitting `KvCache::seq_len` into positions and rows first. The design and the ordered steps are in the issue |
-| [#70](https://github.com/antonellof/frink/issues/70) | `frink quantize` writes Q8_0, Q4_K_S/M, Q5_K_S/M and Q6_K byte-identically to llama.cpp, with or without `--imatrix`, and refuses the rest by name; `frink imatrix` produces the matrix | Q2_K/Q3_K and the IQ-tier encoders. Steps 2 to 4 are in the issue |
-| [#82](https://github.com/antonellof/frink/issues/82) | Rerank scores are the head minus its pooler, so a thresholding client gets a range that never fires | A converter that keeps `bert.pooler.dense`, which frink can now write. Ordering is unaffected |
+| # | What |
+|---|---|
+| [#259](https://github.com/antonellof/frink/issues/259) | CUDA prefill is host-bound: 196 synchronous round trips and 3.1 GB over PCIe per `pp512` step |
+| [#133](https://github.com/antonellof/frink/issues/133) | CUDA decode is memory-bound: the matvec kernels reach 5.3% of card bandwidth where llama.cpp reaches 60.4% |
+| [#61](https://github.com/antonellof/frink/issues/61) | No KV store evicts behind a sliding window, so a windowed model costs full-attention memory |
+| [#27](https://github.com/antonellof/frink/issues/27) | CPU decode is scheduling-bound: rayon fork-join per operation where llama.cpp uses a persistent spin-barrier pool |
 
-Closed on 2026-09-02 and worth knowing about: the GGUF parser hardening
-(#24, #25, #26, #30, #31, #32), `max_tokens` reaching
-`Vec::with_capacity(usize::MAX)` (#36), every continuous-batching cache
-hit returning wrong logits (#37), the response cache serving
-unconstrained answers to grammar requests (#35) and cancelled answers as
-finished ones (#57), the Gemma numerics (#39, #40), the unigram
-tokenizer panicking per request on a short scores array (#34), the KV
-budget pricing a window no store implements (#33), `/tokenize` refusing
-for an encoder (#28), penalties never seeing the prompt (#55, #73), and
-`/v1/rerank` ranking the answering document LAST (#43, #44).
 
 ## Speed gaps against llama.cpp
 
@@ -237,43 +130,29 @@ this is stale.
 
 **Models**
 
-- Gemma-4 tokenizer (`gemma4`) plus an end-to-end chat smoke test (the
-  engine loads today)
-- Qwen3.5 (`qwen35`, `qwen35moe`, `qwen3next`) and Llama 4 run on
-  the generic path since 2026-09-14 (`tests/qwen35_graphs.rs`,
-  `tests/llama4_graphs.rs`); no engine for either
-- MiniMax-M3's sparse attention (`minimax-m2` runs on the generic path)
-- Vision (projector plus generate)
-- Real GLM-5.2, DeepSeek V4 and full Kimi, run end to end
+- Vision: a projector plus generate. Nothing exists today
+- MiniMax-M3's sparse attention
+- The three remaining unaudited graphs: a second routing stage
+  (`graniteswitch`), a per-token adapter (`qwen4exp`), a second expert
+  bank (`grovemoe`)
+- Real GLM-5.2, DeepSeek V4 and full Kimi, run end to end on a
+  checkpoint rather than a fixture
 - MTP draft heads
 - Qwen2-MoE and Mixtral pins, once the GGUF fits Host B
 
 **Serving**
 
-- Tool calling: the OpenAI `tools` / `tool_choice` request and response
-  shape. *Eleven wire formats now parse* (`frink-server::policy::parser::tool_call`),
-  every call in a response rather than the first, and a reasoning
-  model's chain of thought comes back as `reasoning_content`. Five of
-  the eleven stream `tool_calls[].index` argument deltas.
-  `tool_choice: "required"` and a named `tool_choice` compile a *lazy*
-  grammar (llama.cpp's `trigger_patterns`, a grammar switched on partway
-  through a response) from the request's own `tools`, on **eight of the
-  eleven** formats. The grammar's literals come from the same marker
-  description the parser reads with, which is what makes widening it
-  safe: two hand-kept tables, one for writing a call and one for reading
-  it, would drift into output the engine forced and could not parse
-  back. `gemma4`, `minimax_m3` and `muse_glimmer` answer 501 for stated
-  reasons rather than for effort (#29). What is left here is argument
-  deltas for the six JSON-payload formats, and streamed tool calls on
-  the continuous-batching path
-- JSON-schema constrained decoding, **done**. The GBNF engine and the
-  `grammar` request field shipped on 2026-09-01, on chat, completions
-  and all three decode paths; `response_format: json_schema` and
-  llama.cpp's bare `json_schema` field followed on 2026-09-02, compiled
-  by the same converter and decided at the one site that resolves every
-  spelling of "constrain the output"
-- MCP tool invocation. Anthropic streaming and tools now ship
-- The rest of the OpenAI API surface (see [`API.md`](API.md))
+- Tool calling. Eleven wire formats parse, and a forced `tool_choice`
+  compiles a lazy grammar from the request's own `tools` on ten of
+  them; `muse_glimmer` is the eleventh and answers 501 for a stated
+  reason, not for effort (#29). What is left: argument deltas for the
+  six JSON-payload formats, and streamed tool calls on the
+  continuous-batching path
+- MCP tool invocation
+- The rest of the OpenAI API surface. On the generation wires only
+  `use_beam_search`, `prompt_embeds` and `suffix` are still refused,
+  each on its merits; what is missing is whole endpoints
+  (`/pooling`, `/classify`) rather than fields (see [`API.md`](API.md))
 - Docker images (CPU, Metal and CUDA variants)
 - Throughput measurement for concurrent continuous-batching requests
   (Metal parallel fix shipped 0.15.2; CB garbled-output fix and Host B
