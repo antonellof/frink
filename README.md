@@ -47,7 +47,7 @@ kernels, attention and expert routing are written here, in Rust.
   Tokenization is verified against libllama on twenty checkpoints under
   both special-token settings, and every engine number in
   [the speed table](benchmarks/RESULTS.md) was measured against
-  llama.cpp on the same host and the same file. 99 architectures run
+  llama.cpp on the same host and the same file. 100 architectures run
   with a logit comparison to back it; the rest stop and say what is
   missing rather than guess.
 - **OpenAI-compatible server.** On Metal, multiple concurrent clients

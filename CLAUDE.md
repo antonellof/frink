@@ -12,7 +12,7 @@ same command shapes, same or better performance, on the hardware people
 actually own. `docs/plans/north-star.md` is the ranking every other plan
 is read through, and `docs/plans/README.md` is the index.
 
-Honest position, re-audited 2026-09-19 against a MOVED PIN. **99**
+Honest position, re-audited 2026-09-19 against a MOVED PIN. **100**
 architectures run with evidence (`capability::AUDITED_GENERIC_GQA`), 4
 more have dedicated engines, and everything else REFUSES. The "loads
 and is WRONG" class is closed: the generic path is opt-in, so an

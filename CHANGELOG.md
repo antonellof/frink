@@ -17,6 +17,32 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`llama-embed` runs.** It was deferred as an "embedding variant",
+  which was read off the NAME rather than the graph -- the mistake
+  `pangu-embedded` already cost this project once.
+
+  llama.cpp's `llama_model_llama_embed` INHERITS `llama_model_llama`
+  (`models.h:175-182`): the same hparam loader, the same tensor
+  loader, and a graph that is `llama`'s with the `embed` template
+  argument set, which skips the output head and changes nothing in the
+  decoder body. So it belongs on the decoder path, not the encoder
+  loader, and `/v1/embeddings` pools its hidden states as it already
+  does for any GGUF decoder.
+
+  `capability::canonical_architecture` is the alias, resolved ONCE
+  where the loader reads `general.architecture`. The first attempt
+  added a catalog row and nothing else, and the unread-tensor gate
+  caught it immediately: a dozen tables in this crate are keyed by the
+  architecture string, and adding a row to each is a dozen places that
+  have to agree about one fact. The gate catches the first one you
+  forget and nothing catches the rest.
+
+  Evidence is `llama_biases_tiny.gguf`'s weights written under the
+  other architecture string, held to `llama`'s own libllama golden and
+  asserted bit-identical to the `llama` spelling -- not to frink's own
+  output, which would be a tautology.
+
+
 - **Cache-aware admission.** The radix prefix cache already knew how
   much of an incoming prompt was computed; nothing read it at
   admission, so a job whose whole system prompt sat in the page store

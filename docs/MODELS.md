@@ -13,6 +13,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Family | Notes |
 |---|---|
 | Llama 3.x, TinyLlama, Mistral, Yi, MiroThinker | |
+| `llama-embed` | Llama's graph with the output head skipped. `/v1/embeddings` pools its hidden states |
 | Qwen2.5, Qwen3, Qwen2-MoE / Qwen1.5-MoE, Qwen3-MoE | |
 | Qwen3.5 dense and MoE, Qwen3-Next | Recurrent: no prefix-cache reuse, no `--model-draft` |
 | Gemma-2, Gemma-3 | |
@@ -35,7 +36,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint. `PTQ1_0` runs on CPU and Metal; `PQ2_0` is recognised, not executed |
 | BERT, nomic-bert, jina-bert-v3 | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
 
-**99 architectures run with** a benchmark row, a pinned logit
+**100 architectures run with** a benchmark row, a pinned logit
 comparison against real `libllama`, or a fixture behind each. The list
 above is by family; `frink archs` is by GGUF architecture string and is
 the authoritative one.
