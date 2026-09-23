@@ -14,6 +14,14 @@
 //! cannot build one and forget the rates: there is no path from a
 //! finished row to a `Usage` that does not go through
 //! [`RowClock::usage`].
+//!
+//! The same shape recurred once, which is why `cached_tokens` is an
+//! ARGUMENT here rather than a field somebody sets: the batched path
+//! reused a prefix correctly -- measured, 894 ms cold against 409 ms
+//! warm on the same prompt -- and reported `cached_tokens: 0` for
+//! every request, because the private `generate` loop set that field
+//! in `request_tail` and the batcher never reached it. A caller that
+//! forgets it now fails to compile.
 
 use std::time::Instant;
 
@@ -64,19 +72,32 @@ impl RowClock {
         self.first_token.get_or_insert_with(Instant::now);
     }
 
-    /// The row's `Usage`, rates included.
+    /// The row's `Usage`, rates and prefix reuse included.
     ///
     /// A row that failed during prefill has no `prefill_done`, and its
     /// decode phase is empty rather than negative: `Usage::with_timings`
     /// leaves a rate unset for a zero-length phase, so an unfinished
     /// row reports durations without inventing a throughput.
-    pub(super) fn usage(&self, prompt_tokens: usize, completion_tokens: usize) -> Usage {
+    ///
+    /// `cached_tokens` carries the same distinction the private loop
+    /// makes: `Some(0)` is a prefix cache that was consulted and
+    /// missed, `None` is no prefix cache to consult. A caller cannot
+    /// pass neither.
+    pub(super) fn usage(
+        &self,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        cached_tokens: Option<usize>,
+    ) -> Usage {
         let ended = Instant::now();
         let prefill_end = self.prefill_done.unwrap_or(ended);
         let prefill_secs = prefill_end.duration_since(self.started).as_secs_f64();
         let decode_secs = ended.duration_since(prefill_end).as_secs_f64();
-        let usage =
+        let mut usage =
             Usage::new(prompt_tokens, completion_tokens).with_timings(prefill_secs, decode_secs);
+        if let Some(cached) = cached_tokens {
+            usage = usage.with_cached_tokens(cached);
+        }
         match self.first_token {
             Some(first) => usage.with_ttft(first.duration_since(self.started).as_secs_f64()),
             None => usage,
@@ -102,7 +123,7 @@ mod tests {
         clock.prefill_finished();
         clock.token();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let usage = clock.usage(41, 32);
+        let usage = clock.usage(41, 32, None);
         assert!(
             usage.prompt_per_second.is_some(),
             "prefill rate missing: {usage:?}"
@@ -141,7 +162,7 @@ mod tests {
     #[test]
     fn a_row_that_never_decoded_has_no_decode_rate() {
         let clock = RowClock::start();
-        let usage = clock.usage(41, 0);
+        let usage = clock.usage(41, 0, None);
         assert_eq!(usage.predicted_per_second, None);
         assert_eq!(usage.time_to_first_token_ms, None);
         assert!(usage.generation_duration_ms.is_some_and(|ms| ms >= 0.0));

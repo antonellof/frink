@@ -605,6 +605,10 @@ pub(super) fn accept(
         return None;
     }
 
+    // Set beside the lease that decides it. Read HERE rather than when
+    // the row finishes, because by then this row has published its own
+    // prefix and the lease would report that back as reuse.
+    let mut cached_tokens = None;
     let state = match paged {
         Some(config) => {
             // Worst case for this row: its prompt plus everything it
@@ -617,12 +621,17 @@ pub(super) fn accept(
                 max_seq_len,
                 crate::generate::PrefixIntent::sharing(job.params.cache_salt),
             ) {
-                Ok(lease) => PrefillState::new_paged(
-                    Arc::clone(decoder),
-                    &job.prompt_tokens,
-                    chunk_size,
-                    lease,
-                ),
+                Ok(lease) => {
+                    if config.radix.is_some() {
+                        cached_tokens = Some(lease.adopted_positions(lease.block_size()));
+                    }
+                    PrefillState::new_paged(
+                        Arc::clone(decoder),
+                        &job.prompt_tokens,
+                        chunk_size,
+                        lease,
+                    )
+                }
                 Err(_) => {
                     // The block budget said yes and the store said no.
                     // Refuse this row rather than admit one with no
@@ -644,5 +653,6 @@ pub(super) fn accept(
         reply: job.reply,
         abort: job.abort,
         blocks: job.blocks,
+        cached_tokens,
     })
 }
