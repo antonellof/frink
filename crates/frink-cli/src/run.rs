@@ -322,8 +322,30 @@ pub struct InferArgs {
     pub system: Option<String>,
 
     /// Raw prompt: skip chat-template wrap (llama.cpp `--no-cnv`).
+    ///
+    /// llama.cpp REMOVED `--no-cnv` in its 0.4 launcher and spells the
+    /// same intent `-st` / `--single-turn`. Both are accepted here:
+    /// dropping the old name would break every command line written
+    /// against the older tool, and refusing the new one means a
+    /// current llama.cpp invocation fails against frink -- which is
+    /// the whole thing this flag exists to avoid.
     #[arg(long = "no-cnv", default_value_t = false)]
     pub no_cnv: bool,
+
+    /// Accepted and ignored: `frink run` is already one turn.
+    ///
+    /// llama.cpp's `-st` / `--single-turn` means "run the CONVERSATION
+    /// for one turn, then exit" -- the chat template still applies. It
+    /// is NOT `--no-cnv`, which skips the template, and mapping one to
+    /// the other changes the answer: measured on the same prompt, the
+    /// templated reply is "The capital of France is Paris." and the
+    /// raw one continues " Paris\nThe capital city of France is...".
+    ///
+    /// `frink run` generates once and exits, so the flag already
+    /// describes what it does. Accepted so a llama.cpp command line
+    /// runs unchanged, and ignored rather than silently redirected.
+    #[arg(long = "single-turn", default_value_t = false)]
+    pub single_turn: bool,
 
     /// Process `\\n` / `\\t` / `\\r` / `\\\\` escapes in `-p`. Use
     /// `--no-escape` to pass the prompt through literally.
@@ -1242,7 +1264,10 @@ fn apply_backend_env(args: &InferArgs) -> anyhow::Result<()> {
         std::env::set_var("FRINK_CTK", args.ctk.trim());
     }
 
-    eprintln!("{}", banner_line(args, device));
+    // Held for the banner rather than printed here: this runs before
+    // the model is open, and printing it now puts it above the
+    // wordmark, where llama.cpp has nothing.
+    crate::cli_output::set_device_line(banner_line(args, device));
     Ok(())
 }
 
@@ -1449,11 +1474,6 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
         eprintln!("------------------");
     }
 
-    eprintln!(
-        "frink: loading {} (tokenizer={}, ctx={ctx_size})",
-        model,
-        tokenizer.kind()
-    );
     let load_t = Instant::now();
     // LongRoPE picks its factor set from the run's context size, not the
     // checkpoint's advertised maximum (llama.cpp does the same, per
@@ -1465,7 +1485,26 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
         .attach_lora_specs(&file, &lora_specs)
         .map_err(|e| anyhow::anyhow!("lora: {e}"))?;
     let decoder = decoder;
-    eprintln!("frink: loaded in {:.2}s", load_t.elapsed().as_secs_f64());
+    // llama.cpp's banner, printed where its own is: once the model is
+    // open and before anything is generated. The load duration moved
+    // into it rather than onto a line of its own, because llama.cpp
+    // has no such line and the point of this block is to look like
+    // theirs.
+    crate::cli_output::print_logo(&mut io::stderr())?;
+    crate::cli_output::Banner {
+        model_path: &model,
+        ftype: &crate::cli_output::ftype_name(file.metadata_u64("general.file_type")),
+        modalities: "text",
+    }
+    .print(&mut io::stderr())?;
+    if std::env::var_os("FRINK_QUIET").is_none() {
+        eprintln!(
+            "loaded in {:.2}s (tokenizer={}, ctx={ctx_size})",
+            load_t.elapsed().as_secs_f64(),
+            tokenizer.kind()
+        );
+    }
+    crate::cli_output::print_prompt_echo(&mut io::stderr(), &args.prompt)?;
 
     let mut tokens = tokenizer.encode(&prompt, SpecialTokens::Parse);
     // Match llama.cpp vocab add_bos (qwen2/BPE default false). Blindly
@@ -1549,6 +1588,11 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
         );
     }
 
+    // Before the timer, never inside it: the first forward pass
+    // builds every pipeline and allocates every buffer, and that
+    // cost divided by a short prompt is what made this line read
+    // 12.64 t/s where llama.cpp reads 197.7 for the same file.
+    crate::cli_output::warm_up(&decoder);
     let prefill_t = Instant::now();
     let mut pos;
     let mut logits = if tokens.is_empty() {
@@ -1587,20 +1631,14 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
 
     let prompt_n = tokens.len();
     let gen_n = generated.len();
-    let prompt_tps = if prefill_secs > 0.0 {
-        prompt_n as f64 / prefill_secs
-    } else {
-        0.0
-    };
-    let pred_tps = if decode_secs > 0.0 {
-        gen_n as f64 / decode_secs
-    } else {
-        0.0
-    };
-    eprintln!(
-        "frink: prompt {prompt_n} tokens, {prompt_tps:.2} t/s; \
-         predict {gen_n} tokens, {pred_tps:.2} t/s"
-    );
+    crate::cli_output::Timings {
+        prompt_tokens: prompt_n,
+        prompt_secs: prefill_secs,
+        predicted_tokens: gen_n,
+        predicted_secs: decode_secs,
+    }
+    .print(&mut io::stderr())?;
+    crate::cli_output::print_exiting(&mut io::stderr())?;
 
     Ok(())
 }
@@ -1677,6 +1715,11 @@ fn run_mla_infer(args: InferArgs, path: &Path, file: &ShardedGguf) -> anyhow::Re
     )?;
     let mut state = Engine::new_state(&engine);
 
+    // Before the timer, never inside it: the first forward pass
+    // builds every pipeline and allocates every buffer, and that
+    // cost divided by a short prompt is what made this line read
+    // 12.64 t/s where llama.cpp reads 197.7 for the same file.
+    crate::cli_output::warm_up_engine(&engine);
     let prefill_t = Instant::now();
     let mut pos = 0usize;
     let mut logits = if tokens.is_empty() {
@@ -1718,20 +1761,13 @@ fn run_mla_infer(args: InferArgs, path: &Path, file: &ShardedGguf) -> anyhow::Re
 
     let prompt_n = tokens.len();
     let gen_n = generated.len();
-    let prompt_tps = if prefill_secs > 0.0 {
-        prompt_n as f64 / prefill_secs
-    } else {
-        0.0
-    };
-    let pred_tps = if decode_secs > 0.0 {
-        gen_n as f64 / decode_secs
-    } else {
-        0.0
-    };
-    eprintln!(
-        "frink: prompt {prompt_n} tokens, {prompt_tps:.2} t/s; \
-         predict {gen_n} tokens, {pred_tps:.2} t/s"
-    );
+    crate::cli_output::Timings {
+        prompt_tokens: prompt_n,
+        prompt_secs: prefill_secs,
+        predicted_tokens: gen_n,
+        predicted_secs: decode_secs,
+    }
+    .print(&mut io::stderr())?;
     Ok(())
 }
 
@@ -1808,6 +1844,11 @@ fn run_gemma4_infer(args: InferArgs, path: &Path, file: &ShardedGguf) -> anyhow:
     )?;
     let mut state = Engine::new_state(&engine);
 
+    // Before the timer, never inside it: the first forward pass
+    // builds every pipeline and allocates every buffer, and that
+    // cost divided by a short prompt is what made this line read
+    // 12.64 t/s where llama.cpp reads 197.7 for the same file.
+    crate::cli_output::warm_up_engine(&engine);
     let prefill_t = Instant::now();
     let mut pos = 0usize;
     let mut logits = if tokens.is_empty() {
@@ -1849,20 +1890,13 @@ fn run_gemma4_infer(args: InferArgs, path: &Path, file: &ShardedGguf) -> anyhow:
 
     let prompt_n = tokens.len();
     let gen_n = generated.len();
-    let prompt_tps = if prefill_secs > 0.0 {
-        prompt_n as f64 / prefill_secs
-    } else {
-        0.0
-    };
-    let pred_tps = if decode_secs > 0.0 {
-        gen_n as f64 / decode_secs
-    } else {
-        0.0
-    };
-    eprintln!(
-        "frink: prompt {prompt_n} tokens, {prompt_tps:.2} t/s; \
-         predict {gen_n} tokens, {pred_tps:.2} t/s"
-    );
+    crate::cli_output::Timings {
+        prompt_tokens: prompt_n,
+        prompt_secs: prefill_secs,
+        predicted_tokens: gen_n,
+        predicted_secs: decode_secs,
+    }
+    .print(&mut io::stderr())?;
     Ok(())
 }
 
@@ -1938,6 +1972,11 @@ fn run_glm52_infer(args: InferArgs, path: &Path, file: &ShardedGguf) -> anyhow::
     )?;
     let mut state = Engine::new_state(&engine);
 
+    // Before the timer, never inside it: the first forward pass
+    // builds every pipeline and allocates every buffer, and that
+    // cost divided by a short prompt is what made this line read
+    // 12.64 t/s where llama.cpp reads 197.7 for the same file.
+    crate::cli_output::warm_up_engine(&engine);
     let prefill_t = Instant::now();
     let mut pos = 0usize;
     let mut logits = if tokens.is_empty() {
@@ -1979,20 +2018,14 @@ fn run_glm52_infer(args: InferArgs, path: &Path, file: &ShardedGguf) -> anyhow::
 
     let prompt_n = tokens.len();
     let gen_n = generated.len();
-    let prompt_tps = if prefill_secs > 0.0 {
-        prompt_n as f64 / prefill_secs
-    } else {
-        0.0
-    };
-    let pred_tps = if decode_secs > 0.0 {
-        gen_n as f64 / decode_secs
-    } else {
-        0.0
-    };
-    eprintln!(
-        "frink: prompt {prompt_n} tokens, {prompt_tps:.2} t/s; \
-         predict {gen_n} tokens, {pred_tps:.2} t/s"
-    );
+    crate::cli_output::Timings {
+        prompt_tokens: prompt_n,
+        prompt_secs: prefill_secs,
+        predicted_tokens: gen_n,
+        predicted_secs: decode_secs,
+    }
+    .print(&mut io::stderr())?;
+    crate::cli_output::print_exiting(&mut io::stderr())?;
 
     Ok(())
 }
