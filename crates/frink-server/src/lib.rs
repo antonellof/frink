@@ -82,6 +82,7 @@ mod security;
 mod serving;
 mod session;
 mod slots;
+mod srvlog;
 mod sse;
 mod stats;
 mod stop;
@@ -4049,11 +4050,21 @@ fn startup_model_id() -> Option<String> {
 /// or efficiency cores.
 fn init_cpu_pool() {
     match frink_core::threads::init_cpu_pool() {
-        Some(n) => eprintln!(
-            "frink-server: rayon pool {n} threads (perf cores {}; override with FRINK_CPU_THREADS)",
-            frink_core::threads::perf_core_count()
+        Some(n) => crate::srvlog::log(
+            crate::srvlog::Level::Info,
+            crate::srvlog::Sub::Cmn,
+            "init",
+            &format!(
+                "rayon pool init, n_threads = {n} (perf cores {}; override with FRINK_CPU_THREADS)",
+                frink_core::threads::perf_core_count()
+            ),
         ),
-        None => eprintln!("frink-server: global rayon pool already built; leaving it alone"),
+        None => crate::srvlog::log(
+            crate::srvlog::Level::Warn,
+            crate::srvlog::Sub::Cmn,
+            "init",
+            "global rayon pool already built; leaving it alone",
+        ),
     }
 }
 
@@ -4180,10 +4191,10 @@ pub fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     };
 
     let journal = journal::Journal::from_env();
-    eprintln!(
-        "frink-server: process lifecycle journal at {:?} (override with FRINK_JOURNAL_PATH)",
+    crate::srvlog::srv(&format!(
+        "lifecycle journal at {:?} (override with FRINK_JOURNAL_PATH)",
         journal.path()
-    );
+    ));
     journal.append(&journal::Record::session_start(
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
@@ -4862,6 +4873,10 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             listener.set_nonblocking(true)?;
             let bound = listener.local_addr()?;
             tracing::info!("TLS enabled: frink-server listening on https://{bound}");
+            // The human-facing line, in `llama serve`'s shape. The JSON
+            // on stdout below is the parsed contract and is untouched.
+            crate::srvlog::srv("model loaded");
+            crate::srvlog::srv(&format!("listening on https://{bound}"));
             announce_ready(bound, "https");
 
             let handle = axum_server::Handle::new();
@@ -4879,6 +4894,8 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             let bound = listener.local_addr()?;
             tracing::info!("frink-server listening on {bound}");
+            crate::srvlog::srv("model loaded");
+            crate::srvlog::srv(&format!("listening on http://{bound}"));
             announce_ready(bound, "http");
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal(exit_on_stdin_close))
