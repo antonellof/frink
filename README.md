@@ -32,11 +32,11 @@ Frink loads GGUF checkpoints and runs them on the hardware you already
 own. No llama.cpp bindings, no ggml wrapper. The loader, the quantized
 kernels, attention and expert routing are written here, in Rust.
 
-- **One binary, no runtime.** 19 MB with Metal and the server, and
-  completions, the API server, `download`, `bench`, `batched-bench`,
-  `quantize`, `imatrix`, `gguf-split` and `verify` are all inside it. No
-  wheels, no CUDA userspace to match against a driver. PyTorch alone is
-  402 MB, before a serving stack sits on top.
+- **One binary, no runtime.** 23 MB on macOS arm64 with Metal and the
+  server, and completions, the API server, `download`, `bench`,
+  `batched-bench`, `quantize`, `imatrix`, `gguf-split` and `verify` are
+  all inside it. No wheels, no CUDA userspace to match against a
+  driver. PyTorch alone is 402 MB, before a serving stack sits on top.
 - **Quantized end to end.** Weights stay quantized on mmap and
   dequantize inside the matmul, so an 8B model fits on a laptop.
   K-quants, the IQ tiers, MXFP4, F16 and BF16.
@@ -75,9 +75,12 @@ kernels, attention and expert routing are written here, in Rust.
 - **Mixture-of-experts is a first-class path.** GPU routing, indexed
   expert GEMMs, residency planning. Experts stream from the checkpoint
   when they do not fit, and never when they do.
-- **Embeddings from real encoder models.** Point `-m` at a BGE, E5 or
-  GTE checkpoint and `/v1/embeddings` serves it, pooled the way the file
-  says to. Not a decoder's hidden states borrowed for the job.
+- **Embeddings, reranking and scoring from real encoder models.** Point
+  `-m` at a BGE, E5 or GTE checkpoint and `/v1/embeddings` serves it,
+  pooled the way the file says to. Not a decoder's hidden states
+  borrowed for the job. A cross-encoder with a rank head answers
+  `/v1/rerank` through the head itself; `/v1/score` takes either kind
+  and says which one answered.
 
 ## Install
 
@@ -86,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/antonellof/frink/main/scripts/insta
 ```
 
 Installs `frink` and `frink-server` into `~/.local/bin` (override with
-`FRINK_INSTALL_DIR`, pin with `FRINK_VERSION=v0.47.0`). The downloaded
+`FRINK_INSTALL_DIR`, pin with `FRINK_VERSION=v0.48.0`). The downloaded
 `frink` is built with `serve`, so one binary runs completions and
 serves the API. `frink-server` ships alongside it so an existing one on
 your PATH keeps working. Prebuilts are macOS arm64 with Metal and Linux
@@ -187,7 +190,7 @@ belongs to an unrelated crate.
 
 ```toml
 [dependencies]
-frink-inference = "0.47"
+frink-inference = "0.48"
 ```
 
 ```rust
