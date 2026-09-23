@@ -194,7 +194,7 @@ rule that ranks them. The plan's order is:
 |---|---|
 | 1 | Fix what is wrong, and close the oracle's hole |
 | 2 | Model layer: audit, vocabulary, then split |
-| 3 | Close the 41 unaudited architectures, auditing outward |
+| 3 | Close the 4 unaudited architectures, auditing outward |
 | 4 | Out-of-core MoE, and one large real checkpoint |
 | 5 | CPU decode scaling |
 | 6 | Hardware reach: the backend seam, then Vulkan |
@@ -227,10 +227,11 @@ this is stale.
    [`API.md`](API.md). GBNF grammars and the lazy grammars behind a
    forced `tool_choice` both ship, and so does
    `response_format: json_schema`, through the same converter a forced
-   `tool_choice` compiles its arguments with. What is left is a forced
-   `tool_choice` on the eight wire formats that are not JSON-object
-   shaped ([#29](https://github.com/antonellof/frink/issues/29)), and
-   MCP invocation.
+   `tool_choice` compiles its arguments with, and a forced
+   `tool_choice` now reaches ten of the eleven wire formats. What is
+   left is the eleventh (`muse_glimmer`,
+   [#29](https://github.com/antonellof/frink/issues/29)) and MCP
+   invocation.
 6. **Docker images**, so evaluating any of this stops requiring a Rust
    toolchain.
 

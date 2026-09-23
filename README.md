@@ -53,10 +53,16 @@ kernels, attention and expert routing are written here, in Rust.
 - **OpenAI-compatible server.** On Metal, multiple concurrent clients
   share one batched decode worker (llama.cpp slots + continuous batching,
   on by default). Paged KV shared across conversations, runtime model
-  swap, slot save and restore that refuses a mismatched checkpoint by
-  name, resumable streams, Anthropic and Responses endpoints, and
-  speculative decoding that stays lossless at any temperature. Point
-  your existing client at it.
+  swap and sleep/wake, slot save and restore that refuses a mismatched
+  checkpoint by name, resumable streams, Anthropic and Responses
+  endpoints, and speculative decoding that stays lossless at any
+  temperature. Point your existing client at it.
+- **The sampling surface, not a subset of it.** `n` and `best_of` from
+  one shared prefill, interleaved when streaming; `logprobs` and
+  `prompt_logprobs`; `logit_bias`, `allowed_token_ids` and `bad_words`;
+  `echo`, `truncate_prompt_tokens`, `cache_salt`. A field this server
+  does not implement is refused BY NAME rather than dropped, because a
+  dropped field is indistinguishable from an honoured one.
 - **Structured output, enforced per token.** A GBNF grammar, a forced
   `tool_choice` in ten of the eleven tool-call wire formats, or a tool's
   own `parameters` schema: a stack machine masks every token that would
@@ -80,7 +86,7 @@ curl -fsSL https://raw.githubusercontent.com/antonellof/frink/main/scripts/insta
 ```
 
 Installs `frink` and `frink-server` into `~/.local/bin` (override with
-`FRINK_INSTALL_DIR`, pin with `FRINK_VERSION=v0.17.1`). The downloaded
+`FRINK_INSTALL_DIR`, pin with `FRINK_VERSION=v0.47.0`). The downloaded
 `frink` is built with `serve`, so one binary runs completions and
 serves the API. `frink-server` ships alongside it so an existing one on
 your PATH keeps working. Prebuilts are macOS arm64 with Metal and Linux
@@ -181,7 +187,7 @@ belongs to an unrelated crate.
 
 ```toml
 [dependencies]
-frink-inference = "0.17"
+frink-inference = "0.47"
 ```
 
 ```rust

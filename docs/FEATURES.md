@@ -855,6 +855,44 @@ OpenAI-compatible HTTP API:
   none refuses DRY rather than running it breaker-less. `mirostat` and
   `infill` are the two upstream samplers still refused, each by name.
   Every route reads the same knobs through one `SamplingKnobs::resolve`
+- **Several completions per request.** `n` and `best_of` prefill the
+  prompt ONCE and fork the KV per choice, so `prompt_tokens` counts it
+  once while `completion_tokens` sums. Choice `i` samples from
+  `seed + i`, so choice 0 of four is byte-identical to the single
+  answer at the same seed. With `stream`, the choices are INTERLEAVED
+  a token at a time, each chunk carrying its own `choices[].index` and
+  its own reasoning and tool-call parser state. On the paged store the
+  fork is copy-on-write: full pages are shared and only the
+  part-written tail is copied
+- **Per-token steering.** `logit_bias` (upstream's `-100..100`,
+  outside it a 400 rather than a clamp), `allowed_token_ids` and
+  `bad_words`, all applied in the same mask the grammar, JSON mode and
+  the reasoning budget share. A bias cannot lift a token a constraint
+  forbade: a bias is finite and a mask is `-inf`
+- **Logprobs.** `logprobs` on completions (parallel arrays with
+  `text_offset`) and on chat (OpenAI's `content[]` shape), over the
+  distribution the sampler actually drew from, with candidates the
+  chain REMOVED omitted rather than reported as `null`.
+  `prompt_logprobs` scores the prompt from the PLAIN softmax, because
+  a prompt token was supplied rather than drawn
+- **Prompt controls.** `echo` returns the prompt and the completion as
+  one string with the logprobs arrays covering both;
+  `truncate_prompt_tokens` keeps the last `k` tokens, applied before
+  anything is prefilled so the KV, the usage and `echo` all see the
+  prompt that was ANSWERED; `cache_salt` names a caller's prefix-cache
+  namespace, honoured by the contiguous cache, the response cache and
+  the paged store's radix tree
+- **Sleep and wake** (`POST /sleep`, `POST /wake_up`,
+  `GET /is_sleeping`): an unload that REMEMBERS, so the server can
+  bring the model back itself. Frees the KV pool, the paged store, the
+  repack and expert caches and any device buffers. One level, not two:
+  frink mmaps its weights, so discarding them is what dropping the
+  handle already does
+- **Sentence-pair scoring** (`POST /v1/score`, `POST /score`): a
+  cross-encoder answers with its head, a bi-encoder with the cosine of
+  two embeddings, and `frink_score_kind` says which. `/v1/rerank`
+  requires the head and refuses to substitute a cosine, because a
+  rerank promises the model's own ranking
 - Grammar-constrained decoding, in every spelling: llama.cpp's own
   `grammar` field, OpenAI's `response_format: json_schema`, llama.cpp's
   bare `json_schema` field on `/completion`, and a forced `tool_choice`.
