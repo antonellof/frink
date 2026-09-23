@@ -11,13 +11,15 @@ Measured on **5 machines**, one section each. A gap only means something against
 
 ### At a glance
 
-| Machine | Backend | Prefill | Decode |
-|---|---|---|---|
-| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | ⚪ **1.04×** to 🔴 **4.45×** | ⚪ **1.04×** to 🔴 **1.34×** |
-| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | 🔴 **25.53×** to 🔴 **43.29×** | 🔴 **2.75×** to 🔴 **9.25×** |
-| AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | 🔴 **6.26×** to 🔴 **10.14×** | 🔴 **1.06×** to 🔴 **1.92×** |
-| Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | ⚪ **0.99×** to 🔴 **1.09×** | 🟢 **0.60×** to ⚪ **0.96×** |
-| Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | 🔴 **22.55×** to 🔴 **33.79×** | 🔴 **2.18×** to 🔴 **5.04×** |
+| Machine | Backend | Measured at | Prefill | Decode |
+|---|---|---|---|---|
+| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | `0.21.0` ⚠️ | ⚪ **1.04×** to 🔴 **4.45×** | ⚪ **1.04×** to 🔴 **1.34×** |
+| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | `0.21.0` ⚠️ | 🔴 **25.53×** to 🔴 **43.29×** | 🔴 **2.75×** to 🔴 **9.25×** |
+| AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | `0.17.1` ⚠️ | 🔴 **6.26×** to 🔴 **10.14×** | 🔴 **1.06×** to 🔴 **1.92×** |
+| Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | `0.20.0` ⚠️ | ⚪ **0.99×** to 🔴 **1.09×** | 🟢 **0.60×** to ⚪ **0.96×** |
+| Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | `0.17.1` ⚠️ | 🔴 **22.55×** to 🔴 **33.79×** | 🔴 **2.18×** to 🔴 **5.04×** |
+
+⚠️ marks rows measured on a build older than this one (**0.48.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
 
 ### AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic
 

@@ -418,7 +418,7 @@ checked against the code rather than asserted. The gap is the roadmap.
 | NVFP4 / FP8 | **No.** Neither is parsed. |
 | DeepSeek-V4-Flash, GLM-5.2, Kimi K3 | **Loaders and primitives only.** Nothing has run end to end on a real checkpoint. |
 | OpenAI + Anthropic compatible APIs | **Yes**, both, plus Responses. Tool calls parsed in eleven wire formats. |
-| NVIDIA RTX 30/40/50 | **Runs, measured, behind.** Receipts on a GTX 1080, an RTX 3060 and an RTX 3090; correct by `frink verify`; prefill about 4x and decode 2x to 5x off llama.cpp. No GPU in CI. |
+| NVIDIA RTX 30/40/50 | **Runs, correct, behind, and the published receipts are stale.** Receipts on a GTX 1080, an RTX 3060 and an RTX 3090; correct by `frink verify`. Those receipts read 22x to 43x on prefill and were taken on 0.17.1 and 0.21.0, before the resident prefill and the tensor-core GEMM; the ledger marks them stale for that reason. The last prefill number measured after those landed is 4.2x on an RTX 3090 (1932 tok/s against ~8,200), and decode is 2.2x to 5.0x. No GPU in CI, and no receipt on this build. |
 
 Two honest notes. Frink runs on Apple Metal, which that description
 does not cover, and Metal is where it is fastest: every `pp512` row is
