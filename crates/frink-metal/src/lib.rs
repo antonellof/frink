@@ -72,6 +72,11 @@ pub mod resident_act;
 #[cfg(feature = "metal")]
 mod resident_cache;
 
+/// One Shared buffer holding a pool of routed-expert slots, aliased by
+/// the weight cache so unified memory holds each streamed expert once.
+#[cfg(feature = "metal")]
+pub mod expert_slab;
+
 #[cfg(feature = "metal")]
 pub mod greedy_fold;
 

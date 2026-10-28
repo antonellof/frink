@@ -6,7 +6,7 @@
 //! norm and FFN halves, and splitting it would be a rewrite rather than
 //! a move.
 
-use frink_core::expert_store::{ExpertKey, ExpertStore};
+use frink_core::expert_store::ExpertKey;
 use frink_core::tensor::Tensor;
 use frink_core::weight_matrix::WeightMatrix;
 use frink_gguf::{GgufError, ShardedGguf};
@@ -752,12 +752,31 @@ impl Decoder {
             let files: Result<Vec<std::fs::File>, std::io::Error> =
                 file.shard_paths().iter().map(std::fs::File::open).collect();
             let files = files.map_err(GgufError::from)?;
-            let store = std::sync::Arc::new(ExpertStore::new(
+            // The policy ranks by the counters these layers' routing
+            // bumps, so it reads the same `Arc`s rather than a copy.
+            let hotness = super::expert_store_build::LayerActivationCounts::new(
+                layers
+                    .iter()
+                    .enumerate()
+                    .map(|(l, layer)| {
+                        stored_layouts
+                            .get(l)
+                            .is_some_and(Option::is_some)
+                            .then(|| std::sync::Arc::clone(&layer.moe.activation_counts))
+                    })
+                    .collect(),
+            );
+            let all_layouts: Vec<&[StoredExpertLayout]> =
+                stored_layouts.iter().flatten().map(Vec::as_slice).collect();
+            let store = std::sync::Arc::new(super::expert_store_build::build_expert_store(
                 GgufExpertSource {
                     files,
                     segments: store_segments,
                 },
+                &all_layouts,
+                layers.len(),
                 budget,
+                hotness,
             ));
             for (l, layer) in layers.iter_mut().enumerate() {
                 if let Some(layouts) = stored_layouts.get_mut(l).and_then(Option::take) {

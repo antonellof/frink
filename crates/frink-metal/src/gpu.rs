@@ -5366,8 +5366,11 @@ const METAL_VM_PAGE: usize = 4096;
 struct ResidentMmapFile {
     buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     /// Keeps the underlying mapping alive for as long as any weight
-    /// buffer aliases it via `BytesNoCopy`.
-    _mmap: Arc<memmap2::Mmap>,
+    /// buffer aliases it via `BytesNoCopy`. `None` for a region whose
+    /// memory `buffer` itself owns (an expert slot slab,
+    /// [`crate::expert_slab`]), where retaining the buffer is the
+    /// keepalive.
+    _mmap: Option<Arc<memmap2::Mmap>>,
     base_ptr: usize,
     len: usize,
 }
@@ -5423,13 +5426,57 @@ pub fn register_weight_mmap(mmap: Arc<memmap2::Mmap>) {
     };
     let entry = Arc::new(ResidentMmapFile {
         buffer,
-        _mmap: mmap,
+        _mmap: Some(mmap),
         base_ptr: base,
         len: buf_len,
     });
     let mut guard = MMAP_FILE_CACHE.lock().unwrap();
     let cache = guard.get_or_insert_with(HashMap::new);
     cache.entry(key).or_insert(entry);
+}
+
+/// Registers a Shared buffer the process allocated (an expert slot
+/// slab) so a weight slice inside its contents aliases it exactly as a
+/// slice inside a registered GGUF mmap does: no copy, and no bytes
+/// charged to the weight cache. On unified memory that is what keeps
+/// the slab's bytes counted once, by the expert store that owns them.
+pub(crate) fn register_owned_region(
+    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    base_ptr: usize,
+    len: usize,
+) {
+    let entry = Arc::new(ResidentMmapFile {
+        buffer,
+        _mmap: None,
+        base_ptr,
+        len,
+    });
+    let mut guard = MMAP_FILE_CACHE.lock().unwrap();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(base_ptr, entry);
+}
+
+/// Undoes [`register_owned_region`], and drops the process-wide weight
+/// cache's aliases of it so they stop retaining the region's buffer.
+/// A thread-local mirror may still hold an alias until its thread
+/// exits; that keeps the memory allocated (so its address cannot be
+/// handed to anything else) and is never served for other bytes.
+pub(crate) fn unregister_owned_region(base_ptr: usize) {
+    let removed = {
+        let mut guard = MMAP_FILE_CACHE.lock().unwrap();
+        guard.as_mut().and_then(|c| c.remove(&base_ptr))
+    };
+    let Some(region) = removed else {
+        return;
+    };
+    if let Some(cache) = WEIGHT_CACHE.lock().unwrap().as_mut() {
+        cache.retain(|_, w| {
+            !w._keepalive
+                .as_ref()
+                .is_some_and(|k| Arc::ptr_eq(k, &region))
+        });
+    }
 }
 
 fn find_registered_mmap(weights: &[u8]) -> Option<(Arc<ResidentMmapFile>, usize)> {
@@ -5457,6 +5504,9 @@ fn build_resident_weight_buffer(
 ) -> Result<ResidentWeightBuffer, MetalError> {
     if !weights.is_empty() {
         if let Some((file, offset)) = find_registered_mmap(weights) {
+            if file._mmap.is_none() {
+                crate::expert_slab::note_slab_bind();
+            }
             return Ok(ResidentWeightBuffer {
                 buffer: file.buffer.clone(),
                 weight_offset: offset,

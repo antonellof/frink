@@ -116,9 +116,15 @@ available memory cannot be determined resolves to resident rather than
 to streaming: guessing a machine is short would silently put every user
 on the slow path.
 
-On Metal there is a further cost today. Several MoE fast paths still
-accept only resident experts, so streaming currently gives up the fused
-Metal MoE kernels as well. The warning says so when it fires.
+The budget buys whole slots of the largest expert's size; the load
+line says how many (`frink: expert store: N of M routed experts
+resident`). Experts the router picks most often stay resident, and a
+miss colder than every resident expert is read without being cached.
+On Metal the slots are one Shared buffer the GPU reads in place, so the
+budget is not counted a second time by `FRINK_METAL_WEIGHT_CACHE_BYTES`.
+A streamed layer still takes the per-layer Metal top-k launch rather
+than the packed whole-stack decode, so streaming costs speed on Metal
+even when every expert fits the budget.
 
 | Variable | Purpose |
 |---|---|

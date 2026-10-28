@@ -449,7 +449,7 @@ stops matching the code turns a test red.
 |---|---|
 | Bandwidth-adaptive CPU/GPU co-execution (`q*`) | **Partial.** `qstar::BandwidthProfile` is in `frink-core` and used by `frink bench-bw`, a measurement tool. The serving path does not consult it. |
 | Full-layer double-buffered prefill streaming | **Built, not wired.** Kept for the out-of-core work, which names it. |
-| Global LRU expert caching | **Yes, and now singular.** `expert_store` is wired into both decode paths and proven bit-identical to resident at a 1-byte budget. The second, competing cache and its separate byte budget were folded in beside it. |
+| Global LRU expert caching | **Yes, singular, and ranked by routing counts.** `expert_store` is wired into both decode paths; for a GGUF model its entries live in the slots of a `SlotDevice` (host RAM, or on Metal one Shared buffer the GPU reads in place), eviction ranks by the decoder's activation counts, and decode is proven identical to resident at half, a quarter and one slot of the expert bytes. |
 | Graph-compatible execution | **No.** Execution is eager. `ExecutionPlan` is built and read by nothing. |
 | FTW fast weight format | **No.** GGUF only. |
 | Semantic anchor checkpoints for KV | **Yes.** `anchor::decode_slide` and `WindowPolicy` are wired into `generate.rs` and the batch scheduler. |
@@ -464,8 +464,13 @@ stops matching the code turns a test red.
 Two notes. Frink runs on Apple Metal, which that description does not
 cover, and Metal is where it is fastest: every `pp512` row is 0.99x to
 1.09x against llama.cpp and every one of the 16 comparable `tg128` rows
-is faster. The largest gap is missing from this table: running a model
-that does not fit in memory exists as policy and is not executed.
+is faster. The largest gap is missing from this table: running a model that does
+not fit in memory now executes its residency policy (set
+`FRINK_EXPERT_CACHE_BYTES` below the expert bytes), and has been checked
+on models that fit, under a budget. It has not yet run a model that
+really exceeds RAM, and streamed layers decode several times slower
+than resident ones even when every expert is cached
+(`docs/plans/out-of-core-moe.md`).
 
 ## Serving policy
 

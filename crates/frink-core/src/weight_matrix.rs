@@ -50,8 +50,12 @@ pub enum WeightBytes {
     /// makes the store's lease pinning structural: as long as any
     /// `WeightMatrix` built over these bytes is alive, the cache entry's
     /// strong count stays >1 and eviction cannot reuse it.
+    ///
+    /// The bytes may be an expert's own heap buffer or one slot of the
+    /// store's slot pool ([`crate::expert_slab`]); either way the slice
+    /// is the expert's exact length.
     Shared {
-        buf: Arc<Vec<u8>>,
+        buf: Arc<crate::expert_store::ExpertBytes>,
         range: Range<usize>,
     },
 }

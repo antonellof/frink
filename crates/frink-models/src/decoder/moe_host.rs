@@ -24,6 +24,18 @@ impl Decoder {
         })
     }
 
+    /// The expert store this model streams its routed experts through,
+    /// when it does: its slot count, budget and slot memory kind are
+    /// what a report or a test needs beyond the counters.
+    pub fn expert_store(
+        &self,
+    ) -> Option<&frink_core::expert_store::ExpertStore<crate::loader::GgufExpertSource>> {
+        self.layers.iter().find_map(|l| match &l.moe.experts {
+            ExpertBacking::Stored { store, .. } => Some(store.as_ref()),
+            ExpertBacking::Resident(_) => None,
+        })
+    }
+
     /// Builds one global device-residency plan across ALL layers'
     /// routed experts against the single configured VRAM budget --
     /// every `(layer, expert)` candidate competes in one hotness-
