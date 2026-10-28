@@ -187,8 +187,8 @@ pub struct Decoder {
     /// strings. See [`crate::execution_plan`].
     pub execution_plan: crate::execution_plan::ExecutionPlan,
     /// May a windowed layer's host [`KvCache`] drop rows that have
-    /// fallen behind its window? Off unless `FRINK_KV_WINDOW` says
-    /// otherwise; see [`kv_window`] for what else turns it off. A field
+    /// fallen behind its window? On unless `FRINK_KV_WINDOW=0`; see
+    /// [`kv_window`] for what else turns it off. A field
     /// rather than a cached global so a test can run both arms in one
     /// process and compare tokens.
     pub kv_window: KvWindowPolicy,

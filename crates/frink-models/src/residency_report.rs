@@ -338,7 +338,7 @@ mod tests {
     /// makes every test built on the default env-sensitive, and a test
     /// whose expected numbers depend on the developer's shell is a test
     /// that goes red for the wrong reason. Everything below asserts the
-    /// default engine's arithmetic, so it says so.
+    /// non-evicting engine's arithmetic, so it says so.
     fn assumptions(cache: Option<u64>) -> ResidencyAssumptions {
         ResidencyAssumptions {
             context_tokens: 128,

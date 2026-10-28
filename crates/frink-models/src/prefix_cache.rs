@@ -72,6 +72,11 @@ pub struct PrefixCache {
     hits_positions_reused: u64,
     hits_count: u64,
     misses_count: u64,
+    /// Candidate matches passed over because a windowed entry could not
+    /// be truncated back to them (#61). Counted per candidate, so an
+    /// operator can tell "the prefix cache misses" from "the prefix
+    /// cache matched and refused".
+    refused_windowed: u64,
     /// Ticks on every hit and every store, so `last_used` orders
     /// entries by when they were last USEFUL rather than by when they
     /// arrived.
@@ -98,6 +103,7 @@ impl PrefixCache {
             hits_positions_reused: 0,
             hits_count: 0,
             misses_count: 0,
+            refused_windowed: 0,
             clock: 0,
         }
     }
@@ -143,9 +149,16 @@ impl PrefixCache {
                 continue;
             }
             let common = common_prefix_len(&entry.tokens, tokens);
-            if common > 0 && best.map(|(len, _)| common > len).unwrap_or(true) {
-                best = Some((common, i));
+            if common == 0 || best.is_some_and(|(len, _)| common <= len) {
+                continue;
             }
+            // A windowed entry (#61) is reusable only as far back as its
+            // caches can still truncate. See `reusable_at`.
+            if !reusable_at(entry, common, tokens.len()) {
+                self.refused_windowed += 1;
+                continue;
+            }
+            best = Some((common, i));
         }
 
         match best {
@@ -212,13 +225,15 @@ impl PrefixCache {
     /// the most reused, so FIFO evicted the one entry worth keeping as
     /// soon as `max_entries` newer prompts arrived, and the next
     /// request off that system prompt recomputed all of it.
-    /// A cache that has evicted rows behind a sliding window (#61,
-    /// `FRINK_KV_WINDOW`) is REFUSED rather than stored. A stored
-    /// prefix is handed back truncated to an arbitrary common length,
-    /// and a windowed cache no longer holds the rows an arbitrary
-    /// truncation names -- so storing one would trade a cheap recompute
-    /// for a request that stops. Refusing loses the prefix cache for
-    /// the run, which is what the switch's documentation says it costs.
+    /// A cache that evicts rows behind a sliding window (#61) IS stored,
+    /// and costs O(window) for its windowed layers rather than the whole
+    /// prefix. What it can no longer do is be truncated to an arbitrary
+    /// common length, so the lookup reuses it only for a match it can
+    /// still truncate to (`reusable_at`) and treats a deeper one as a
+    /// miss. Multi-turn chat, where the next prompt extends the last
+    /// one, matches at or near the end and keeps hitting; a request that
+    /// diverges a window or more back recomputes, which is the honest
+    /// answer for rows this cache no longer holds.
     ///
     /// A cache holding a RECURRENT state (`frink_core::recurrent_state`,
     /// a Mamba layer's) is refused for the same reason from the other
@@ -238,10 +253,7 @@ impl PrefixCache {
         pending_logits: Vec<f32>,
         salt: Option<u64>,
     ) {
-        if kv_caches
-            .iter()
-            .any(|c| c.window().is_some() || c.recurrent.is_some())
-        {
+        if kv_caches.iter().any(|c| c.recurrent.is_some()) {
             return;
         }
         if self.entries.len() >= self.max_entries {
@@ -274,6 +286,7 @@ impl PrefixCache {
             misses: self.misses_count,
             entries: self.entries.len(),
             total_positions_reused: self.hits_positions_reused,
+            refused_windowed: self.refused_windowed,
         }
     }
 }
@@ -284,6 +297,31 @@ pub struct PrefixCacheStats {
     pub misses: u64,
     pub entries: usize,
     pub total_positions_reused: u64,
+    /// Matches a windowed entry could not serve; see
+    /// `PrefixCache::refused_windowed`.
+    pub refused_windowed: u64,
+}
+
+/// Whether `entry` can be handed back for a query of `query_len` tokens
+/// that shares its first `matched_len`.
+///
+/// Every cache must truncate to `matched_len` (`KvCache::can_truncate_to`,
+/// which is where a windowed cache says it no longer holds what the next
+/// query reads). And when the match covers the whole query but not the
+/// whole entry, the caller has no stored logits for that position and
+/// backs off one more to recompute them
+/// (`frink-server::generate`'s restore), so that position must be
+/// reachable too. Asking here keeps the refusal in one place: a lookup
+/// that answered yes and a restore that then could not truncate would be
+/// two structures disagreeing about one cache.
+fn reusable_at(entry: &StoredPrefix, matched_len: usize, query_len: usize) -> bool {
+    let backs_off = matched_len == query_len && matched_len < entry.tokens.len();
+    let target = if backs_off {
+        matched_len - 1
+    } else {
+        matched_len
+    };
+    entry.kv_caches.iter().all(|c| c.can_truncate_to(target))
 }
 
 fn common_prefix_len(a: &[usize], b: &[usize]) -> usize {
@@ -382,6 +420,90 @@ mod tests {
             let p: Vec<usize> = (n * 10..n * 10 + 4).collect();
             assert_eq!(cache.find_longest_prefix(&p).matched_len, 0, "prompt {n}");
         }
+    }
+
+    /// A cache over `len` positions whose one layer evicts behind
+    /// `window`, as a windowed decoder leaves it.
+    fn windowed_cache(len: usize, window: usize) -> KvCache {
+        let w = frink_core::kv_swa::KvWindow::with_default_slack(window).expect("positive window");
+        let mut cache = KvCache::new(1, 1);
+        cache.arm_window(w);
+        for i in 0..len {
+            cache.push(&[i as f32], &[i as f32 * 10.0]).unwrap();
+            cache.evict_behind_window();
+        }
+        assert!(cache.rows() < len, "the fixture must have evicted");
+        cache
+    }
+
+    /// **#61: a windowed entry is stored, and reused only where it can
+    /// be.** Before, a windowed cache was refused at `store`, so turning
+    /// eviction on turned the prefix cache off. Now it is stored and
+    /// the lookup asks the cache itself how far back it can go.
+    ///
+    /// The extension case (the next chat turn) hits. A query that shares
+    /// only the first few tokens names a position the windowed layer
+    /// dropped, and it must be a MISS: handing back a cache truncated
+    /// across a hole would answer the next token out of a history the
+    /// model never had. Sabotaged by making `reusable_at` return `true`,
+    /// the restore below panics in `truncate` rather than passing.
+    #[test]
+    fn a_windowed_entry_is_reused_at_its_end_and_refused_deep_inside_it() {
+        let stored: Vec<usize> = (0..64).collect();
+        let mut cache = PrefixCache::new(4);
+        cache.store(stored.clone(), vec![windowed_cache(64, 8)], vec![0.5]);
+        assert_eq!(cache.stats().entries, 1, "a windowed cache is stored");
+
+        // The next turn: the whole stored sequence and then some.
+        let mut next = stored.clone();
+        next.extend([100, 101]);
+        let m = cache.find_longest_prefix(&next);
+        assert_eq!(m.matched_len, 64);
+        assert_eq!(m.pending_logits, Some(vec![0.5]));
+        assert_eq!(m.kv_caches.expect("a hit")[0].positions(), 64);
+
+        // Diverges three tokens before the end: inside the reserve.
+        let mut near = stored[..61].to_vec();
+        near.push(999);
+        let m = cache.find_longest_prefix(&near);
+        assert_eq!(
+            m.matched_len, 61,
+            "a match inside the rollback reserve is served"
+        );
+
+        // Diverges at token 5 of 64: that row is gone.
+        let mut deep = stored[..5].to_vec();
+        deep.push(999);
+        let m = cache.find_longest_prefix(&deep);
+        assert_eq!(m.matched_len, 0, "a match behind the window must miss");
+        assert!(m.kv_caches.is_none());
+        assert!(cache.stats().refused_windowed >= 1);
+    }
+
+    /// The back-off case: the query is a strict prefix of the entry, so
+    /// the caller recomputes the last matched position and must be able
+    /// to truncate one further than the match. Refused here when that
+    /// one further is out of reach, not discovered by the restore.
+    #[test]
+    fn a_windowed_entry_is_refused_when_the_restore_would_back_off_past_it() {
+        let stored: Vec<usize> = (0..64).collect();
+        let entry = StoredPrefix {
+            salt: None,
+            tokens: stored.clone(),
+            kv_caches: vec![windowed_cache(64, 8)],
+            pending_logits: vec![0.5],
+            last_used: 0,
+        };
+        let limit = entry.kv_caches[0].rollback_limit();
+        let deepest = (0..=64usize)
+            .find(|&n| entry.kv_caches[0].can_truncate_to(n))
+            .expect("the cache can truncate to its own length");
+        assert!(64 - deepest >= limit.min(64));
+        // A query ending exactly at the deepest reachable match backs
+        // off one more, which is out of reach.
+        assert!(!reusable_at(&entry, deepest, deepest));
+        // The same match inside a longer query does not back off.
+        assert!(reusable_at(&entry, deepest, deepest + 3));
     }
 
     #[test]

@@ -15,6 +15,49 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **A sliding-window layer's KV stops growing at its window, by
+  default.** The contiguous host store has been able to drop rows behind
+  a layer's window since 0.17.0, behind `FRINK_KV_WINDOW=1`. It is now on
+  unless `FRINK_KV_WINDOW=0`, which is what llama.cpp's
+  `llama_kv_cache_iswa` does with its default `swa_full = false`.
+  Gemma-3-4B at 32768 tokens holds 1.68 GiB of host f32 KV instead of
+  9.13 GiB, and `--ctx-size auto` and `inspect-plan` price that. Output
+  is token-identical either way. Eviction is per layer, so an
+  alternating model keeps every position in its full-attention layers.
+  It stays off under `FRINK_METAL_ATTN` and on a draft model, and the
+  paged store and the KV pool still hold the whole context (#61).
+- **The prefix cache stores windowed caches.** It used to refuse them,
+  so turning eviction on turned the prefix cache off. A windowed entry
+  is now reused for any match it can still truncate to, which covers
+  the next turn of a chat. A deeper match is a miss, counted as
+  `refused_windowed` in the prefix-cache stats.
+
+### Fixed
+
+- **A rejected speculative draft on an evicting cache could leave a hole
+  in the window.** A cache that had just drained to `window` rows let a
+  truncate roll it back further than the next query could afford, and
+  the next token was answered across the missing rows with nothing to
+  say so. A drain now keeps a rollback reserve of a quarter window inside
+  its slack, `KvCache::can_truncate_to` refuses a rollback that would
+  leave the window short, and both speculative paths bound the draft by
+  `KvCache::rollback_limit` before writing it.
+- **A release-build server never rolled back a rejected draft.** The
+  rollback was the argument of a `debug_assert!`, which a release build
+  does not evaluate, so every rejected prompt-lookup draft left its rows
+  in the contiguous cache and the rest of the answer was computed over a
+  history that never happened. The rollback now runs in every build.
+  The same gate also asked a recurrent model's cache whether it could
+  roll back to where it already was, which every cache can; it now asks
+  how far a rollback may go, which is zero for a recurrent state.
+- **The paged prefill with eviction on panicked on its first windowed
+  layer.** It gathers the paged history into a scratch contiguous copy,
+  runs the forward, and scatters rows back by offset; the forward
+  evicted the scratch and the scatter found fewer rows than it wrote.
+  The scratch copy, and a slot save's prefill, now keep every row.
+
 ## [0.50.0] - 2026-10-28
 
 ### Added

@@ -169,7 +169,12 @@ fn the_paged_path_scales_embeddings_and_softcaps_logits_like_the_contiguous_one(
 /// reservation would get wrong.
 fn paged_prefill_matches_contiguous(config: ModelConfig) {
     let n_layers = 2;
-    let decoder = Decoder::new_random_small(config, n_layers, 10);
+    let mut decoder = Decoder::new_random_small(config, n_layers, 10);
+    // Evicting, whatever the shell says: the paged prefill gathers into a
+    // contiguous scratch copy and scatters it back by offset, so a
+    // windowed arm here is what proves the scratch never evicts (#61).
+    // The contiguous reference evicts too, which is the default run.
+    decoder.kv_window = crate::decoder::KvWindowPolicy::on();
     let prompt = [3usize, 1, 4, 1, 5];
     let continuation = [9usize, 2, 6, 5];
 

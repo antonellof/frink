@@ -9,18 +9,35 @@
 //! store did not take (#33) or the store from taking one the budget did
 //! not price.
 //!
-//! # Off by default
+//! # On by default
 //!
-//! `FRINK_KV_WINDOW=1` turns it on, and nothing else does. The switch
-//! exists in the shape `FRINK_CPU_POOL` established: one env var, so
-//! the before and the after are one word apart and reverting costs
-//! nothing.
+//! A windowed layer keeps `window + slack` rows instead of the whole
+//! context, which is what llama.cpp's `llama_kv_cache_iswa` does with
+//! its default `swa_full = false`. `FRINK_KV_WINDOW=0` keeps every row,
+//! so the before and the after are one word apart and reverting costs
+//! nothing. It shipped behind an opt-in first (#113, #189) and went on
+//! by default once every interaction below had either been handled or
+//! been given a named fallback (#61):
+//!
+//! - **Speculative rollback.** A drain keeps a reserve inside its slack
+//!   (`KvWindow::max_rollback`), and every speculative caller bounds its
+//!   draft block by `KvCache::rollback_limit` before it writes.
+//! - **The prefix cache** stores windowed caches and reuses one only for
+//!   a match the cache can still truncate to (`KvCache::can_truncate_to`);
+//!   a deeper match is a miss, never a truncated history.
+//! - **`n > 1` forks** clone the post-prefill caches, and a clone carries
+//!   its window and its rows, so each fork drains on its own.
+//! - **Slot files** hold a whole history, so their prefill keeps every
+//!   row (`KvCache::forbid_eviction`).
+//! - **The paged prefill's scratch copy** is read back by offset, so it
+//!   never evicts either.
+//! - **Context shift** is refused before any of this is reached.
 //!
 //! # What the switch refuses to do
 //!
-//! Eviction is the contiguous host store on the CPU path, and only that
-//! (#61 steps 3 and 4 are the GPU stores and the paged one). Two things
-//! it therefore turns itself off for:
+//! Eviction is the contiguous host store, and only that (the GPU-resident
+//! stores and the paged one are #61's remaining steps). Two things it
+//! therefore turns itself off for:
 //!
 //! - **Metal attention.** `Decoder`'s Metal arms compare
 //!   `MetalKvBuffers::seq_len` against the host cache's `rows()` and its
@@ -59,7 +76,7 @@ pub const KV_WINDOW_ENV: &str = "FRINK_KV_WINDOW";
 
 impl KvWindowPolicy {
     /// Never evicts. What every cache in this engine did before #61, and
-    /// what a run gets unless [`KV_WINDOW_ENV`] says otherwise.
+    /// what a run gets when [`KV_WINDOW_ENV`] is `0`.
     pub const fn off() -> Self {
         KvWindowPolicy { enabled: false }
     }
@@ -73,13 +90,20 @@ impl KvWindowPolicy {
     /// Reads [`KV_WINDOW_ENV`], then subtracts the runs that must not
     /// evict. See the module doc for which and why.
     pub fn from_env() -> Self {
-        let on = matches!(
-            std::env::var(KV_WINDOW_ENV).ok().as_deref(),
-            Some("1") | Some("on") | Some("true") | Some("yes")
-        );
+        let on = Self::parse(std::env::var(KV_WINDOW_ENV).ok().as_deref());
         #[cfg(feature = "metal")]
         let on = on && !frink_metal::attn::metal_attn_enabled();
         KvWindowPolicy { enabled: on }
+    }
+
+    /// The switch's spelling: on unless it says off. Anything that is
+    /// not one of the four "off" spellings, including a typo, leaves the
+    /// default, which is on.
+    fn parse(value: Option<&str>) -> bool {
+        !matches!(
+            value.map(str::trim),
+            Some("0") | Some("off") | Some("false") | Some("no")
+        )
     }
 
     pub fn enabled(&self) -> bool {
@@ -116,6 +140,10 @@ impl KvWindowPolicy {
     }
 }
 
+/// Never evicts, as a value. NOT what a run gets, which is
+/// [`KvWindowPolicy::from_env`]: a `Default` that read the environment
+/// would make every struct literal built with `..Default::default()` in
+/// a test depend on the shell it ran in.
 impl Default for KvWindowPolicy {
     fn default() -> Self {
         Self::off()
@@ -156,10 +184,22 @@ impl Decoder {
 mod tests {
     use super::*;
 
-    /// The switch is off unless it is on, and "off" means no window for
-    /// any layer however windowed the model is.
+    /// The switch is on unless it says off, and every spelling of off is
+    /// off. A typo is not one of them.
     #[test]
-    fn the_default_policy_evicts_nothing() {
+    fn the_switch_is_on_unless_it_says_off() {
+        assert!(KvWindowPolicy::parse(None));
+        assert!(KvWindowPolicy::parse(Some("1")));
+        assert!(KvWindowPolicy::parse(Some("on")));
+        assert!(KvWindowPolicy::parse(Some("of")));
+        for off in ["0", "off", "false", "no", " 0 "] {
+            assert!(!KvWindowPolicy::parse(Some(off)), "{off:?}");
+        }
+    }
+
+    /// "Off" means no window for any layer however windowed the model is.
+    #[test]
+    fn the_off_policy_evicts_nothing() {
         let off = KvWindowPolicy::off();
         assert!(!off.enabled());
         assert_eq!(off.window_for(Some(1024)), None);

@@ -96,8 +96,8 @@ impl ContextCeiling {
     /// whether a request is admitted is `limit`, in POSITIONS, and that
     /// limit came from [`KvBudget::max_context`], which does know about
     /// eviction (#61). This only fills the byte fields of a refusal
-    /// whose stated reason is the position ceiling, so under
-    /// `FRINK_KV_WINDOW` it over-states the bytes a windowed model
+    /// whose stated reason is the position ceiling, so when a windowed
+    /// store evicts (`FRINK_KV_WINDOW`) it over-states the bytes a model
     /// would really have held -- in the direction that makes a refusal
     /// look more justified rather than less, and never in a decision.
     /// Giving this the residency too would mean threading it through
@@ -402,8 +402,8 @@ pub fn price_gguf(
         context_tokens: gguf_ctx,
         concurrent_requests: concurrent_requests.max(1),
         kv_elem,
-        // **The server prices the UNWINDOWED number even when
-        // `FRINK_KV_WINDOW` is on, and that is deliberate.**
+        // **The server prices the UNWINDOWED number even though
+        // `FRINK_KV_WINDOW` is on by default, and that is deliberate.**
         //
         // Sliding-window eviction (#61 step 2) is a property of the
         // contiguous host `KvCache`, and it is not the only store this

@@ -368,9 +368,15 @@ pub(crate) fn probe(caches: &[KvCache]) -> Vec<CacheProbe> {
 /// position counter is the one length the block advances; reading rows
 /// there refused every hybrid model's bench as "layer 0 consumed 0 of
 /// 128 prompt tokens".
+///
+/// A windowed layer that evicts (#61, the default) is the other case
+/// where rows stop being the length: past `window + slack` positions it
+/// holds fewer rows than it consumed, and reading rows there would
+/// refuse any row whose prompt passes the window as a run that skipped
+/// work. Its position counter is what it consumed.
 fn probe_one(c: &KvCache) -> CacheProbe {
     CacheProbe {
-        seq_len: if c.k_width() == 0 {
+        seq_len: if c.k_width() == 0 || c.window().is_some() {
             c.positions()
         } else {
             c.rows()
