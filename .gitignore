@@ -50,3 +50,4 @@ data/
 # FRINK_CONVERSATIONS_DIR (default ./frink-conversations). Seven were
 # committed by accident in 56a0d48 while testing chat fixes locally.
 frink-conversations/
+ferrox-conversations/
