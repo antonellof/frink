@@ -164,6 +164,14 @@ impl RopeLayout {
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub name: &'static str,
+    /// What every host K/V cache this model builds stores its rows as
+    /// (`frink_core::kv_store`). A RUN choice, not a fact of the file:
+    /// the loader sets it from `kv_budget::host_kv_dtype`, which reads
+    /// `--ctk` and the backend, and every cache constructor and every
+    /// host-KV budget reads it here, so the store and its price cannot
+    /// disagree. A short convolution's history stays f32 whatever this
+    /// says ([`Self::layer_kv_dtype`]).
+    pub kv_dtype: frink_core::kv_store::KvDtype,
     /// Decoder layers: llama.cpp's `n_layer()`, which is the file's
     /// `block_count` MINUS [`Self::n_mtp_blocks`].
     pub n_layers: usize,
@@ -1017,6 +1025,7 @@ impl ModelConfig {
 /// hparams as published placeholders).
 pub fn glm_5_2() -> ModelConfig {
     ModelConfig {
+        kv_dtype: frink_core::kv_store::KvDtype::F32,
         sliding_window: None,
         name: "glm-5.2",
         attention: AttentionKind::Gqa,
@@ -1114,6 +1123,7 @@ pub fn glm_5_2() -> ModelConfig {
 /// placeholders for smoke/bench.
 pub fn deepseek_v4_pro() -> ModelConfig {
     ModelConfig {
+        kv_dtype: frink_core::kv_store::KvDtype::F32,
         sliding_window: None,
         name: "deepseek-v4-pro",
         attention: AttentionKind::Gqa,
@@ -1216,6 +1226,7 @@ pub fn deepseek_v4_pro() -> ModelConfig {
 /// treat this preset as a runnable Kimi substitute.
 pub fn kimi_k3() -> ModelConfig {
     ModelConfig {
+        kv_dtype: frink_core::kv_store::KvDtype::F32,
         sliding_window: None,
         name: "kimi-k3",
         n_layers: 93,
@@ -1347,6 +1358,7 @@ pub fn kimi_k3() -> ModelConfig {
 /// independent NumPy reference implementation reading the same file.
 pub fn test_dense_fixture() -> ModelConfig {
     ModelConfig {
+        kv_dtype: frink_core::kv_store::KvDtype::F32,
         sliding_window: None,
         name: "frink-test-dense",
         attention: AttentionKind::Gqa,
@@ -1424,6 +1436,7 @@ pub fn test_dense_fixture() -> ModelConfig {
 /// `test_dense_fixture` verifies the single-expert path.
 pub fn test_moe_fixture() -> ModelConfig {
     ModelConfig {
+        kv_dtype: frink_core::kv_store::KvDtype::F32,
         sliding_window: None,
         name: "frink-test-moe",
         attention: AttentionKind::Gqa,
@@ -1503,6 +1516,7 @@ pub fn test_moe_fixture() -> ModelConfig {
 /// documented, not implemented or tested.
 pub fn test_mixed_fixture() -> ModelConfig {
     ModelConfig {
+        kv_dtype: frink_core::kv_store::KvDtype::F32,
         sliding_window: None,
         name: "frink-test-mixed",
         attention: AttentionKind::Gqa,

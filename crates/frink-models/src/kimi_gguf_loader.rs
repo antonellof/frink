@@ -904,6 +904,7 @@ mod tests {
         // 0), 1 = MoE+MLA -- covering every real attention/FFN
         // combination `load_kimi_gguf_layer` must dispatch correctly.
         let model_cfg = crate::config::ModelConfig {
+            kv_dtype: frink_core::kv_store::KvDtype::F32,
             // Kimi's stack has no per-layer RoPE gate; llama.cpp writes
             // no `use_rope` for it (`crate::rope_layers`).
             rope_layers: crate::rope_layers::RopeLayers::All,

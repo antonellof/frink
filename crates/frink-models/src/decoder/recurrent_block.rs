@@ -97,7 +97,10 @@ impl Decoder {
                 let table = cache.block_table();
                 let block = store.block_size();
                 window_from_history(l_cache, n_embd, cache.seq_len(), |i| {
-                    store.k_row(table[i / block], i % block)
+                    store
+                        .k_row(table[i / block], i % block)
+                        .as_f32()
+                        .expect(SHORT_CONV_HISTORY_IS_F32)
                 })
             }),
         }
@@ -196,7 +199,15 @@ fn contiguous_step(cache: &mut KvCache, bx: &[f32], l_cache: usize, n_embd: usiz
         .push(bx, &[])
         .expect("unbounded/planned KvCache growth is infallible");
     let rows = cache.rows();
+    let history = cache.k.as_f32().expect(SHORT_CONV_HISTORY_IS_F32);
     window_from_history(l_cache, n_embd, rows, |i| {
-        &cache.k[i * n_embd..(i + 1) * n_embd]
+        &history[i * n_embd..(i + 1) * n_embd]
     })
 }
+
+/// A short convolution's history is its STATE, kept at f32 as llama.cpp
+/// keeps its `r` cache (`type_r` defaults to `GGML_TYPE_F32`) whatever
+/// `-ctk` says. `ModelConfig::new_kv_caches` builds such a layer's cache
+/// at f32 for that reason, so an f16 one here is a construction bug.
+const SHORT_CONV_HISTORY_IS_F32: &str =
+    "a short-convolution history is stored at f32 (`ModelConfig::new_kv_caches`)";

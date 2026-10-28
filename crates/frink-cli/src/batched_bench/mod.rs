@@ -237,8 +237,10 @@ pub fn run(args: BatchedBenchArgs) -> anyhow::Result<()> {
              {kind:?}, which has no multi-sequence decode step to measure"
         );
     }
-    let config = ModelConfig::from_gguf(&file)
+    let mut config = ModelConfig::from_gguf(&file)
         .with_context(|| format!("reading model config for arch {arch}"))?;
+    config.kv_dtype =
+        frink_models::host_kv_dtype_from_env(crate::bench_model::active_budget_backend());
 
     let n_kv_max = if args.ctx_size > 0 {
         args.ctx_size

@@ -806,7 +806,13 @@ fn banner_line(args: &InferArgs, device: OffloadDevice) -> String {
     } else if effective_ctk == frink_models::kv_budget::KvElem::from_ctk(requested_ctk) {
         String::new()
     } else {
-        format!(" (--ctk {requested_ctk} ignored: only the Metal KV store has a selectable dtype)")
+        // A block-quantized wire on the host store (it keeps f16), or any
+        // dtype on CUDA (it keeps f32): `host_kv_dtype` says why.
+        format!(
+            " (--ctk {requested_ctk} has no {} host store; using {})",
+            budget_backend_for(args).as_str(),
+            effective_ctk.as_str()
+        )
     };
 
     format!(
@@ -837,17 +843,21 @@ fn gpu_layers_note(args: &InferArgs, device: OffloadDevice) -> String {
     }
 }
 
-/// Width of the KV store the selected backend will really keep. The
-/// host `frink_core::cache::KvCache` is `Vec<f32>`; only the Metal
-/// path has a device KV whose dtype `--ctk` selects.
+/// Width of the KV store the selected backend will really keep: the
+/// Metal device wire `--ctk` selects, or the host store
+/// [`host_kv_dtype_for`] builds. The same function decides the latter
+/// for the budget and for the caches, so the two cannot disagree.
 fn kv_elem_for(args: &InferArgs) -> frink_models::KvElem {
     use frink_models::{BudgetBackend, KvElem};
     match budget_backend_for(args) {
         BudgetBackend::Metal => KvElem::from_ctk(&args.ctk),
-        // CUDA has no device KV store of its own yet, and CPU is the
-        // f32 host cache.
-        BudgetBackend::Cuda | BudgetBackend::Cpu => KvElem::F32,
+        BudgetBackend::Cuda | BudgetBackend::Cpu => KvElem::from(host_kv_dtype_for(args)),
     }
+}
+
+/// What this run's host K/V caches store (`frink_models::host_kv_dtype`).
+fn host_kv_dtype_for(args: &InferArgs) -> frink_core::kv_store::KvDtype {
+    frink_models::host_kv_dtype(budget_backend_for(args), &args.ctk)
 }
 
 /// Resolves `-c/--ctx-size` against the pre-load budget, printing the
@@ -1480,6 +1490,7 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
     // request, from `cparams.n_ctx_seq`).
     let mut config = config;
     config.apply_runtime_context(ctx_size);
+    config.kv_dtype = host_kv_dtype_for(&args);
     let mut decoder = load_decoder_streaming_if_needed(path, config)?;
     decoder
         .attach_lora_specs(&file, &lora_specs)
@@ -2079,7 +2090,10 @@ fn run_infer_speculative(
         );
     }
 
-    let config = frink_models::ModelConfig::from_gguf(&frink_gguf::ShardedGguf::open(draft_path)?)?;
+    let mut config =
+        frink_models::ModelConfig::from_gguf(&frink_gguf::ShardedGguf::open(draft_path)?)?;
+    // The draft's caches at the target's width: one `--ctk` for the run.
+    config.kv_dtype = decoder.config.kv_dtype;
     if config.has_recurrent_layers() {
         anyhow::bail!(
             "--model-draft cannot be a model with recurrent (Mamba) layers: the draft cache is \
@@ -2269,31 +2283,39 @@ mod tests {
 
     /// The banner may not promise a KV dtype the run will not use.
     ///
-    /// `frink -m m.gguf -dev cpu -ngl all` printed `ctk=f16` because
-    /// the banner echoed the flag's default, while the host `KvCache`
-    /// is `Vec<f32>` and the budget priced it at f32. That made the
-    /// memory warning look like a bug: it charged 229376 bytes/token
-    /// where the banner implied 114688, so a 3B model at its 131072
-    /// trained context read as 37.5 GB instead of 22.5 GB. The warning
-    /// was right and the banner was wrong.
-    ///
-    /// The flag and the store are two things that must agree, so the
-    /// banner now derives from `kv_elem_for`, the same function the
-    /// budget prices with.
+    /// `frink -m m.gguf -dev cpu -ngl all` once printed `ctk=f16` while
+    /// the host `KvCache` was `Vec<f32>` and the budget priced it at f32.
+    /// The host store honours `--ctk f16` / `f32` now
+    /// (`frink_models::host_kv_dtype`), and the banner, the budget and the
+    /// caches all read that one function, so this pins the three answers
+    /// the host can give: the flag honoured, the flag honoured the other
+    /// way, and a device-only wire falling back to f16 by name.
     #[test]
     fn the_banner_reports_the_kv_dtype_the_run_will_actually_keep() {
         let a = args(&["-m", "m.gguf", "--device", "cpu", "--ctk", "f16"]);
-        assert_eq!(kv_elem_for(&a).as_str(), "f32", "the host KV cache is f32");
-
-        let line = banner_line(&a, OffloadDevice::Cpu);
-        assert!(line.contains("ctk=f32"), "{line}");
-        assert!(
-            !line.contains("ctk=f16"),
-            "the banner echoed the flag: {line}"
+        assert_eq!(kv_elem_for(&a).as_str(), "f16", "llama.cpp's default width");
+        assert_eq!(
+            frink_models::KvElem::from(super::host_kv_dtype_for(&a)),
+            kv_elem_for(&a),
+            "the caches and the budget read one function"
         );
+        let line = banner_line(&a, OffloadDevice::Cpu);
         assert!(
-            line.contains("--ctk f16 ignored"),
-            "a flag with no effect must say so: {line}"
+            line.contains("ctk=f16") && !line.contains("--ctk f16"),
+            "{line}"
+        );
+
+        let a = args(&["-m", "m.gguf", "--device", "cpu", "--ctk", "f32"]);
+        assert_eq!(kv_elem_for(&a).as_str(), "f32");
+        assert!(banner_line(&a, OffloadDevice::Cpu).contains("ctk=f32"));
+
+        let a = args(&["-m", "m.gguf", "--device", "cpu", "--ctk", "q8_0"]);
+        assert_eq!(kv_elem_for(&a).as_str(), "f16");
+        let line = banner_line(&a, OffloadDevice::Cpu);
+        assert!(line.contains("ctk=f16"), "{line}");
+        assert!(
+            line.contains("--ctk q8_0 has no cpu host store; using f16"),
+            "a flag the host cannot honour must say so: {line}"
         );
     }
 

@@ -64,10 +64,20 @@ const PREFIX_LEN: usize = 8 + 4 + 4 + 8 + 32;
 /// n_logits, model_name_len, fingerprint_len.
 const HEADER_FIELDS: usize = 9;
 
-/// Tag for the KV element type. One variant today; the number is in the
-/// file so a future f16 tier invalidates these rather than
-/// reinterpreting their bytes.
+/// Tag for the STORE's KV element type, which the identity check holds
+/// against the serving model's (`ModelConfig::kv_dtype`). The body is
+/// f32 on the wire for both: an f16 element widens to f32 and narrows
+/// back exactly, so the tag says what the cache was, not how wide each
+/// body float is, and the body arithmetic is one rule.
 const DTYPE_F32: u32 = 0;
+const DTYPE_F16: u32 = 1;
+
+fn dtype_tag(dtype: KvDtype) -> u32 {
+    match dtype {
+        KvDtype::F32 => DTYPE_F32,
+        KvDtype::F16 => DTYPE_F16,
+    }
+}
 
 /// A slot as it exists in memory: the prompt it covers, the logits that
 /// predict the token after it, and one KV cache per layer.
@@ -156,13 +166,18 @@ pub(crate) fn encode(identity: &SlotIdentity, payload: &SlotPayload) -> Vec<u8> 
             && l.v_head_dim == head_dim),
         "slot file format holds one KV geometry; the layers differ, or V is not K's width"
     );
+    let dtype = identity.dtype;
+    assert!(
+        payload.layers.iter().all(|l| l.dtype() == dtype),
+        "slot file format holds one KV dtype, and it is the identity's"
+    );
 
     let mut header = Vec::new();
     for value in [
         payload.layers.len() as u32,
         n_kv_heads as u32,
         head_dim as u32,
-        DTYPE_F32,
+        dtype_tag(dtype),
         positions as u32,
         payload.tokens.len() as u32,
         payload.pending_logits.len() as u32,
@@ -182,7 +197,12 @@ pub(crate) fn encode(identity: &SlotIdentity, payload: &SlotPayload) -> Vec<u8> 
         body.extend_from_slice(&logit.to_le_bytes());
     }
     for layer in &payload.layers {
-        for value in layer.k.iter().chain(layer.v.iter()) {
+        for value in layer
+            .k
+            .to_f32_vec()
+            .iter()
+            .chain(layer.v.to_f32_vec().iter())
+        {
             body.extend_from_slice(&value.to_le_bytes());
         }
     }
@@ -260,9 +280,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<UnverifiedSlot, SlotFormatError> {
     let name_len = field(7);
     let fingerprint_len = field(8);
 
-    if dtype_tag != DTYPE_F32 {
-        return Err(SlotFormatError::UnknownDtype(dtype_tag));
-    }
+    let dtype = match dtype_tag {
+        DTYPE_F32 => KvDtype::F32,
+        DTYPE_F16 => KvDtype::F16,
+        other => return Err(SlotFormatError::UnknownDtype(other)),
+    };
     if n_layers == 0 {
         return Err(SlotFormatError::NoLayers);
     }
@@ -327,7 +349,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<UnverifiedSlot, SlotFormatError> {
     }
     let mut layers = Vec::with_capacity(n_layers);
     for _ in 0..n_layers {
-        let mut cache = KvCache::new(n_kv_heads, head_dim);
+        let mut cache = KvCache::new(n_kv_heads, head_dim).with_dtype(dtype);
         let k_start = cursor;
         let v_start = cursor + per_position * positions * 4;
         // Rebuilt one position at a time through `push`, the only
@@ -356,7 +378,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<UnverifiedSlot, SlotFormatError> {
             n_layers,
             n_kv_heads,
             head_dim,
-            dtype: KvDtype::F32,
+            dtype,
             fingerprint,
         },
         payload: SlotPayload {

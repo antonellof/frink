@@ -18,7 +18,7 @@ use frink_core::cache::{
 };
 use frink_models::sampling::SamplingParams;
 use frink_models::tokenizer::{prepend_bos, SpecialTokens, StopTokens};
-use frink_models::{Ceiling, Decoder, Engine, KvElem, KvShape, PrefixCache, TextTokenizer};
+use frink_models::{Ceiling, Decoder, Engine, KvShape, PrefixCache, TextTokenizer};
 
 use crate::budget::ContextCeiling;
 
@@ -1206,7 +1206,7 @@ fn pool_immovable_refusal(
     // honest answer: such a pool serves nothing.
     let blocks_per_layer_limit = total_blocks / decoder.layers.len();
     let positions_limit = blocks_per_layer_limit * block_size;
-    let shape = KvShape::from_config(&decoder.config, KvElem::F32);
+    let shape = KvShape::host(&decoder.config);
     Some(DecodeError::KvBudgetExceeded {
         binding: Ceiling::DeviceMemory.code(),
         estimated_bytes: shape.kv_bytes_for_tokens(max_seq_len),
@@ -4630,7 +4630,7 @@ mod tests {
         // would compare equal and prove nothing.
         let store = config.store.read(0);
         assert!(
-            store.k_row(a[0], 0).iter().any(|x| *x != 0.0),
+            store.k_row(a[0], 0).to_f32_vec().iter().any(|x| *x != 0.0),
             "the original's tail page is all zeros, so equality proves nothing"
         );
     }
@@ -5676,8 +5676,7 @@ mod tests {
         // every layer, every position.
         assert_eq!(
             windowed_bytes,
-            KvShape::from_config(&full.config, KvElem::F32).per_token_kv_bytes()
-                * max_seq_len as u64
+            KvShape::host(&full.config).per_token_kv_bytes() * max_seq_len as u64
         );
     }
 
@@ -5820,7 +5819,7 @@ mod tests {
         let prompt = String::from_utf8(vec![1u8, 2, 3, 4, 5]).unwrap();
         let pool = Arc::new(Mutex::new(KvBlockPool::new(64, 64)));
         let config = pool_config(pool.clone(), Duration::ZERO);
-        let shape = KvShape::from_config(&decoder.config, KvElem::F32);
+        let shape = KvShape::host(&decoder.config);
         // The prompt alone is 5 tokens against a ceiling of 4, so no
         // output budget exists that would make it servable.
         let ceiling = ContextCeiling::new(Some(4), shape);
@@ -5878,7 +5877,7 @@ mod tests {
     fn a_prompt_that_fits_is_served_with_its_budget_clamped_rather_than_refused() {
         let decoder = small_decoder();
         let prompt = String::from_utf8(vec![1u8, 2]).unwrap();
-        let shape = KvShape::from_config(&decoder.config, KvElem::F32);
+        let shape = KvShape::host(&decoder.config);
         // 2 prompt tokens under a 4-position ceiling leaves room for 2,
         // and the request asks for 5.
         let ceiling = ContextCeiling::new(Some(4), shape);
@@ -5913,7 +5912,7 @@ mod tests {
     fn a_request_inside_the_ceiling_is_admitted_unchanged() {
         let decoder = small_decoder();
         let prompt = String::from_utf8(vec![1u8, 2]).unwrap();
-        let shape = KvShape::from_config(&decoder.config, KvElem::F32);
+        let shape = KvShape::host(&decoder.config);
         let ceiling = ContextCeiling::new(Some(7), shape);
 
         let mut with = String::new();

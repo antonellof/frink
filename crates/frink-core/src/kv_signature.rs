@@ -70,24 +70,11 @@ pub const BLOCK_FORMAT_VERSION: u32 = 2;
 /// aligned, which is the exact assumption `kv_swa` exists to refuse.
 pub const READABLE_FORMAT_VERSIONS: &[u32] = &[2];
 
-/// Element type of the stored K/V tensors.
-///
-/// Only `F32` exists today, because [`KvCache`] stores `Vec<f32>`. The
-/// enum is here so a future f16/quantized KV tier changes the signature
-/// -- and therefore invalidates blocks written by an f32 build -- rather
-/// than reinterpreting their bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KvDtype {
-    F32,
-}
-
-impl KvDtype {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            KvDtype::F32 => "f32",
-        }
-    }
-}
+/// Element type of the stored K/V tensors: the host store's own dtype
+/// (`crate::kv_store`), one type, so a block file cannot name a width the
+/// cache does not have. A block written at one dtype is a MISS for a
+/// reader at the other, never a reinterpretation of its bytes.
+pub use crate::kv_store::KvDtype;
 
 /// What a block's payload *is*: the shape any reader must match to use
 /// it. Construct it from a payload with [`Self::from_payload`], or as a
@@ -139,6 +126,7 @@ impl CacheSignature {
             });
         }
         let per_token = n_kv_heads * head_dim;
+        let dtype = first.dtype();
         let tokens = measure_layer(0, first, per_token)?;
 
         for (index, layer) in layers.iter().enumerate().skip(1) {
@@ -148,6 +136,14 @@ impl CacheSignature {
                     field: "layer shape",
                     expected: format!("{n_kv_heads}x{head_dim}"),
                     found: format!("{}x{}", layer.n_kv_heads, layer.head_dim),
+                });
+            }
+            if layer.dtype() != dtype {
+                return Err(SignatureError::RaggedPayload {
+                    layer: index,
+                    field: "dtype",
+                    expected: dtype.name().to_string(),
+                    found: layer.dtype().name().to_string(),
                 });
             }
             let layer_tokens = measure_layer(index, layer, per_token)?;
@@ -176,7 +172,7 @@ impl CacheSignature {
             n_layers: layers.len(),
             n_kv_heads,
             head_dim,
-            dtype: KvDtype::F32,
+            dtype,
             tokens,
             layout,
         })
@@ -190,6 +186,7 @@ impl CacheSignature {
         n_layers: usize,
         n_kv_heads: usize,
         head_dim: usize,
+        dtype: KvDtype,
         tokens: usize,
     ) -> Self {
         CacheSignature {
@@ -198,7 +195,7 @@ impl CacheSignature {
             n_layers,
             n_kv_heads,
             head_dim,
-            dtype: KvDtype::F32,
+            dtype,
             tokens,
             layout,
         }
@@ -245,8 +242,8 @@ impl CacheSignature {
         if self.dtype != other.dtype {
             return Err(mismatch(
                 "dtype",
-                self.dtype.as_str().to_string(),
-                other.dtype.as_str().to_string(),
+                self.dtype.name().to_string(),
+                other.dtype.name().to_string(),
             ));
         }
         if self.tokens != other.tokens {
@@ -640,7 +637,7 @@ mod tests {
         let layers = payload(3, 2, 8, 4);
         let signature =
             CacheSignature::from_payload("model-a", flat(4), &layers).expect("signature");
-        let expected = CacheSignature::expected("model-a", flat(4), 3, 2, 8, 4);
+        let expected = CacheSignature::expected("model-a", flat(4), 3, 2, 8, KvDtype::F32, 4);
         let block = UnverifiedBlock::new(Some(signature), layers)
             .verify(&expected)
             .expect("a block that is what it says it is must verify");
@@ -654,7 +651,7 @@ mod tests {
     /// unknown by definition.
     #[test]
     fn an_unmarked_block_is_rejected_not_trusted() {
-        let expected = CacheSignature::expected("model-a", flat(4), 3, 2, 8, 4);
+        let expected = CacheSignature::expected("model-a", flat(4), 3, 2, 8, KvDtype::F32, 4);
         let err = UnverifiedBlock::new(None, payload(3, 2, 8, 4))
             .verify(&expected)
             .expect_err("an unmarked block must be refused");
@@ -669,7 +666,7 @@ mod tests {
     /// produce confident wrong tokens.
     #[test]
     fn a_signature_that_overstates_its_payload_is_rejected() {
-        let expected = CacheSignature::expected("model-a", flat(4), 3, 2, 16, 4);
+        let expected = CacheSignature::expected("model-a", flat(4), 3, 2, 16, KvDtype::F32, 4);
         let mut lying = expected.clone();
         assert_eq!(lying.head_dim, 16);
         let err = UnverifiedBlock::new(Some(lying.clone()), payload(3, 2, 8, 4))
@@ -688,7 +685,7 @@ mod tests {
         // a 4-position payload.
         lying.head_dim = 8;
         lying.tokens = 8;
-        let expected = CacheSignature::expected("model-a", flat(8), 3, 2, 8, 8);
+        let expected = CacheSignature::expected("model-a", flat(8), 3, 2, 8, KvDtype::F32, 8);
         let err = UnverifiedBlock::new(Some(lying.clone()), payload(3, 2, 8, 4))
             .verify(&expected)
             .expect_err("stamp claims 8 tokens over a 4-token payload");
@@ -704,7 +701,7 @@ mod tests {
         // And overstated layer count.
         lying.tokens = 4;
         lying.n_layers = 4;
-        let expected = CacheSignature::expected("model-a", flat(4), 4, 2, 8, 4);
+        let expected = CacheSignature::expected("model-a", flat(4), 4, 2, 8, KvDtype::F32, 4);
         let err = UnverifiedBlock::new(Some(lying), payload(3, 2, 8, 4))
             .verify(&expected)
             .expect_err("stamp claims 4 layers over a 3-layer payload");
@@ -798,7 +795,15 @@ mod tests {
         let signature =
             CacheSignature::from_payload("model-a", flat(4), &layers).expect("signature");
         let err = UnverifiedBlock::new(Some(signature.clone()), layers)
-            .verify(&CacheSignature::expected("model-b", flat(4), 3, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-b",
+                flat(4),
+                3,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("a different model must not share KV state");
         assert_eq!(
             err,
@@ -811,7 +816,15 @@ mod tests {
 
         let layers = payload(3, 2, 8, 4);
         let err = UnverifiedBlock::new(Some(signature), layers)
-            .verify(&CacheSignature::expected("model-a", flat(4), 3, 4, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                flat(4),
+                3,
+                4,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("a different KV head count must not be reused");
         assert_eq!(
             err,
@@ -830,7 +843,15 @@ mod tests {
             CacheSignature::from_payload("model-a", flat(4), &layers).expect("signature");
         signature.format_version = 99;
         let err = UnverifiedBlock::new(Some(signature), layers)
-            .verify(&CacheSignature::expected("model-a", flat(4), 2, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                flat(4),
+                2,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("an unknown layout must not be guessed at");
         assert_eq!(
             err,
@@ -857,7 +878,15 @@ mod tests {
             CacheSignature::from_payload("model-a", layout_128, &layers).expect("signature");
 
         let err = UnverifiedBlock::new(Some(signature.clone()), layers)
-            .verify(&CacheSignature::expected("model-a", layout_256, 3, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                layout_256,
+                3,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("a window change must invalidate the block, not be ignored");
         assert_eq!(
             err,
@@ -872,7 +901,15 @@ mod tests {
         // the check must invalidate on change, not on principle.
         let layers = payload(3, 2, 8, 4);
         UnverifiedBlock::new(Some(signature), layers)
-            .verify(&CacheSignature::expected("model-a", layout_128, 3, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                layout_128,
+                3,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect("unchanged config must still hit");
     }
 
@@ -885,7 +922,15 @@ mod tests {
         let signature =
             CacheSignature::from_payload("model-a", sliding, &layers).expect("signature");
         let err = UnverifiedBlock::new(Some(signature), layers)
-            .verify(&CacheSignature::expected("model-a", flat(4), 2, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                flat(4),
+                2,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("no window and a 128 window are different configurations");
         assert_eq!(
             err,
@@ -906,7 +951,15 @@ mod tests {
         let signature =
             CacheSignature::from_payload("model-a", flat(4), &layers).expect("signature");
         let err = UnverifiedBlock::new(Some(signature), layers)
-            .verify(&CacheSignature::expected("model-a", flat(2), 2, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                flat(2),
+                2,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("a 4-token block is not a 2-token block");
         assert_eq!(
             err,
@@ -941,7 +994,15 @@ mod tests {
         lying.layout = flat(8);
         lying.tokens = 8;
         let err = UnverifiedBlock::new(Some(lying), payload(2, 2, 8, 4))
-            .verify(&CacheSignature::expected("model-a", flat(8), 2, 2, 8, 8))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                flat(8),
+                2,
+                2,
+                8,
+                KvDtype::F32,
+                8,
+            ))
             .expect_err("the payload settles the block size, not the stamp");
         assert_eq!(
             err,
@@ -963,7 +1024,15 @@ mod tests {
             CacheSignature::from_payload("model-a", flat(4), &layers).expect("signature");
         signature.format_version = 1;
         let err = UnverifiedBlock::new(Some(signature), layers)
-            .verify(&CacheSignature::expected("model-a", flat(4), 2, 2, 8, 4))
+            .verify(&CacheSignature::expected(
+                "model-a",
+                flat(4),
+                2,
+                2,
+                8,
+                KvDtype::F32,
+                4,
+            ))
             .expect_err("a v1 block cannot say what layout it was cut under");
         assert_eq!(
             err,

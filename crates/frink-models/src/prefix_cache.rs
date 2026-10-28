@@ -616,7 +616,12 @@ mod tests {
         // final logits (in case a later request extends even further).
         for (restored, fresh) in restored_caches.iter().zip(fresh_caches.iter()) {
             assert_eq!(restored.positions(), fresh.positions());
-            for (a, b) in restored.k.iter().zip(fresh.k.iter()) {
+            for (a, b) in restored
+                .k
+                .to_f32_vec()
+                .iter()
+                .zip(fresh.k.to_f32_vec().iter())
+            {
                 assert!((a - b).abs() < 1e-3);
             }
         }

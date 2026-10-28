@@ -603,7 +603,8 @@ fn load_gemma4_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<Gemm
 }
 
 fn load_real_gguf_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<GgufLoaded> {
-    let config = ModelConfig::from_gguf(file)?;
+    let mut config = ModelConfig::from_gguf(file)?;
+    config.kv_dtype = crate::budget::server_host_kv_dtype();
     if let Some(arch) = file.metadata_str("general.architecture") {
         frink_models::ensure_generic_decoder(arch).map_err(|e| anyhow::anyhow!("{e}"))?;
     }

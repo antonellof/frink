@@ -487,8 +487,8 @@ impl Decoder {
                     Some(l) => self.gqa_attention(
                         l,
                         q,
-                        &cache.k,
-                        &cache.v,
+                        cache.k_rows(),
+                        cache.v_rows(),
                         n_heads,
                         n_kv_heads,
                         head_dim,
@@ -498,8 +498,8 @@ impl Decoder {
                     // sink-bearing layers, at the cache's own two widths.
                     None => causal_gqa_attention_row(
                         q,
-                        &cache.k,
-                        &cache.v,
+                        cache.k_rows(),
+                        cache.v_rows(),
                         n_heads,
                         n_kv_heads,
                         head_dim,

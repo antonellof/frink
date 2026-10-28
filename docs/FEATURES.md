@@ -140,9 +140,11 @@ and `presets`. See [`CLI.md`](CLI.md).
 
 Constrained decoding is on the CLI too: `--grammar`, `--grammar-file`
 and `-j` / `--json-schema`, the same spellings llama.cpp uses, reaching
-the same stack machine the HTTP `grammar` field does. `--ctk` selects a
-KV dtype on Metal only; the CPU and CUDA KV cache is the host `Vec<f32>`
-and the startup banner says so when the flag is being ignored.
+the same stack machine the HTTP `grammar` field does. The host KV cache
+keeps `f16` by default and `f32` under `--ctk f32`, llama.cpp's default
+and opt-out, so a CPU run holds the same bytes per token as llama.cpp;
+`--ctk` also selects the Metal device store's quantized wires, and the
+startup banner names what each backend really keeps.
 
 `--lora` / `--lora-scaled` load a LoRA adapter GGUF
 (`convert_lora_to_gguf.py`'s format) on the CLI and the server, applied

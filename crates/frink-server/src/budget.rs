@@ -357,6 +357,25 @@ pub struct Adopted {
 
 /// Prices the GGUF at `path` against the machine, best effort.
 ///
+/// The backend this server build prices against.
+pub(crate) fn server_backend() -> frink_models::BudgetBackend {
+    use frink_models::BudgetBackend;
+    if cfg!(feature = "metal") {
+        BudgetBackend::Metal
+    } else if cfg!(feature = "cuda") {
+        BudgetBackend::Cuda
+    } else {
+        BudgetBackend::Cpu
+    }
+}
+
+/// What this server's host K/V caches store: `--ctk` (which `cli.rs`
+/// carries in `FRINK_CTK`, f16 when unset, llama-server's default) on
+/// this build's backend, through the one function `frink run` asks too.
+pub(crate) fn server_host_kv_dtype() -> frink_core::kv_store::KvDtype {
+    frink_models::host_kv_dtype_from_env(server_backend())
+}
+
 /// Returns `None` -- and logs why -- for every reason the CLI treats as
 /// "do not check": no device-budget probe, or a header this planner
 /// cannot read (the MLA/Gemma4/GLM stacks carry their own hparams and
@@ -371,16 +390,9 @@ pub fn price_gguf(
     concurrent_requests: usize,
 ) -> Option<(KvBudget, usize, String)> {
     use frink_models::residency_report::{ResidencyAssumptions, ResidencyReport};
-    use frink_models::{BudgetBackend, DeviceBudget};
+    use frink_models::DeviceBudget;
 
-    let backend = if cfg!(feature = "metal") {
-        BudgetBackend::Metal
-    } else if cfg!(feature = "cuda") {
-        BudgetBackend::Cuda
-    } else {
-        BudgetBackend::Cpu
-    };
-    let device = DeviceBudget::detect(backend);
+    let device = DeviceBudget::detect(server_backend());
     if device.is_unknown() {
         tracing::info!("{device}; serving with no derived context ceiling");
         return None;

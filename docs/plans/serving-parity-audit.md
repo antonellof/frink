@@ -53,7 +53,7 @@ chunk duration, which is the related half.
 
 **Implemented.** `crates/frink-core/src/cache.rs` is the store:
 `block_size` positions per block over a shared budget of blocks
-(`cache.rs:48`, `cache.rs:57`), handed out as `PageGroup`s. A sequence holds a
+(`cache.rs:48`, `cache.rs:58`), handed out as `PageGroup`s. A sequence holds a
 lease, not a contiguous buffer, so its KV is scattered and its pages
 are returned when it ends.
 

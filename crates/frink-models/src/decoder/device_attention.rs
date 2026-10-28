@@ -219,13 +219,32 @@ impl Decoder {
         if stale {
             // Split the borrows: the upload reads the authority and
             // writes the mirror, and they are two fields of one cache.
-            let (k, v) = (&cache.k[..width], &cache.v[..width]);
+            // An f16 store is widened into a local first (the device
+            // mirror is f32 whatever the host keeps); an f32 one is
+            // uploaded in place.
+            let widened = match (cache.k.as_f32(), cache.v.as_f32()) {
+                (Some(_), Some(_)) => None,
+                _ => Some((
+                    cache.k_rows().slice(0..width).to_f32_vec(),
+                    cache.v_rows().slice(0..width).to_f32_vec(),
+                )),
+            };
+            let (k, v): (&[f32], &[f32]) = match &widened {
+                Some((k, v)) => (k, v),
+                None => {
+                    let (k, v) = (&cache.k.as_f32()?[..width], &cache.v.as_f32()?[..width]);
+                    // SAFETY-free: `k`/`v` are immutable borrows of other
+                    // fields, which the compiler cannot see through a single
+                    // `&mut cache`, so they are taken first.
+                    unsafe {
+                        (
+                            std::slice::from_raw_parts(k.as_ptr(), k.len()),
+                            std::slice::from_raw_parts(v.as_ptr(), v.len()),
+                        )
+                    }
+                }
+            };
             let mirror = cache.metal_attn.as_mut()?;
-            // SAFETY-free: `k`/`v` are immutable borrows of other
-            // fields, which the compiler cannot see through a single
-            // `&mut cache`, so they are taken first.
-            let k: &[f32] = unsafe { std::slice::from_raw_parts(k.as_ptr(), k.len()) };
-            let v: &[f32] = unsafe { std::slice::from_raw_parts(v.as_ptr(), v.len()) };
             mirror.upload_from_host(k, v, rows).ok()?;
             mirror.seq_len = rows;
         }

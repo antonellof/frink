@@ -193,8 +193,12 @@ impl Decoder {
             attn_scale: 1.0 / (head_dim as f32).sqrt(),
             attn_softcap: self.config.attn_logit_softcap,
             window: self.config.layer_sliding_window(l),
-            prefix_k: &cache.k[..start_pos * kv_width],
-            prefix_v: &cache.v[..start_pos * kv_width],
+            // The kernel reads f32 rows. CUDA keeps an f32 host store
+            // (`kv_budget::host_kv_dtype`); an f16 one, which a CUDA
+            // build can still be handed, takes the host body rather than
+            // being reinterpreted.
+            prefix_k: &cache.k.as_f32()?[..start_pos * kv_width],
+            prefix_v: &cache.v.as_f32()?[..start_pos * kv_width],
             start_pos,
         };
         Some((desc, params))

@@ -62,7 +62,6 @@ use axum::Json;
 use serde::Deserialize;
 
 use frink_core::cache::KvCache;
-use frink_core::kv_signature::KvDtype;
 use frink_models::Decoder;
 
 use crate::{ActiveModel, ApiError, AppState};
@@ -231,7 +230,7 @@ fn serving_identity(active: &ActiveModel) -> Result<(SlotIdentity, Arc<Decoder>)
             n_layers: decoder.layers.len(),
             n_kv_heads: config.n_kv_heads,
             head_dim: config.head_dim,
-            dtype: KvDtype::F32,
+            dtype: config.kv_dtype,
             fingerprint,
         },
         Arc::clone(decoder),

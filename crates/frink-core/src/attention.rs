@@ -10,6 +10,7 @@
 //! primitives into full RoPE-carrying MLA forward passes.
 
 use crate::cache::PagedKvStore;
+use crate::kv_store::KvRows;
 
 /// The RoPE frequency table for `(theta, dim)`, computed once per
 /// thread.
@@ -776,10 +777,10 @@ pub fn proportional_freq_factors(head_size: usize, rotary_dim: usize, base: f32)
 /// `q` is [n_heads, head_dim]; `k_cache`/`v_cache` are
 /// [seq_len, n_kv_heads, head_dim] flattened row-major. Returns
 /// [n_heads, head_dim].
-pub fn causal_gqa_attention(
+pub fn causal_gqa_attention<'a>(
     q: &[f32],
-    k_cache: &[f32],
-    v_cache: &[f32],
+    k_cache: impl Into<KvRows<'a>>,
+    v_cache: impl Into<KvRows<'a>>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -792,10 +793,10 @@ pub fn causal_gqa_attention(
 
 /// [`causal_gqa_attention`] with optional Gemma-2 attention logit softcap.
 #[allow(clippy::too_many_arguments)]
-pub fn causal_gqa_attention_softcap(
+pub fn causal_gqa_attention_softcap<'a>(
     q: &[f32],
-    k_cache: &[f32],
-    v_cache: &[f32],
+    k_cache: impl Into<KvRows<'a>>,
+    v_cache: impl Into<KvRows<'a>>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -822,10 +823,10 @@ pub fn causal_gqa_attention_softcap(
 /// last cached position) sees only the most recent `window` positions,
 /// including its own.
 #[allow(clippy::too_many_arguments)]
-pub fn causal_gqa_attention_windowed(
+pub fn causal_gqa_attention_windowed<'a>(
     q: &[f32],
-    k_cache: &[f32],
-    v_cache: &[f32],
+    k_cache: impl Into<KvRows<'a>>,
+    v_cache: impl Into<KvRows<'a>>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -839,10 +840,10 @@ pub fn causal_gqa_attention_windowed(
 
 /// [`causal_gqa_attention_windowed`] with optional attention logit softcap.
 #[allow(clippy::too_many_arguments)]
-pub fn causal_gqa_attention_windowed_softcap(
+pub fn causal_gqa_attention_windowed_softcap<'a>(
     q: &[f32],
-    k_cache: &[f32],
-    v_cache: &[f32],
+    k_cache: impl Into<KvRows<'a>>,
+    v_cache: impl Into<KvRows<'a>>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -872,10 +873,10 @@ pub fn causal_gqa_attention_windowed_softcap(
 /// nothing to the output (`ggml_soft_max_add_sinks`). Carries no
 /// softcap, as llama.cpp's sink arm carries none.
 #[allow(clippy::too_many_arguments)]
-pub fn causal_gqa_attention_sinks(
+pub fn causal_gqa_attention_sinks<'a>(
     q: &[f32],
-    k_cache: &[f32],
-    v_cache: &[f32],
+    k_cache: impl Into<KvRows<'a>>,
+    v_cache: impl Into<KvRows<'a>>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -914,10 +915,10 @@ pub fn causal_gqa_attention_sinks(
 /// the score is a dot over the K width and the accumulate is an axpy
 /// over the V width, and nothing in between cares that they agree.
 #[allow(clippy::too_many_arguments)]
-pub fn causal_gqa_attention_row(
+pub fn causal_gqa_attention_row<'a>(
     q: &[f32],
-    k_cache: &[f32],
-    v_cache: &[f32],
+    k_cache: impl Into<KvRows<'a>>,
+    v_cache: impl Into<KvRows<'a>>,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
@@ -928,6 +929,7 @@ pub fn causal_gqa_attention_row(
     attn_softcap: Option<f32>,
     alibi: Option<&[f32]>,
 ) -> Vec<f32> {
+    let (k_cache, v_cache) = (k_cache.into(), v_cache.into());
     assert_eq!(q.len(), n_heads * head_dim);
     assert_eq!(k_cache.len(), seq_len * n_kv_heads * head_dim);
     assert_eq!(v_cache.len(), seq_len * n_kv_heads * v_head_dim);
@@ -978,12 +980,19 @@ pub fn causal_gqa_attention_row(
         let q_h = &q[h * head_dim..(h + 1) * head_dim];
         let sink = sinks.map(|s| s[h]);
         let slope = alibi.map_or(0.0, |s| s[h]);
+        // One scratch row per head for an f16 store to widen into; an f32
+        // store borrows and never touches it (`crate::kv_store`).
+        let (mut k_scratch, mut v_scratch) = (Vec::new(), Vec::new());
         online_attn_accumulate(q_h, scale, out_h, attn_softcap, sink, |visit| {
             for t in start..seq_len {
-                let k_t = &k_cache
-                    [(t * n_kv_heads + kv_h) * head_dim..(t * n_kv_heads + kv_h + 1) * head_dim];
-                let v_t = &v_cache[(t * n_kv_heads + kv_h) * v_head_dim
-                    ..(t * n_kv_heads + kv_h + 1) * v_head_dim];
+                let k_t = k_cache.read(
+                    (t * n_kv_heads + kv_h) * head_dim..(t * n_kv_heads + kv_h + 1) * head_dim,
+                    &mut k_scratch,
+                );
+                let v_t = v_cache.read(
+                    (t * n_kv_heads + kv_h) * v_head_dim..(t * n_kv_heads + kv_h + 1) * v_head_dim,
+                    &mut v_scratch,
+                );
                 visit(k_t, v_t, slope * (t as f32 - q_pos));
             }
         });
@@ -2309,14 +2318,17 @@ pub fn causal_gqa_attention_paged_sinks(
         let sink = sinks.map(|s| s[h]);
         let slope = alibi.map_or(0.0, |s| s[h]);
         let out_h = &mut out[h * v_head_dim..(h + 1) * v_head_dim];
+        let (mut k_scratch, mut v_scratch) = (Vec::new(), Vec::new());
         online_attn_accumulate(q_h, scale, out_h, attn_softcap, sink, |visit| {
             for t in start..seq_len {
                 let block_id = block_table[t / block_size];
                 let offset = t % block_size;
-                let k_row = store.k_row(block_id, offset);
-                let v_row = store.v_row(block_id, offset);
-                let k_t = &k_row[kv_h * head_dim..(kv_h + 1) * head_dim];
-                let v_t = &v_row[kv_h * v_head_dim..(kv_h + 1) * v_head_dim];
+                let k_t = store
+                    .k_row(block_id, offset)
+                    .read(kv_h * head_dim..(kv_h + 1) * head_dim, &mut k_scratch);
+                let v_t = store
+                    .v_row(block_id, offset)
+                    .read(kv_h * v_head_dim..(kv_h + 1) * v_head_dim, &mut v_scratch);
                 visit(k_t, v_t, slope * (t as f32 - q_pos));
             }
         });

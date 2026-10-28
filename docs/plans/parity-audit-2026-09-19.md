@@ -229,7 +229,7 @@ each checked against frink by grep rather than by memory:
 | disaggregated prefill, KV connectors, KV offload | **no** | `docs/plans/out-of-core-moe.md` is the nearest thing and is groundwork |
 | sleep mode | **no** | |
 | per-request metrics | **yes** | `stats/` |
-| quantized KV cache | **Metal only** | `--ctk` reaches `frink-metal`'s device store; the host cache is f32 (see 2.4) |
+| quantized KV cache | **Metal only** | `--ctk` reaches `frink-metal`'s device store; the host cache is f16 / f32 since 2026-10-28 (see 2.4) |
 | per-caller cache isolation (`cache_salt`) | **yes on the contiguous caches**, refused by name on the paged store | see 2.5 |
 
 ### 2.3 The finding worth acting on
@@ -261,6 +261,18 @@ away for the seventeen architectures whose MTP blocks frink already
 SKIPS by name (`crate::mtp_blocks::NEXTN_READERS`).
 
 ### 2.4 The host KV store is f32 where llama.cpp's is f16
+
+**Served since 2026-10-28.** The host store keeps f16 by default and
+f32 under `--ctk f32` (`frink_core::kv_store`), and the one function
+that decides it, `frink_models::host_kv_dtype`, is what the caches, the
+CLI banner, `-c auto`, the server's budgets, the slot file and the KV
+block file all read. CUDA keeps f32, because its decode kernel reads
+f32 rows. A short convolution's history stays f32, as llama.cpp's `r`
+cache does. On Llama-3.2-3B Q4_K_M the `-c auto` price per token went
+229376 to 114688 bytes, and the derived context from 87040 to the
+model's 131072. `frink parity` on Llama-3.2-1B Q4_K_M, which compares
+against libllama's default f16 context, read KL 1.770e-4 at an f32
+store and 1.768e-4 at f16. The original note is kept below.
 
 Found on 2026-09-22 from a real deployment, not from reading. A
 CPU-only host running Ternary-Bonsai-2-27B refused a 6415-token prompt

@@ -108,6 +108,7 @@ use crate::kv_signature::{
     CacheSignature, KvBlock, KvDtype, UnverifiedBlock, BLOCK_FORMAT_VERSION,
     READABLE_FORMAT_VERSIONS,
 };
+use crate::kv_store::KvBuf;
 use crate::kv_swa::{BlockLayout, BlockLayoutError};
 
 const MAGIC: &[u8; 8] = b"FRXKVBLK";
@@ -125,16 +126,19 @@ pub const BLOCK_FILE_EXT: &str = "kvb";
 const TMP_DIR: &str = ".tmp";
 
 const DTYPE_F32: u32 = 0;
+const DTYPE_F16: u32 = 1;
 
 fn dtype_code(dtype: KvDtype) -> u32 {
     match dtype {
         KvDtype::F32 => DTYPE_F32,
+        KvDtype::F16 => DTYPE_F16,
     }
 }
 
 fn dtype_from_code(code: u32) -> Option<KvDtype> {
     match code {
         DTYPE_F32 => Some(KvDtype::F32),
+        DTYPE_F16 => Some(KvDtype::F16),
         _ => None,
     }
 }
@@ -155,9 +159,7 @@ fn window_from_code(code: u32) -> Option<usize> {
 }
 
 fn dtype_width(dtype: KvDtype) -> usize {
-    match dtype {
-        KvDtype::F32 => 4,
-    }
+    dtype.elem_bytes()
 }
 
 /// Why a block file was refused. Every variant means "these bytes are
@@ -248,12 +250,10 @@ pub fn encode_block(hash: &BlockHash, block: &KvBlock) -> Vec<u8> {
 
     let mut body = Vec::with_capacity(body_len(sig) as usize);
     for layer in block.layers() {
-        for value in &layer.k {
-            body.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in &layer.v {
-            body.extend_from_slice(&value.to_le_bytes());
-        }
+        // At the store's own width, bit for bit: the signature names the
+        // dtype, so a reader at the other one misses rather than widens.
+        push_le(&mut body, &layer.k);
+        push_le(&mut body, &layer.v);
     }
 
     let mut digest = Sha256::new();
@@ -393,11 +393,12 @@ pub fn decode_block(bytes: &[u8]) -> Result<DecodedBlock, BlockFormatError> {
     let mut layers = Vec::with_capacity(n_layers);
     let mut offset = 0usize;
     for _ in 0..n_layers {
-        let k = read_f32(&body[offset..offset + per_layer_elems * 4]);
-        offset += per_layer_elems * 4;
-        let v = read_f32(&body[offset..offset + per_layer_elems * 4]);
-        offset += per_layer_elems * 4;
-        let mut cache = KvCache::new(n_kv_heads, head_dim);
+        let width = dtype_width(dtype);
+        let k = read_le(dtype, &body[offset..offset + per_layer_elems * width]);
+        offset += per_layer_elems * width;
+        let v = read_le(dtype, &body[offset..offset + per_layer_elems * width]);
+        offset += per_layer_elems * width;
+        let mut cache = KvCache::new(n_kv_heads, head_dim).with_dtype(dtype);
         cache.k = k;
         cache.v = v;
         // The rows were just written by hand, so this is the one place
@@ -422,13 +423,36 @@ pub fn decode_block(bytes: &[u8]) -> Result<DecodedBlock, BlockFormatError> {
     })
 }
 
-fn read_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect()
+fn push_le(body: &mut Vec<u8>, buf: &KvBuf) {
+    match buf {
+        KvBuf::F32(v) => v
+            .iter()
+            .for_each(|x| body.extend_from_slice(&x.to_le_bytes())),
+        KvBuf::F16(v) => v
+            .iter()
+            .for_each(|x| body.extend_from_slice(&x.to_le_bytes())),
+    }
+}
+
+fn read_le(dtype: KvDtype, bytes: &[u8]) -> KvBuf {
+    match dtype {
+        KvDtype::F32 => KvBuf::F32(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
+                .collect(),
+        ),
+        KvDtype::F16 => KvBuf::F16(
+            bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| half::f16::from_le_bytes(*c))
+                .collect(),
+        ),
+    }
 }
 
 /// Something went wrong reaching the disk tier. Corruption and
@@ -2221,7 +2245,7 @@ mod tests {
     }
 
     fn expected(model: &str, n_layers: usize, tokens: usize) -> CacheSignature {
-        CacheSignature::expected(model, flat(tokens), n_layers, 2, 4, tokens)
+        CacheSignature::expected(model, flat(tokens), n_layers, 2, 4, KvDtype::F32, tokens)
     }
 
     fn hash(n: usize) -> BlockHash {
@@ -2267,8 +2291,8 @@ mod tests {
             .expect("the block just written must be found");
         assert_eq!(read.layers().len(), 3);
         for (a, b) in read.layers().iter().zip(copy.layers()) {
-            assert_eq!(a.k, b.k);
-            assert_eq!(a.v, b.v);
+            assert_eq!(a.k.to_f32_vec(), b.k.to_f32_vec());
+            assert_eq!(a.v.to_f32_vec(), b.v.to_f32_vec());
             assert_eq!(a.positions(), b.positions());
         }
         let stats = store.stats();
@@ -2427,7 +2451,7 @@ mod tests {
         assert!(store
             .get(
                 &h,
-                &CacheSignature::expected("model-a", flat(4), 2, 8, 4, 4)
+                &CacheSignature::expected("model-a", flat(4), 2, 8, 4, KvDtype::F32, 4)
             )
             .expect("get")
             .is_none());
@@ -2629,7 +2653,7 @@ mod tests {
         let after_window_change = reopened
             .get(
                 &h,
-                &CacheSignature::expected("model-a", window_256, 2, 2, 4, 4),
+                &CacheSignature::expected("model-a", window_256, 2, 2, 4, KvDtype::F32, 4),
             )
             .expect("a config change is a miss, not an I/O error");
         assert!(
@@ -2644,7 +2668,7 @@ mod tests {
         let same = reopened
             .get(
                 &h,
-                &CacheSignature::expected("model-a", window_128, 2, 2, 4, 4),
+                &CacheSignature::expected("model-a", window_128, 2, 2, 4, KvDtype::F32, 4),
             )
             .expect("get")
             .expect("the same window must still hit");
@@ -3051,7 +3075,7 @@ mod tests {
             .expect("get")
             .expect("hit");
         assert_eq!(
-            got.layers()[0].k[0],
+            got.layers()[0].k.as_f32().unwrap()[0],
             9.0,
             "the newer block must win, not whichever write ran last"
         );
@@ -3116,7 +3140,7 @@ mod tests {
             .expect("get")
             .expect("the prefetch already had it");
         assert_eq!(got.tokens(), 4);
-        assert_eq!(got.layers()[0].k[0], 5.0);
+        assert_eq!(got.layers()[0].k.as_f32().unwrap()[0], 5.0);
 
         let stats = store.stats();
         assert_eq!(
@@ -3151,7 +3175,7 @@ mod tests {
         }
         for (i, h) in hashes.iter().enumerate() {
             let got = store.get(h, &want).expect("get").expect("read ahead");
-            assert_eq!(got.layers()[0].k[0], i as f32);
+            assert_eq!(got.layers()[0].k.as_f32().unwrap()[0], i as f32);
         }
         let stats = store.stats();
         assert_eq!(stats.prefetch_issued, 4);
@@ -3243,7 +3267,7 @@ mod tests {
         let want = expected("model-a", 1, 4);
         for (i, h) in hashes.iter().enumerate() {
             let got = store.get(h, &want).expect("get").expect("hit");
-            assert_eq!(got.layers()[0].k[0], i as f32);
+            assert_eq!(got.layers()[0].k.as_f32().unwrap()[0], i as f32);
         }
     }
 
@@ -3281,7 +3305,7 @@ mod tests {
         for _ in 0..2000 {
             if let Some(outcome) = handle.try_claim() {
                 let got = outcome.expect("read").expect("hit");
-                assert_eq!(got.layers()[0].k[0], 2.0);
+                assert_eq!(got.layers()[0].k.as_f32().unwrap()[0], 2.0);
                 assert_eq!(store.stats().staged_blocks, 0);
                 return;
             }

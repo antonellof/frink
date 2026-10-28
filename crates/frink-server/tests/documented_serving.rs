@@ -51,7 +51,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
         "fn admit",
     ),
     // Paged KV.
-    ("crates/frink-core/src/cache.rs", 57, "fn new"),
+    ("crates/frink-core/src/cache.rs", 58, "fn new"),
     ("crates/frink-server/src/generate.rs", 415, "fn fork"),
     (
         "crates/frink-server/src/serving/batch/prefill.rs",

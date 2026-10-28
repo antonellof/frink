@@ -15,6 +15,41 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **The host KV cache keeps f16, as llama.cpp's does.** It was
+  `Vec<f32>` on every backend, so a CPU run held twice the reference's
+  bytes per token and reached half its context on the same memory
+  (`docs/plans/parity-audit-2026-09-19.md` §2.4). `--ctk f16` (the
+  default) and `--ctk f32` now select the host store on CPU, and on the
+  host side of Metal. The quantized wires stay Metal's device store and
+  fall back to f16 on the host, which the banner says. CUDA keeps f32,
+  because its decode kernel reads f32 rows. Arithmetic stays f32: a row
+  is rounded once when written and widened when read
+  (`frink_core::kv_store`).
+
+  One function, `frink_models::host_kv_dtype`, decides the width, and
+  `ModelConfig::kv_dtype` carries it, so the caches, the `-c auto`
+  budget, the server's context ceilings, the slot file and the KV block
+  file cannot disagree about it. The server had priced the host store
+  at a literal `KvElem::F32` in eight places, and `kv_signature` kept a
+  second, f32-only `KvDtype` beside the cache. Both are gone.
+
+  Measured: on Llama-3.2-3B Q4_K_M, `-c auto` prices 114688 bytes per
+  token where it priced 229376, and derives 131072 tokens where it
+  derived 87040. `frink parity` now runs frink at f16, like the libllama
+  default it compares against; on Llama-3.2-1B Q4_K_M it reads KL
+  1.768e-4 at f16 and 1.770e-4 at f32. CPU decode after a 3000-token
+  prompt runs at 31.2 to 34.5 tok/s against 26.7 to 29.7 at f32
+  (interleaved, three runs each, on a laptop and so relative only).
+  Prefill is about 1% slower, from one widening copy per layer.
+
+  The library default (`ModelConfig::from_gguf`) stays f32, because
+  every libllama golden in `tests/` was made with
+  `type_k = GGML_TYPE_F32`. `tests/f16_host_kv.rs` holds the f16 store
+  to one answer across prefill, decode, multi-seq and paged, on a dense,
+  a windowed, a short-convolution and a Mamba fixture.
+
 ## [0.49.0] - 2026-09-23
 
 ### Added
