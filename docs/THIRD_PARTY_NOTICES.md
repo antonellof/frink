@@ -245,7 +245,7 @@ under the same Apache-2.0 license as frink itself.
 
 ## Frink Studio frontend (`ui/`)
 
-The web UI is a separate React application under [`ui/`](../ui). It is
+The web UI is a separate React application under [`ui/`](https://github.com/antonellof/frink/tree/main/ui). It is
 distributed as built JavaScript, so every dependency's licence travels
 with the bundle rather than staying a lockfile detail. **All of them are
 permissive: MIT, Apache-2.0 or ISC.** No AGPL or GPL dependency is
@@ -386,7 +386,7 @@ A full recursive re-read of the reference in August 2026 -- six readers
 over its 435 files, checked against every frink crate rather than
 against the port's own scope -- found 34 further pieces the first pass
 had missed. They are tracked individually in
-[`docs/plans/archive/freetoken-parity.md`](plans/archive/freetoken-parity.md) rather
+[`docs/plans/archive/freetoken-parity.md`](https://github.com/antonellof/frink/blob/main/docs/plans/archive/freetoken-parity.md) rather
 than summarised here, because each closes on its own. That review also
 found one place where the port had got a *shipped* rule wrong rather
 than merely omitted it: `route_top_k_grouped` implemented "k from every

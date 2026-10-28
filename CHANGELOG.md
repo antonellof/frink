@@ -2771,8 +2771,6 @@ the remaining work.
   token-for-token against llama.cpp master on DeepSeek-R1-Distill at
   temperature 0. Studio's sampling panel carries the field. Replaces the
   501 that refused the field by name.
-  rather than starting over. Default off; the channel-grammar families
-  and a content continuation for an always-open family are 501 by name.
 - `reasoning_budget_tokens` / `thinking_budget_tokens` are refused by
   name (501) except `-1`, rather than silently dropped. llama.cpp
   enforces the budget in its sampler; frink has no such sampler yet.
