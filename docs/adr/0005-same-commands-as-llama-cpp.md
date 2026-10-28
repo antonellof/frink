@@ -1,6 +1,6 @@
 # 0005. Same commands and flags as llama.cpp's tools
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-28
 
 ## Context
