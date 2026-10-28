@@ -1771,6 +1771,17 @@ in two directories. Each of those splits happened because somebody was
 about to add to the file and split it first. That is the whole
 mechanism, and it is the only one that has ever worked here.
 
+On 2026-10-28 the two worst left the table the same way, before the
+next architecture landed: `frink-models/src/decoder.rs` went 8050 to
+254 lines and `loader.rs` 6024 to 108, as module roots over one file
+per concept in `decoder/` and `loader/` (the host forward bodies, the
+Metal eligibility and launch glue, the FFN and MoE helpers, the
+config resolution, the tensor readers, the tests by path). Pure
+moves. Two functions are each a file of their own because splitting
+them would be a rewrite: `Decoder::forward_token_on_worker`
+(`decoder/forward_token.rs`, 1242 lines) and `ModelConfig::from_gguf`
+(`loader/model_config.rs`, 1319). They are the next thing to shrink.
+
 Those files are why llama.cpp has 155 architectures and frink has 93
 proven. Adding a model means editing a 6750-line file, so nobody adds
 one. The same decode layer used to be written out about ELEVEN times

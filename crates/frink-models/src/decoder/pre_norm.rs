@@ -68,19 +68,35 @@ mod tests {
     /// long call across three lines, and a grep test that a formatter
     /// can silence is a test that cannot fail -- this repo has shipped
     /// exactly that.
+    ///
+    /// Every file of the decoder module is searched
+    /// (`super::super::module_sources`), because the host bodies live in
+    /// several of them (`forward_token.rs`, `batch.rs`, `paged.rs`,
+    /// `multi_seq.rs`, and the blocks they call) and a body moved into a
+    /// new file must not leave the search.
     #[test]
     fn no_host_body_norms_the_stream_by_hand() {
-        // Not this file: the needle below is in its own source.
-        const BODIES: [(&str, &str); 4] = [
-            ("decoder.rs", include_str!("../decoder.rs")),
-            ("decoder/ffn_block.rs", include_str!("ffn_block.rs")),
-            ("decoder/attn_block.rs", include_str!("attn_block.rs")),
-            (
-                "decoder/recurrent_block.rs",
-                include_str!("recurrent_block.rs"),
-            ),
-        ];
-        for (name, src) in BODIES {
+        let bodies = super::super::module_sources();
+        for name in [
+            "decoder.rs",
+            "decoder/forward_token.rs",
+            "decoder/batch.rs",
+            "decoder/paged.rs",
+            "decoder/multi_seq.rs",
+            "decoder/ffn_block.rs",
+            "decoder/attn_block.rs",
+            "decoder/recurrent_block.rs",
+        ] {
+            assert!(
+                bodies.iter().any(|(n, _)| n == name),
+                "{name} is not a decoder source any more; update this list"
+            );
+        }
+        for (name, src) in &bodies {
+            // Not this file: the needle below is in its own source.
+            if name == "decoder/pre_norm.rs" {
+                continue;
+            }
             let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
             assert!(
                 !flat.contains(".norm_weight.apply("),

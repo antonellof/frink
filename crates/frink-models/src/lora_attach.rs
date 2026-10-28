@@ -14,7 +14,7 @@
 //! `lora_b` rows are split the same way, in the same order, with one
 //! copy of `lora_a` each: `B (A x)` over stacked rows IS the stacked
 //! `B_i (A x)`, exactly. Where the loader ALIASED one file tensor into
-//! two matrices (the ungated FFN's gate is its up, `loader.rs:1641`),
+//! two matrices (the ungated FFN's gate is its up, `loader/layer_parts.rs:191`),
 //! the whole delta goes on both, so the two stay one tensor.
 //!
 //! What is refused, by name, rather than approximated:
@@ -421,7 +421,7 @@ impl Decoder {
                             LayerTarget::FfnDown => Parts::Split(vec![&mut ex.down]),
                             // `ffn_up` is three things across the loader:
                             // the up matrix; Phi-3's fused gate+up (first
-                            // half gate, `loader.rs:1658`); or the ungated
+                            // half gate, `loader/layer_parts.rs:208`); or the ungated
                             // FFN's up, which is ALSO its gate.
                             _ if ungated => Parts::Alias(vec![&mut ex.up, &mut ex.gate]),
                             _ if file_rows == ex.gate.rows() + ex.up.rows()

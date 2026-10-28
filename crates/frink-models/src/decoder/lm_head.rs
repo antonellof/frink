@@ -35,7 +35,7 @@ use frink_core::weight_matrix::WeightMatrix;
 ///
 /// A newtype with a single constructor, so "these logits skipped the
 /// cap" is a state that cannot be built. Every output-head path in
-/// `decoder.rs` goes through it.
+/// the decoder module goes through it.
 pub(crate) struct Logits(Vec<f32>);
 
 impl Logits {
@@ -121,14 +121,15 @@ impl Logits {
 /// Metal decode stack, carrying the launch it is permission for.
 ///
 /// Generic over the launch type so this compiles and is testable
-/// without the `metal` feature and without a device; `decoder.rs`
-/// instantiates it at `frink_metal::gpu::MatvecLaunch<'_>`.
+/// without the `metal` feature and without a device;
+/// `decoder/forward_token.rs` instantiates it at `frink_metal::gpu::MatvecLaunch<'_>`.
 ///
 /// The only constructor is [`Self::permit`], which refuses unless greedy
 /// argmax is active for this thread. That is what makes
 /// [`Self::argmax_only`] able to be a constant instead of a second
 /// expression the caller has to keep in step.
-/// Only `decoder.rs`'s Metal decode stacks fold an lm_head, so outside a
+/// Only the Metal decode stacks in `decoder/forward_token.rs` fold an
+/// lm_head, so outside a
 /// `metal` build this type has no caller -- but its tests are the ones
 /// that pin the invariant, and they must run in the default build the
 /// gates actually exercise.
