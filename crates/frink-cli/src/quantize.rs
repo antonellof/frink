@@ -526,7 +526,7 @@ mod tests {
 
     /// One place the test `QuantizeArgs` are built.
     ///
-    /// Six hand-written literals of this struct is the shape CLAUDE.md
+    /// Six hand-written literals of this struct is the shape ADR 0004
     /// names first: adding `--pure` had to be spelled six times, and
     /// six copies is five chances to give one of them a different
     /// default from the CLI's. The builder takes what each test varies

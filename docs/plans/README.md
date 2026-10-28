@@ -9,6 +9,11 @@ Every file in this directory is listed here once.
   shapes, same or better performance, on the hardware people actually
   own. Open items are GitHub issues, ranked by its tiers.
 
+Decisions live in [`../adr/`](../adr/README.md). A plan here is a
+design doc for work in flight; when it lands, its lasting decisions
+become ADRs and the plan moves to `archive/`
+([ADR 0007](../adr/0007-issues-plans-adrs.md)).
+
 ## Design docs
 
 - **[`model-layer-reorg.md`](model-layer-reorg.md)**, making an
