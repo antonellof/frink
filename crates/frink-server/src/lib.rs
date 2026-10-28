@@ -508,7 +508,7 @@ pub(crate) struct AppState {
     pub(crate) continuous_batching_enabled: bool,
     /// Serializes private-loop Metal decodes when continuous batching is
     /// off. Shared `metal_attn_kv` is not safe across concurrent
-    /// `forward_token` calls yet; see `docs/plans/metal-parallel-concurrency.md`.
+    /// `forward_token` calls yet; see `docs/plans/archive/metal-parallel-concurrency.md`.
     pub(crate) metal_private_decode_gate: Option<Arc<std::sync::Mutex<()>>>,
     /// The model id a load task is currently working on, so
     /// `/admin/models` can report `loading` for it. Separate from

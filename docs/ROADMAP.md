@@ -79,10 +79,11 @@ Still open (see the Open section of
 
 ## Where the project goes next
 
-This section is the reader-facing half of
-[`plans/roadmap.md`](plans/roadmap.md), which holds every open item
-ranked, and [`plans/north-star.md`](plans/north-star.md), which holds
-the rule that ranks them. The plan's order is:
+This section is the reader-facing summary of the plans.
+[`plans/north-star.md`](plans/north-star.md) holds the rule that ranks
+the work, and the open items are tracked as
+[GitHub issues](https://github.com/antonellof/frink/issues). The order
+is:
 
 | # | Theme |
 |---|---|
@@ -95,8 +96,7 @@ the rule that ranks them. The plan's order is:
 | 7 | The rest: embeddings, quants, serving, measurement |
 
 The list below describes what those steps mean for someone running the
-engine rather than working on it. Where the two disagree, the plan is
-right and this page is stale.
+engine rather than working on it.
 
 1. **Run bigger models on the same hardware.** Make Qwen3 35B-A3B Q5
    usable on a box that today handles Q4, or an 8B. Most of the items
@@ -110,13 +110,16 @@ right and this page is stale.
    natural split. Hot experts stay resident on the GPU, cold ones get
    streamed or run on CPU. `PlacementPlan` and `ExpertStore` are the
    groundwork.
-4. **CUDA performance.** The matvec kernels build and run on real
-   hardware, but nobody has tuned them. The batched `Q8_0`/`Q4_0` GEMM
-   added on 2026-09-01 has never executed on a GPU at all. Its
-   evidence is a scalar twin plus a host harness that runs the emitted
-   CUDA against a barrier shim, and its hardware test is `#[ignore]`d
-   with "NEVER RUN" as the reason. The work is to put it on a card, then
-   the dp4a/MMQ integer path and the other five quant kinds.
+4. **CUDA performance.** The batched GEMM (`mul_mm`) first ran on a
+   GPU on 2026-09-15: all 13 hardware tests passed on an RTX 3090 and
+   `frink verify --backend cuda` was token-identical on five quant
+   kinds. Since 0.22.0 it runs on the tensor cores on `sm_80` and up,
+   and CUDA prefill keeps dense layers on the device. The RTX 3090 row
+   is still about 4.3× behind llama.cpp on prefill and 2.75× on decode
+   ([#259](https://github.com/antonellof/frink/issues/259),
+   [#133](https://github.com/antonellof/frink/issues/133)). Decode is
+   limited by memory-request concurrency rather than arithmetic, so the
+   work there is the matvec's load pattern, not a faster inner loop.
 5. **Tool calling and full OpenAI API compatibility.** See
    [`API.md`](API.md). GBNF grammars and the lazy grammars behind a
    forced `tool_choice` both ship. So does
@@ -162,7 +165,7 @@ right and this page is stale.
 - Throughput measurement for concurrent continuous-batching requests
   (the Metal parallel fix shipped in 0.15.2, and the CB garbled-output
   fix and Host B serving receipts in 0.15.3; see
-  [`plans/metal-parallel-concurrency.md`](plans/metal-parallel-concurrency.md)
+  [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
   and [`benchmarks/receipts/serving/`](../benchmarks/receipts/serving/))
 - Full KV layer offload, multi-GPU, tensor parallel, PD disaggregation
 

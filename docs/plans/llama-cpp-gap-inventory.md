@@ -17,6 +17,17 @@ invented keys, and a quant table accurate on the lines it flagged and
 wrong by omission on a whole SIMD tier. A confident wrong count is worse
 than no count.
 
+**File paths and line numbers predate the 2026-10 splits.**
+`crates/frink-quant/src/repack.rs` is now the `repack/` directory (one
+file per layout, with `avx2/` and `neon/` beside them), and
+`frink-models/src/decoder.rs` and `loader.rs` were split into the
+`decoder/` and `loader/` modules in #390. A `file:line` cite below
+points at the tree as it was read on 2026-09-01; the three `repack.rs`
+paths are re-pointed to the directory, and the line numbers on them are
+dropped. The `roadmap.md` it cites is archived as
+[`archive/roadmap-2026-09.md`](archive/roadmap-2026-09.md), and its
+`roadmap.md:N` line cites refer to that file as it stood then.
+
 **Read the body as a SNAPSHOT dated 2026-09-01, not as current
 state.** Rows are deliberately left as the reading found them, because
 an audit that is edited in place stops being evidence of anything. What
@@ -259,7 +270,7 @@ llama.cpp's `ggml/src/` holds 18 backend directories. frink has two.
 
 | llama.cpp backend (size) | frink counterpart | Severity | Size |
 |---|---|---|---|
-| `ggml-cpu/` (66 files, 90,589 lines) | `frink-quant` + `frink-core` (`lib.rs` 8230, `repack.rs` 6446) | -- | -- |
+| `ggml-cpu/` (66 files, 90,589 lines) | `frink-quant` + `frink-core` (`lib.rs` 8230, `repack/`, then one 6446-line `repack.rs`) | -- | -- |
 | `ggml-cuda/` (274 files, 43,277 lines) | `frink-cuda/src/`, **5 files, 2,601 lines** (`gpu.rs:1794`, `attn.rs:395`, `graph.rs:159`) | **critical** | XL |
 | `ggml-metal/` (12 files, 24,979 lines) | `frink-metal/src/`, 8 files, 19,664 lines | high | L |
 | **`ggml-vulkan/`** (145 files, 34,174 lines) | **none** | **critical** | XL |
@@ -316,8 +327,8 @@ CPU **26**. frink CPU **21**, Metal **6** plus F32, CUDA **5**.
 
 CPU repacking: llama.cpp `ggml-cpu/repack.cpp` repacks Q4_0, Q4_K, Q5_K,
 Q6_K, Q8_0, Q8_K, Q2_K, IQ4_NL, MXFP4. frink
-`crates/frink-quant/src/repack.rs` repacks Q4_0 (`:2273`), Q8_0
-(`:443`), Q4_K (`:90`), Q5_K (`:1123`), Q6_K (`:1815`) -- the five that
+`crates/frink-quant/src/repack/` repacks Q4_0 (`q4_0x4.rs`), Q8_0
+(`q8_0x4.rs`), Q4_K (`q4_kx8.rs`), Q5_K (`q5_kx8.rs`), Q6_K (`q6_kx8.rs`) -- the five that
 matter, missing IQ4_NL, MXFP4 and Q2_K. The `Q4_0_4_4` family is removed
 upstream (`ggml.h:421-428`) and is not a gap on either side.
 
@@ -329,7 +340,7 @@ upstream (`ggml.h:421-428`) and is not a gap on either side.
 | **x86 AVX512 / AVX512-VNNI / AVX-VNNI** | `ggml-cpu/arch/x86/cpu-feats.cpp` | **none** (zero `avx512`/`vnni` hits in `frink-quant`) | high | L |
 | Intel AMX int8 | `ggml-cpu/amx/mmq.cpp` | none | medium | XL |
 | ARM NEON | `ggml-cpu/arch/arm/quants.c` | Y, 26 `enable="neon"` | -- | -- |
-| ARM dotprod + i8mm | Y | Y (`repack.rs`, 32 `dotprod`, 92 `i8mm`) | -- | -- |
+| ARM dotprod + i8mm | Y | Y (`repack/`, 32 `dotprod`, 92 `i8mm` when read) | -- | -- |
 | ARM SVE / SME (+ `kleidiai/`) | Y | none | medium | L |
 | riscv-v, s390 VXE, wasm SIMD, POWER VSX, LoongArch LSX | `ggml-cpu/arch/*` | none | low | XL |
 

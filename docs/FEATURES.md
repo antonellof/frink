@@ -321,7 +321,7 @@ OpenAI-compatible HTTP API:
   Llama-3.2-3B Q4_K_M: 16/16 OK at concurrency 8, ~24 aggregate tok/s,
   ~118 ms mean TTFT sequential. CLI: `-cb`, `-np` / `--parallel N`,
   `--no-cont-batching` for the serialized private path. See
-  [`plans/metal-parallel-concurrency.md`](plans/metal-parallel-concurrency.md)
+  [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
 - Cache-aware admission. When a radix prefix cache is configured,
   a waiting job whose prompt is already computed may be admitted ahead
   of one that is not. Two bounds keep it from starving any job: only

@@ -84,10 +84,14 @@ todos:
 isProject: false
 ---
 
+> **Archived snapshot.** This roadmap was counted on 2026-09-02 and archived
+> on 2026-10-28; several items it marks pending have since landed. Open work
+> is ranked in [`north-star.md`](../north-star.md) and listed as GitHub issues.
+
 # The roadmap
 
 Every open item, merged by what the work is rather than by which
-document raised it. The goal is in [`north-star.md`](north-star.md).
+document raised it. The goal is in [`north-star.md`](../north-star.md).
 
 **The rule that overrides the order: shipped and working beats big and
 undone.** An item that cannot be cut into steps which each land, and
@@ -104,10 +108,10 @@ content closed, and when it is, the content says which parts.
 
 Two items are big enough to have their own design document:
 
-- [`model-layer-reorg.md`](model-layer-reorg.md), splitting the
+- [`model-layer-reorg.md`](../model-layer-reorg.md), splitting the
   decoder so architectures scale. It was 6438 lines when that document
   was written and is 6702 today, the first time it has shrunk.
-- [`out-of-core-moe.md`](out-of-core-moe.md), running a 155 GB model on
+- [`out-of-core-moe.md`](../out-of-core-moe.md), running a 155 GB model on
   a 32 GB machine.
 
 ## Order, and what each step ships
@@ -135,7 +139,7 @@ One item was already stale and is now closed:
 from the crates.io publish order. It was added, and all 13 crates
 published at 0.12.0 and again at 0.13.0.
 
-Superseded plan files moved to [`archive/`](archive/). They are kept
+Superseded plan files moved to [`archive/`](./). They are kept
 because their reasoning is worth not re-deriving, not because they are
 still the plan.
 

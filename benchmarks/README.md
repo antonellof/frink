@@ -305,4 +305,4 @@ See also [`pi-agent-tests/README.md`](../../pi-agent-tests/README.md).
 
 0.15.2 measured similar aggregate throughput at concurrency 8 but returned
 garbled text under CB on Metal until the 0.15.3 host-K/V prefill fix.
-See [`docs/plans/metal-parallel-concurrency.md`](../docs/plans/metal-parallel-concurrency.md).
+See [`docs/plans/archive/metal-parallel-concurrency.md`](../docs/plans/archive/metal-parallel-concurrency.md).
