@@ -100,6 +100,14 @@
 //! wait longest. FIFO cannot starve, so FIFO it is until there is a
 //! measured reason to change it.
 //!
+//! **Preemption** (opt-in, `FRINK_CB_PREEMPT_AFTER_TICKS`). A job that
+//! has waited that many admission passes may evict the most recently
+//! admitted decoding rows to make room for itself. An evicted row keeps
+//! everything it produced ([`answer`]), goes back to the front of the
+//! queue, and is prefilled again from its prompt plus its generated
+//! tokens when it is re-admitted. See [`preempt`] for why the trigger
+//! is a wait bound rather than a block fault, and why it terminates.
+//!
 //! `FRINK_CB_KV_BLOCKS` unset means no block budget at all, which is
 //! today's behaviour: `max_seqs` alone. The two caps compose -- a job
 //! must satisfy both.
@@ -142,12 +150,14 @@
 //! worker's own admission queue for a while, and a cap that stopped
 //! counting it there would stop bounding anything.
 
+mod answer;
 mod batcher;
 mod block_budget;
 pub(super) mod cache_aware;
 mod clock;
 mod config;
 mod counters;
+mod preempt;
 mod prefill;
 mod queue;
 mod row;

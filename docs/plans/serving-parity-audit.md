@@ -1,7 +1,8 @@
 # Continuous-batching serving features: what is here, read against the code
 
-Audited 2026-09-23 against `1c89868`. Every row carries the file and
-line that decides it, because the last two audits of this kind found
+Audited 2026-09-23 against `1c89868`; the preemption section
+2026-10-28. Every row carries the file and line that decides it,
+because the last two audits of this kind found
 prose describing a leak that had been fixed and a refusal called an
 absence. A capability table nothing checks is a claim, not an audit.
 
@@ -20,7 +21,7 @@ request that arrives mid-generation is admitted on the next tick and
 joins the same decode step as the rows already running; it does not
 wait for them to finish.
 
-- Admission: `worker.rs:62` (`admit`), capped by both a sequence count
+- Admission: `worker.rs:63` (`admit`), capped by both a sequence count
   and a block budget (`block_budget.rs`). A head job that does not fit
   stops the line rather than being skipped, because skipping on SIZE
   is a starvation bug.
@@ -44,10 +45,64 @@ agreed within 1.2%.
   <img alt="Eight concurrent requests reach 48.4 tok/s with batching off and 61.8 with it on." src="../assets/serving-batching-light.svg">
 </picture>
 
-**Not implemented:** preemption. A running row is never evicted to
-make room for a waiting one; admission refuses instead and the request
-queues. `serving/mod.rs:11` records why the scheduling quantum is a
-chunk duration, which is the related half.
+### Preemption
+
+**Implemented, opt-in** (`FRINK_CB_PREEMPT_AFTER_TICKS`, unset by
+default). Recompute-style: a decoding row is evicted, its blocks go
+back to the ledger, and when it is re-admitted it prefills its prompt
+followed by every token it had generated, then carries on.
+`serving/batch/preempt.rs` holds the policy and states it in full.
+
+- **Trigger: a wait bound, not a block fault.** The usual trigger is a
+  running row asking for a KV block when none is free. That cannot
+  happen here, because admission reserves `prompt + max_tokens` for a
+  request's whole life before it runs. What can happen is a job
+  waiting behind rows that hold large reservations, so the trigger is
+  the job admission would take next having waited that many admission
+  passes. `make_room` (`preempt.rs:111`) then evicts the most recently
+  admitted decoding rows, as few as make that job fit under BOTH caps,
+  or none if every eligible row together would not.
+- **What survives is one type.** Everything a row has produced that a
+  recompute cannot reproduce lives in `answer.rs` (`Answer`): the
+  sampler's RNG position, the grammar parse, the reasoning budget, the
+  stop matcher's withheld tail, the UTF-8 tail, the text already
+  streamed, and the clock. The row is split by `Slot::into_parts`
+  (`row.rs:285`), whose destructure has no `..`, so a field added to
+  `Slot` does not compile until it is classified as carried or
+  recomputed. New and resumed jobs go through the same `admit` and
+  `accept`; a resumed one differs only in what its prefill runs.
+- **Where it goes.** The front of the queue, behind the job it made
+  room for. Placed in front of it, it would be re-admitted into the
+  blocks it just gave up.
+- **It terminates.** `MAX_PREEMPTIONS = 4` (`preempt.rs:55`) per
+  request. Past that a row runs to completion, and the queue is the
+  strict FIFO that already cannot starve.
+- **Refused for sliding-window paged rows.** Their KV depends on when
+  each slide ran and on anchor state held by the lease, and a
+  recompute from tokens reproduces neither. They are not evicted; the
+  job waits as before.
+- On a paged store the evicted row publishes its pages to the radix
+  tree before its lease drops, so re-admission can adopt them. It
+  keeps the `cached_tokens` figure from its FIRST admission: what it
+  adopts later is mostly its own publish, not reuse.
+
+Tested in `serving/batch/tests/preempt.rs`, each test sabotaged once
+and confirmed red: forced preemption produces the unpreempted tokens
+at temperature 0 and the same draws under a seeded sampler; streamed
+deltas concatenate to the unpreempted text while a stop string is
+withholding; two rows that cannot both fit both finish, under either
+cap, with at most `MAX_PREEMPTIONS` evictions each; and the paged path
+with a prefix tree gives the reference tokens.
+
+**Not measured.** No serving figure above was taken with preemption
+on, and none is quoted for it. Each eviction costs a re-prefill, so
+whether it should be on by default is a measurement question this
+audit does not answer. `frink_scheduler_preempted_total` on `/metrics`
+counts evictions.
+
+`serving/mod.rs:11` records why the scheduling quantum is a chunk
+duration: a GPU cannot preempt a running kernel, so preemption here
+happens between ticks, never inside one.
 
 ### The per-step token budget
 
@@ -68,7 +123,7 @@ step, spent by prompt tokens and generated tokens alike, with no phase
 distinction. `serving/batch/step_budget.rs` is that at this worker's
 shape: the decode width is known before the prefill chunk runs, so the
 chunk takes what is left of `max_batch_tokens`
-(`step_budget.rs:55`, `FRINK_CB_MAX_BATCH_TOKENS`) rather than a fixed
+(`step_budget.rs:57`, `FRINK_CB_MAX_BATCH_TOKENS`) rather than a fixed
 number.
 
 Two properties, both tested rather than argued:
@@ -79,14 +134,15 @@ Two properties, both tested rather than argued:
 - **It cannot deadlock.** A budget alone does: once enough rows are
   decoding the remainder is zero, no prompt advances, and the rows that
   would free the budget wait on a prompt that never runs.
-  `MIN_PREFILL_CHUNK` (`step_budget.rs:63`) is the floor, driven to
+  `MIN_PREFILL_CHUNK` (`step_budget.rs:65`) is the floor, driven to
   completion by `a_saturated_batch_still_advances_its_prompts` rather
   than read off the constant.
 
 The floor means the budget is a TARGET and not a cap: a batch wider
 than the budget still costs `rows + MIN_PREFILL_CHUNK`. Bounding it
-strictly would mean preempting a decoding row, which this engine does
-not do.
+strictly would mean preempting decoding rows to narrow the step. The
+preemption above evicts to ADMIT a waiting job and never to narrow a
+step, so the floor stands.
 
 **The first version of the test asserted the wrong property.** It said
 per-tick work was FLAT, and it is not: at a narrow batch the
@@ -109,7 +165,7 @@ are returned when it ends.
   sliding-window model (`ForkRefused::SlidingWindow`), because two
   sequences recycling out of one page set is a use-after-free that
   reads as another position's tokens.
-- Chunked prefill: `serving/batch/prefill.rs:158`, with a test pinning
+- Chunked prefill: `serving/batch/prefill.rs:156`, with a test pinning
   that chunking does not change the logits.
 - Quantized KV wires: `f16`, `q8_0`, `fp8`, `q4`, the last with a
   Hadamard rotation on K.
@@ -129,7 +185,7 @@ matched unlocked leaf and cascading into a newly childless parent.
 - Namespaces: `salted.rs` is one tree per caller salt over one page
   pool, with round-robin eviction across namespaces. Two callers with
   byte-identical prompts share nothing.
-- Reclamation is wired on both decode paths: `generate.rs:857` calls
+- Reclamation is wired on both decode paths: `generate.rs:866` calls
   `evict` from `acquire_paged_caches`, which the private loop and the
   batched worker both go through, and the caller retries immediately
   rather than charging reclamation against its deadline.
@@ -185,7 +241,7 @@ the one number in this document that did not come off a socket.
 
 | | |
 |---|---|
-| Preemption / row eviction | Not implemented. Admission refuses; the request queues. |
+| Preemption / row eviction | Implemented, opt-in (`FRINK_CB_PREEMPT_AFTER_TICKS`). Recompute-style, triggered by a wait bound; see Preemption above. Not measured. |
 | KV swap to host | Not implemented. Pages come back from the tree or the request waits. |
 | Tensor / pipeline parallel | Not implemented. Single process, single device. |
 | Disaggregated prefill | Not implemented. |

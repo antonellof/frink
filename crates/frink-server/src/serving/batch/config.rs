@@ -78,6 +78,11 @@ pub struct BatcherConfig {
     /// Token positions (prompt + `max_tokens`) any single request may
     /// ask for, or `None` for no per-request ceiling.
     pub max_context: Option<usize>,
+    /// Admission passes the job admission would take next may wait
+    /// before the most recently admitted decoding rows are preempted to
+    /// make room for it, or `None` for no preemption (the default).
+    /// See [`super::preempt`].
+    pub preempt_after_ticks: Option<u32>,
 }
 
 impl Default for BatcherConfig {
@@ -90,6 +95,7 @@ impl Default for BatcherConfig {
             kv_block_size: DEFAULT_KV_BLOCK_SIZE,
             kv_blocks: None,
             max_context: None,
+            preempt_after_ticks: None,
         }
     }
 }
@@ -108,6 +114,7 @@ impl BatcherConfig {
             kv_block_size: env_positive("FRINK_CB_KV_BLOCK_SIZE").unwrap_or(DEFAULT_KV_BLOCK_SIZE),
             kv_blocks: env_positive("FRINK_CB_KV_BLOCKS"),
             max_context: env_positive("FRINK_CB_MAX_CONTEXT"),
+            preempt_after_ticks: env_ticks("FRINK_CB_PREEMPT_AFTER_TICKS"),
         }
     }
 }
@@ -119,6 +126,16 @@ pub(super) fn env_positive(name: &str) -> Option<usize> {
         .unwrap_or_else(|_| panic!("{name} must be a positive integer"));
     assert!(value > 0, "{name} must be a positive integer");
     Some(value)
+}
+
+/// A tick count that may be zero: `0` is a meaningful bound ("preempt
+/// as soon as the head cannot fit"), unlike the sizes above.
+fn env_ticks(name: &str) -> Option<u32> {
+    let raw = std::env::var(name).ok()?;
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{name} must be a non-negative integer")),
+    )
 }
 
 /// How many decode forwards pass between two status lines.

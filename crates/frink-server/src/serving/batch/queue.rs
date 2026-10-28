@@ -54,6 +54,16 @@ impl QueueGate {
         debug_assert!(previous > 0, "queue depth underflow");
     }
 
+    /// Claims a slot for a job going BACK into the queue: a decoding row
+    /// preempted to make room for another. Not capped: the job held a
+    /// slot before it was admitted, it has a client streaming from it,
+    /// and refusing it here would drop an answer half-way through. Its
+    /// admission releases the slot again, so the depth stays the count
+    /// of jobs in the worker's queue.
+    pub(super) fn requeue(&self) {
+        self.depth.fetch_add(1, Ordering::AcqRel);
+    }
+
     pub(super) fn depth(&self) -> usize {
         self.depth.load(Ordering::Relaxed)
     }

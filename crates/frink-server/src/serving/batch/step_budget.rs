@@ -41,8 +41,10 @@
 //!
 //! The floor means the budget is a TARGET, not a cap: a very wide
 //! batch still costs `rows + MIN_PREFILL_CHUNK`. Bounding it strictly
-//! would mean preempting a decoding row, which this engine does not
-//! do (`docs/plans/serving-parity-audit.md`).
+//! would mean preempting decoding rows to narrow the step. The
+//! preemption this batcher has (`super::preempt`) evicts to ADMIT a
+//! waiting job, never to narrow a step, so the floor stands
+//! (`docs/plans/serving-parity-audit.md`).
 
 /// Default tokens per tick, prompt and generated together.
 ///
