@@ -47,22 +47,44 @@
 //!
 //! `grep -l shortconv src/models/*.cpp` over all 155 llama.cpp graphs:
 //! `lfm2.cpp` and `lfm2moe.cpp`, and `models.h:1899` gives the second
-//! the first's graph (`using graph = llama_model_lfm2::graph`). So
-//! [`SHORTCONV_ARCHITECTURES`] is two rows, and what `head_count_kv 0`
-//! means on the OTHER hybrid rows (a Mamba-2 block, a gated delta-net
-//! block, a KDA block) is recorded in `layer_shapes::ZeroKvLayer` and
-//! refused by name until a body exists for it.
+//! the first's graph (`using graph = llama_model_lfm2::graph`). At the
+//! `604cc430` pin the block moved into `lfm-base.cpp`
+//! (`llm_build_lfm_base::build_lfm_shortconv`) and a third graph,
+//! `lfm3.cpp`, calls it (`:165-171`). So [`SHORTCONV_ARCHITECTURES`] is
+//! three rows, and what `head_count_kv 0` means on the OTHER hybrid rows
+//! (a Mamba-2 block, a gated delta-net block, a KDA block) is recorded
+//! in `layer_shapes::ZeroKvLayer` and refused by name until a body
+//! exists for it.
 //!
-//! # What stays refused
+//! # Windows
 //!
-//! `attention.sliding_window` on this architecture: `lfm2.cpp:24-29`
-//! honours it on the attention layers ALONE (`is_swa_impl[il] =
-//! !is_recr_impl[il]`), which `crate::swa_layers` has no variant for,
-//! and a window on the conv layer would also arm `FRINK_KV_WINDOW`'s
-//! eviction against a history the conv indexes by row. No published
-//! LFM2 export writes the key (the converter does not; measured over
-//! the four sizes' configs). The fixture that evidences the refusal
-//! runs in libllama and its logits differ from the unwindowed file's.
+//! The two generations read the window differently, and
+//! [`shortconv_window_refusal`] is the one place that says how:
+//!
+//! - `lfm2.cpp:24-29` honours a scalar `attention.sliding_window` on the
+//!   attention layers ALONE (`is_swa_impl[il] = !is_recr_impl[il]`),
+//!   which `crate::swa_layers` has no variant for, and no published LFM2
+//!   export writes the key (the converter does not; measured over the
+//!   four sizes' configs). REFUSED. The fixture that evidences the
+//!   refusal runs in libllama and its logits differ from the unwindowed
+//!   file's.
+//! - `lfm3.cpp:13-18` reads the per-layer ARRAY with `get_arr`, which
+//!   `crate::swa_layers` honours, and REQUIRES at least one sliding
+//!   layer (`:14-16`). Its converter marks `sliding_attention` layers
+//!   only (`conversion/lfm3.py:95`), never a conv layer. Served, with
+//!   two refusals: a file with no sliding layer (llama.cpp throws), and
+//!   one that marks a CONV layer as sliding, which upstream ignores (no
+//!   conv code reads `is_swa`) but which here would arm `FRINK_KV_
+//!   WINDOW`'s eviction against the history the conv indexes by row.
+//!   No converter writes the second; refusing it is cheaper than a
+//!   mask that only matters for a hand-written file.
+//!
+//! # Post norms on the block
+//!
+//! `lfm3.cpp:178-181` norms the branch output with `attn_post_norm`
+//! OUTSIDE the `is_recr` branch, so a conv layer's output is normed as
+//! an attention layer's is ([`CONV_OUTPUT_POST_NORMED`]); `lfm2.cpp`
+//! creates no such tensor.
 
 use frink_core::weight_matrix::WeightMatrix;
 use frink_gguf::TensorSource;
@@ -80,7 +102,65 @@ pub const SHORTCONV_ARCHITECTURES: &[(&str, &str)] = &[
         "lfm2moe",
         "lfm2moe.cpp:12-14, :66-69; the graph is lfm2's (models.h:1899)",
     ),
+    (
+        "lfm3",
+        "lfm3.cpp:8-10 (is_recr), :84-86 (tensors), :165-171 (lfm-base.cpp:9-112, the block)",
+    ),
 ];
+
+/// The short-conv graphs that norm the conv block's output with
+/// `attn_post_norm` before the residual add (`lfm3.cpp:178-181`, outside
+/// the `is_recr` branch). See the module doc.
+pub const CONV_OUTPUT_POST_NORMED: &[&str] = &["lfm3"];
+
+/// Why a short-conv architecture's window cannot be served, or `None`
+/// when it can (or the architecture is not a short-conv one). `window`
+/// is the declared `attention.sliding_window`; `slides` and `kv_heads`
+/// are the per-layer `is_swa` answer and `head_count_kv` (`0` is a conv
+/// layer). See the module doc for the two generations.
+pub fn shortconv_window_refusal(
+    arch: &str,
+    window: Option<usize>,
+    n_layers: usize,
+    slides: impl Fn(usize) -> bool,
+    kv_heads: &[u64],
+) -> Option<String> {
+    if !is_shortconv_architecture(arch) {
+        return None;
+    }
+    let reads_array = matches!(
+        crate::swa_layers::pattern_key_read(arch),
+        crate::swa_layers::PatternKeyRead::PerLayerBool
+    );
+    match (window, reads_array) {
+        (None, _) => None,
+        (Some(w), false) => Some(format!(
+            "`{arch}.attention.sliding_window` {w}: lfm2.cpp:24-29 windows the attention \
+             layers and not the conv layers, which `swa_layers` cannot yet spell, and a \
+             window on a conv layer would evict the history its convolution reads \
+             (`crate::shortconv`); no published LFM2 export writes the key"
+        )),
+        (Some(_), true) => {
+            let is_conv = |il: usize| kv_heads.get(il).copied() == Some(0);
+            if let Some(il) = (0..n_layers).find(|&il| is_conv(il) && slides(il)) {
+                return Some(format!(
+                    "`{arch}.attention.sliding_window_pattern` marks conv layer {il} as \
+                     sliding: llama.cpp's conv block never reads `is_swa` (lfm-base.cpp:9-112) \
+                     and its converter never writes it (conversion/lfm3.py:95), while here a \
+                     window on a conv layer would evict the history its convolution reads"
+                ));
+            }
+            if !(0..n_layers).any(&slides) {
+                return Some(format!(
+                    "`{arch}.attention.sliding_window_pattern` marks no layer as sliding, and \
+                     llama.cpp refuses that file (lfm3.cpp:14-16, \"LFM3 requires sliding \
+                     window attention layers\")"
+                ));
+            }
+            None
+        }
+    }
+}
 
 /// True for an architecture whose zero-KV layers are short convolutions.
 pub fn is_shortconv_architecture(arch: &str) -> bool {
@@ -312,10 +392,43 @@ mod tests {
     }
 
     #[test]
-    fn the_table_is_the_two_lfm2_graphs() {
+    fn the_table_is_the_three_lfm_graphs() {
         assert!(is_shortconv_architecture("lfm2"));
         assert!(is_shortconv_architecture("lfm2moe"));
+        assert!(is_shortconv_architecture("lfm3"));
         assert!(!is_shortconv_architecture("deci"));
         assert!(!is_shortconv_architecture("jamba"));
+    }
+
+    /// The two generations: lfm2's scalar window is refused whatever
+    /// it says, lfm3's array is served unless it marks a conv layer or
+    /// no layer at all, and a windowless file is never refused.
+    #[test]
+    fn each_generation_reads_its_window_as_its_graph_does() {
+        let kv = [0u64, 2, 2, 0, 2];
+        let slides = |p: &'static [bool]| move |il: usize| p[il];
+        assert!(shortconv_window_refusal("lfm2", Some(4), 5, |_| true, &kv)
+            .is_some_and(|m| m.contains("lfm2.cpp:24-29")));
+        assert_eq!(
+            shortconv_window_refusal("lfm2", None, 5, |_| true, &kv),
+            None
+        );
+        const SERVED: [bool; 5] = [false, true, false, false, true];
+        assert_eq!(
+            shortconv_window_refusal("lfm3", Some(3), 5, slides(&SERVED), &kv),
+            None
+        );
+        const ON_CONV: [bool; 5] = [true, true, false, false, true];
+        assert!(
+            shortconv_window_refusal("lfm3", Some(3), 5, slides(&ON_CONV), &kv)
+                .is_some_and(|m| m.contains("conv layer 0"))
+        );
+        assert!(shortconv_window_refusal("lfm3", Some(3), 5, |_| false, &kv)
+            .is_some_and(|m| m.contains("lfm3.cpp:14-16")));
+        // Not a short-conv graph: nothing to say.
+        assert_eq!(
+            shortconv_window_refusal("llama", Some(3), 5, |_| true, &kv),
+            None
+        );
     }
 }

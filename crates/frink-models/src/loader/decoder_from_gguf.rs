@@ -334,6 +334,17 @@ impl Decoder {
                     &config,
                 )?,
             };
+            if let Some(reason) = crate::norm_sites::post_norm_pairing_refusal(
+                &arch,
+                l,
+                attn.post_attn_norm.is_some(),
+                attn.post_ffn_norm.is_some(),
+            ) {
+                return Err(LoadError::UnsupportedFeature(
+                    config.name.to_string(),
+                    reason,
+                ));
+            }
 
             // Leading dense layers (see ModelConfig::layer_is_dense's
             // doc comment) load from the plain dense tensor names

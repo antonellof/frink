@@ -36,17 +36,21 @@
 //! ```
 //!
 //! Generated against `libllama.0.4.1` built from `.scratch/llama.cpp` at
-//! `5b59b83`; its non-decode output for every fixture below is
-//! byte-identical to the last-position golden already committed for it.
+//! `5b59b83`, except `lfm3`, whose graph landed after that pin and was
+//! generated against a `libllama` built at `604cc430`; for every fixture
+//! below the non-decode output is byte-identical to the last-position
+//! golden already committed for it.
 //!
 //! # What is covered
 //!
-//! Six fixtures, chosen for where decode can part from prefill: two
+//! Seven fixtures, chosen for where decode can part from prefill: two
 //! plain dense GQA graphs (`mistral3`, `glm4`), two sliding windows of 3
 //! (`cohere2` dense, `smallthinker_swa2` MoE) so 32 steps cross the
-//! window ten times over, and two hybrids whose recurrent state is a
+//! window ten times over, two hybrids whose recurrent state is a
 //! reduction over the whole prefix (`qwen35`'s gated delta net,
-//! `granitehybrid`'s Mamba-2). Four decode bodies: prefill then the CPU
+//! `granitehybrid`'s Mamba-2), and one whose state is a window of its
+//! inputs beside a window of 3 on its sliding layers (`lfm3`'s short
+//! convolution). Four decode bodies: prefill then the CPU
 //! row body (`forward_token`), the row body from position 0, the paged
 //! body (`forward_token_paged`), and continuous batching
 //! (`forward_multi_seq`) with two sequences at DIFFERENT positions in
@@ -100,6 +104,11 @@ const GOLDENS: &[(&str, f32)] = &[
     ("smallthinker_swa2", GRAPH_TOL),
     ("qwen35", RECURRENT_DECODE_TOL),
     ("granitehybrid", RECURRENT_DECODE_TOL),
+    // Generated against `libllama` built from llama.cpp at `604cc430`,
+    // the first golden here past the `5b59b83` build. A short-conv
+    // hybrid with a window of 3 on two of its three attention layers,
+    // so 32 steps cross both the conv history and the window.
+    ("lfm3", GRAPH_TOL),
 ];
 
 /// Paged block size. Does not divide the six-token prompt, so the

@@ -55,7 +55,7 @@ counted separately. `frink archs` is the authoritative list.
 | MiniMax-M3 | Needs MiniMax Sparse Attention |
 | Kimi K3, GLM-5.2, DeepSeek V4 | Loaders and primitives only; nothing has run end to end on a real checkpoint |
 | `bailingmoe3`, `dots3note`, `hy_v4`, `deepseek41` (DeepSeek-V4.1-Flash), `glm5-next` (GLM-5.3-Flash) | Each needs an attention or residual layout this engine does not have, and is refused by name |
-| `kolibri1`, `lfm3`, `flint`, `beam`, `maion-coder`, `k2-horizon`, `muse-spark`, `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | The eleven unaudited architectures; see below |
+| `kolibri1`, `flint`, `beam`, `maion-coder`, `k2-horizon`, `muse-spark`, `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | The ten unaudited architectures; see below |
 | Vision | Frink finds an mmproj file and warns. An `image_url` in a request is an error |
 | MTP draft heads | `--mtp` errors by design. Speculation uses prompt lookup, or a second GGUF on the CLI (`--model-draft`) |
 
@@ -97,17 +97,17 @@ instead. The message names the reason, which is one of these six.
 
 ## The eleven unaudited architectures
 
-None of the 11 is a fixture away. Two are a single match arm away
-(table rows on seams frink already serves), and the rest need code or a
-reading nobody has done. All 11 have now been read on both sides. Each
+None of the 10 is a fixture away or a single match arm away; each
+needs code or a reading nobody has done. All 10 have now been read on
+both sides. Each
 refusal prints its own blocker with the `llama.cpp/src/models/*.cpp`
 line that decides it, so trust `frink -m <file>` over this table.
 
 | Class | Count |
 |---|---|
 | fixture-away | 0 |
-| one match arm | 2 |
-| new code | 8 |
+| one match arm | 0 |
+| new code | 9 |
 | unknown | 1 |
 
 The count was 4 until 2026-10-28, when the llama.cpp pin moved from
@@ -115,12 +115,15 @@ The count was 4 until 2026-10-28, when the llama.cpp pin moved from
 turned out to be generic-path candidates
 ([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md)).
 Because upstream keeps adding architectures, this count rises whenever
-the pin moves.
+the pin moves. Of the two that read as a single match arm, `lfm3` closed
+the same day on a libllama golden and a 32-step greedy decode, and
+`kolibri1` moved to new code: its router adds the selection bias to the
+raw logits (`kolibri1.cpp:138`), before the sigmoid, where every router
+frink has adds it after.
 
 | Architecture | What is missing |
 |---|---|
-| `kolibri1` | Table rows only: RoPE on the sliding layers, the window array, sandwich norms, sigmoid routing with a shared expert. Needs a libllama golden |
-| `lfm3` | Table rows only: LFM2's layers plus a per-head sigmoid attention gate, the window array, and `rope_freqs` on the full layers alone |
+| `kolibri1` | A router that ranks experts by `logits + exp_probs_b` before the sigmoid, while every router here adds the bias after it. The rest (RoPE on the sliding layers, the window array, sandwich norms, a shared expert) is table rows |
 | `flint` | Its `flint` pre-tokenizer is a sequence of two regexes, which the tokenizer cannot express. The graph itself is served seams |
 | `beam` | A scaled residual (`h / sqrt(i) + r * sqrt((i - 1) / i)`) and a power-form attention temperature |
 | `maion-coder` | A latent MoE (the experts run between `ffn_latent_down` and `ffn_latent_up`) |

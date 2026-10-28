@@ -177,6 +177,35 @@ pub fn weightless_embedding_norm(arch: &str) -> bool {
 /// (`lfm2moe.cpp:31`).
 pub const OUTPUT_NORM_UNDER_EMBEDDING_NAME: &[&str] = &["lfm2", "lfm2moe"];
 
+/// Architectures whose two OPTIONAL post norms must be present together
+/// or not at all, with the line that refuses a file carrying one. The
+/// default row loads each independently, so without this a file with
+/// one would be served where llama.cpp throws.
+pub const POST_NORMS_BOTH_OR_NEITHER: &[(&str, &str)] = &[("lfm3", "lfm3.cpp:53-55")];
+
+/// Why layer `layer`'s post norms cannot be served, or `None`.
+pub fn post_norm_pairing_refusal(
+    arch: &str,
+    layer: usize,
+    post_attn: bool,
+    post_ffn: bool,
+) -> Option<String> {
+    let (_, line) = POST_NORMS_BOTH_OR_NEITHER
+        .iter()
+        .find(|(a, _)| *a == arch)?;
+    let (has, lacks) = if post_attn {
+        ("post_attention_norm", "post_ffw_norm")
+    } else {
+        ("post_ffw_norm", "post_attention_norm")
+    };
+    (post_attn != post_ffn).then(|| {
+        format!(
+            "blk.{layer} carries {has} without {lacks}: llama.cpp requires both post norms or \
+             neither for `{arch}` (src/models/{line})"
+        )
+    })
+}
+
 /// Architectures with ONE norm per layer, `attn_norm`, whatever the
 /// layer's block is: `nemotron-h.cpp:52` ("all blocks use the attn
 /// norm"), `:145`. Every Nemotron-H layer is a single block with a
@@ -456,6 +485,24 @@ mod tests {
         // The name alone does nothing on another architecture.
         let llama = NormSites::for_arch("llama");
         assert_eq!(llama.for_layer("llama", &forty_b, 1), llama);
+    }
+
+    /// `lfm3.cpp:53-55` throws on a layer with one post norm; the
+    /// default row would serve it, so the pairing table refuses it, and
+    /// only for the architectures it names.
+    #[test]
+    fn one_post_norm_without_the_other_is_refused_where_upstream_throws() {
+        assert_eq!(post_norm_pairing_refusal("lfm3", 0, true, true), None);
+        assert_eq!(post_norm_pairing_refusal("lfm3", 0, false, false), None);
+        let msg = post_norm_pairing_refusal("lfm3", 2, true, false).expect("refused");
+        assert!(
+            msg.contains("blk.2 carries post_attention_norm without post_ffw_norm")
+                && msg.contains("lfm3.cpp:53-55"),
+            "{msg}"
+        );
+        assert!(post_norm_pairing_refusal("lfm3", 1, false, true)
+            .is_some_and(|m| m.contains("post_ffw_norm without post_attention_norm")));
+        assert_eq!(post_norm_pairing_refusal("gemma2", 0, true, false), None);
     }
 
     /// The default row is the plain pre-norm layer with both post-norms

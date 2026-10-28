@@ -173,6 +173,8 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("spark2_5", "src/models/spark2-5.cpp:8"),
     ("maple", "src/models/maple.cpp:8"),
     ("granite_swa", "src/models/granite-swa.cpp:17"),
+    // Landed upstream after the 2026-09-19 pin.
+    ("lfm3", "src/models/lfm3.cpp:13"),
 ];
 
 /// The graphs that read `nextn_predict_layers` BEFORE the array, so
