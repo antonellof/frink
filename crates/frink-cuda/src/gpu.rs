@@ -290,10 +290,10 @@ fn launch_matvec(
         .map_err(|e| CudaError::Launch(format!("{e:?}")))
 }
 
-/// How many warps a coalesced matvec block carries. Eight keeps enough
-/// rows in flight per SM to hold loads outstanding, which is the thing
-/// those kernels exist to fix.
-const COALESCED_WARPS_PER_BLOCK: usize = 8;
+/// How many warps a coalesced matvec block carries; one holder, in
+/// `matvec_kinds::coalesced`, so the host check launches the geometry
+/// this file does.
+const COALESCED_WARPS_PER_BLOCK: usize = crate::matvec_kinds::coalesced::WARPS_PER_BLOCK;
 
 /// Which kernel a matvec actually runs, and the geometry that kernel
 /// needs.
@@ -317,33 +317,58 @@ fn matvec_launch_plan(
     kernel_src: &'static str,
     module_name: &'static str,
     rows: usize,
-) -> (
-    &'static str,
-    &'static str,
-    &'static str,
-    cudarc::driver::LaunchConfig,
-) {
-    match coalesced_matvec_kernel(fn_name) {
-        Some((src, module, entry)) => (
-            src,
-            module,
-            entry,
-            cudarc::driver::LaunchConfig {
+    width: MatvecWidth,
+) -> MatvecPlan {
+    match coalesced_kind(fn_name) {
+        Some(kind) => MatvecPlan {
+            source: PlanSource::Coalesced(kind, width),
+            module: kind.module(width),
+            entry: kind.entry,
+            // The same grid at both widths: one row per warp. Width
+            // changes what a warp does inside its row, not which row
+            // it owns, so the A/B varies exactly one thing.
+            cfg: cudarc::driver::LaunchConfig {
                 grid_dim: (rows.div_ceil(COALESCED_WARPS_PER_BLOCK) as u32, 1, 1),
                 block_dim: ((COALESCED_WARPS_PER_BLOCK * 32) as u32, 1, 1),
                 shared_mem_bytes: 0,
             },
-        ),
-        None => (
-            kernel_src,
-            module_name,
-            fn_name,
-            cudarc::driver::LaunchConfig {
+        },
+        None => MatvecPlan {
+            source: PlanSource::Static(kernel_src),
+            module: module_name,
+            entry: fn_name,
+            cfg: cudarc::driver::LaunchConfig {
                 grid_dim: (rows as u32, 1, 1),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 256 * std::mem::size_of::<f32>() as u32,
             },
-        ),
+        },
+    }
+}
+
+/// What [`matvec_launch_plan`] decided: the NVRTC module and entry
+/// point to launch, where its text comes from, and its geometry.
+struct MatvecPlan {
+    source: PlanSource,
+    module: &'static str,
+    entry: &'static str,
+    cfg: cudarc::driver::LaunchConfig,
+}
+
+/// A block-per-row kernel is a literal; a coalesced one is generated
+/// per width ([`CoalescedKind::source`]), and only on a module-cache
+/// miss.
+enum PlanSource {
+    Static(&'static str),
+    Coalesced(&'static CoalescedKind, MatvecWidth),
+}
+
+impl MatvecPlan {
+    fn text(&self) -> String {
+        match self.source {
+            PlanSource::Static(src) => src.to_string(),
+            PlanSource::Coalesced(kind, width) => kind.source(width),
+        }
     }
 }
 
@@ -370,16 +395,36 @@ fn enqueue_matvec(
     ),
     CudaError,
 > {
+    // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
+    enqueue_matvec_at(dev, launch, d_x, MatvecWidth::from_env())
+}
+
+/// [`enqueue_matvec`] at an explicit width, so the hardware test can
+/// hold both widths against their twins whatever the environment says.
+fn enqueue_matvec_at(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    launch: &MatvecLaunch<'_>,
+    d_x: &cudarc::driver::CudaSlice<f32>,
+    width: MatvecWidth,
+) -> Result<
+    (
+        cudarc::driver::CudaSlice<f32>,
+        std::sync::Arc<ResidentCudaWeights>,
+    ),
+    CudaError,
+> {
     use cudarc::driver::LaunchAsync;
 
-    let (src, module, entry, cfg) = matvec_launch_plan(
+    let plan = matvec_launch_plan(
         launch.fn_name,
         launch.kernel_src,
         launch.module_name,
         launch.rows,
+        width,
     );
+    let (module, entry, cfg) = (plan.module, plan.entry, plan.cfg);
 
-    ensure_module_loaded(dev, src, module, entry)?;
+    ensure_module_loaded_lazy(dev, module, entry, || plan.text())?;
     let func = dev.get_func(module, entry).ok_or_else(|| {
         CudaError::KernelCompile(format!("function '{entry}' not found after load_ptx"))
     })?;
@@ -499,7 +544,7 @@ pub(crate) fn resident_cuda_weights(
 // family; `gpu.rs` keeps the device plumbing. Re-exported so every
 // existing path still resolves -- a refactor that moves a definition
 // should not move a public name.
-use crate::matvec_kinds::coalesced::coalesced_matvec_kernel;
+use crate::matvec_kinds::coalesced::{coalesced_kind, CoalescedKind, MatvecWidth};
 pub use crate::matvec_kinds::coalesced::{
     Q4_K_MATVEC_COALESCED_KERNEL_SRC, Q5_K_MATVEC_COALESCED_KERNEL_SRC,
     Q6_K_MATVEC_COALESCED_KERNEL_SRC, Q8_0_MATVEC_COALESCED_KERNEL_SRC,
@@ -1313,84 +1358,69 @@ mod tests {
         (weights, x, expected)
     }
 
-    /// Every coalesced kernel against its scalar twin, on a real
-    /// device. The twins prove the lane mapping without a GPU; this
-    /// proves the CUDA C, the vector loads and the warp-shuffle
-    /// reduction, none of which a twin covers.
+    /// Every coalesced kernel, at BOTH widths, against its scalar twin
+    /// on a real device. The twins prove the lane mapping without a GPU
+    /// and `tools/matvec_host_check` runs the CUDA C text on a host
+    /// CPU; this proves NVRTC accepts it and that the vector loads, the
+    /// alignment they assume and the warp-shuffle reduction hold on
+    /// hardware, none of which the other two can see.
     ///
-    /// One test over the table rather than one test per kind, so a new
-    /// kind cannot be added with its hardware check quietly left out.
+    /// Walks [`crate::matvec_kinds::coalesced::COALESCED`] rather than a
+    /// list of its own, so a new kind cannot be added with its hardware
+    /// check quietly left out. Block counts 3 and 12: 3 is fewer than a
+    /// wide warp's blocks per trip for every kind (so some lanes idle),
+    /// 12 is a 3072-wide K-quant row.
     ///
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware -- verifies every coalesced matvec against its scalar twin"]
-    fn every_coalesced_matvec_matches_its_twin() {
-        type Twin = fn(&[u8], &[f32], usize) -> f32;
-        let cases: &[(&str, usize, usize, u32, Twin)] = &[
-            (
-                "Q4_K",
-                144,
-                256,
-                7,
-                crate::coalesced_twin::q4_k_matvec_coalesced_row,
-            ),
-            (
-                "Q5_K",
-                176,
-                256,
-                17,
-                crate::coalesced_twin::q5_k_matvec_coalesced_row,
-            ),
-            (
-                "Q6_K",
-                210,
-                256,
-                11,
-                crate::coalesced_twin::q6_k_matvec_coalesced_row,
-            ),
-            (
-                "Q8_0",
-                34,
-                32,
-                23,
-                crate::coalesced_twin::q8_0_matvec_coalesced_row,
-            ),
-        ];
+    #[ignore = "requires real CUDA hardware. The WIDE width (the default since #133) has NEVER executed on a GPU; the narrow width passed on an RTX 3060/3070. Run with --ignored and record the result"]
+    fn every_coalesced_matvec_matches_its_twin_at_both_widths() {
+        use crate::matvec_kinds::coalesced::{MatvecWidth, COALESCED};
         let rows = 37usize; // not a multiple of the warps per block
-        let n_blocks_per_row = 3usize;
-        for (kind, block_bytes, per_block, seed, twin) in cases {
-            let row_bytes = n_blocks_per_row * block_bytes;
-            let cols = n_blocks_per_row * per_block;
-            let weights = pseudo_bytes(*seed, rows * row_bytes);
-            let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
-            // Enter through the ordinary kernel identity, not the
-            // coalesced one, so this exercises the ROUTING too: if
-            // `matvec_launch_plan` stopped substituting the coalesced
-            // kernel, the result would match a dequantize-then-dot
-            // reference but not the coalesced twin's lane order.
-            let (src, module, fn_name) = super::matvec_launch_meta(kind)
-                .unwrap_or_else(|| panic!("{kind} has no matvec kernel"));
-            let got = super::launch_matvec(
-                src,
-                module,
-                fn_name,
-                &weights,
-                &x,
-                rows,
-                row_bytes,
-                n_blocks_per_row,
-            )
-            .unwrap_or_else(|e| panic!("{kind}: {e:?}"));
-            assert_eq!(got.len(), rows, "{kind}");
-            for r in 0..rows {
-                let row = &weights[r * row_bytes..(r + 1) * row_bytes];
-                let want = twin(row, &x, n_blocks_per_row);
-                assert!(
-                    !(want.is_nan() ^ got[r].is_nan()),
-                    "{kind} row {r}: GPU={} twin={want}",
-                    got[r]
-                );
-                assert_close_relative(got[r], want, r);
+        let dev = super::shared_device().expect("device");
+        for kind in COALESCED {
+            let twin = crate::coalesced_twin::twin_for(kind.entry)
+                .unwrap_or_else(|| panic!("{} has no twin", kind.entry));
+            let mv = crate::matvec_kinds::KINDS
+                .iter()
+                .find(|m| m.fn_name == kind.base_fn)
+                .expect("routed from a MatvecKind");
+            let mm = crate::mul_mm::kind_by_name(mv.name).expect("geometry");
+            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+                for (n_blocks_per_row, seed) in [(3usize, 7u32), (12, 23)] {
+                    let row_bytes = n_blocks_per_row * mm.block_bytes;
+                    let cols = n_blocks_per_row * mm.block_elems;
+                    let weights = pseudo_bytes(seed, rows * row_bytes);
+                    let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
+                    // Enter through the ordinary kernel identity, not the
+                    // coalesced one, so this exercises the ROUTING too.
+                    let launch = super::MatvecLaunch {
+                        kernel_src: mv.src,
+                        module_name: mv.module_name,
+                        fn_name: mv.fn_name,
+                        weights: &weights,
+                        rows,
+                        row_bytes,
+                        n_blocks_per_row,
+                    };
+                    let d_x = dev.htod_copy(x.clone()).expect("upload");
+                    let (d_out, _w) = super::enqueue_matvec_at(&dev, &launch, &d_x, width)
+                        .unwrap_or_else(|e| panic!("{} {width:?}: {e:?}", mv.name));
+                    let got = dev.dtoh_sync_copy(&d_out).expect("download");
+                    assert_eq!(got.len(), rows, "{}", mv.name);
+                    let lanes = kind.lanes(width);
+                    for r in 0..rows {
+                        let row = &weights[r * row_bytes..(r + 1) * row_bytes];
+                        let want = twin(row, &x, n_blocks_per_row, lanes);
+                        assert!(
+                            !(want.is_nan() ^ got[r].is_nan()),
+                            "{} {width:?} row {r}: GPU={} twin={want}",
+                            mv.name,
+                            got[r]
+                        );
+                        assert_close_relative(got[r], want, r);
+                    }
+                }
             }
         }
     }
@@ -1399,52 +1429,71 @@ mod tests {
     /// indexes as if it had one row per warp while getting one row per
     /// block, and returns wrong numbers rather than failing. So the
     /// kernel and its geometry are chosen together, and this checks
-    /// they stay that way -- on the host, with no GPU.
+    /// they stay that way at both widths -- on the host, with no GPU.
     #[test]
     fn the_plan_pairs_each_kernel_with_its_own_geometry() {
+        use crate::matvec_kinds::coalesced::MatvecWidth;
         let rows = 37usize; // not a multiple of the warps per block
 
         for kind in ["Q4_K", "Q5_K", "Q6_K", "Q8_0"] {
             let (src, module, fn_name) = super::matvec_launch_meta(kind).expect("kernel");
-            let (plan_src, plan_module, entry, cfg) =
-                super::matvec_launch_plan(fn_name, src, module, rows);
-            assert!(
-                entry.ends_with("_coalesced"),
-                "{kind}: plan chose {entry}, not the coalesced kernel"
-            );
-            assert!(
-                plan_src.contains(entry) && plan_module.ends_with("_coalesced"),
-                "{kind}: plan's source and module do not match {entry}"
-            );
-            let warps = super::COALESCED_WARPS_PER_BLOCK as u32;
-            assert_eq!(cfg.block_dim, (warps * 32, 1, 1), "{kind}: block_dim");
-            assert_eq!(cfg.shared_mem_bytes, 0, "{kind}: needs no shared memory");
-            // Every row must land in some warp, including the tail.
-            assert!(
-                cfg.grid_dim.0 * warps >= rows as u32,
-                "{kind}: {} blocks x {warps} warps does not cover {rows} rows",
-                cfg.grid_dim.0
-            );
-            assert!(
-                (cfg.grid_dim.0 - 1) * warps < rows as u32,
-                "{kind}: {} blocks is more than the tail needs",
-                cfg.grid_dim.0
-            );
+            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+                let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+                let ck = super::coalesced_kind(fn_name).expect("coalesced");
+                assert!(
+                    plan.entry.ends_with("_coalesced"),
+                    "{kind}: plan chose {}, not the coalesced kernel",
+                    plan.entry
+                );
+                assert_eq!(
+                    plan.module,
+                    ck.module(width),
+                    "{kind} {width:?}: module key"
+                );
+                let text = plan.text();
+                assert!(
+                    text.contains(&format!("void {}(", plan.entry)),
+                    "{kind}: plan's source does not define {}",
+                    plan.entry
+                );
+                assert!(
+                    text.starts_with(&format!("#define FX_LANES {}\n", ck.lanes(width))),
+                    "{kind} {width:?}: source compiled for the wrong width"
+                );
+                let cfg = plan.cfg;
+                let warps = super::COALESCED_WARPS_PER_BLOCK as u32;
+                assert_eq!(cfg.block_dim, (warps * 32, 1, 1), "{kind}: block_dim");
+                assert_eq!(cfg.shared_mem_bytes, 0, "{kind}: needs no shared memory");
+                // Every row must land in some warp, including the tail.
+                assert!(
+                    cfg.grid_dim.0 * warps >= rows as u32,
+                    "{kind}: {} blocks x {warps} warps does not cover {rows} rows",
+                    cfg.grid_dim.0
+                );
+                assert!(
+                    (cfg.grid_dim.0 - 1) * warps < rows as u32,
+                    "{kind}: {} blocks is more than the tail needs",
+                    cfg.grid_dim.0
+                );
+            }
         }
 
         // A kind with no coalesced kernel keeps the old geometry, and
-        // keeps its own kernel rather than silently getting another's.
+        // keeps its own kernel rather than silently getting another's,
+        // whatever the width.
         let (src, module, fn_name) = super::matvec_launch_meta("Q4_0").expect("kernel");
-        let (plan_src, plan_module, entry, cfg) =
-            super::matvec_launch_plan(fn_name, src, module, rows);
-        assert_eq!(entry, fn_name);
-        assert!(std::ptr::eq(plan_src, src) && std::ptr::eq(plan_module, module));
-        assert_eq!(cfg.grid_dim, (rows as u32, 1, 1), "one block per row");
-        assert_eq!(cfg.block_dim, (256, 1, 1));
-        assert!(
-            cfg.shared_mem_bytes > 0,
-            "the block-per-row kernels reduce through shared memory"
-        );
+        for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+            let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+            assert_eq!(plan.entry, fn_name);
+            assert!(std::ptr::eq(plan.module, module));
+            assert_eq!(plan.text(), src);
+            assert_eq!(plan.cfg.grid_dim, (rows as u32, 1, 1), "one block per row");
+            assert_eq!(plan.cfg.block_dim, (256, 1, 1));
+            assert!(
+                plan.cfg.shared_mem_bytes > 0,
+                "the block-per-row kernels reduce through shared memory"
+            );
+        }
     }
 
     #[test]
