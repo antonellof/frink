@@ -15,7 +15,57 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-10-28
+
+### Added
+
+- **One token budget per serving tick, shared by prefill and decode.**
+  A worker tick runs one prefill chunk and then one decode step over
+  every in-flight row. The chunk was a constant, so a tick cost
+  `chunk + rows` and grew with the batch, and every decoding row
+  waited out the whole chunk before its next token. The chunk now
+  takes what is left of `FRINK_CB_MAX_BATCH_TOKENS` (default 256) after
+  the decode width. It can only make a chunk smaller than
+  `FRINK_CB_PREFILL_CHUNK`, and a floor of 16 prompt tokens per tick
+  keeps a saturated batch from deadlocking. The latency benefit is not
+  measured yet; the tests establish the bounds, not the speedup.
+
+- **`frink` starts and talks like `llama`.** `frink cli` is an alias of
+  `run`, and `-st` / `--single-turn` runs one templated turn, which is
+  NOT the same as `--no-cnv` (that skips the chat template, and the
+  two produce different text; a test pins it). `serve` prints
+  llama.cpp's startup line shape (`0.00.910.553 I srv  frink_server:
+  listening on ...`, elapsed as minutes.seconds.millis.micros) on
+  stderr; the `frink.server.ready` JSON line on stdout is unchanged.
+  The prompt echo is green and the timing line magenta, as upstream,
+  under a pure-ASCII wordmark. Colour is off whenever stderr is not a
+  terminal, `NO_COLOR` turns it off and `FRINK_COLOR=1` forces it on.
+
+- **Decode is checked against llama.cpp at every step.** Every golden
+  had been the last-position logits of a six-token prompt, and `frink
+  parity` reads one token, so a decode-side defect past position 5 was
+  invisible. `tests/decode_step_graphs.rs` runs a greedy 32-step
+  generation on six fixtures against libllama's distribution at each
+  step, on four decode bodies (row, row-only, paged, multi-sequence).
+
+- **Architecture coverage is pinned to llama.cpp's own name table.**
+  Every name upstream defines has a catalog row and resolves: run it,
+  refuse it by name, or defer it with a reason. A name upstream adds
+  and frink has never heard of now fails a test instead of loading as
+  "unknown architecture". The published manifest is compared to the
+  generator row by row, which found two wrong rows (`llama-embed`
+  listed as not served, `minimax-01` listed as plain GQA).
+
 ### Changed
+
+- **The llama.cpp reference moved to `604cc430` (2026-10-28)**, 913
+  commits on from `5b59b83`: 169 graphs where there were 155, and 13
+  new architecture names, each with a catalog row and the upstream line
+  that decides it. Seven are generic-path candidates and triaged,
+  `deepseek41` and `glm5-next` need dedicated engines, four are
+  deferred. Every census the capability tables derive from was re-run;
+  `docs/plans/parity-audit-2026-10-28.md` has each count with its
+  command.
 
 - **The host KV cache keeps f16, as llama.cpp's does.** It was
   `Vec<f32>` on every backend, so a CPU run held twice the reference's
@@ -81,6 +131,26 @@ are the ones worth reading twice.
   batch gate, and an address-keyed repack of `Shared` bytes (the
   original bug). On OLMoE-1B-7B Q4_0 (CPU), resident and streamed at
   128 MiB both answer " Paris.\n\nParis is the capital of France."
+
+- **Three served architectures follow upstream's new behaviour.**
+  `mellum` now reads `expert_weights_norm` upstream (seeded true), so a
+  file declaring `false` is no longer renormalised here alone.
+  `nemotron` gained the `domyn-small` pre-tokenizer: frink sent an
+  unknown pre-tokenizer to the GPT-2 regex where llama.cpp throws, and
+  now refuses the six it has no arm for by name (`glm5` joins `glm4`'s,
+  whose pattern is byte-identical). `lfm2`'s new non-causal decision
+  head (`decision.block_count`) is refused by name. Measuring
+  `laguna`'s YaRN reads found frink reading the two YaRN betas for
+  every architecture while four graphs read them upstream; it reads
+  them for those four now.
+
+- **The reported prompt rate included backend warmup.** The prompt
+  timer started before the first forward pass, so Metal pipeline
+  construction and first dispatch were divided by the prompt length:
+  a 5-token prompt read 6 to 12 tok/s against llama.cpp's ~198. frink
+  warms up at load now, as llama.cpp does, on scratch caches so the
+  warmup leaves no token in the real sequence. The same prompt reads
+  ~143 tok/s.
 
 ## [0.49.0] - 2026-09-23
 
