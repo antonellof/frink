@@ -67,7 +67,7 @@ fn every_unaudited_architecture_renders_a_detail_line() {
         assert!(detail.len() > 100, "`{}` renders {detail:?}", p.gguf_name);
     }
     assert_eq!(
-        n, 4,
+        n, 11,
         "the unaudited count moved. It was 47 until the triage itself found `minicpm3` was \
          an MLA model sitting on the generic-GQA row and it was reclassified to \
          DedicatedOnly, 46 until `deepseek`, `bailingmoe`, `seed_oss`, `maincoder` and \
@@ -184,7 +184,11 @@ fn every_unaudited_architecture_renders_a_detail_line() {
          built and whose recurrent mask went on `gdn::recurrent_layers`, so what actually \
          needed new code was the RESIDUAL -- `src/models/minimax-01.cpp:249,428` make each \
          sublayer's pre-norm output, scaled, the stream its branch joins, which is ONE \
-         graph of the 155 (`frink_models::normed_residual`)"
+         graph of the 155 (`frink_models::normed_residual`), and 4 to 11 on 2026-10-28 \
+         when the pin moved again (`5b59b83` to `604cc430`, 913 commits, 155 graphs to \
+         169): seven of its thirteen new names are generic-path candidates, read and \
+         triaged the same day -- `kolibri1`, `lfm3`, `flint`, `beam`, `maion-coder`, \
+         `k2-horizon`, `muse-spark` (docs/plans/parity-audit-2026-10-28.md)"
     );
 }
 
@@ -434,8 +438,10 @@ fn the_remaining_work_is_counted() {
         .filter(|p| p.triage.is_some())
         .count();
     // 2 before the 2026-09-19 pin move (`grovemoe`, `phi4`), plus the
-    // eight upstream architectures it brought in.
-    assert_eq!(triaged + TRIAGE_PENDING.len(), 4);
+    // eight upstream architectures it brought in (six closed since),
+    // plus the seven generic-path candidates the 2026-10-28 move to
+    // `604cc430` brought in.
+    assert_eq!(triaged + TRIAGE_PENDING.len(), 11);
 }
 
 /// `minicpm3` is refused as an MLA model, not as an unaudited one.
@@ -1205,9 +1211,14 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
     }
     assert_eq!(
         (fixture, arm, new_code, unknown),
-        (0, 0, 3, 1),
+        (0, 2, 8, 1),
         "the triage distribution moved; if a verdict changed on evidence that is correct, \
-         update this and docs/MODELS.md together. BOTH cheap classes were ZERO between \
+         update this and docs/MODELS.md together. The 2026-10-28 pin move to `604cc430` \
+         made it (0, 2, 8, 1) from (0, 0, 3, 1): ONE MATCH ARM gained `kolibri1` and \
+         `lfm3` (table rows on served seams), NEW CODE gained `flint` (its pre-tokenizer \
+         is a regex SEQUENCE), `beam` (a scaled residual), `maion-coder` (a latent MoE), \
+         `k2-horizon` (a grouped RMS norm and value experts) and `muse-spark` (a \
+         norm-preserving residual and a latent MoE). BOTH cheap classes were ZERO between \
          2026-09-12 and 2026-09-19 -- `gemma` was the last FIXTURE-AWAY row and `chatglm` \
          the last ONE MATCH ARM one -- and the 2026-09-19 pin move refilled the ONE MATCH \
          ARM column with two: `maple` needs one `frink_models::rope_layers` row \
@@ -1308,7 +1319,7 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
          single UNKNOWN left is `phi4`; `mistral`, `mixtral` and `yi` were the other \
          three and turned out not to be architectures at all"
     );
-    assert_eq!(fixture + arm + new_code + unknown, 4);
+    assert_eq!(fixture + arm + new_code + unknown, 11);
 }
 
 /// The per-layer activation-parameter seam closed two rows whose

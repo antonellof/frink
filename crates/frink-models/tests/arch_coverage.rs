@@ -8,8 +8,11 @@
 //! produce a refusal, it produces `resolve_architecture` returning
 //! `None` for a real file somebody downloaded.
 //!
-//! The claim is true as of the `5b59b83` pin -- 153 of 153, measured
-//! by this test rather than asserted -- and these keep it true.
+//! The claim is true as of the `604cc430` pin (2026-10-28) -- 166 of
+//! 166, measured by this test rather than asserted -- and these keep
+//! it true. It was 153 of 153 at `5b59b83`; the thirteen names that
+//! pin move brought each got a row the same day, refused or deferred
+//! with the line that decides it.
 //!
 //! # Why the names are committed rather than read from a checkout
 //!

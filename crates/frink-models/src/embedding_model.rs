@@ -61,6 +61,23 @@ const NOT_YET: &[(&str, &str)] = &[
         "gemma-embedding",
         "a decoder embedding path, not an encoder",
     ),
+    // Landed upstream after the 2026-09-19 pin, read on 2026-10-28
+    // (`604cc430`).
+    (
+        "gemma-embedding2",
+        "Gemma-4's block run bidirectionally with symmetric SWA and per-layer embeddings \
+         (gemma-embedding2.cpp:4-8), not BERT's",
+    ),
+    (
+        "clef",
+        "a decision head over qwen35's layers that emits one score per token \
+         (clef.cpp:8-24); it is a scorer, not an embedding",
+    ),
+    (
+        "vllm-decision2",
+        "a decision head over qwen3's layers that emits one score per token \
+         (vllm-decision2.cpp:7-15); it is a scorer, not an embedding",
+    ),
 ];
 
 /// True when `general.architecture` names an encoder / embedding model

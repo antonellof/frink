@@ -58,6 +58,7 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `mpt` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `jais` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `graniteswitch` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `muse-spark` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `olmoe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `qwen2` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `qwen2moe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
@@ -88,6 +89,12 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `talkie` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `glm4moe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `minimax-01` | TextGeneration | Hybrid | Hybrid | generic-gqa |
+| `kolibri1` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `lfm3` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `flint` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `beam` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `maion-coder` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
+| `k2-horizon` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `qwen4exp` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `grovemoe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `hrm_text` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
@@ -124,6 +131,8 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `bailingmoe3` | TextGeneration | Dedicated | KvGqa | dedicated |
 | `dots3note` | TextGeneration | Dedicated | KvGqa | dedicated |
 | `hy_v4` | TextGeneration | Dedicated | KvGqa | dedicated |
+| `deepseek41` | TextGeneration | Dedicated | KvGqa | dedicated |
+| `glm5-next` | TextGeneration | Dedicated | KvGqa | dedicated |
 | `qwen35` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `qwen35moe` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `qwen3next` | TextGeneration | Hybrid | Hybrid | generic-gqa |
@@ -148,6 +157,10 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `jina-bert-v3` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `eurobert` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `gemma-embedding` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
+| `gemma-embedding2` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
+| `clef` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
+| `vllm-decision2` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
+| `sensenova_u1` | DeferredMultimodal | StandardGqa | None | deferred |
 | `yi-vl` | DeferredMultimodal | StandardGqa | None | deferred |
 | `qwen2vl` | DeferredMultimodal | StandardGqa | None | deferred |
 | `qwen3vl` | DeferredMultimodal | StandardGqa | None | deferred |

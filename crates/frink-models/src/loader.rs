@@ -137,6 +137,15 @@ const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
 /// it guards against. `conversion/mimo.py` writes SIGMOID from
 /// `scoring_func`, so on a real MiMo file the two agree too; the row
 /// exists because the literal is what llama.cpp runs.
+///
+/// Re-measured 2026-10-28 at the `604cc430` pin, counting call SITES
+/// (MTP graphs included, so the numbers are not the ones above): 80
+/// sites where `5b59b83` had 69 -- 4 SIGMOID literals at both pins, 33
+/// SOFTMAX at both, the hparam 32 -> 43. Every new site is a new graph
+/// except `mellum`, which moved from the SOFTMAX literal to the hparam
+/// seeded SOFTMAX (`mellum.cpp:9,11,206`): on a file without the key
+/// the answer is unchanged, and on one with it this loader already
+/// read the key. No row is added or removed.
 const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
     ("mimo2", GatingFunction::Sigmoid),
     // `nemotron-h.cpp:218`: the SIGMOID literal; the converter writes no
@@ -166,6 +175,11 @@ const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe", "llama4"];
 /// here; `cohere2moe.cpp:20` joined on 2026-09-14). Found by `mimo2`'s fixture: `mimo2.cpp` reads the
 /// key nowhere, libllama ran the fixture unscaled, and frink -- which
 /// honoured the key for any architecture -- scaled it by 2.5.
+///
+/// Re-measured 2026-10-28 at the `604cc430` pin: the same grep is 29
+/// files (24 at `5b59b83` with this spelling of the command), and the
+/// five it gained are all NEW graphs (`beam`, `flint`, `glm5-next`,
+/// `k2-horizon`, `muse-spark`), every one refused, so no row is added.
 const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
@@ -189,6 +203,17 @@ const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
 /// literal is what `NO_TOPK_RENORMALIZE_ARCHITECTURES` and its default
 /// transcribe. `deepseek` reads the scale but not the norm
 /// (`deepseek.cpp` passes `false`).
+///
+/// Re-measured 2026-10-28 at the `604cc430` pin: `grep -l
+/// LLM_KV_EXPERT_WEIGHTS_NORM src/models/*.cpp` is 29 files where it was
+/// 22, and ONE of the seven it gained is a graph frink SERVES: `mellum`
+/// (`mellum.cpp:8-11`) now seeds `expert_weights_norm = true`, reads the
+/// key, and passes the hparam (`:204`) where `5b59b83`'s `:180` passed
+/// the literal `true`
+/// (it reads `expert_gating_func` the same way, seeded SOFTMAX, which
+/// is what this loader already did for it). Without the row a Mellum
+/// file declaring `false` would have been renormalised here and not
+/// upstream. The other six are new graphs, all refused.
 const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
@@ -198,6 +223,8 @@ const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "exaone-moe",
     "glm4moe",
     "laguna",
+    // `mellum.cpp:8-11` since the `604cc430` pin (seeded `true`).
+    "mellum",
     // `nemotron-h.cpp:18` (`norm_topk_prob`).
     "nemotron_h_moe",
     "step35",
@@ -1697,6 +1724,23 @@ fn linear_scaling_from_gguf(file: &impl TensorSource, arch: &str) -> Option<f32>
     metadata_f32_any(file, &[key("rope.scaling.factor")]).filter(|f| f.is_finite() && *f > 1.0)
 }
 
+/// Architectures whose `load_arch_hparams` reads
+/// `rope.scaling.yarn_beta_fast` / `_slow`
+/// (`LLM_KV_ROPE_SCALING_YARN_BETA_FAST` / `_SLOW`). Everywhere else the
+/// two keys are dead metadata upstream: `llama-hparams.h` seeds 32 / 1
+/// and nothing overrides them.
+///
+/// Measured 2026-10-28 at the `604cc430` pin: `grep -l
+/// YARN_BETA_FAST src/models/*.cpp` is `grok.cpp:26`, `mistral3.cpp:7`,
+/// `laguna.cpp:10` (new since `5b59b83`) and `k2-horizon.cpp:4` (a new,
+/// refused graph). frink read both keys for EVERY architecture until
+/// then, while `conversion/base.py:1653-1656` writes them for any HF
+/// config whose YaRN block carries `beta_fast` / `beta_slow` -- the
+/// `expert_weights_scale` shape again: a key honoured where upstream
+/// ignores it. `laguna`'s reading is the one that moved upstream; for it
+/// frink was already right.
+const YARN_BETA_READERS: &[&str] = &["grok", "mistral3", "laguna"];
+
 /// The YaRN RoPE scaling a GGUF declares, or `None` when this file
 /// declares none that changes the rotation.
 ///
@@ -1705,9 +1749,9 @@ fn linear_scaling_from_gguf(file: &impl TensorSource, arch: &str) -> Option<f32>
 /// is a string (`"none"`, `"linear"`, `"yarn"`, `"longrope"`) and
 /// `<arch>.rope.scaling.factor` the ratio of served to trained context.
 /// `beta_fast` / `beta_slow` are read from both the plain and the
-/// `yarn_`-prefixed spelling and otherwise fall back to the reference's
-/// own defaults (32.0 / 1.0), which is what a real checkpoint relies on
-/// -- almost none of them write those two keys.
+/// `yarn_`-prefixed spelling ONLY where the architecture's graph reads
+/// them ([`YARN_BETA_READERS`]), and otherwise fall back to the
+/// reference's own defaults (32.0 / 1.0, or Grok's seeded 8.0).
 ///
 /// `None` is returned for every case where applying YaRN would be a
 /// guess or a no-op rather than a correction, so that no checkpoint's
@@ -1739,7 +1783,11 @@ pub(crate) fn yarn_scaling_from_gguf(
     let factor = metadata_f32_any(file, &[key("rope.scaling.factor")])
         .filter(|f| f.is_finite() && *f > 1.0)?;
     let orig_max_pos = orig_ctx?;
+    let reads_beta = YARN_BETA_READERS.contains(&arch);
     let beta = |suffix: &str, default: f32| -> f32 {
+        if !reads_beta {
+            return default;
+        }
         metadata_f32_any(
             file,
             &[
@@ -4094,6 +4142,7 @@ mod tests {
             ("GATING_LITERAL_ARCHITECTURES", GATING_LITERAL_NAMES),
             ("EXPERT_WEIGHTS_SCALE_READERS", EXPERT_WEIGHTS_SCALE_READERS),
             ("EXPERT_WEIGHTS_NORM_READERS", EXPERT_WEIGHTS_NORM_READERS),
+            ("YARN_BETA_READERS", YARN_BETA_READERS),
             (
                 "NO_TOPK_RENORMALIZE_ARCHITECTURES",
                 NO_TOPK_RENORMALIZE_ARCHITECTURES,
@@ -4425,6 +4474,38 @@ mod tests {
             ],
         );
         assert!(cfg.rope_freqs.is_none());
+    }
+
+    /// `rope.scaling.yarn_beta_fast` / `_slow` move the correction ramp
+    /// only on the graphs that read them (`YARN_BETA_READERS`, measured
+    /// at `604cc430`); on every other architecture llama.cpp keeps its
+    /// seeded 32 / 1 whatever the file says, and so must frink.
+    ///
+    /// Sabotage to confirm: drop the `reads_beta` early return and the
+    /// `llama` arm reads 8.0 / 2.0.
+    #[test]
+    fn yarn_betas_are_read_only_where_the_graph_reads_them() {
+        use frink_gguf::GgufValue as V;
+        let file = |arch: &str| {
+            crate::test_source::StubSource::with_tensors(&[])
+                .with_key(
+                    &format!("{arch}.rope.scaling.type"),
+                    V::String("yarn".into()),
+                )
+                .with_key(&format!("{arch}.rope.scaling.factor"), V::F32(4.0))
+                .with_key(&format!("{arch}.rope.scaling.yarn_beta_fast"), V::F32(8.0))
+                .with_key(&format!("{arch}.rope.scaling.yarn_beta_slow"), V::F32(2.0))
+        };
+        for (arch, fast, slow) in [
+            ("llama", 32.0, 1.0),
+            ("qwen3", 32.0, 1.0),
+            ("laguna", 8.0, 2.0),
+            ("mistral3", 8.0, 2.0),
+        ] {
+            let y = yarn_scaling_from_gguf(&file(arch), arch, Some(4096))
+                .unwrap_or_else(|| panic!("{arch}: yarn declared"));
+            assert_eq!((y.beta_fast, y.beta_slow), (fast, slow), "{arch}");
+        }
     }
 
     /// `general.sampling.*` is the checkpoint's own recommendation, and

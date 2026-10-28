@@ -107,11 +107,14 @@ fn compile(pattern: &str) -> fancy_regex::Regex {
 pub(super) fn regex_for(pre: &str) -> fancy_regex::Regex {
     let pattern = match pre {
         // `LLAMA_VOCAB_PRE_TYPE_LLAMA3`. `falcon-h1`, `midm-2.0`,
+        // (`glm5` joined `glm4` on the `CHATGLM4` arm at the
+        // `604cc430` pin, `llama-vocab.cpp:2602-2607`; that arm's pattern,
+        // `:414-417`, is this one byte for byte.)
         // `lfm2` and `jina-v5-nano` are in the same upstream arm and
         // were missing here; `deepseek-*` are NOT (see above).
         "llama3" | "llama-v3" | "llama-bpe" | "falcon3" | "falcon-h1" | "pixtral" | "midm-2.0"
         | "lfm2" | "jina-v5-nano" | "deepseek-llm" | "deepseek-coder" | "deepseek-v3"
-        | "chatglm-bpe" | "glm4" => LLAMA3,
+        | "chatglm-bpe" | "glm4" | "glm5" => LLAMA3,
 
         // `LLAMA_VOCAB_PRE_TYPE_QWEN2` and the arms sharing its regex.
         // `deepseek-r1-qwen`, `kormo`, `f2llmv2` and `megrez` all land
@@ -133,6 +136,59 @@ pub(super) fn regex_for(pre: &str) -> fancy_regex::Regex {
         _ => GPT2,
     };
     compile(pattern)
+}
+
+/// `tokenizer.ggml.pre` values llama.cpp gained at the `604cc430` pin
+/// (2026-10-28) whose arm this module does not have, with the line that
+/// says why. Each would otherwise fall through to [`GPT2`] in
+/// [`regex_for`] and tokenize fluently and WRONGLY, where llama.cpp
+/// either runs its own arm or, for a string it does not know, throws
+/// `unknown pre-tokenizer type` (`llama-vocab.cpp:2760`).
+///
+/// Refused rather than added because none of them is one regex: a
+/// sequence, a raw-UTF-8 mode without the GPT-2 byte map, or both. The
+/// older multi-regex arms this module also lacks (see [`regex_for`]'s
+/// doc) predate the pin and are not re-litigated here.
+pub(super) const UNSERVED_PRE: &[(&str, &str)] = &[
+    (
+        "domyn-small",
+        "`LLAMA_VOCAB_PRE_TYPE_DOMYN_SMALL` (llama-vocab.cpp:2653-2656, `:548-556`): SPM-style \
+         BPE over raw UTF-8 with `escape_whitespaces`, not the GPT-2 byte map; it is the \
+         Nemotron BPE tokenizer of #23343, on an architecture frink serves",
+    ),
+    (
+        "flint",
+        "`LLAMA_VOCAB_PRE_TYPE_FLINT` (llama-vocab.cpp:285-290): a SEQUENCE of two regexes",
+    ),
+    (
+        "k2-horizon",
+        "`LLAMA_VOCAB_PRE_TYPE_K2_HORIZON` (llama-vocab.cpp:571-574): letters may carry \
+         combining marks and ZWJ/ZWNJ, a pattern no arm here has",
+    ),
+    (
+        "mmbert",
+        "`LLAMA_VOCAB_PRE_TYPE_MMBERT` (llama-vocab.cpp:556-562,679): raw UTF-8 and words \
+         split in `tokenize()`, not by a regex",
+    ),
+    (
+        "nemotron-3.5-embed",
+        "`LLAMA_VOCAB_PRE_TYPE_NEMOTRON_3_5_EMBD` (llama-vocab.cpp:425-431,649-654,2752-2755): \
+         the tekken pattern after a ZWNJ normalisation, with `ignore_merges` and `add_bos`",
+    ),
+    (
+        "soprano",
+        "`LLAMA_VOCAB_PRE_TYPE_SOPRANO` (llama-vocab.cpp:576-578,655,793): a SEQUENCE of two \
+         regexes over raw UTF-8",
+    ),
+];
+
+/// Why `pre` cannot be tokenized here, or `None` when an arm (or the
+/// GPT-2 fallback upstream also takes) covers it.
+pub(super) fn unserved_pre(pre: &str) -> Option<&'static str> {
+    UNSERVED_PRE
+        .iter()
+        .find(|(name, _)| *name == pre)
+        .map(|(_, why)| *why)
 }
 
 /// The Gemma-4 newline-only pattern.
@@ -369,5 +425,34 @@ mod tests {
     fn the_gemma4_pattern_only_carves_on_newlines() {
         let chunks = split_with_gaps(&newline_regex(), "one two\n\nthree");
         assert_eq!(chunks, vec!["one two", "\n\n", "three"]);
+    }
+
+    /// `glm5` is `glm4`'s arm upstream (`CHATGLM4`), so it must split
+    /// exactly as `glm4` does here and not as the GPT-2 fallback: digits
+    /// in threes is the visible difference.
+    #[test]
+    fn glm5_splits_as_glm4_and_not_as_the_fallback() {
+        let text = "pay 12345 now";
+        assert_eq!(split("glm5", text), split("glm4", text));
+        assert_ne!(split("glm5", text), split("gpt2", text));
+    }
+
+    /// Every refused `pre` is one this module has NO arm for: a name on
+    /// both lists would be a refusal that hides a served arm, or an arm
+    /// that a refusal makes unreachable.
+    #[test]
+    fn an_unserved_pre_is_not_also_an_arm() {
+        let text = "Hello 12345 world's  end\n\nx";
+        for (pre, why) in UNSERVED_PRE {
+            assert!(why.contains("llama-vocab.cpp:"), "{pre}: {why}");
+            assert_eq!(
+                split(pre, text),
+                split("gpt2", text),
+                "{pre} is refused but regex_for has an arm for it"
+            );
+            assert_eq!(unserved_pre(pre), Some(*why));
+        }
+        assert_eq!(unserved_pre("llama-bpe"), None);
+        assert_eq!(unserved_pre("glm5"), None);
     }
 }

@@ -48,6 +48,14 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     // them as if the refusal lifted -- which is exactly what this test
     // is for. `qwen4exp` and `qwen3tts` answer IMROPE and `kimi-k3`
     // NONE, so they stay out of the table as the other MROPE rows do.
+    // Added 2026-10-28 with the pin move to `604cc430`: ten of the
+    // thirteen new names are in the NORM or NEOX group (`beam`,
+    // `deepseek41`, `flint`, `gemma-embedding2`, `k2-horizon`,
+    // `kolibri1`, `lfm3`, `maion-coder`, `muse-spark`,
+    // `vllm-decision2`); `clef` answers IMROPE, `sensenova_u1` MROPE
+    // and `glm5-next` NONE. `bailingmoe3` moved from the NORM group to
+    // a per-checkpoint arm (MROPE when the file carries sections) and
+    // was never in this table, because it is `dedicated`.
     ("afmoe", RopeLayout::Neox),
     ("apertus", RopeLayout::Neox),
     ("arcee", RopeLayout::Norm),
@@ -55,6 +63,7 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     ("baichuan", RopeLayout::Norm),
     ("bailingmoe", RopeLayout::Norm),
     ("bailingmoe2", RopeLayout::Neox),
+    ("beam", RopeLayout::Neox),
     ("bert", RopeLayout::Neox),
     ("bitnet", RopeLayout::Neox),
     ("chameleon", RopeLayout::Norm),
@@ -71,6 +80,7 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     ("deepseek2-ocr", RopeLayout::Norm),
     ("deepseek32", RopeLayout::Norm),
     ("deepseek4", RopeLayout::Norm),
+    ("deepseek41", RopeLayout::Norm),
     ("dots1", RopeLayout::Neox),
     ("dream", RopeLayout::Neox),
     ("eagle3", RopeLayout::Norm),
@@ -82,8 +92,10 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     ("exaone4", RopeLayout::Neox),
     ("falcon", RopeLayout::Neox),
     ("falcon-h1", RopeLayout::Neox),
+    ("flint", RopeLayout::Neox),
     ("gemma", RopeLayout::Neox),
     ("gemma-embedding", RopeLayout::Neox),
+    ("gemma-embedding2", RopeLayout::Neox),
     ("gemma2", RopeLayout::Neox),
     ("gemma3", RopeLayout::Neox),
     ("gemma3n", RopeLayout::Neox),
@@ -106,15 +118,19 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     ("internlm2", RopeLayout::Norm),
     ("jais2", RopeLayout::Neox),
     ("jina-bert-v3", RopeLayout::Neox),
+    ("k2-horizon", RopeLayout::Neox),
+    ("kolibri1", RopeLayout::Neox),
     ("laguna", RopeLayout::Neox),
     ("lfm2", RopeLayout::Neox),
     ("lfm2moe", RopeLayout::Neox),
+    ("lfm3", RopeLayout::Neox),
     ("llada", RopeLayout::Norm),
     ("llada-moe", RopeLayout::Neox),
     ("llama", RopeLayout::Norm),
     ("llama-embed", RopeLayout::Norm),
     ("llama4", RopeLayout::Norm),
     ("maincoder", RopeLayout::Norm),
+    ("maion-coder", RopeLayout::Neox),
     ("maple", RopeLayout::Neox),
     ("mellum", RopeLayout::Neox),
     ("mimo2", RopeLayout::Neox),
@@ -127,6 +143,7 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     ("mistral4", RopeLayout::Norm),
     ("modern-bert", RopeLayout::Neox),
     ("muse-glimmer", RopeLayout::Norm),
+    ("muse-spark", RopeLayout::Norm),
     ("nanbeige", RopeLayout::Norm),
     ("nemotron", RopeLayout::Neox),
     ("neo-bert", RopeLayout::Norm),
@@ -161,6 +178,7 @@ const LLAMA_ROPE_TYPES: &[(&str, RopeLayout)] = &[
     ("starcoder2", RopeLayout::Neox),
     ("step35", RopeLayout::Neox),
     ("talkie", RopeLayout::Neox),
+    ("vllm-decision2", RopeLayout::Neox),
     ("xverse", RopeLayout::Norm),
 ];
 
@@ -194,6 +212,8 @@ const LLAMA_NO_ROPE: &[&str] = &[
     "nemotron_h",
     "nemotron_h_moe",
     "kimi-linear",
+    // Added 2026-10-28 (`604cc430`); a `dedicated` refusal.
+    "glm5-next",
 ];
 
 /// Every architecture frink actually routes through a RoPE kernel must

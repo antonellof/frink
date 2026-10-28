@@ -32,9 +32,13 @@ Four items are large enough to carry their own design document:
 
 One audit sits beside them:
 
-- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)**,
-  the llama.cpp surface re-measured against a moved pin, plus the
-  serving-feature gaps that a GGUF architecture count cannot see.
+- **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)**,
+  the llama.cpp pin moved again (`5b59b83` to `604cc430`, 913 commits)
+  and every census re-run against it: 13 new architecture names, the
+  served-architecture behaviour that moved upstream, and what was fixed.
+  Its predecessor, [`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md),
+  still carries the serving-feature gaps a GGUF architecture count
+  cannot see.
 
 How work lands is written down too:
 
@@ -54,7 +58,8 @@ One item has a written **verdict** rather than a design:
 
 Parity inventory and deltas against llama.cpp:
 
-- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the current re-measurement of the llama.cpp surface and the serving-feature gaps
+- **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)** — the current re-measurement of the llama.cpp surface, at the `604cc430` pin
+- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the previous one, at `5b59b83`, and the serving-feature gaps
 - **[`serving-parity-audit.md`](serving-parity-audit.md)** — continuous batching, paged KV, prefix caching and cache-aware admission read against the code, every claim carrying the line that decides it (`documented_serving.rs` holds the citations)
 - **[`server-speculative-decoding.md`](server-speculative-decoding.md)** — the engine has it, the server cannot reach it
 - **[`done/several-completions-per-request.md`](done/several-completions-per-request.md)** — `n` > 1 as a KV fork, not as a loop that re-prefills

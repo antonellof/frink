@@ -25,9 +25,9 @@ can do is [`FEATURES.md`](FEATURES.md).
 | GLM-4-0414 / Z1 / OCR, GLM-4.5 / 4.5-Air / 4.6 | A vision tower's `rope.dimension_sections` is refused by name on `glm4`, served on `glm4moe` |
 | Command-R, Command-R7B, Cohere2 MoE | Command-R+ (64 layers) is refused: it needs a per-head QK LayerNorm |
 | EXAONE-4, EXAONE-MoE, Granite 3, Granite 4.0 hybrid | Granite 4.0 is recurrent: no prefix-cache reuse, no `--model-draft` |
-| Nemotron, Nemotron-H, Nemotron-3 Nano | Recurrent. Nemotron-3 Super's `moe_latent_size` is refused by name |
+| Nemotron, Nemotron-H, Nemotron-3 Nano | Recurrent. Nemotron-3 Super's `moe_latent_size` is refused by name, and so is the `domyn-small` pre-tokenizer |
 | Jamba, Mamba, Mamba-2, FalconMamba, Falcon-H1, PLaMo-2 | Recurrent |
-| LFM2, LFM2-MoE | A file declaring `attention.sliding_window` is refused by name |
+| LFM2, LFM2-MoE | A file declaring `attention.sliding_window` is refused by name, and so is an LFM2-d1 decision head (`decision.block_count`) |
 | MiniMax-Text-01, MiniMax-M2 | |
 | gpt-oss | **CPU only**: no Metal kernel implements attention sinks |
 | Llama 4 Scout, Llama 4 Maverick | **CPU only**: its window is chunked, and the fused Metal launches take one window per layer |
@@ -87,28 +87,39 @@ one of six things caused it.
    `FRINK_ALLOW_UNAUDITED_ARCH=1` runs one anyway; compare the output
    against llama.cpp yourself before trusting it.
 
-## The four unaudited architectures
+## The eleven unaudited architectures
 
-None of the 4 is a fixture or a single match arm away: they need an
-attention implementation or a reading nobody has done. All 4 have now
-been read on both sides, and each refusal prints its own blocker with
-the `llama.cpp/src/models/*.cpp` line that decides it, so
+None of the 11 is a fixture away. Two are a single match arm away
+(table rows on seams frink already serves), and the rest need code or a
+reading nobody has done. All 11 have now been read on both sides, and
+each refusal prints its own blocker with the
+`llama.cpp/src/models/*.cpp` line that decides it, so
 `frink -m <file>` is the authoritative answer rather than this table.
 
 | Class | Count |
 |---|---|
 | fixture-away | 0 |
-| one match arm | 0 |
-| new code | 3 |
+| one match arm | 2 |
+| new code | 8 |
 | unknown | 1 |
 
-Both cheap classes are empty, which is a better answer than the count:
-nothing still refusing is one fixture or one arm away.
+The count was 4 until 2026-10-28, when the llama.cpp pin moved from
+`5b59b83` to `604cc430` and seven of its thirteen new architecture names
+turned out to be generic-path candidates
+([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md)).
+A count against a moving upstream goes up when the pin moves.
 
 | Architecture | What is missing |
 |---|---|
-| `graniteswitch` | A second routing stage over expert groups |
-| `qwen4exp` | A per-token adapter selection the decoder has no site for |
+| `kolibri1` | Table rows only: RoPE on the sliding layers, the window array, sandwich norms, sigmoid routing with a shared expert. Needs a libllama golden |
+| `lfm3` | Table rows only: LFM2's layers plus a per-head sigmoid attention gate, the window array, and `rope_freqs` on the full layers alone |
+| `flint` | Its `flint` pre-tokenizer is a sequence of two regexes, which the tokenizer cannot express. The graph itself is served seams |
+| `beam` | A scaled residual (`h / sqrt(i) + r * sqrt((i - 1) / i)`) and a power-form attention temperature |
+| `maion-coder` | A latent MoE (the experts run between `ffn_latent_down` and `ffn_latent_up`) |
+| `k2-horizon` | A grouped RMS norm, a base-2 softplus attention gate, and value experts (MoVA) |
+| `muse-spark` | A norm-preserving residual with per-channel alpha/beta tensors, and a latent MoE with a post-expert norm |
+| `graniteswitch` | A per-token adapter selection the decoder has no site for |
+| `qwen4exp` | A delta-net over a hybrid memory index, a memory class frink does not have |
 | `grovemoe` | A second expert bank, and llama.cpp's graph and the reference model disagree about it. There is no single graph to match |
 | `phi4` | Not in llama.cpp's `LLM_ARCH_NAMES`, so there is no reference graph to diff against. Frink would admit it as `phi3`'s graph on the assumption that a file spelling it means the same thing, and refuses until a real file settles that |
 
