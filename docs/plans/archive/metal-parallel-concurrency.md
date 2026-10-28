@@ -37,8 +37,8 @@ quiz across unrelated prompts (the 0.15.2 CB regression).
 TTFT **118 ms**.
 
 Receipts:
-[`benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json`](../../benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json),
-[`benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json`](../../benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json).
+[`benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json`](../../../benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json),
+[`benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json`](../../../benchmarks/receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json).
 Harness: `pi-agent-tests/frink_parallel_bench.py`,
 `pi-agent-tests/frink_stream_bench.py`.
 
@@ -49,7 +49,7 @@ Harness: `pi-agent-tests/frink_parallel_bench.py`,
 - **Single-flight gate** for private-loop Metal decode when CB is off
 - **Incremental CB streaming** — tokens emitted as sampled, not buffered to end
 - **Decoder hardening:** poison-tolerant `metal_attn_kv` lock, fill `hidden` before CPU `rms_norm` fallback
-- **Parity review:** [`archive/llama-cpp-parity-review-2026-09-02.md`](archive/llama-cpp-parity-review-2026-09-02.md)
+- **Parity review:** [`archive/llama-cpp-parity-review-2026-09-02.md`](llama-cpp-parity-review-2026-09-02.md)
 
 ## Problem (historical, pre-0.15.2)
 

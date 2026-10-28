@@ -5,7 +5,7 @@
 //! One question, answered end to end: *can frink reach a Vulkan
 //! device from Rust, upload a quantized weight verbatim, run one
 //! compute shader, and read back a correct answer?* That is the
-//! `vulkan-beachhead` GO/NO-GO in `docs/plans/roadmap.md`'s
+//! `vulkan-beachhead` GO/NO-GO in `docs/plans/archive/roadmap-2026-09.md`'s
 //! `d-hardware-reach`, and it is deliberately scoped below a backend:
 //! **one kernel, one quant kind, no integration**.
 //!

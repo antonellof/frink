@@ -1,6 +1,6 @@
 ---
 name: "speculative decoding with a real draft model, on CPU, CUDA and Metal"
-overview: "THE ONE ITEM THAT RAISES DECODE THROUGHPUT WITHOUT BUYING HARDWARE. Decode is memory-bandwidth bound: to emit one token the engine reads every weight in the model, so a 17 GB checkpoint on a 960 GB/s card cannot exceed ~56 tok/s no matter how good the kernels are. That ceiling is arithmetic, not engineering. Speculative decoding breaks it by changing WHAT IS READ PER TOKEN rather than how fast it is read: a small draft model proposes k tokens, the target verifies all k in ONE pass over its weights, and the rejection rule guarantees the output distribution is exactly the target's. FRINK ALREADY HAS THE HARD HALF. `speculative.rs` implements the Leviathan/Chen rejection rule, is lossless at every temperature rather than only at `--temp 0`, and proves it against 200k sampled tokens. What is missing is a DRAFTER WORTH HAVING: the only implementation in the tree is an n-gram prompt-lookup with no model at all. This plan adds a second GGUF as the draft model, wires it through the CLI and the server, and refuses loudly when the two checkpoints do not share a vocabulary. SCOPE: CPU, CUDA and Metal, which is every backend frink has. No AMD-specific work."
+overview: "THE ONE ITEM THAT RAISES DECODE THROUGHPUT WITHOUT BUYING HARDWARE. Decode is memory-bandwidth bound: to emit one token the engine reads every weight in the model, so a 17 GB checkpoint on a 960 GB/s card cannot exceed ~56 tok/s no matter how good the kernels are. That ceiling is arithmetic, not engineering. Speculative decoding breaks it by changing WHAT IS READ PER TOKEN rather than how fast it is read: a small draft model proposes k tokens, the target verifies all k in ONE pass over its weights, and the rejection rule guarantees the output distribution is exactly the target's. FRINK ALREADY HAS THE HARD HALF. `speculative.rs` implements the Leviathan/Chen rejection rule, is lossless at every temperature rather than only at `--temp 0`, and proves it against 200k sampled tokens. STATUS 2026-10-28: steps 1 to 3 have landed. `draft_model.rs` holds `DraftModelSpeculator` (a second GGUF as the drafter, its KV rolled back on rejection, a vocabulary-size mismatch refused by name), and `frink run` takes `-d` / `--model-draft`, `--draft-max` (alias `--draft`) and `--draft-p-min`. The server speculates with prompt-lookup since 0.28.0; it has no draft-model path yet, which is step 4 and `server-speculative-decoding.md`. This plan added a second GGUF as the draft model, wired it through the CLI, and refuses when the two checkpoints do not share a vocabulary. SCOPE: CPU, CUDA and Metal, which is every backend frink has. No AMD-specific work."
 ---
 
 # Speculative decoding with a real draft model
@@ -15,7 +15,7 @@ tokens/sec <= memory bandwidth / model bytes
 
 A 17 GB checkpoint at 960 GB/s cannot pass ~56 tok/s. Better kernels
 move the engine toward that number and cannot move it past. Every other
-decode optimisation in `roadmap.md` is a fight for the gap between where
+decode optimisation on the roadmap is a fight for the gap between where
 frink is and where that ceiling sits. This item moves the ceiling.
 
 The mechanism is one sentence: a 2 GB drafter proposes k tokens, the
@@ -53,18 +53,41 @@ cheaper rather than from new hardware.
 So the verification half is done, tested, and backend-agnostic: it goes
 through `forward_batch`, which already runs on CPU, CUDA and Metal.
 
-## What is missing
+## Status
 
-**A drafter worth having.** The only `Drafter` in the tree is
+Checked against the code on 2026-10-28.
+
+- **Step 1 landed.** `crates/frink-models/src/draft_model.rs` holds
+  `DraftModelSpeculator`, a `Drafter` that owns its own `Decoder` and
+  cache and truncates the cache to the synced history at the top of
+  every `propose`.
+- **Step 2 landed in part.** A draft model whose vocabulary size differs
+  from the target's is refused by name (`VocabMismatch`). The hash of
+  the token strings described below is not implemented; a `Decoder`
+  alone sees only the size.
+- **Step 3 landed.** `frink run` takes `-d` / `--model-draft`,
+  `--draft-max` (alias `--draft`) and `--draft-p-min`. `--draft-min` is
+  not implemented.
+- **Step 4 is open for a draft model.** The server speculates with
+  `PromptLookupSpeculator` since 0.28.0 and fills the `Usage` fields
+  when it does; it cannot load a second GGUF.
+  [`server-speculative-decoding.md`](server-speculative-decoding.md)
+  says what that costs.
+- **Step 5 is open.** `--mtp` still errors by design.
+
+The text below is the plan as written, before steps 1 to 3 landed.
+
+## What was missing
+
+**A drafter worth having.** The only `Drafter` in the tree was
 `PromptLookupSpeculator`, an n-gram match over the history with no model
 at all. It is free and it helps on repetitive text, which is why it was
 first. It cannot carry a coding workload.
 
 **Any wiring at all.** `frink speculative` is a demo command on
 synthetic random weights, so the hit rate it prints says nothing about a
-real checkpoint. `frink run` has no draft flags. The server has no
-speculative path, so every speculation field in `Usage` is absent on
-every response. `--mtp` errors by design.
+real checkpoint. `frink run` had no draft flags, and the server had no
+speculative path. `--mtp` errors by design.
 
 ## The steps, each of which ships on its own
 

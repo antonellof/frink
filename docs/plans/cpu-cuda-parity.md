@@ -579,17 +579,26 @@ the code read as if they were right.
 ### 6. Kernel coverage, by what people actually run
 
 Not alphabetically, and not all 21. In order of how often a checkpoint
-in the wild uses it:
+in the wild uses it.
 
-- **CUDA Q5_0, landed 2026-09-05, UNVERIFIED ON HARDWARE.** Matvec and
+The CUDA kinds below were written without a GPU and each was first
+marked unverified on hardware. All of them have since run on one: on
+2026-09-15 the `--ignored` CUDA suite passed on a rented RTX 3090 (all
+13 hardware tests, with `launch_mul_mm_matches_the_scalar_twin` walking
+every kind in `mul_mm::KINDS`), as the Status table at the end records.
+The GEMMs are what CUDA prefill runs, and its remaining gap is tracked
+in [#259](https://github.com/antonellof/frink/issues/259). The bench
+rows each bullet asks for are a separate exit and are not all taken.
+
+- **CUDA Q5_0, landed 2026-09-05, verified on hardware 2026-09-15.** Matvec and
   GEMM together, because `a_cuda_kind_with_a_matvec_also_has_a_gemm`
   forbids half of it. The GEMM's emitted C is executed on the host by
   `crates/frink-cuda/tools/mul_mm_host_check/run.sh` and matches the
   Rust twin bit for bit; the matvec's C has no such harness and no GPU
-  has run either. `cargo test -p frink-cuda --features cuda --
-  --ignored` is the exit criterion, plus a Q5_0 bench row.
-- **CUDA IQ4_NL and IQ4_XS, landed 2026-09-09, UNVERIFIED ON
-  HARDWARE.** Matvec and GEMM together. They are codebook formats, so
+  had run either at the time. `cargo test -p frink-cuda --features cuda
+  -- --ignored` was the exit criterion, plus a Q5_0 bench row.
+- **CUDA IQ4_NL and IQ4_XS, landed 2026-09-09, verified on hardware
+  2026-09-15.** Matvec and GEMM together. They are codebook formats, so
   `MulMmKind` grew a `codebook: Option<Codebook>` field and
   `kernel_src` emits it as a `__constant__ float[16]` ahead of
   `dequant_src`; the `dequant_twin` seam is unchanged, because its
@@ -601,13 +610,13 @@ in the wild uses it:
   carry the sixteen values as a literal, which is a second structure --
   `every_embedded_codebook_is_the_mul_mm_codebook` parses them back out
   of the kernel text and holds them to the `Codebook`, bit for bit.
-- **MXFP4 on GPU, landed 2026-09-09, UNVERIFIED ON HARDWARE.** gpt-oss
+- **MXFP4 on GPU, landed 2026-09-09, verified on CUDA hardware 2026-09-15.** gpt-oss
   ships it and no GPU backend had it at all, so every expert decoded on
   the host with the device idle. Matvec and GEMM, the same codebook
   seam, with the E2M1 table and an E8M0 scale helper. 17-byte blocks:
   the only odd stride in the table, so nothing in either kernel may
   assume a block pointer is aligned to anything.
-- **CUDA Q2_K and Q3_K, landed 2026-09-09, UNVERIFIED ON HARDWARE.**
+- **CUDA Q2_K and Q3_K, landed 2026-09-09, verified on hardware 2026-09-15.**
   Common in small-memory builds, and they were absent on all three GPU
   backends. Matvec and GEMM, both affine. Q3_K is the fiddly one: its
   third quant bit is a bit plane in `hmask` and it is INVERTED (a set

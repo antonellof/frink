@@ -1,6 +1,6 @@
 ---
 name: dFlash / dFlash2, block-diffusion speculative decoding
-overview: "GOAL: give frink a real speculative drafter. Today `frink-models::speculative` is prompt-lookup only (an n-gram match over the history, no model), and `--mtp` errors. dFlash is a block-diffusion drafter: it predicts a whole K-token block in ONE forward pass instead of autoregressively, conditioned on the target model's own hidden states, sharing the target's embedding and LM head, and the target verifies the block in one batched pass. Published numbers: mean acceptance length 4.80 tok and 2.7-3.4x throughput on the drafter's own benchmark table, 3.3x vs EAGLE-3's 2.1x on GSM8K at equal acceptance length. THE HONEST CONSTRAINT, stated up front: dFlash is a TRAINED drafter and frink does not train. Everything here is worthless without a published drafter checkpoint in a format frink can load, so `dflash-checkpoint-reality` is the first todo and it is a GO/NO-GO, if no loadable checkpoint exists, the useful subset of this plan is the engine-side work (lossless verification, the drafter trait, cache resume, acceptance metrics), which is worth doing on its own and is written to stand alone."
+overview: "GOAL: give frink a real speculative drafter. When this was written `frink-models::speculative` was prompt-lookup only (an n-gram match over the history, no model). Since then `draft_model.rs` added a second GGUF as an autoregressive drafter (`frink run -d`), and the server speculates with prompt-lookup (0.28.0); `--mtp` still errors, and no trained block drafter exists. dFlash is a block-diffusion drafter: it predicts a whole K-token block in ONE forward pass instead of autoregressively, conditioned on the target model's own hidden states, sharing the target's embedding and LM head, and the target verifies the block in one batched pass. Published numbers: mean acceptance length 4.80 tok and 2.7-3.4x throughput on the drafter's own benchmark table, 3.3x vs EAGLE-3's 2.1x on GSM8K at equal acceptance length. THE HONEST CONSTRAINT, stated up front: dFlash is a TRAINED drafter and frink does not train. Everything here is worthless without a published drafter checkpoint in a format frink can load, so `dflash-checkpoint-reality` is the first todo and it is a GO/NO-GO, if no loadable checkpoint exists, the useful subset of this plan is the engine-side work (lossless verification, the drafter trait, cache resume, acceptance metrics), which is worth doing on its own and is written to stand alone."
 todos:
   - id: dflash-checkpoint-reality
     content: "GO/NO-GO, do this before writing any kernel. Establish whether a dFlash drafter can be loaded by frink AT ALL. Answer three questions with evidence, not inference: (1) does a published checkpoint exist and under what licence (search names the HF repo `incoai/Qwen3.8-27B-DFlash2`, and claims 3.5M downloads and integrations across the major serving stacks including llama.cpp); (2) since llama.cpp is claimed as an integration, is there a GGUF convert path and what tensor names + metadata keys does it emit, read llama.cpp's converter and its dFlash graph, that is this repo's default method and it settles the format question by reading rather than guessing; (3) does the checkpoint ship the drafter ALONE (sharing the target's embedding + LM head) or a standalone model. If the answer to (1) is no, STOP and record that; the engine-side todos below still stand"
@@ -95,13 +95,16 @@ Not here:
 
 - **Any trained drafter.** `frink speculative` is prompt-lookup: an n-gram
   match over the history with no model at all. `--mtp` errors by design and
-  says so in `docs/CLI.md`. The `Drafter` trait now exists for one to plug
-  into, but nothing implements it except prompt lookup.
+  says so in `docs/CLI.md`. The `Drafter` trait has two implementations:
+  prompt lookup, and `DraftModelSpeculator` (`draft_model.rs`), which runs
+  a smaller GGUF of the same family autoregressively behind `frink run -d`.
+  Neither is a trained block drafter.
 - **Any diffusion / masked-denoising machinery.** Nothing in the tree
   resembles it.
-- **Serving integration.** `speculative_decode_with` accepts a warm cache
-  now, but `frink-server` still never calls it, so the acceptance metrics
-  on the wire are always absent. That is `spec-server-integration`.
+- **Serving integration with a model drafter.** Since 0.28.0 `frink-server`
+  speculates with prompt lookup and fills the acceptance metrics when it
+  does. It cannot load a draft model; that is `spec-server-integration` and
+  [`../server-speculative-decoding.md`](../server-speculative-decoding.md).
 
 ## The constraint that decides whether this plan is real
 
@@ -127,6 +130,19 @@ items, `spec-lossless-verify`, `spec-drafter-trait`, `spec-cache-resume`,
 *any* drafter usable in serving, they close a real correctness hole at
 temp > 0, and they are the prerequisites for MTP heads, EAGLE, or dFlash
 whenever a checkpoint does appear.
+
+**Where the go/no-go stands, 2026-10-28.** Question (2) has moved:
+llama.cpp at the `604cc430` pin names a `dflash` architecture and has a
+`src/models/dflash.cpp` graph
+([`../parity-audit-2026-10-28.md`](../parity-audit-2026-10-28.md) lists it
+among the callers of several builder changes), so a GGUF representation
+exists and its tensor names and keys can be settled by reading. frink
+catalogs `dflash` as enum-only ("speculative draft head; not a standalone
+decoder target"). Questions (1) and (3) are not answered in this repo:
+no published dFlash GGUF has been confirmed loadable here. So the revive
+condition is unchanged and not yet met: this plan moves back when a
+loadable drafter checkpoint is confirmed to exist, and reading
+`dflash.cpp` and its converter is now the cheap first step toward that.
 
 ## Published numbers, and how much to trust them
 
@@ -202,7 +218,7 @@ roughly 15-layer quality.
 
 ## Measurement contract
 
-Same as `docs/plans/llama-cpp-parity-push.md`: quiet host (1-minute load
+Same as `docs/plans/archive/llama-cpp-parity-push.md`: quiet host (1-minute load
 average below 2.0, now enforced by `frink-cli/src/host_state.rs`), both
 engines measured in the same session, interleaved A/B, receipts checked in.
 

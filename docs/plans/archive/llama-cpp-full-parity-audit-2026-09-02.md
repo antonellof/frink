@@ -214,7 +214,7 @@ Still missing: `dry`, `xtc`, `typ_p`, `top_n_sigma`, mirostat, infill, adaptive_
 
 ## Part 3: Priority plan
 
-Ranked per [`north-star.md`](../north-star.md) and [`roadmap.md`](../roadmap.md).
+Ranked per [`north-star.md`](../north-star.md) and [`roadmap-2026-09.md`](roadmap-2026-09.md).
 
 ### P0 — Correctness and trust (this week)
 

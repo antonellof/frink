@@ -253,10 +253,11 @@ cargo build -p frink-cli --release --features cuda
 ./target/release/frink bench --suite --fit-host --skip-missing --backend cuda
 ```
 
-Record the GPU and driver whenever you quote a CUDA number. There is
-no pinned CUDA host here and no CUDA files under
-[`receipts/engine/`](receipts/engine/), so nothing in `RESULTS.md`
-covers it. See [`docs/ROADMAP.md`](../docs/ROADMAP.md).
+Record the GPU and driver whenever you quote a CUDA number. CUDA rows
+come from rented hosts (an RTX 3090 and an RTX 3060 so far); their
+receipts are the `*_cuda__*.json` files under
+[`receipts/engine/`](receipts/engine/), and `RESULTS.md` renders them
+beside the Metal and CPU rows.
 
 ## Serving (HTTP)
 
@@ -268,7 +269,7 @@ batching.
 | | |
 |---|---|
 | Measures | end-to-end HTTP latency and throughput |
-| Driver | `frink serve-bench` (Rust) or [`pi-agent-tests`](../../pi-agent-tests/) harness |
+| Driver | `frink serve-bench` |
 | Compared against | — (no llama.cpp HTTP twin in-tree) |
 | Raw numbers | [`receipts/serving/`](receipts/serving/) |
 | Workload | streaming chat/completions, concurrency sweeps |
@@ -283,7 +284,8 @@ frink serve -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -dev metal -ngl all &
 
 Rules for meaningful numbers: see [`docs/CLI.md`](../docs/CLI.md)
 (`serve-bench` section). Temperature 0, exact output length, and
-positional TTFT/TPOT split are enforced in `frink_edge::bench_client`.
+positional TTFT/TPOT split are enforced in `frink-cli`'s `bench_client`
+module, which `serve-bench` drives.
 
 ### Metal continuous batching (0.15.3)
 
@@ -297,12 +299,29 @@ Host B, **Llama-3.2-3B-Instruct Q4_K_M**, CB auto-on, `frink 0.15.3`:
 | | 8 | 16/16 | **24.4** | 957 ms |
 | sequential stream (`max_tokens=128`) | 1 | 8/8 | — | **118 ms** |
 
-Receipts (from [`pi-agent-tests/frink_parallel_bench.py`](../../pi-agent-tests/frink_parallel_bench.py)
-and [`frink_stream_bench.py`](../../pi-agent-tests/frink_stream_bench.py)):
+These numbers were recorded with frink 0.15.3 by an external harness
+that is not part of this repository. Receipts:
 [`llama32_3b_q4km_metal_cb_parallel_0.15.3.json`](receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json),
 [`llama32_3b_q4km_metal_cb_stream_0.15.3.json`](receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json).
-See also [`pi-agent-tests/README.md`](../../pi-agent-tests/README.md).
+To reproduce the same shapes with the in-repo client, start the server
+as above and run:
+
+```bash
+# parallel stream burst, 64 output tokens, two requests per client
+for c in 1 2 4 8; do
+  ./target/release/frink serve-bench --concurrency $c --requests $((2 * c)) --output-len 64
+done
+
+# sequential stream, 128 output tokens
+./target/release/frink serve-bench --concurrency 1 --requests 8 --output-len 128
+```
+
+`--url` points it at a server other than `http://127.0.0.1:8383`, and
+`--json` writes the report as JSON for a receipt. The prompts differ
+from the 0.15.3 harness's, so expect the shape of the results to
+match rather than the exact figures. Current serving numbers are in
+[`RESULTS.md`](RESULTS.md#serving-features-measured).
 
 0.15.2 measured similar aggregate throughput at concurrency 8 but returned
 garbled text under CB on Metal until the 0.15.3 host-K/V prefill fix.
-See [`docs/plans/metal-parallel-concurrency.md`](../docs/plans/metal-parallel-concurrency.md).
+See [`docs/plans/archive/metal-parallel-concurrency.md`](../docs/plans/archive/metal-parallel-concurrency.md).

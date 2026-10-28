@@ -1,84 +1,94 @@
 # Plans
 
-Two files hold the plan:
+Every file in this directory is listed here once.
+
+## Goal
 
 - **[`north-star.md`](north-star.md)** is the goal and the ranking rule.
   Be the Rust alternative to llama.cpp: same models, same command
   shapes, same or better performance, on the hardware people actually
-  own.
-- **[`roadmap.md`](roadmap.md)** is every open item, merged by theme.
+  own. Open items are GitHub issues, ranked by its tiers.
 
-Four items are large enough to carry their own design document:
+## Design docs
 
-- **[`speculative-decoding.md`](speculative-decoding.md)**, the one
-  decode item that raises throughput without buying hardware. Decode
-  reads every weight per token, so bandwidth divided by model bytes is a
-  hard ceiling; a draft model changes what is read per token rather than
-  how fast. The lossless half already ships and is tested at 200k
-  samples. What is missing is a drafter worth having.
-- **[`model-layer-reorg.md`](model-layer-reorg.md)**, splitting the
-  decoder so architectures scale. `decoder.rs` was 6438 lines when that
-  document was written and 8050 on 2026-10-28, when it and `loader.rs`
-  (6024) were split into modules.
+- **[`model-layer-reorg.md`](model-layer-reorg.md)**, making an
+  architecture a new file. The decoration audit and the shared
+  `attn_block` have landed, and `decoder.rs` (8050 lines) and
+  `loader.rs` (6024) were split into modules on 2026-10-28 (#390);
+  `LayerPlan` and the per-architecture trait are still open.
 - **[`out-of-core-moe.md`](out-of-core-moe.md)**, running a 155 GB model
-  on a 32 GB machine.
+  on a 32 GB machine. Streamed experts reach the fused Metal top-k
+  decode now; nothing executes the residency policy yet.
+- **[`speculative-decoding.md`](speculative-decoding.md)**, the one
+  decode item that raises throughput without buying hardware. The
+  lossless rejection rule, a second GGUF as the drafter and the `frink
+  run -d` flags have landed.
+- **[`server-speculative-decoding.md`](server-speculative-decoding.md)**,
+  the server half. Prompt-lookup speculation ships on the server; a
+  draft model does not reach it yet.
 - **[`gdn-resident-state.md`](gdn-resident-state.md)**, a recurrent
-  layer that does not come back to the host. It was the measured next
-  step for Bonsai-2-27B decode, which has since gone from 7.2 to 11.17
-  tok/s against the PrismML fork's 11.46, with the per-token ledger that says why, the delta-rule and
-  gated-norm kernels that already exist and are pinned against the CPU
-  definition, the reason wiring them TODAY is a loss (3.1 MB of state
-  per layer, copied both ways), and four measured non-results so they
-  are not tried again.
+  layer that does not come back to the host. Bonsai-2-27B decode went
+  from 7.2 to 11.17 tok/s against the PrismML fork's 11.46, flat with
+  context, and the file carries the per-token ledger and the measured
+  non-results so they are not tried again.
+- **[`cpu-cuda-parity.md`](cpu-cuda-parity.md)**, the two backends that
+  are not at parity, ordered by what was measured on rented hosts
+  rather than by tok/s. Carries the kernel-coverage matrix, because a
+  gap column cannot show a format the backend never runs.
 
-One audit sits beside them:
+## Audits
 
-- **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)**,
-  the llama.cpp pin moved again (`5b59b83` to `604cc430`, 913 commits)
-  and every census re-run against it: 13 new architecture names, the
+- **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)**, the
+  current re-measurement of the llama.cpp surface at the `604cc430`
+  pin (913 commits on from `5b59b83`): 13 new architecture names, the
   served-architecture behaviour that moved upstream, and what was fixed.
-  Its predecessor, [`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md),
-  still carries the serving-feature gaps a GGUF architecture count
-  cannot see.
+- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)**, the
+  previous one, at `5b59b83`. It still carries the serving-feature gaps
+  a GGUF architecture count cannot see.
+- **[`serving-parity-audit.md`](serving-parity-audit.md)**, continuous
+  batching, paged KV, prefix caching and cache-aware admission read
+  against the code, every claim carrying the line that decides it
+  (`documented_serving.rs` holds the citations).
+- **[`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md)**, the
+  evidence-backed differential of 2026-09-01. A snapshot, not a plan:
+  its paths and line numbers predate the 2026-10 splits.
 
-How work lands is written down too:
+## Process and verdicts
 
 - **[`contribution-workflow.md`](contribution-workflow.md)**, the rule
   that a completed feature is a branch and a pull request, a defect is a
   GitHub issue, and the two are never the same artifact. It also carries
   the parallel-agent rules, whose first failure is two branches editing
   one file.
-
-One item has a written **verdict** rather than a design:
-
 - **[`vulkan-beachhead-verdict.md`](vulkan-beachhead-verdict.md)**, the
   `d-hardware-reach` GO/NO-GO. GO: a Q8_0 matvec ran as a hand-emitted
   SPIR-V shader on a real device and matched its scalar twin. It also
   carries the survey of the backend seam a third backend would need,
   which is `backend-seam-refactor`'s to-do list.
 
-Parity inventory and deltas against llama.cpp:
+## History
 
-- **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)** — the current re-measurement of the llama.cpp surface, at the `604cc430` pin
-- **[`parity-audit-2026-09-19.md`](parity-audit-2026-09-19.md)** — the previous one, at `5b59b83`, and the serving-feature gaps
-- **[`serving-parity-audit.md`](serving-parity-audit.md)** — continuous batching, paged KV, prefix caching and cache-aware admission read against the code, every claim carrying the line that decides it (`documented_serving.rs` holds the citations)
-- **[`server-speculative-decoding.md`](server-speculative-decoding.md)** — the engine has it, the server cannot reach it
-- **[`done/several-completions-per-request.md`](done/several-completions-per-request.md)** — `n` > 1 as a KV fork, not as a loop that re-prefills
-- **[`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md)** — evidence-backed differential (not a plan)
-- **[`archive/llama-cpp-full-parity-audit-2026-09-02.md`](archive/llama-cpp-full-parity-audit-2026-09-02.md)** — file map + sweep + priority plan
-- **[`archive/llama-cpp-parity-update-2026-09-03.md`](archive/llama-cpp-parity-update-2026-09-03.md)** — post-merge delta (Qwen MoE Metal, Phi-4 LongRoPE, sweep)
-- **[`cpu-cuda-parity.md`](cpu-cuda-parity.md)** — the two backends that
-  are not at parity, ordered by what was measured on rented hosts on
-  2026-09-04 rather than by tok/s. Carries the kernel-coverage matrix,
-  because a gap column cannot show a format the backend never runs
+- **[`archive/`](archive/)** holds superseded plans and dated audits:
+  `roadmap-2026-09.md` (the single roadmap of 2026-09-02, archived
+  2026-10-28), `metal-parallel-concurrency.md` (shipped in 0.15.2 and
+  0.15.3), `llama-cpp-full-parity-audit-2026-09-02.md`,
+  `llama-cpp-parity-review-2026-09-02.md`,
+  `llama-cpp-parity-update-2026-09-03.md`, `llama-cpp-parity-push.md`,
+  `freetoken-parity.md`, `amd-strix-halo.md`,
+  `serving-and-tiered-kv.md`, `one-binary-serve.md`,
+  `completion-push.md`, `project-status-2026-09.md`, and
+  `closures-2026-09.md` (how each architecture closed, moved out of
+  `CLAUDE.md`).
+- **[`done/`](done/)** holds plans that finished:
+  `several-completions-per-request.md` (`n` > 1 as a KV fork, not as a
+  loop that re-prefills).
+- **[`on-hold/`](on-hold/)** holds work ranked below the goal, each with
+  the condition that brings it back: `dflash-speculative-decoding.md`
+  and `frink-ui.md`.
 
-Everything else is history: [`archive/`](archive/) holds superseded
-plans, whose open items were merged into the roadmap by theme;
-[`on-hold/`](on-hold/) holds work ranked below the goal, each with the
-condition that brings it back; and [`done/`](done/) holds plans that
-finished. The counts in each of those READMEs are derived from the
-files by `crates/frink-models/tests/documented_counts.rs`, because two
-of them had already drifted.
+The counts in each of those READMEs are derived from the files by
+`crates/frink-models/tests/documented_counts.rs`, because two of them
+had already drifted.
 
 ## Where the project stands
 

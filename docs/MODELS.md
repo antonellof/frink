@@ -12,44 +12,52 @@ can do is [`FEATURES.md`](FEATURES.md).
 
 | Family | Notes |
 |---|---|
-| Llama 3.x, TinyLlama, Mistral, Yi, MiroThinker | |
+| Llama 3.x, TinyLlama, Mistral, Mixtral, Yi, SmolLM2, MiroThinker (`llama`); Ministral 3 (`mistral3`) | |
 | `llama-embed` | Llama's graph with the output head skipped. `/v1/embeddings` pools its hidden states |
-| Qwen2.5, Qwen3, Qwen2-MoE / Qwen1.5-MoE, Qwen3-MoE | |
-| Qwen3.5 dense and MoE, Qwen3-Next | Recurrent: no prefix-cache reuse, no `--model-draft` |
-| Gemma-2, Gemma-3 | |
+| Llama 4 Scout, Llama 4 Maverick (`llama4`) | CPU only: its window is chunked, and the fused Metal launches take one window per layer |
+| Qwen-1 (`qwen`), Qwen2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen1.5-MoE / Qwen2-MoE (`qwen2moe`), Qwen3-MoE (`qwen3moe`) | |
+| Qwen3.5 dense and MoE (`qwen35`, `qwen35moe`), Qwen3-Next (`qwen3next`) | Recurrent: no prefix-cache reuse, no `--model-draft` |
+| Gemma-1, Gemma-2, Gemma-3 (`gemma`, `gemma2`, `gemma3`) | |
 | Gemma-4-E2B | Dedicated engine, `gemma4` BPE tokenizer |
-| Phi-2, Phi-3, Phi-4-mini, Phi-3.5-MoE | |
-| SmolLM2, SmolLM3, OLMo, OLMo-2, OLMoE, Olmo-3 | |
-| Mixtral, DBRX, Arctic, Grok, Jais, MPT, BLOOM, Refact, GPT-2, GPT-NeoX, StarCoder, StarCoder2, Falcon | |
+| Phi-2 / Phi-1.5 (`phi2`), Phi-3 / Phi-4-mini (`phi3`), Phi-3.5-MoE (`phimoe`) | |
+| OLMo (`olmo`), OLMo-2 / Olmo-3 (`olmo2`), OLMoE (`olmoe`), SmolLM3 (`smollm3`) | |
+| ChatGLM (`chatglm`), GLM-4-0414 / Z1 / OCR (`glm4`), GLM-4.5 / 4.5-Air / 4.6 (`glm4moe`) | A vision tower's `rope.dimension_sections` is refused by name on `glm4`, served on `glm4moe` |
 | DeepSeek-V2 / V3, Mistral-Large-3, PLM | MLA engine, both tensor forms, YaRN as real exports declare it. Any other scaling type is refused by name |
-| GLM-4-0414 / Z1 / OCR, GLM-4.5 / 4.5-Air / 4.6 | A vision tower's `rope.dimension_sections` is refused by name on `glm4`, served on `glm4moe` |
-| Command-R, Command-R7B, Cohere2 MoE | Command-R+ (64 layers) is refused: it needs a per-head QK LayerNorm |
-| EXAONE-4, EXAONE-MoE, Granite 3, Granite 4.0 hybrid | Granite 4.0 is recurrent: no prefix-cache reuse, no `--model-draft` |
-| Nemotron, Nemotron-H, Nemotron-3 Nano | Recurrent. Nemotron-3 Super's `moe_latent_size` is refused by name, and so is the `domyn-small` pre-tokenizer |
-| Jamba, Mamba, Mamba-2, FalconMamba, Falcon-H1, PLaMo-2 | Recurrent |
-| LFM2, LFM2-MoE | A file declaring `attention.sliding_window` is refused by name, and so is an LFM2-d1 decision head (`decision.block_count`) |
-| MiniMax-Text-01, MiniMax-M2 | |
-| gpt-oss | **CPU only**: no Metal kernel implements attention sinks |
-| Llama 4 Scout, Llama 4 Maverick | **CPU only**: its window is chunked, and the fused Metal launches take one window per layer |
-| openPangu-Embedded | A decoder, not an embedding model |
-| BitNet, Apertus, Step-3.5, Laguna, Mellum, SmallThinker, MiMo-V2, Nanbeige, Talkie, Arcee, Deci, OpenELM, StableLM | StableLM-2-12B is refused: it needs a per-head QK LayerNorm |
+| Baichuan 7B and 13B (`baichuan`), InternLM2 (`internlm2`), XVERSE (`xverse`), Orion-14B (`orion`), MiniCPM (`minicpm`), Hunyuan dense (`hunyuan-dense`), ERNIE-4.5 (`ernie4_5`), Seed-OSS (`seed_oss`), EXAONE-3 (`exaone`), openPangu-Embedded (`pangu-embedded`) | openPangu-Embedded is a decoder, not an embedding model. Baichuan-13B runs on ALiBi, picked by its 40-layer depth |
+| DeepSeek-V1 (`deepseek`), dots.llm1 (`dots1`), Ling (`bailingmoe`, `bailingmoe2`), Hunyuan-MoE (`hunyuan-moe`), ERNIE-4.5-MoE (`ernie4_5-moe`), DBRX (`dbrx`), Arctic (`arctic`), Grok-1 / Grok-2 (`grok`) | An ERNIE-4.5-MoE file whose experts interleave with dense layers is refused by name, as llama.cpp's own loader cannot load one |
+| AFMoE (`afmoe`), Laguna (`laguna`), SmallThinker (`smallthinker`), MiMo-V2 (`mimo2`), Step-3.5 (`step35`), MiniMax-M2 (`minimax-m2`), MiniMax-Text-01 (`minimax-01`) | |
+| Command-R, Aya-23 (`command-r`), Command-R7B / Command-A (`cohere2`), Cohere2 MoE (`cohere2moe`) | Command-R+ (64 layers) is refused: it needs a per-head QK LayerNorm |
+| EXAONE-4 (`exaone4`), EXAONE-MoE (`exaone-moe`) | |
+| Granite 3 (`granite`, `granitemoe`, `granite-moe`), Granite 4.1 (`granite_swa`), Granite 4.0 hybrid (`granitehybrid`, `granite-hybrid`) | Granite 4.0 hybrid is recurrent: no prefix-cache reuse, no `--model-draft` |
+| Nemotron-4 (`nemotron`), Nemotron-H and Nemotron-3 Nano dense (`nemotron_h`), Nemotron-3 Nano 30B-A3B (`nemotron_h_moe`) | The hybrids are recurrent. Nemotron-3 Super's `moe_latent_size` is refused by name, and so is the `domyn-small` pre-tokenizer |
+| Jamba (`jamba`), Mamba and FalconMamba (`mamba`), Mamba-2 (`mamba2`), Falcon-H1 (`falcon-h1`), PLaMo-2 (`plamo2`) | Recurrent |
+| PLaMo (`plamo`), PLaMo-3 (`plamo3`) | |
+| LFM2 (`lfm2`), LFM2-MoE (`lfm2moe`) | A file declaring `attention.sliding_window` is refused by name, and so is an LFM2-d1 decision head (`decision.block_count`) |
+| gpt-oss (`gpt-oss`) | CPU only: no Metal kernel implements attention sinks |
+| GPT-2 (`gpt2`), GPT-NeoX / Pythia (`gptneox`), StarCoder (`starcoder`), StarCoder2 (`starcoder2`), CodeShell (`codeshell`), Jais-2 (`jais2`), Falcon (`falcon`), StableLM (`stablelm`) | StableLM-2-12B is refused: it needs a per-head QK LayerNorm |
+| BLOOM (`bloom`), MPT (`mpt`), Refact (`refact`), Jais (`jais`) | ALiBi in place of RoPE |
+| BitNet (`bitnet`), Apertus (`apertus`), Mellum (`mellum`), Nanbeige (`nanbeige`), Talkie (`talkie`), Arcee (`arcee`), Deci (`deci`), OpenELM (`openelm`), Maincoder (`maincoder`) | |
+| Spark-2.5 (`spark2_5`), Maple-20B (`maple`), `muse-glimmer`, DFM Mimir (`hrm_text`) | Added after the llama.cpp reference moved to `5b59b83` on 2026-09-19 |
 | Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint. `PTQ1_0` runs on CPU and Metal; `PQ2_0` is recognised, not executed |
-| BERT, nomic-bert, jina-bert-v3 | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
+| BERT (`bert`), nomic-bert (`nomic-bert`), jina-bert-v2 (`jina-bert-v2`), jina-bert-v3 (`jina-bert-v3`), NeoBERT (`neo-bert`), EuroBERT (`eurobert`) | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
 
-100 architectures run, each backed by a benchmark row, a pinned logit
-comparison against real `libllama`, or a fixture. The list above is by
-family. `frink archs` lists them by GGUF architecture string and is the
-authoritative list.
+100 architectures run on the shared decoder, each backed by a benchmark
+row, a pinned logit comparison against real `libllama`, or a fixture.
+The GGUF architecture string of each is in brackets above; every one of
+the 100 in `capability::AUDITED_GENERIC_GQA` appears there. Gemma-4,
+the MLA rows and the encoders run on engines of their own and are
+counted separately. `frink archs` is the authoritative list.
 
 ## What does not run
 
 | | |
 |---|---|
 | MiniMax-M3 | Needs MiniMax Sparse Attention |
-| Kimi K3, GLM-5.2, DeepSeek V4 | Loaders and primitives only; nothing run end to end |
-| `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | Unaudited; see below |
+| Kimi K3, GLM-5.2, DeepSeek V4 | Loaders and primitives only; nothing has run end to end on a real checkpoint |
+| `bailingmoe3`, `dots3note`, `hy_v4`, `deepseek41` (DeepSeek-V4.1-Flash), `glm5-next` (GLM-5.3-Flash) | Each needs an attention or residual layout this engine does not have, and is refused by name |
+| `kolibri1`, `lfm3`, `flint`, `beam`, `maion-coder`, `k2-horizon`, `muse-spark`, `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | The eleven unaudited architectures; see below |
 | Vision | Frink finds an mmproj file and warns. An `image_url` in a request is an error |
-| MTP draft heads | `--mtp` errors by design. Speculation is prompt-lookup only |
+| MTP draft heads | `--mtp` errors by design. Speculation uses prompt lookup, or a second GGUF on the CLI (`--model-draft`) |
 
 ## Why a model stops
 
