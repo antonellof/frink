@@ -32,7 +32,8 @@ cargo test -p frink-metal --features metal -- --ignored    # needs Metal
 
 ./target/debug/frink -m model.gguf -p "Hi" -n 64 --temp 0 --no-cnv
 ./target/debug/frink -m model.gguf -p "Hi" -n 64 -ngl 99   # Metal
-./target/debug/frink parity -m model.gguf --dumper target/llama_logits
+./target/debug/frink parity -m model.gguf \
+    --dumper target/llama_logits --dumper target/llama_logits_scratch
 ./target/debug/frink archs | caps | inspect <gguf>
 FRINK_MODEL_PATH=model.gguf ./target/debug/frink-server
 
@@ -42,7 +43,8 @@ FRINK_MODEL_PATH=model.gguf ./target/debug/frink-server
 
 The llama.cpp reference is a source build at the pinned commit in
 `.scratch/llama.cpp`; `tools/build_llama_logits.sh` builds the parity
-dumper against it.
+dumper against it. Build it twice (see the script): with one reference,
+`frink parity` cannot call a K-quant result wrong.
 
 ## Rules
 
@@ -64,6 +66,15 @@ rule.
   A flag accepted but not honoured is an error.
 - **Measure on quiet, rented hardware** ([0006](docs/adr/0006-measurement.md)).
   Agents never benchmark.
+- **Numerics follow ggml** ([0009](docs/adr/0009-numerics-follow-ggml.md)).
+  Quant layouts, f16 KV, the sampler order and tokenisation match
+  llama.cpp. An unlisted deviation is a bug.
+- **Coverage before speed** ([0010](docs/adr/0010-coverage-before-speed.md)).
+  Check the kernel matrix before profiling; close a missing kernel
+  before tuning an existing one.
+- **Goldens come from the oracle** ([0011](docs/adr/0011-the-oracle-runs-in-ci.md)).
+  A model-level golden is a cache of libllama's answer, never a value
+  frink produced.
 - **Small files, few crates** ([0008](docs/adr/0008-small-files-few-crates.md)).
   Split a file before it passes ~1000 lines. No new crate for one user.
   Delete dead code.
@@ -90,6 +101,23 @@ Rust specifics:
    multi-step decode.
 5. Add the row, update the triage, and keep `cargo test --workspace`
    green.
+
+## Before opening a PR
+
+- It closes or advances a named issue, and says which.
+- `cargo fmt --all`, clippy with `-D warnings` in debug and `--release`,
+  and `cargo test --workspace` are green.
+- Anything that changes tokens has `frink parity` evidence; anything
+  that needs hardware lists the exact commands still to run.
+- New tests were sabotaged once and went red.
+- Docs that state what changed are updated in the same PR, and no
+  count is restated outside the one place a test pins it.
+
+## Picking work
+
+Take the highest priority in
+[`docs/plans/north-star.md`](docs/plans/north-star.md) whose issue
+nobody is working on and whose files no open branch is editing.
 
 ## Working with agents
 
