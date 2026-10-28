@@ -19,10 +19,13 @@ frink serve -m model.gguf -dev metal --no-cont-batching      # private path (ser
 
 See [`docs/plans/metal-parallel-concurrency.md`](../../docs/plans/metal-parallel-concurrency.md).
 
-**0.15.3 serving receipt (Host B, Llama-3.2-3B Q4_K_M, CB on):** concurrency
-1→8 all OK, ~24 aggregate tok/s at 8 clients, mean TTFT ~118 ms sequential /
-~957 ms at concurrency 8. Receipts under
+Serving measurements (continuous batching, paged KV, prefix cache)
+are in
+[`benchmarks/RESULTS.md`](../../benchmarks/RESULTS.md#serving-features-measured),
+with the raw receipts under
 [`benchmarks/receipts/serving/`](../../benchmarks/receipts/serving/).
+To measure your own deployment, point `frink serve-bench` at a running
+server.
 
 ## The web UI is a separate app
 

@@ -11,7 +11,7 @@ crate.
 
 ```toml
 [dependencies]
-frink-inference = "0.13"
+frink-inference = "0.50"
 ```
 
 ```rust
@@ -36,16 +36,20 @@ a binary called `frink` would fight over the same path in
 | Feature | Effect |
 |---|---|
 | `metal` | Apple Metal kernels. Apple Silicon only. |
-| `cuda` | CUDA/NVRTC kernels. Needs a CUDA toolkit at build time. |
+| `cuda` | CUDA/NVRTC kernels. Builds without a CUDA toolkit; the driver and NVRTC libraries are loaded at run time. |
 | `api` | Re-export `frink-api` (route constants + wire DTOs). |
 
 Neither GPU feature is on by default. `metal` does not build off Apple
-Silicon, and `cuda` needs a toolkit most machines do not have.
+Silicon. `cuda` compiles anywhere, because `cudarc` opens the driver
+and NVRTC with `dlopen`, but it only runs on a machine with an NVIDIA
+GPU and driver.
 
-The bar CUDA is held to is "must compile". There is no pinned benchmark
-host for it and no published timings, so treat a Windows or Linux
-install as CPU-only in practice. See
-[`docs/FEATURES.md`](https://github.com/antonellof/frink/blob/main/docs/FEATURES.md).
+CUDA timings against llama.cpp are published for an RTX 3090 and an
+RTX 3060 in
+[`benchmarks/RESULTS.md`](https://github.com/antonellof/frink/blob/main/benchmarks/RESULTS.md),
+measured on rented hosts. See
+[`docs/FEATURES.md`](https://github.com/antonellof/frink/blob/main/docs/FEATURES.md)
+for what the CUDA backend covers.
 
 ## The rest of the workspace
 
@@ -54,13 +58,18 @@ install as CPU-only in practice. See
 | [`frink-gguf`](https://crates.io/crates/frink-gguf) | GGUF mmap reader, sharded checkpoints |
 | [`frink-quant`](https://crates.io/crates/frink-quant) | Block layouts, fused dequant+dot |
 | [`frink-safetensors`](https://crates.io/crates/frink-safetensors) | SafeTensors mmap reader |
-| [`frink-core`](https://crates.io/crates/frink-core) | Tensor ops, RoPE, GQA, KV cache |
+| [`frink-core`](https://crates.io/crates/frink-core) | Tensor ops, RoPE, GQA, KV cache, MoE expert residency |
 | [`frink-moe`](https://crates.io/crates/frink-moe) | Expert routing and dispatch |
 | [`frink-models`](https://crates.io/crates/frink-models) | Loaders and decoder stacks |
-| [`frink-edge`](https://crates.io/crates/frink-edge) | Serving policy: prefix caches, schedulers, output parsers |
 | [`frink-api`](https://crates.io/crates/frink-api) | Route constants + wire DTOs |
 | [`frink-metal`](https://crates.io/crates/frink-metal) | Apple Metal kernels |
 | [`frink-cuda`](https://crates.io/crates/frink-cuda) | CUDA/NVRTC kernels |
+| [`frink-vulkan`](https://crates.io/crates/frink-vulkan) | Early Vulkan backend: one Q8_0 compute shader, end to end |
+
+The serving policy (prefix cache, scheduler, output parsers) lives in
+`frink-server`'s `policy` module. It was a crate of its own,
+`frink-edge`, which has been dissolved into `frink-core` and
+`frink-server`.
 
 Speed claims live in
 [`benchmarks/RESULTS.md`](https://github.com/antonellof/frink/blob/main/benchmarks/RESULTS.md),
