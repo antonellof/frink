@@ -382,16 +382,26 @@ mod tests {
     /// would open a parallel region per matvec again, and nothing but
     /// a throughput measurement on a quiet host would notice.
     ///
-    /// Sabotage: move any wrapper below back into `decoder.rs` with its
-    /// `pub` intact and this goes red naming it.
+    /// Every other file of the decoder module is searched
+    /// (`super::super::module_sources`), so a forward body moved into a
+    /// file of its own is still covered.
+    ///
+    /// Sabotage: move any wrapper below back into `decoder.rs`, or into
+    /// any other file under `decoder/`, with its `pub` intact and this
+    /// goes red naming it.
     #[test]
     fn a_public_forward_may_not_be_declared_outside_this_file() {
-        let body = include_str!("../decoder.rs");
-        let stray: Vec<&str> = body
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.starts_with("pub fn forward"))
-            .collect();
+        let mut stray: Vec<String> = Vec::new();
+        for (name, body) in super::super::module_sources() {
+            if name == "decoder/entry.rs" {
+                continue;
+            }
+            for l in body.lines().map(str::trim) {
+                if l.starts_with("pub fn forward") {
+                    stray.push(format!("{name}: {l}"));
+                }
+            }
+        }
         assert!(
             stray.is_empty(),
             "these forward entry points bypass the pool wrapper in entry.rs: {stray:?}"
