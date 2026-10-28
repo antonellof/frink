@@ -964,6 +964,18 @@ impl ModelConfig {
         }
     }
 
+    /// What layer `il`'s cache stores its rows as: [`Self::kv_dtype`],
+    /// except a short convolution's history, which is that layer's STATE
+    /// and stays f32 as llama.cpp's `r` cache does (`type_r` is
+    /// `GGML_TYPE_F32` whatever `-ctk` says). Every cache constructor
+    /// below asks this, and nothing else decides it.
+    pub fn layer_kv_dtype(&self, il: usize) -> frink_core::kv_store::KvDtype {
+        match self.layer_shape(il).attention {
+            AttnShape::ShortConv => frink_core::kv_store::KvDtype::F32,
+            _ => self.kv_dtype,
+        }
+    }
+
     /// One contiguous cache per layer, each sized for that layer.
     ///
     /// The twenty-odd call sites that used to spell
@@ -975,6 +987,7 @@ impl ModelConfig {
             .map(|il| {
                 let (n_kv_heads, head_dim, v_head_dim) = self.layer_cache_geometry(il);
                 KvCache::new_split(n_kv_heads, head_dim, v_head_dim)
+                    .with_dtype(self.layer_kv_dtype(il))
             })
             .collect()
     }
@@ -985,6 +998,7 @@ impl ModelConfig {
             .map(|il| {
                 let (n_kv_heads, head_dim, v_head_dim) = self.layer_cache_geometry(il);
                 KvCache::with_capacity_split(n_kv_heads, head_dim, v_head_dim, max_seq_len)
+                    .with_dtype(self.layer_kv_dtype(il))
             })
             .collect()
     }
@@ -1006,6 +1020,7 @@ impl ModelConfig {
                     std::sync::Arc::clone(pool),
                     max_seq_len,
                 )
+                .map(|c| c.with_dtype(self.layer_kv_dtype(il)))
             })
             .collect()
     }
@@ -1023,6 +1038,7 @@ impl ModelConfig {
                         head_dim,
                         v_head_dim,
                     )
+                    .with_dtype(self.layer_kv_dtype(il))
                 })
                 .collect(),
         )

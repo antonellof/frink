@@ -496,6 +496,7 @@ dependencies = [
  "frink-metal",
  "frink-quant",
  "frink-vulkan",
+ "half",
  "libc",
  "memmap2",
  "rayon",

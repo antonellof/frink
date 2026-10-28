@@ -3682,12 +3682,15 @@ fn price_batcher_config(path: Option<&str>) -> serving::batch::BatcherConfig {
     let Some(path) = path else {
         return batcher;
     };
-    // `frink_core::cache::KvCache` is `Vec<f32>` on both decode paths,
-    // so f32 is the width really kept, even under Metal attention where
-    // the *device* also holds an f16 copy. Budgeting the host store is
-    // the conservative reading: it over-charges KV and therefore
-    // under-states the context that fits.
-    let priced = budget::price_gguf(path, frink_models::KvElem::F32, 1);
+    // The HOST store's width, `budget::server_host_kv_dtype` -- the same
+    // call `model.rs` sets the caches from -- even under Metal attention,
+    // where the device also holds a copy at its own wire. Budgeting the
+    // host store is the conservative reading.
+    let priced = budget::price_gguf(
+        path,
+        frink_models::KvElem::from(budget::server_host_kv_dtype()),
+        1,
+    );
     let Some((priced, gguf_ctx, source)) = priced else {
         return batcher;
     };
@@ -3756,8 +3759,7 @@ pub(crate) fn activate_loaded_model(
             // fairness, not a batched prefill kernel), so a sliding
             // layer really does need only `window + 1 - 1` positions
             // live. `chunk = 1` here is the truth, not a simplification.
-            let shape =
-                frink_models::KvShape::from_config(&decoder.config, frink_models::KvElem::F32);
+            let shape = frink_models::KvShape::host(&decoder.config);
             let ceiling = Arc::new(budget::ContextCeiling::new(config.max_context, shape));
             let batcher = if enable_continuous_batching {
                 tracing::info!(
@@ -10073,6 +10075,7 @@ pub(crate) mod tests {
         let mla_v_head_dim = 2;
 
         let model_cfg = frink_models::ModelConfig {
+            kv_dtype: frink_core::kv_store::KvDtype::F32,
             rope_layers: frink_models::rope_layers::RopeLayers::All,
             layer_shapes: frink_models::layer_shapes::LayerShapes::Uniform,
             name: "synthetic-kimi-server-test",

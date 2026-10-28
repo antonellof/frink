@@ -162,8 +162,8 @@ impl SlotIdentity {
             ),
             (
                 "kv_dtype",
-                dtype.as_str().to_string(),
-                serving.dtype.as_str().to_string(),
+                dtype.name().to_string(),
+                serving.dtype.name().to_string(),
             ),
             (
                 "checkpoint",

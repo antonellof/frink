@@ -121,6 +121,10 @@ pub fn prefill_logits(
     }
     let mut config = ModelConfig::from_gguf(&file).context("reading model config")?;
     config.apply_runtime_context(runtime_ctx);
+    // The reference dumper runs llama.cpp's default context, f16 K/V
+    // (`tools/llama_logits.c` takes `llama_context_default_params`), so
+    // this side keeps the host store llama.cpp would: like for like.
+    config.kv_dtype = frink_models::host_kv_dtype_from_env(frink_models::BudgetBackend::Cpu);
     let decoder = Decoder::from_gguf(path, config)?;
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
     let logits = decoder.forward_batch_last(&tokens, 0, &mut caches);

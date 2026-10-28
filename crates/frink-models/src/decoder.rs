@@ -42,6 +42,7 @@ use frink_core::attention::{
     causal_gqa_attention_softcap,
 };
 use frink_core::cache::{KvCache, PagedKvCache, PagedStoreExhausted, SharedPagedKv};
+use frink_core::kv_store::KvRows;
 use frink_core::matmul::rms_norm;
 pub use kv_window::{KvWindowPolicy, KV_WINDOW_ENV};
 #[cfg(feature = "metal")]
@@ -2078,8 +2079,8 @@ impl Decoder {
         &self,
         layer: usize,
         q: &[f32],
-        k: &[f32],
-        v: &[f32],
+        k: KvRows<'_>,
+        v: KvRows<'_>,
         n_heads: usize,
         n_kv_heads: usize,
         head_dim: usize,
@@ -2087,26 +2088,30 @@ impl Decoder {
     ) -> Vec<f32> {
         #[cfg(feature = "cuda")]
         {
-            if cuda_gqa_enabled()
-                && self.config.layer_shapes.is_uniform()
-                && self.alibi_slopes.is_none()
-            {
-                match frink_cuda::attn::launch_gqa_decode_resident(
-                    layer, q, k, v, n_heads, n_kv_heads, head_dim, seq_len,
-                ) {
-                    Ok(out) => return out,
-                    Err(e) => {
-                        eprintln!(
-                            "frink: CUDA GQA resident decode failed, trying full upload: {e}"
-                        );
+            // The CUDA kernels read f32 rows; an f16 host store takes the
+            // host kernel below rather than being widened per token.
+            if let (KvRows::F32(k), KvRows::F32(v)) = (k, v) {
+                if cuda_gqa_enabled()
+                    && self.config.layer_shapes.is_uniform()
+                    && self.alibi_slopes.is_none()
+                {
+                    match frink_cuda::attn::launch_gqa_decode_resident(
+                        layer, q, k, v, n_heads, n_kv_heads, head_dim, seq_len,
+                    ) {
+                        Ok(out) => return out,
+                        Err(e) => {
+                            eprintln!(
+                                "frink: CUDA GQA resident decode failed, trying full upload: {e}"
+                            );
+                        }
                     }
-                }
-                match frink_cuda::attn::launch_gqa_decode(
-                    q, k, v, n_heads, n_kv_heads, head_dim, seq_len,
-                ) {
-                    Ok(out) => return out,
-                    Err(e) => {
-                        eprintln!("frink: CUDA GQA decode failed, host fallback: {e}");
+                    match frink_cuda::attn::launch_gqa_decode(
+                        q, k, v, n_heads, n_kv_heads, head_dim, seq_len,
+                    ) {
+                        Ok(out) => return out,
+                        Err(e) => {
+                            eprintln!("frink: CUDA GQA decode failed, host fallback: {e}");
+                        }
                     }
                 }
             }
@@ -2281,7 +2286,10 @@ impl Decoder {
                     for (m, c) in bufs.iter_mut().zip(kv_caches.iter()) {
                         // ROWS: this uploads `c.k` / `c.v` themselves, so the
                         // count must describe those buffers.
-                        if c.rows() > 0 && m.upload_from_host(&c.k, &c.v, c.rows()).is_err() {
+                        if c.rows() > 0
+                            && m.upload_from_host(&c.k.to_f32_vec(), &c.v.to_f32_vec(), c.rows())
+                                .is_err()
+                        {
                             ok = false;
                             break;
                         }
@@ -4367,8 +4375,8 @@ impl Decoder {
             cache
                 .append_contiguous(
                     &mut store,
-                    &gathered.k[base..],
-                    &gathered.v[base..],
+                    gathered.k_rows().slice(base..gathered.k.len()),
+                    gathered.v_rows().slice(base..gathered.v.len()),
                     tokens.len(),
                 )
                 .expect("blocks reserved above are still held by this sequence");
@@ -4477,7 +4485,10 @@ impl Decoder {
                 if bufs.len() == need {
                     let mut ok = true;
                     for (m, c) in bufs.iter_mut().zip(kv_caches.iter()) {
-                        if c.rows() > 0 && m.upload_from_host(&c.k, &c.v, c.rows()).is_err() {
+                        if c.rows() > 0
+                            && m.upload_from_host(&c.k.to_f32_vec(), &c.v.to_f32_vec(), c.rows())
+                                .is_err()
+                        {
                             ok = false;
                             break;
                         }
@@ -4930,8 +4941,11 @@ impl Decoder {
                 // over query positions — the serial loop was a dominant CPU
                 // pp512 bottleneck (each query still attends only its causal
                 // prefix; K/V slices are immutable after the pushes above).
-                let cache_k = &cache.k;
-                let cache_v = &cache.v;
+                // f32 for the blocked kernel's many reads of each row;
+                // borrowed for an f32 store, widened once for f16.
+                let (cache_k_wide, cache_v_wide) =
+                    (cache.k_rows().to_f32_cow(), cache.v_rows().to_f32_cow());
+                let (cache_k, cache_v) = (&*cache_k_wide, &*cache_v_wide);
                 let softcap = self.config.attn_logit_softcap;
                 let batch_window = self.config.batch_window(l, start_pos, batch_size);
                 // A layer with sinks takes the per-query path, windowed
@@ -7095,7 +7109,7 @@ mod tests {
         for (ca, cb) in caches_a.iter().zip(caches_b.iter()) {
             assert_eq!(ca.positions(), cb.positions());
             assert_eq!(ca.k.len(), cb.k.len());
-            for (a, b) in ca.k.iter().zip(cb.k.iter()) {
+            for (a, b) in ca.k.to_f32_vec().iter().zip(cb.k.to_f32_vec().iter()) {
                 assert!((a - b).abs() < 1e-4);
             }
         }

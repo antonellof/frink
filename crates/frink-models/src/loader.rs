@@ -1540,6 +1540,7 @@ impl ModelConfig {
         }
 
         Ok(ModelConfig {
+            kv_dtype: frink_core::kv_store::KvDtype::F32,
             name,
             n_layers,
             n_mtp_blocks: trunk.n_mtp_blocks,

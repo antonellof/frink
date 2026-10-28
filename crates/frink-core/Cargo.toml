@@ -25,6 +25,9 @@ frink-quant = { workspace = true }
 frink-cuda = { workspace = true }
 frink-metal = { workspace = true, optional = true }
 frink-vulkan = { workspace = true, optional = true }
+# The host KV store keeps K/V at f16 by default, as llama.cpp's
+# `llama_context_default_params` does (`crate::kv_store`).
+half = { workspace = true }
 memmap2 = { workspace = true }
 rayon = { workspace = true }
 sha2 = { workspace = true }

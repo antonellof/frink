@@ -19,6 +19,7 @@
 
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::kv_store::{KvBuf, KvDtype, KvRows};
 use crate::kv_swa::KvWindow;
 
 /// Returned by `KvCache::push` (and `with_pool`) when a pool-backed
@@ -135,8 +136,12 @@ pub struct KvCache {
     /// `n_kv_heads * v_head_dim`, so the two buffers are sized and
     /// indexed by their OWN width throughout this file.
     pub v_head_dim: usize,
-    pub k: Vec<f32>, // [rows, n_kv_heads, head_dim], flattened
-    pub v: Vec<f32>, // [rows, n_kv_heads, v_head_dim], flattened
+    /// `[rows, n_kv_heads, head_dim]`, flattened, at the cache's dtype
+    /// (`crate::kv_store`): f32 from every constructor, f16 once
+    /// [`Self::with_dtype`] says so, which is what a model's caches do.
+    pub k: KvBuf,
+    /// `[rows, n_kv_heads, v_head_dim]`, flattened, same dtype as `k`.
+    pub v: KvBuf,
     /// This sequence's KV on the Metal device, when a layer's attention
     /// runs there.
     ///
@@ -333,8 +338,8 @@ impl KvCache {
             n_kv_heads,
             head_dim,
             v_head_dim,
-            k: Vec::new(),
-            v: Vec::new(),
+            k: KvBuf::new(KvDtype::F32),
+            v: KvBuf::new(KvDtype::F32),
             positions: 0,
             planned_capacity: None,
             pool_state: None,
@@ -363,8 +368,8 @@ impl KvCache {
             n_kv_heads,
             head_dim,
             v_head_dim,
-            k: Vec::with_capacity(max_seq_len * n_kv_heads * head_dim),
-            v: Vec::with_capacity(max_seq_len * n_kv_heads * v_head_dim),
+            k: KvBuf::with_capacity(KvDtype::F32, max_seq_len * n_kv_heads * head_dim),
+            v: KvBuf::with_capacity(KvDtype::F32, max_seq_len * n_kv_heads * v_head_dim),
             positions: 0,
             planned_capacity: Some(max_seq_len),
             pool_state: None,
@@ -419,8 +424,14 @@ impl KvCache {
             n_kv_heads,
             head_dim,
             v_head_dim,
-            k: Vec::with_capacity(blocks_needed * block_size * n_kv_heads * head_dim),
-            v: Vec::with_capacity(blocks_needed * block_size * n_kv_heads * v_head_dim),
+            k: KvBuf::with_capacity(
+                KvDtype::F32,
+                blocks_needed * block_size * n_kv_heads * head_dim,
+            ),
+            v: KvBuf::with_capacity(
+                KvDtype::F32,
+                blocks_needed * block_size * n_kv_heads * v_head_dim,
+            ),
             positions: 0,
             planned_capacity: None,
             pool_state: Some(PooledState {
@@ -462,10 +473,44 @@ impl KvCache {
             }
         }
 
-        self.k.extend_from_slice(k_step);
-        self.v.extend_from_slice(v_step);
+        self.k.extend_from_f32(k_step);
+        self.v.extend_from_f32(v_step);
         self.positions += 1;
         Ok(())
+    }
+
+    /// The same cache storing its rows at `dtype`.
+    ///
+    /// Only for a cache that holds nothing yet: converting rows already
+    /// written would round them a second time on an f16 round trip,
+    /// and no caller has a reason to. Capacity is kept, so a cache
+    /// pre-allocated for a context stays pre-allocated.
+    pub fn with_dtype(mut self, dtype: KvDtype) -> Self {
+        assert!(
+            self.k.is_empty() && self.v.is_empty(),
+            "with_dtype on a cache that already holds rows"
+        );
+        if self.k.dtype() != dtype {
+            self.k = KvBuf::with_capacity(dtype, self.k.capacity());
+            self.v = KvBuf::with_capacity(dtype, self.v.capacity());
+        }
+        self
+    }
+
+    /// What this cache's rows are stored as.
+    pub fn dtype(&self) -> KvDtype {
+        self.k.dtype()
+    }
+
+    /// Every K row, borrowed at the store's dtype: what the attention
+    /// kernels read.
+    pub fn k_rows(&self) -> KvRows<'_> {
+        self.k.view()
+    }
+
+    /// Every V row, borrowed at the store's dtype.
+    pub fn v_rows(&self) -> KvRows<'_> {
+        self.v.view()
     }
 
     /// Advance length by `n` positions without storing real K/V values
@@ -619,8 +664,8 @@ impl KvCache {
         // One `drain` per eviction, not one per token: the whole reason
         // `KvWindow` carries slack. This moves `keep` rows down, and it
         // happens once every `slack + 1` positions.
-        self.k.drain(..drop_rows * k_width);
-        self.v.drain(..drop_rows * v_width);
+        self.k.drain_front(drop_rows * k_width);
+        self.v.drain_front(drop_rows * v_width);
         // `drain` frees no memory, and the saving this exists for is
         // memory. A cache that just absorbed a 32k-token prefill holds
         // 32k rows of capacity behind `window + slack` rows of data
@@ -655,7 +700,7 @@ impl KvCache {
     /// the number that matters for "does this fit in the context
     /// budget,"
     pub fn allocated_bytes(&self) -> usize {
-        (self.k.capacity() + self.v.capacity()) * std::mem::size_of::<f32>()
+        self.k.allocated_bytes() + self.v.allocated_bytes()
     }
 
     /// True if this cache was pre-allocated via `with_capacity` and
@@ -695,8 +740,8 @@ pub struct PagedKvStore {
     head_dim: usize,
     /// V head width; see [`KvCache::v_head_dim`].
     v_head_dim: usize,
-    k: Vec<f32>, // [total_blocks * block_size, n_kv_heads, head_dim], flattened
-    v: Vec<f32>, // [total_blocks * block_size, n_kv_heads, v_head_dim], flattened
+    k: KvBuf, // [total_blocks * block_size, n_kv_heads, head_dim], flattened
+    v: KvBuf, // [total_blocks * block_size, n_kv_heads, v_head_dim], flattened
     free_block_ids: Vec<usize>,
 }
 
@@ -719,8 +764,14 @@ impl PagedKvStore {
             n_kv_heads,
             head_dim,
             v_head_dim,
-            k: vec![0.0; total_blocks * block_size * n_kv_heads * head_dim],
-            v: vec![0.0; total_blocks * block_size * n_kv_heads * v_head_dim],
+            k: KvBuf::zeroed(
+                KvDtype::F32,
+                total_blocks * block_size * n_kv_heads * head_dim,
+            ),
+            v: KvBuf::zeroed(
+                KvDtype::F32,
+                total_blocks * block_size * n_kv_heads * v_head_dim,
+            ),
             // Pushed in descending order so `pop()` hands out ascending
             // block IDs -- not load-bearing for correctness (any free ID
             // works), just makes manual debugging/inspection saner.
@@ -779,16 +830,39 @@ impl PagedKvStore {
     /// `causal_gqa_attention_paged` to read attention inputs directly out
     /// of shared physical storage via a block table, and by
     /// `PagedKvCache::push` to write a new position into it.
-    pub fn k_row(&self, id: usize, offset: usize) -> &[f32] {
+    pub fn k_row(&self, id: usize, offset: usize) -> KvRows<'_> {
         let width = self.k_width();
         let start = id * self.k_elems_per_block() + offset * width;
-        &self.k[start..start + width]
+        self.k.view().slice(start..start + width)
     }
 
-    pub fn v_row(&self, id: usize, offset: usize) -> &[f32] {
+    pub fn v_row(&self, id: usize, offset: usize) -> KvRows<'_> {
         let width = self.v_width();
         let start = id * self.v_elems_per_block() + offset * width;
-        &self.v[start..start + width]
+        self.v.view().slice(start..start + width)
+    }
+
+    /// The same store at `dtype`. Only before any sequence has written
+    /// a row, for the reason [`KvCache::with_dtype`] gives.
+    pub fn with_dtype(mut self, dtype: KvDtype) -> Self {
+        // A zero-width store (a recurrent layer's: no rows at all) has
+        // nothing to convert and no block count to recover from its
+        // buffer length.
+        assert!(
+            self.k_elems_per_block() == 0
+                || self.free_block_ids.len() == self.k.len() / self.k_elems_per_block(),
+            "with_dtype on a paged store with blocks in use"
+        );
+        if self.k.dtype() != dtype {
+            self.k = KvBuf::zeroed(dtype, self.k.len());
+            self.v = KvBuf::zeroed(dtype, self.v.len());
+        }
+        self
+    }
+
+    /// What this store's rows are stored as.
+    pub fn dtype(&self) -> KvDtype {
+        self.k.dtype()
     }
 
     /// Copies every position of block `src` over block `dst`.
@@ -814,16 +888,18 @@ impl PagedKvStore {
         self.v.copy_within(vs..vs + v_span, vd);
     }
 
-    fn k_row_mut(&mut self, id: usize, offset: usize) -> &mut [f32] {
+    fn write_k_row(&mut self, id: usize, offset: usize, row: KvRows<'_>) {
         let width = self.k_width();
+        assert_eq!(row.len(), width);
         let start = id * self.k_elems_per_block() + offset * width;
-        &mut self.k[start..start + width]
+        self.k.write_rows(start, row);
     }
 
-    fn v_row_mut(&mut self, id: usize, offset: usize) -> &mut [f32] {
+    fn write_v_row(&mut self, id: usize, offset: usize, row: KvRows<'_>) {
         let width = self.v_width();
+        assert_eq!(row.len(), width);
         let start = id * self.v_elems_per_block() + offset * width;
-        &mut self.v[start..start + width]
+        self.v.write_rows(start, row);
     }
 }
 
@@ -888,6 +964,18 @@ impl PagedKvCache {
         k_step: &[f32],
         v_step: &[f32],
     ) -> Result<(), PagedStoreExhausted> {
+        self.push_rows(store, KvRows::F32(k_step), KvRows::F32(v_step))
+    }
+
+    /// [`Self::push`] for a row already at some store's dtype, so a row
+    /// moved from one f16 store to another is copied rather than
+    /// widened and rounded again.
+    fn push_rows(
+        &mut self,
+        store: &mut PagedKvStore,
+        k_step: KvRows<'_>,
+        v_step: KvRows<'_>,
+    ) -> Result<(), PagedStoreExhausted> {
         let block_size = store.block_size();
         let offset_in_block = self.seq_len % block_size;
         // Index by position rather than taking the tail block: a
@@ -900,12 +988,8 @@ impl PagedKvCache {
             self.block_table.push(id);
         }
         let block_id = self.block_table[block_index];
-        store
-            .k_row_mut(block_id, offset_in_block)
-            .copy_from_slice(k_step);
-        store
-            .v_row_mut(block_id, offset_in_block)
-            .copy_from_slice(v_step);
+        store.write_k_row(block_id, offset_in_block, k_step);
+        store.write_v_row(block_id, offset_in_block, v_step);
         self.seq_len += 1;
         Ok(())
     }
@@ -1079,14 +1163,15 @@ impl PagedKvCache {
             store.head_dim,
             store.v_head_dim,
             self.seq_len,
-        );
+        )
+        .with_dtype(store.dtype());
         cache.k.reserve_exact(self.seq_len * store.k_width());
         cache.v.reserve_exact(self.seq_len * store.v_width());
         for pos in 0..self.seq_len {
             let block_id = self.block_table[pos / store.block_size];
             let offset = pos % store.block_size;
-            cache.k.extend_from_slice(store.k_row(block_id, offset));
-            cache.v.extend_from_slice(store.v_row(block_id, offset));
+            cache.k.extend_from_rows(store.k_row(block_id, offset));
+            cache.v.extend_from_rows(store.v_row(block_id, offset));
         }
         // The paged store does not evict either, so its positions and
         // its rows agree and this one assignment is both.
@@ -1104,13 +1189,14 @@ impl PagedKvCache {
     /// would leave the sequence with a `seq_len` that disagrees with
     /// the model's own idea of how far it has got, which is not a
     /// recoverable state.
-    pub fn append_contiguous(
+    pub fn append_contiguous<'a>(
         &mut self,
         store: &mut PagedKvStore,
-        k: &[f32],
-        v: &[f32],
+        k: impl Into<KvRows<'a>>,
+        v: impl Into<KvRows<'a>>,
         count: usize,
     ) -> Result<(), PagedStoreExhausted> {
+        let (k, v) = (k.into(), v.into());
         let (k_width, v_width) = (store.k_width(), store.v_width());
         assert_eq!(k.len(), count * k_width, "k row count");
         assert_eq!(v.len(), count * v_width, "v row count");
@@ -1118,10 +1204,10 @@ impl PagedKvCache {
             return Err(PagedStoreExhausted);
         }
         for i in 0..count {
-            self.push(
+            self.push_rows(
                 store,
-                &k[i * k_width..(i + 1) * k_width],
-                &v[i * v_width..(i + 1) * v_width],
+                k.slice(i * k_width..(i + 1) * k_width),
+                v.slice(i * v_width..(i + 1) * v_width),
             )
             .expect("blocks reserved above, so no push here can exhaust the store");
         }
@@ -1436,6 +1522,43 @@ impl GroupTable {
 
 #[cfg(test)]
 mod tests {
+    use crate::kv_store::KvDtype;
+
+    /// The f16 store holds half the bytes of the f32 one for the same
+    /// rows, and every edit a cache makes (push, truncate, evict, clone)
+    /// keeps its dtype and its rounded values.
+    #[test]
+    fn an_f16_cache_is_half_the_bytes_and_keeps_its_dtype_through_every_edit() {
+        let rows: Vec<Vec<f32>> = (0..6)
+            .map(|p| (0..8).map(|i| 0.1 * (p * 8 + i) as f32).collect())
+            .collect();
+        let mut a = KvCache::with_capacity(2, 4, 6);
+        let mut b = KvCache::with_capacity(2, 4, 6).with_dtype(KvDtype::F16);
+        for r in &rows {
+            a.push(r, r).unwrap();
+            b.push(r, r).unwrap();
+        }
+        assert_eq!(b.dtype(), KvDtype::F16);
+        assert_eq!(b.allocated_bytes() * 2, a.allocated_bytes());
+        let want: Vec<f32> = rows
+            .iter()
+            .flatten()
+            .map(|&x| half::f16::from_f32(x).to_f32())
+            .collect();
+        assert_eq!(b.k.to_f32_vec(), want);
+        assert_ne!(
+            b.k.to_f32_vec(),
+            a.k.to_f32_vec(),
+            "0.1 * n is not exact in f16"
+        );
+        b.truncate(4);
+        assert_eq!(b.rows(), 4);
+        assert_eq!(b.v.to_f32_vec(), want[..32].to_vec());
+        let c = b.clone();
+        assert_eq!(c.dtype(), KvDtype::F16);
+        assert_eq!(c.k_rows(), b.k_rows());
+    }
+
     use super::*;
 
     /// `blocks_needed_for` is the reservation the whole no-partial-write
@@ -1682,9 +1805,13 @@ mod tests {
         // which is exactly what "behind the window" means -- the kernel
         // never indexes it.
         let flat = cache.to_contiguous(&store);
-        assert_eq!(&flat.k[4..6], &[3.0, 3.0], "position 2 reads its own row");
         assert_eq!(
-            &flat.k[0..2],
+            &flat.k.as_f32().unwrap()[4..6],
+            &[3.0, 3.0],
+            "position 2 reads its own row"
+        );
+        assert_eq!(
+            &flat.k.as_f32().unwrap()[0..2],
             &[3.0, 3.0],
             "position 0 now reads the recycled row, and nothing may read it"
         );
@@ -1739,8 +1866,16 @@ mod tests {
         assert_eq!(flat.positions(), 5);
         assert_eq!(flat.k.len(), 5 * 4);
         for (i, r) in rows.iter().enumerate() {
-            assert_eq!(&flat.k[i * 4..(i + 1) * 4], r, "position {i} k");
-            assert_eq!(&flat.v[i * 4..(i + 1) * 4], r, "position {i} v");
+            assert_eq!(
+                &flat.k.as_f32().unwrap()[i * 4..(i + 1) * 4],
+                r,
+                "position {i} k"
+            );
+            assert_eq!(
+                &flat.v.as_f32().unwrap()[i * 4..(i + 1) * 4],
+                r,
+                "position {i} v"
+            );
         }
 
         // And appending those same rows back onto a fresh sequence
@@ -1751,8 +1886,8 @@ mod tests {
             .append_contiguous(&mut store2, &flat.k, &flat.v, 5)
             .unwrap();
         let again = rebuilt.to_contiguous(&store2);
-        assert_eq!(again.k, flat.k);
-        assert_eq!(again.v, flat.v);
+        assert_eq!(again.k.to_f32_vec(), flat.k.to_f32_vec());
+        assert_eq!(again.v.to_f32_vec(), flat.v.to_f32_vec());
         assert_eq!(again.positions(), flat.positions());
     }
 
@@ -1768,7 +1903,7 @@ mod tests {
             .unwrap();
         assert_eq!(cache.positions(), 2);
         assert_eq!(cache.k.len(), 2 * 2 * 2);
-        assert_eq!(cache.k[4], 9.0);
+        assert_eq!(cache.k.as_f32().unwrap()[4], 9.0);
     }
 
     #[test]
@@ -1803,8 +1938,8 @@ mod tests {
 
         cache.truncate(1);
         assert_eq!(cache.positions(), 1);
-        assert_eq!(cache.k, vec![1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(cache.v, vec![10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(cache.v.to_f32_vec(), vec![10.0, 20.0, 30.0, 40.0]);
     }
 
     #[test]
@@ -1813,7 +1948,7 @@ mod tests {
         cache.push(&[1.0, 2.0], &[3.0, 4.0]).unwrap();
         cache.truncate(1);
         assert_eq!(cache.positions(), 1);
-        assert_eq!(cache.k, vec![1.0, 2.0]);
+        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0]);
     }
 
     #[test]
@@ -1843,8 +1978,8 @@ mod tests {
         cache.truncate(2);
         cache.push(&[99.0], &[990.0]).unwrap(); // real continuation after rejection
         assert_eq!(cache.positions(), 3);
-        assert_eq!(cache.k, vec![1.0, 2.0, 99.0]);
-        assert_eq!(cache.v, vec![10.0, 20.0, 990.0]);
+        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0, 99.0]);
+        assert_eq!(cache.v.to_f32_vec(), vec![10.0, 20.0, 990.0]);
     }
 
     #[test]
@@ -1859,11 +1994,11 @@ mod tests {
         assert!(cache.v.capacity() >= expected_elems);
 
         let step = vec![0.5f32; n_kv_heads * head_dim];
-        let k_ptr_before = cache.k.as_ptr();
+        let k_ptr_before = cache.k.as_f32().unwrap().as_ptr();
         for _ in 0..max_seq_len {
             cache.push(&step, &step).unwrap();
         }
-        let k_ptr_after = cache.k.as_ptr();
+        let k_ptr_after = cache.k.as_f32().unwrap().as_ptr();
         assert_eq!(
             k_ptr_before, k_ptr_after,
             "pushing exactly up to the planned capacity must not reallocate"
@@ -1934,7 +2069,7 @@ mod tests {
         cache.push(&[3.0], &[3.0]).unwrap();
         assert_eq!(pool.lock().unwrap().free_blocks(), 8);
         assert_eq!(cache.positions(), 3);
-        assert_eq!(cache.k, vec![1.0, 2.0, 3.0]);
+        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0, 3.0]);
     }
 
     #[test]
@@ -1954,7 +2089,11 @@ mod tests {
             1,
             "a failed push must not change seq_len"
         );
-        assert_eq!(cache.k, before_k, "a failed push must not append data");
+        assert_eq!(
+            cache.k.to_f32_vec(),
+            before_k.to_f32_vec(),
+            "a failed push must not append data"
+        );
     }
 
     #[test]
@@ -2019,7 +2158,7 @@ mod tests {
             2,
             "cloning must not acquire additional blocks"
         );
-        assert_eq!(clone.k, original.k);
+        assert_eq!(clone.k.to_f32_vec(), original.k.to_f32_vec());
 
         drop(clone);
         assert_eq!(
@@ -2206,13 +2345,13 @@ mod tests {
             let e_start = (evicting.rows() - read) * per;
             let p_start = (plain.rows() - read) * per;
             assert_eq!(
-                &evicting.k[e_start..],
-                &plain.k[p_start..],
+                &evicting.k.as_f32().unwrap()[e_start..],
+                &plain.k.as_f32().unwrap()[p_start..],
                 "K read set diverged at position {p}"
             );
             assert_eq!(
-                &evicting.v[e_start..],
-                &plain.v[p_start..],
+                &evicting.v.as_f32().unwrap()[e_start..],
+                &plain.v.as_f32().unwrap()[p_start..],
                 "V read set diverged at position {p}"
             );
             assert_eq!(evicting.positions(), plain.positions());

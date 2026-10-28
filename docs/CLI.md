@@ -114,12 +114,14 @@ token, so there is no retry loop and no repair pass; the same machine
 serves `response_format` and `tool_choice` on the HTTP API
 ([docs/API.md](API.md)).
 
-**`--ctk` only binds on Metal.** Only the Metal KV store has a
-selectable dtype. On CPU and CUDA the KV cache is the host `Vec<f32>`,
-so `--ctk f16` there is accepted, ignored, and reported as ignored by
-the startup banner. That matters for memory: f32 doubles the KV bytes
-per token, which is why a model that fits at its full context on Metal
-can need `--ctx-size auto` on CPU. `frink inspect-plan` prices both.
+**`--ctk` on each backend.** The host KV cache (CPU, and the host side of
+Metal) keeps `f16` by default and `f32` under `--ctk f32`, as llama.cpp
+does, so a CPU run holds the same bytes per token as `llama-cli` on the
+same file. The block-quantized wires (`q8_0`, `fp8`, `q4_0`) exist only
+in the Metal device store; on the host they fall back to `f16` and the
+startup banner says so. CUDA keeps an `f32` host store, because its
+decode kernel reads f32 rows, and the banner says that too. The budget
+behind `--ctx-size auto` prices the store the run really builds.
 
 `--samplers` (llama.cpp's, also `--sampler-seq`) chooses the ORDER, as a
 semicolon-separated list. The default is llama.cpp's own default chain,
@@ -1177,7 +1179,7 @@ have.
 | `-c` / `--ctx-size` | Positions any one request may ask for. Sets `FRINK_CB_MAX_CONTEXT`. Unset means the ceiling is derived at load from weights and per-token KV against the device budget, capped at the model's trained context |
 | `--api-key`, `--api-key-file` | Require `Authorization: Bearer`. Also gates `/admin`. Prefer the file form on a shared host: an argument is visible in `ps` to every user on the machine. An empty key file is refused rather than leaving every route open |
 | `--alias` | What the model is called in `/v1/models` and in every response's `model` field |
-| `--ctk` / `--cache-type-k` | KV dtype. **Metal only**, the CPU and CUDA cache is the host `Vec<f32>` |
+| `--ctk` / `--cache-type-k` | KV dtype. The host store keeps `f16` (default) or `f32`; the quantized wires are Metal's device store; CUDA's host store is `f32` |
 | `--host`, `--port` | `--port 0` asks the kernel for a free one and announces it on stdout |
 | `-t`, `-ngl`, `-dev` | Threads, GPU layers, device |
 | `-cb` / `--cont-batching`, `-np` / `--parallel` | Continuous batching and its sequence cap. Read back as `frink_scheduler_max_seqs` on `GET /metrics` |

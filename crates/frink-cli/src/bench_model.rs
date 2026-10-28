@@ -169,8 +169,12 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
     let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let (params_b, load_s, rows) = match kind {
         SelectedEngineKind::GenericDecoder => {
-            let config = ModelConfig::from_gguf(&file)
+            let mut config = ModelConfig::from_gguf(&file)
                 .with_context(|| format!("reading model config for arch {arch}"))?;
+            // `llama-bench` measures at f16 K/V unless `-ctk` says
+            // otherwise, so the row it is compared against keeps the
+            // store `frink run` would.
+            config.kv_dtype = frink_models::host_kv_dtype_from_env(active_budget_backend());
             let params_b = estimate_params(&config);
             let load_t = Instant::now();
             let decoder = Decoder::from_gguf(path, config)?;
@@ -628,6 +632,15 @@ pub fn active_backend() -> &'static str {
         }
     }
     "CPU"
+}
+
+/// [`active_backend`] as the budget names it.
+pub fn active_budget_backend() -> frink_models::BudgetBackend {
+    match active_backend() {
+        "Metal" => frink_models::BudgetBackend::Metal,
+        "CUDA" => frink_models::BudgetBackend::Cuda,
+        _ => frink_models::BudgetBackend::Cpu,
+    }
 }
 
 /// Rough total for the report column only — embeddings plus the

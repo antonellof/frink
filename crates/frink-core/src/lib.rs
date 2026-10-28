@@ -50,6 +50,7 @@ pub mod kernel_registry;
 pub mod kv_block;
 pub mod kv_disk;
 pub mod kv_signature;
+pub mod kv_store;
 pub mod kv_swa;
 pub mod mamba2;
 pub mod matmul;

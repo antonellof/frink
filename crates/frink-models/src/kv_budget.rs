@@ -190,6 +190,44 @@ impl KvElem {
     }
 }
 
+impl From<frink_core::kv_store::KvDtype> for KvElem {
+    fn from(d: frink_core::kv_store::KvDtype) -> Self {
+        match d {
+            frink_core::kv_store::KvDtype::F32 => KvElem::F32,
+            frink_core::kv_store::KvDtype::F16 => KvElem::F16,
+        }
+    }
+}
+
+/// What the HOST K/V store keeps for a run on `backend` that asked for
+/// `ctk`: THE decision, read by `ModelConfig::kv_dtype` and so by every
+/// cache constructor and every host-KV budget.
+///
+/// f16 unless `--ctk f32`, as llama.cpp (`llama_context_default_params`
+/// sets `type_k = type_v = GGML_TYPE_F16`). A block-quantized `--ctk`
+/// (`q8_0`, `q4_0`, `fp8`) names a Metal DEVICE wire; the host has no
+/// such store and keeps f16, which the banner says. CUDA keeps f32,
+/// because its decode kernel uploads f32 host rows and an f16 store
+/// would send every layer to the host kernel instead.
+pub fn host_kv_dtype(backend: crate::BudgetBackend, ctk: &str) -> frink_core::kv_store::KvDtype {
+    use frink_core::kv_store::KvDtype;
+    match backend {
+        crate::BudgetBackend::Cuda => KvDtype::F32,
+        crate::BudgetBackend::Cpu | crate::BudgetBackend::Metal => match KvElem::from_ctk(ctk) {
+            KvElem::F32 => KvDtype::F32,
+            KvElem::F16 | KvElem::Q8_0 | KvElem::Q4_0 => KvDtype::F16,
+        },
+    }
+}
+
+/// [`host_kv_dtype`] for a process whose `--ctk` arrives in `FRINK_CTK`
+/// (`frink-server`, which sets it from its flag; a `frink` subcommand
+/// with no flag of its own), f16 when unset as llama.cpp's default is.
+pub fn host_kv_dtype_from_env(backend: crate::BudgetBackend) -> frink_core::kv_store::KvDtype {
+    let ctk = std::env::var("FRINK_CTK").unwrap_or_else(|_| "f16".to_string());
+    host_kv_dtype(backend, &ctk)
+}
+
 /// How one layer's KV cache is shaped. Which variant applies is a
 /// property of the *decoder that will run*, not of the architecture
 /// name -- see [`KvLayout::MlaLatent`]'s doc comment for the one place
@@ -345,6 +383,23 @@ impl KvShape {
     /// stacks carry their own hyperparameters (`Deepseek2Hparams`,
     /// `MlaConfig`) and should build their shape with
     /// [`KvShape::mla_expanded`].
+    /// The host store this config's caches really are: priced at
+    /// [`ModelConfig::kv_dtype`], the field `new_kv_caches` builds them
+    /// from, so a budget cannot restate the width. One element width per
+    /// shape, so a model with a layer kept at a different width (a short
+    /// convolution's f32 history beside f16 attention) is priced at the
+    /// WIDER one: an over-charge, the direction that never approves a
+    /// context that does not fit.
+    pub fn host(config: &ModelConfig) -> Self {
+        let mut widest = config.kv_dtype;
+        for il in 0..config.n_layers {
+            if config.layer_kv_dtype(il).elem_bytes() > widest.elem_bytes() {
+                widest = config.layer_kv_dtype(il);
+            }
+        }
+        Self::from_config(config, KvElem::from(widest))
+    }
+
     pub fn from_config(config: &ModelConfig, elem: KvElem) -> Self {
         // The SAME question `ModelConfig::new_kv_caches` asks per layer
         // before it allocates one. It asked it there and not here, and

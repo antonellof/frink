@@ -479,11 +479,11 @@ fn emit(model: &str, prompt: &str, prompt_tokens: Option<usize>) -> anyhow::Resu
             let host = &caches[l];
             // The host cache is the record whenever it holds anything
             // real; the device copy is read only where it does not.
-            let cache = if energy(&host.k) > 0.0 {
+            let cache = if energy(&host.k.to_f32_vec()) > 0.0 {
                 host
             } else {
                 match device_view.as_ref().map(|v| &v[l]) {
-                    Some(d) if energy(&d.k) > 0.0 => {
+                    Some(d) if energy(&d.k.to_f32_vec()) > 0.0 => {
                         from_device += 1;
                         d
                     }
@@ -495,12 +495,13 @@ fn emit(model: &str, prompt: &str, prompt_tokens: Option<usize>) -> anyhow::Resu
             // ROWS: `last` indexes the final resident row of k/v below.
             let seq = cache.rows();
             let last = seq.saturating_sub(1);
+            let (k, v) = (cache.k.to_f32_vec(), cache.v.to_f32_vec());
             LayerProbe {
                 seq,
-                k_all: head_norms(&cache.k, heads, dim, 0, seq),
-                v_all: head_norms(&cache.v, heads, dim, 0, seq),
-                k_last: head_norms(&cache.k, heads, dim, last, seq),
-                v_last: head_norms(&cache.v, heads, dim, last, seq),
+                k_all: head_norms(&k, heads, dim, 0, seq),
+                v_all: head_norms(&v, heads, dim, 0, seq),
+                k_last: head_norms(&k, heads, dim, last, seq),
+                v_last: head_norms(&v, heads, dim, last, seq),
                 experts: routed_counts(&decoder.layers[l]),
             }
         })
