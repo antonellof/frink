@@ -72,15 +72,15 @@ Same via explicit subcommand: `frink run -m …`.
 | `--frequency-penalty` | Penalise a token in proportion to how often it has appeared. `0.0` = off |
 | `--hf-file` | Exact filename inside `--hf-repo`, llama.cpp's `-hff`. Skips quant resolution entirely |
 | `--repeat-last-n` | How many recent tokens the repetition / presence / frequency penalties consider. `0` = penalties off. Default `64`, llama.cpp's (`common/common.h:238`) |
-| `--typical` / `--typical-p` | Locally typical sampling. Keeps the candidates nearest the distribution's entropy, so it can drop the MOST likely token. `1.0` = off, llama.cpp's default (`common/common.h:230`) |
+| `--typical` / `--typical-p` | Locally typical sampling. Keeps the candidates nearest the distribution's entropy, so it can drop the most likely token. `1.0` = off, llama.cpp's default (`common/common.h:230`) |
 | `--top-nsigma` / `--top-n-sigma` | Mask every candidate more than `n` standard deviations of the logits below the maximum. `-1.0` = off, llama.cpp's default. `0.0` is a no-op, not greedy |
 | `--xtc-probability` | Chance that XTC removes the top candidates on a token. `0.0` = off, llama.cpp's default |
-| `--xtc-threshold` | Probability a candidate must reach before XTC may remove it. Default `0.1`; **above `0.5` disables XTC**, as upstream |
+| `--xtc-threshold` | Probability a candidate must reach before XTC may remove it. Default `0.1`; above `0.5` disables XTC, as upstream |
 | `--dry-multiplier` | DRY sequence-repetition penalty. `0.0` = off, llama.cpp's default |
 | `--dry-base` | Base of DRY's exponential. Default `1.75`; below `1.0` disables DRY |
 | `--dry-allowed-length` | Repetitions this long or shorter are free. Default `2` |
 | `--dry-penalty-last-n` | How many recent tokens DRY scans. `0` = off, `-1` = the context size (default) |
-| `--dry-sequence-breaker` | Repeatable. A string DRY refuses to look past. Giving any CLEARS llama.cpp's defaults (`\n`, `:`, `"`, `*`), and the literal `none` clears them outright |
+| `--dry-sequence-breaker` | Repeatable. A string DRY refuses to look past. Giving any replaces llama.cpp's defaults (`\n`, `:`, `"`, `*`), and the literal `none` clears them outright |
 | `-s` / `--seed` | `-1` = time-based |
 | `--samplers` / `--sampler-seq` | Order the chain runs in, semicolon-separated. A sampler frink lacks is refused by name, see below |
 | `--grammar` | Constrain generation to a GBNF grammar, llama.cpp's `--grammar` |
@@ -89,16 +89,16 @@ Same via explicit subcommand: `frink run -m …`.
 | `-dev` / `--device` | `auto`, `none`, `cpu`, `metal`, or `cuda` |
 | `--list-devices` | Print compiled, detected devices and exit |
 | `-ngl` / `--gpu-layers` / `--n-gpu-layers` | `0`, `auto`, `all`, or a count at/above the layer count. A *partial* count is refused, see below |
-| `--ctk` | KV dtype, llama.cpp's set: `f32`, `f16` (default), `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`, plus frink's `fp8`. Served: `f16`, `q8_0`, `fp8` (the Q8_0 wire) and `q4_0` (4 bits with a Hadamard rotation on K where the head width allows it); the rest are accepted and reported as falling back. A value outside the set is refused, as llama.cpp refuses it. **Metal only**, see below. Sets `FRINK_CTK` |
-| `-d` / `--model-draft FILE` | A smaller checkpoint from the SAME family and tokenizer as the target, used as a speculative drafter. The output is exactly what the target would have written alone. Refused with a grammar, without a prompt, for a recurrent (Mamba) target or draft, and for a device-resident draft KV, see below |
+| `--ctk` | KV dtype, llama.cpp's set: `f32`, `f16` (default), `bf16`, `q8_0`, `q4_0`, `q4_1`, `iq4_nl`, `q5_0`, `q5_1`, plus frink's `fp8`. Served: `f16`, `q8_0`, `fp8` (the Q8_0 wire) and `q4_0` (4 bits with a Hadamard rotation on K where the head width allows it); the rest are accepted and reported as falling back. A value outside the set is refused, as llama.cpp refuses it. Metal only, see below. Sets `FRINK_CTK` |
+| `-d` / `--model-draft FILE` | A smaller checkpoint from the same family and tokenizer as the target, used as a speculative drafter. The output is exactly what the target would have written alone. Refused with a grammar, without a prompt, for a recurrent (Mamba) target or draft, and for a device-resident draft KV, see below |
 | `--draft-max N` / `--draft` | Tokens the drafter proposes per verification step (llama.cpp's spelling). Default 5 |
 | `--draft-p-min P` | Stop drafting once the drafter's own probability for the token it just sampled falls below `P` (llama.cpp's spelling). Default 0.75 |
 | `--lora FILE` | A LoRA adapter GGUF (what `convert_lora_to_gguf.py` writes), applied at scale 1. Repeatable; comma-separated as llama.cpp accepts it. See below |
 | `--lora-scaled FILE:SCALE` | The same with a scale. Adapters are numbered in the order given, every `--lora` before every `--lora-scaled` |
 | `--system` | Chat mode only |
 | `--no-cnv` | Skip chat-template wrap |
-| `--single-turn` (`-st`) | Accepted and ignored: `frink run` is already one turn. llama.cpp 0.4 spells single-turn conversation this way, and it is **not** `--no-cnv` -- the chat template still applies |
-| `-e` / `--escape` | Expand `\n` `\t` `\r` `\\` in `-p`. **On by default**, as in llama.cpp |
+| `--single-turn` (`-st`) | Accepted and ignored: `frink run` is already one turn. llama.cpp 0.4 spells single-turn conversation this way, and it is not `--no-cnv`: the chat template still applies |
+| `-e` / `--escape` | Expand `\n` `\t` `\r` `\\` in `-p`. On by default, as in llama.cpp |
 | `--no-escape` | Pass `-p` through literally |
 | `--ignore-eos` | Always emit up to `-n` |
 | `--verbose-prompt` | Print final prompt to stderr |
@@ -109,7 +109,7 @@ Stderr prints load and throughput timings. Generated text goes to stdout.
 **Structured output.** `--grammar`, `--grammar-file` and `-j` all end
 at the same stack machine, which masks every token that cannot continue
 a valid string. A schema is compiled to GBNF first, so the two paths
-share one enforcer rather than two that drift. The constraint holds per
+share one enforcer and cannot drift apart. The constraint holds per
 token, so there is no retry loop and no repair pass; the same machine
 serves `response_format` and `tool_choice` on the HTTP API
 ([docs/API.md](API.md)).
@@ -123,31 +123,30 @@ startup banner says so. CUDA keeps an `f32` host store, because its
 decode kernel reads f32 rows, and the banner says that too. The budget
 behind `--ctx-size auto` prices the store the run really builds.
 
-`--samplers` (llama.cpp's, also `--sampler-seq`) chooses the ORDER, as a
+`--samplers` (llama.cpp's, also `--sampler-seq`) chooses the order, as a
 semicolon-separated list. The default is llama.cpp's own default chain,
 spelled out:
 `--samplers "penalties;dry;top_n_sigma;top_k;typ_p;top_p;min_p;xtc;temperature"`.
 llama.cpp's aliases parse, so `top-k`, `nucleus`, `temp` and `typical`
 all work, and an upstream command line pastes in unchanged.
 
-A sampler frink does not implement is **refused by name with the
-reason**, never skipped. That is now only `mirostat` and `infill`:
-`mirostat` REPLACES the chain upstream rather than joining it, so there
-is no position in this order that would honour it, and `infill` needs
-the model's FIM tokens. A caller who asked for one and silently got a
-chain without it was handed a different sampler than the one they
-requested.
+frink refuses a sampler it does not implement, naming it and giving the
+reason, and never skips it. That now applies only to `mirostat` and
+`infill`. Upstream, `mirostat` replaces the chain instead of joining it,
+so no position in this order would honour it, and `infill` needs the
+model's FIM tokens. Skipping one silently would hand the caller a
+different sampler than the one they requested.
 
-Order is not cosmetic, which is why it is worth exposing and why getting
-it wrong is a silent quality regression rather than an error. Each
+Order changes the output, so it is worth exposing, and getting it wrong
+is a silent quality regression that raises no error. Each
 filter renormalises over the survivors of the last, so moving a step
 changes what the next step can see. This project shipped that bug once:
 temperature ran first, and top-p then summed probabilities temperature
 had already reshaped.
 
-**The sampler chain is llama.cpp's, in llama.cpp's order.** Penalties,
+The sampler chain is llama.cpp's, in llama.cpp's order: penalties,
 DRY, top-n-sigma, top-k, typical-p, top-p, min-p, XTC, and
-**temperature last** (`common/common.h:259-269`; frink
+temperature last (`common/common.h:259-269`; frink
 `crates/frink-models/src/sampling.rs`'s `filtered_distribution`). Every
 one of those nine runs by default, and the four with no OpenAI
 equivalent sit at neutral values that make them exact no-ops, so a
@@ -155,52 +154,52 @@ command line that does not name them samples what it always did.
 Frink used to divide by the temperature first and filter afterwards,
 which keeps a different candidate set for the same flags: top-p selects
 the smallest set summing to `p`, and temperature changes the
-probabilities being summed. The repetition penalty is applied **once per
-candidate**, not once per occurrence in the history, so a token seen `n`
-times is no longer scaled by `penalty^n`. Both were live on every
+probabilities being summed. The repetition penalty is applied once per
+candidate, not once per occurrence in the history, so a token seen `n`
+times is no longer scaled by `penalty^n`. Both bugs were live on every
 `frink run` at the defaults above.
 
-**Speculative decoding** comes in two shapes, and only one of them is
-a demo.
+Speculative decoding comes in two shapes, and only one of them is a
+demo.
 
 `-d` / `--model-draft FILE` is the real one: a second, smaller GGUF
 from the same family and tokenizer proposes tokens and the target
 verifies them in one batched pass. Decode reads every weight of the
 target per token, so bandwidth divided by model bytes is a hard
 ceiling; a drafter changes what is read per token rather than how fast.
-**The text is exactly what the target would have written alone** -- the
+The text is exactly what the target would have written alone: the
 rejection rule is lossless at every temperature, and the drafter can
 only ever save a forward pass.
 
 `--draft-max` (default 5) sets how many tokens the drafter proposes
 per verification step, and `--draft-p-min` (default 0.75) stops it
-early once its own confidence drops. The second is not a micro-tuning
-knob: a guessing drafter is worse than no drafter, because the target
-pays for the position either way AND a rejection discards every
+early once its own confidence drops. The second setting has a large
+effect: a guessing drafter is worse than no drafter, because the target
+pays for the position either way and a rejection also discards every
 position after it, so proposing a token the drafter does not believe
 in costs twice.
 
-It refuses rather than guessing in five cases, each for a reason:
+It refuses to run in five cases:
 
 - with `--grammar` / `--grammar-file` / `-j`, because the draft is
   verified against the target's own sampler and the grammar machine's
   state would have to be rolled back with it;
 - without a prompt, since there is no history to draft from;
-- when the TARGET has recurrent (Mamba) layers, because such a state is
+- when the target has recurrent (Mamba) layers, because such a state is
   a reduction over the whole prefix and cannot be rolled back to a
   middle position (`docs/MODELS.md` names the affected families);
-- when the DRAFT does, for the same reason;
-- when the drafter's KV would live on the DEVICE (a Metal or CUDA
+- when the draft does, for the same reason;
+- when the drafter's KV would live on the device (a Metal or CUDA
   drafter), because a drafter that cannot see its own rows cannot roll
-  back the ones the target rejected. `--device cpu` runs it. This one
-  was found by running it rather than by reading: on Metal it panicked
-  mid-answer, after the first block had already been printed.
+  back the ones the target rejected. `--device cpu` runs it. This case
+  was found by running it: on Metal it panicked mid-answer, after the
+  first block had already been printed.
 
 `frink speculative` is the demo: it matches n-grams against the history,
 has no draft model, and runs on synthetic random weights, so the hit
-rate it prints tells you nothing about a real drafter. What it does
-report honestly is acceptance length and the per-position accept rate
-alongside the call counts.
+rate it prints tells you nothing about a real drafter. The numbers it
+does report reliably are the acceptance length and the per-position
+accept rate, alongside the call counts.
 
 `frink-server` speculates too, with the prompt-lookup drafter and no
 flag: it is on for any request whose sampling the verification can
@@ -217,24 +216,24 @@ plug in through the `Drafter` trait in `frink_models::speculative`.
 `--device auto -ngl auto`. `auto`, `all`, or a count at or above the
 model's layer count enable all supported ops on the selected backend.
 
-**A partial `-ngl` is refused, deliberately.** llama.cpp's `-ngl N` puts
+A partial `-ngl` is refused on purpose. llama.cpp's `-ngl N` puts
 exactly `N` layers in VRAM and runs the rest on the CPU, which is how
 you fit a model that does not otherwise fit. frink has no partial layer
-placement, and it used to accept the count and then offload *everything*:
-same flag, same value, no error, and an out-of-memory on exactly the
-machine the flag existed to accommodate. It now stops and says so. Use
+placement. It used to accept the count and then offload everything,
+with no error, and ran out of memory on exactly the machine the flag
+was meant for. It now stops and says so. Use
 `-ngl 0` for CPU or `-ngl all` for the whole model.
 
 ### Chat vs completion
 
-- **Default:** the prompt is rendered through the GGUF's own
+- Default: the prompt is rendered through the GGUF's own
   `tokenizer.chat_template`, evaluated as Jinja2 by the same evaluator
   `frink-server` uses, so the CLI and `/v1/chat/completions` frame a
   conversation identically. A checkpoint that ships no template falls
   back to ChatML (matching llama.cpp `--jinja`), or to role-labeled
   lines for a byte tokenizer. A template that does not compile is an
-  error, not a fallback to a guessed framing.
-- **Whitespace:** the evaluator runs with `trim_blocks` and
+  error; frink does not fall back to a guessed framing.
+- Whitespace: the evaluator runs with `trim_blocks` and
   `lstrip_blocks` on, which is how HuggingFace's `apply_chat_template`
   and llama.cpp's Jinja engine both compile a chat template. Templates
   that use explicit `{%- … -%}` control render the same either way;
@@ -243,12 +242,12 @@ machine the flag existed to accommodate. It now stops and says so. Use
   generated by jinja2 itself
   (`cargo test -p frink-models --test chat_template_real_gguf`,
   regenerate with `python3 scripts/chat_template_goldens.py`).
-- **One disclosed deviation:** `{{ x | tojson }}` sorts object keys.
+- One deviation: `{{ x | tojson }}` sorts object keys.
   That is stock jinja2's policy, but transformers and llama.cpp both
   preserve the author's order. Frink cannot: `serde_json::Map` is a
   `BTreeMap` here, so the order is gone before the filter runs. It
   changes the order of keys inside a `<tools>` block, nothing else.
-- **`-st` / `--single-turn`:** accepted so a llama.cpp 0.4 command line
+- `-st` / `--single-turn`: accepted so a llama.cpp 0.4 command line
   runs here unchanged, and ignored because `frink run` generates once
   and exits. It is not a synonym for `--no-cnv`: `-st` runs the
   conversation for one turn with the chat template applied, and
@@ -256,13 +255,13 @@ machine the flag existed to accommodate. It now stops and says so. Use
   prompt, the templated reply is "The capital of France is Paris."
   and the raw one runs on into " Paris\nThe capital city of France
   is...".
-- **`--no-cnv`:** raw prompt (classic completion). BOS is still added under the
+- `--no-cnv`: raw prompt (classic completion). BOS is still added under the
   same rule.
 
 ### Who adds BOS
 
-**The chat template owns BOS when it prints one. Otherwise the loader
-owns it.** Which of the two applies is a property of the individual
+The chat template owns BOS when it prints one. Otherwise the loader
+owns it. Which of the two applies is a property of the individual
 checkpoint, not of the model family, so frink adds the id
 *idempotently* (`frink_models::tokenizer::prepend_bos`) rather than
 picking a side:
@@ -273,7 +272,7 @@ picking a side:
   *text*, and a rendered prompt is encoded with special-token markers
   parsed (llama.cpp's `parse_special = true`, as its server does), so it
   comes back as the BOS *id* in position 0.
-- Unsloth deliberately **strips** `{{ bos_token }}` from the templates it
+- Unsloth deliberately strips `{{ bos_token }}` from the templates it
   bakes into its GGUF exports, so that a runtime adding BOS itself does not
   double it. TinyLlama's checked-in template is the local example.
 
@@ -313,7 +312,7 @@ work here, because the names and the flag spellings are the same:
 | `llama help` | `frink help` |
 
 `cli` is an alias of `run`, so both spellings work. `version` and
-`licenses` exist as SUBCOMMANDS as well as `--version`, because that
+`licenses` exist as subcommands as well as `--version`, because that
 is how the other launcher spells them and being told "not a command"
 is a poor answer to a correct command line.
 
@@ -326,17 +325,17 @@ right-aligned to twelve columns.
 0.00.910.553 I srv  frink_server: listening on http://127.0.0.1:8383
 ```
 
-Those go to **stderr**. The `frink.server.ready` JSON line stays on
-**stdout**, untouched: it is a parsed contract, and it is what makes
+Those go to stderr. The `frink.server.ready` JSON line stays on
+stdout, untouched: it is a parsed contract, and it is what makes
 `--port 0` usable, because the supervisor learns the bound port from
 the child instead of probing for it.
 
-The run output carries the same block llama.cpp prints -- `build`,
-`model`, `ftype`, `modalities`, aligned the same way -- with a
-`device` row it does not have, and closes with llama.cpp's own
+The run output carries the same block llama.cpp prints (`build`,
+`model`, `ftype`, `modalities`, aligned the same way), plus a
+`device` row llama.cpp does not have, and closes with llama.cpp's own
 `[ Prompt: X t/s | Generation: Y t/s ]`.
 
-**One number moved when this landed.** The prompt rate used to start
+One number changed when this landed. The prompt rate used to start
 its timer before the first forward pass, so one-time backend warmup
 was inside it and then divided by the prompt length: a five-token
 prompt read `12.64 t/s` against llama.cpp's `197.7` for the same file,
@@ -387,23 +386,23 @@ Five rules decide whether the numbers mean anything, and all five are
 in `frink_cli::bench_client` with no socket in them, so each is
 covered by a test rather than inferred from a live run:
 
-- **Every request does exactly the requested work.** Temperature 0,
+- Every request does exactly the requested work: temperature 0,
   top-k 1, `ignore_eos`, and an exact output length. Without
   `ignore_eos` the requests finish at different lengths and the slowest
   percentile is whichever prompt happened to run longest, a fact about
   the prompts reported as a fact about the server.
-- **The TTFT/TPOT split is positional.** The first token-bearing chunk
+- The TTFT/TPOT split is positional. The first token-bearing chunk
   is time-to-first-token; every later one is an inter-token sample.
   Keepalives and the terminal `finish_reason` frame are excluded: a
   keepalive arrives during exactly the window TTFT measures, and the
   terminal frame carries no token.
-- **Percentiles are nearest-rank over samples pooled across requests**,
+- Percentiles are nearest-rank over samples pooled across requests,
   never per-request means percentiled afterwards. One request that
   stalled mid-answer has to reach the p99, and inside its own mean it
   never does.
-- **Throughput is total tokens over the whole run's span**, not the sum
+- Throughput is total tokens over the whole run's span, not the sum
   of per-request rates, which gets *better* the worse the queueing is.
-- **Prefix reuse is a share of the run's total prompt tokens**, not the
+- Prefix reuse is a share of the run's total prompt tokens, not the
   mean of per-request shares. One long cold prompt beside nine short
   warm ones is mostly cold work; averaging fractions would call it 90%
   reused.
@@ -418,8 +417,8 @@ no prefix cache says so rather than reporting zero. `--cache-salt`
 puts the run in its own namespace, which two runs under different salts
 do not share even with identical prompts.
 
-**Every number this command printed before 0.48.0 was flattered by
-reuse it was written to avoid.** The filler was deliberately varied
+Every number this command printed before 0.48.0 was flattered by
+reuse it was written to avoid. The filler was deliberately varied
 *within* a prompt and identical *across* requests, so the second half
 of a run found the first half's pages: eight requests at concurrency
 four reused 43.5% of their prompt tokens with nothing shared asked
@@ -429,8 +428,8 @@ what it had reused.
 Token counts come from the server's own `usage.completion_tokens`, not
 from the chunk count: a buffered answer arrives as one chunk and was
 still N tokens of work. A buffered stream therefore reports TTFT and
-end-to-end but no TPOT. That detail does not exist, and it is left
-blank rather than invented.
+end-to-end but no TPOT. No inter-token timing exists for such a
+stream, so the field is left blank rather than invented.
 
 ## Bandwidth profile (`bench-bw`)
 
@@ -450,14 +449,14 @@ loader finds on its own. A profile is keyed to the card it was taken
 on: another machine's split is worse than no split, so a profile whose
 recorded GPU name disagrees is ignored rather than approximated.
 
-It refuses to write in two cases, both deliberate:
+It refuses to write in two cases:
 
-- **Only one side measured.** The fetch fraction is a *ratio*, so one
+- Only one side was measured. The fetch fraction is a *ratio*, so one
   number says nothing about the split. The PCIe half needs a CUDA
   build; without one the command measures the CPU side, says so, and
   writes nothing rather than half a profile that `policy_for` would
   consult as though it were whole.
-- **An unoptimized build.** A debug binary measures its own code
+- The build is unoptimized. A debug binary measures its own code
   generation, and since the device copy is driver-performed and
   unaffected, that moves the *ratio* rather than merely lowering both
   numbers. A verdict that flips with `--release` measures nothing.
@@ -472,7 +471,7 @@ run together.
 
 ## Correctness (`verify`, `parity`)
 
-Two different questions, and only the second one involves llama.cpp.
+These answer two different questions, and only the second involves llama.cpp.
 
 ```bash
 # Do frink's own backends agree? (CPU reference vs Metal/CUDA)
@@ -487,7 +486,7 @@ Two different questions, and only the second one involves llama.cpp.
 `verify` greedy-decodes the same prompt on two frink backends and diffs
 the token ids. It cannot catch a bug both backends share.
 
-`parity` runs **two** comparisons against llama.cpp on the same GGUF: the
+`parity` runs two comparisons against llama.cpp on the same GGUF: the
 tokenizer first, then the graph.
 
 ### The tokenizer half
@@ -531,7 +530,7 @@ logit numbers underneath were computed from two different prompts.
 ### The logit half
 
 `parity` compares the logit distribution at the last prompt position
-against llama.cpp's, feeding **the same token ids to both** so the
+against llama.cpp's, feeding the same token ids to both so the
 tokenizer is not part of *that* experiment. It reports KL in both
 directions, total variation, max |delta p|, top-k overlap, and where
 llama's top-1 ranks for frink, then gives one of four verdicts:
@@ -551,7 +550,7 @@ A `WRONG` on a quantized file is a distance between two points and does
 not say which one moved. llama.cpp quantizes activations to 8 bits for
 its quantized matmuls and frink keeps them in f32, and on a graph that
 amplifies that loss the two disagree while frink is the closer of the
-two to the f32 answer -- PLM-1.8B Q8_0 reads `WRONG` at 3.5e-2 for
+two to the f32 answer. PLM-1.8B Q8_0 reads `WRONG` at 3.5e-2 for
 exactly that reason (`docs/plans/llama-cpp-gap-inventory.md` §10.1).
 The arbiter is the dequantized file:
 
@@ -569,9 +568,9 @@ published numbers were measured with the default).
 
 ### The reference dumper
 
-Both halves need it, built once. It is C, not Rust, and it lives outside
-the cargo workspace on purpose. It exists to give llama.cpp's own
-answer, so it links llama.cpp's own library:
+Both halves need it, built once. It is written in C and lives outside
+the cargo workspace on purpose: it exists to give llama.cpp's own
+answer, so it links llama.cpp's own library.
 
 ```bash
 ./tools/build_llama_logits.sh          # -> target/llama_logits
@@ -610,7 +609,7 @@ is not a verdict either way.
 It runs one prefill per backend (a child process each, because the
 backend is a process-lifetime choice), then reads every layer's KV cache
 back and scores the per-head magnitudes. What it prints per layer is the
-**spread** of the per-head ratios, not the mean: one wrong head in
+spread of the per-head ratios, not the mean: one wrong head in
 thirty-two leaves the mean at 1.0, and a single bad head is the shape of
 every simdgroup-indexing bug this project has hit. The mean is printed
 next to it so the reader can watch it fail to notice.
@@ -635,14 +634,13 @@ means one side never recorded a selection, which is not agreement.
 
 `inspect-plan` prices a checkpoint from static type rules.
 `quant-sensitivity` measures the same question on the checkpoint in
-front of it: it round-trips **one tensor at a time** through a candidate
+front of it: it round-trips one tensor at a time through a candidate
 format, scores `relative_mse` per block, swaps the result into the
 loaded model and reports how far the next-token distribution moved (KL,
 nats). Every other weight stays as the checkpoint shipped it, so no
 tensor inherits damage from the layers above it.
 
-Both columns are printed because they disagree, and the disagreement is
-the point: a tensor can round-trip badly and barely move the logits, or
+Both columns are printed because they disagree: a tensor can round-trip badly and barely move the logits, or
 round-trip cleanly and move them a lot. Only the second is a reason to
 spend bits. The rollup at the bottom gives each tensor family's share of
 the total measured KL, which is what a static quant rule is guessing at.
@@ -661,15 +659,15 @@ Corpus evaluation, llama.cpp's `perplexity` tool.
 frink perplexity -m model.gguf -f corpus.txt --ctx-size 512
 ```
 
-This is the quality axis the project did not have. `frink parity`
+This adds the quality axis the project did not have. `frink parity`
 compares first-token distributions and `frink bench` measures speed;
 neither answers "is this quantization worse, and by how much". It is
 also the acceptance test the quantizer needs, because a bad K-quant
 encoder produces a file that loads fine and generates measurably worse
 text.
 
-**Measured against `llama-perplexity` on the same corpus and
-checkpoint**, both engines on CPU:
+Measured against `llama-perplexity` on the same corpus and
+checkpoint, both engines on CPU:
 
 | Checkpoint | frink | llama.cpp | Gap |
 |---|---|---|---|
@@ -683,15 +681,14 @@ Every gap is under a fifth of one standard error, and the per-window
 running estimates track window for window, which is what says
 tokenization and chunking agree.
 
-**The gaps are not noise, and their shape is the interesting part.**
-frink sits below llama.cpp on every quantized checkpoint and the gap
+The gaps are not noise, and their shape is informative. frink sits below llama.cpp on every quantized checkpoint and the gap
 widens as the quant coarsens. That is the `vec_dot_type` difference this
 repo already documents
 ([`plans/llama-cpp-gap-inventory.md`](plans/llama-cpp-gap-inventory.md)
 §10) showing up on a second axis, with the sign it should have:
 llama.cpp quantizes the activation to the weight's vec_dot type and
 frink keeps it in f32, so frink is slightly less surprised. Qwen3 is
-the control, straddling zero. A difference in METHOD would not produce a
+the control, straddling zero. A difference in method would not produce a
 gap that is monotone in the quant.
 
 The method is llama.cpp's, verified against `tools/perplexity/perplexity.cpp`
@@ -716,7 +713,7 @@ unevidenced.
 ## Quantize (`frink quantize`)
 
 Writes a `Q8_0`, `Q4_K_S`, `Q4_K_M`, `Q5_K_S`, `Q5_K_M` or `Q6_K` GGUF
-from an F32/F16/BF16 one, **byte-identical to `llama-quantize`'s**,
+from an F32/F16/BF16 one, byte-identical to `llama-quantize`'s,
 and refuses every other target by name.
 
 ```bash
@@ -725,8 +722,7 @@ frink quantize model-f16.gguf model-q4_k_m.gguf --type q4_k_m --imatrix imatrix.
 frink quantize model-f16.gguf model-q4_k.gguf   --type q4_k_m --pure   # no per-tensor mix
 ```
 
-The refusal is the point rather than a limitation to apologise for.
-Q2_K/Q3_K, the IQ tiers, MXFP4 and the legacy Q4_0 family each need
+The refusal is deliberate. Q2_K/Q3_K, the IQ tiers, MXFP4 and the legacy Q4_0 family each need
 their own transcription of an iterative fit, and a K-quant encoder
 that takes min and max over a block where llama.cpp does an iterative
 scale-and-min fit produces a file that loads and generates measurably
@@ -737,18 +733,18 @@ Which tensors are quantized is transcribed from llama.cpp's
 `tensor_allows_quantization` rather than reinvented: everything 2-D
 ending in `weight`, except norms, router gates, position and token-type
 embeddings, SSM and shortconv kernels, RWKV time-mix, T5 position bias,
-multimodal patch tables and audio codebooks. The per-tensor MIX is
+multimodal patch tables and audio codebooks. The per-tensor mix is
 llama.cpp's too: a `Q4_K_M` file has a Q6_K output head and Q6_K
 `ffn_down` on a quarter of its layers, and `--pure` is
 `llama-quantize --pure`, which skips the mix and not the keep-list.
 
-**Every target is byte-identical, and the claim that Q4_K could never
-be was wrong.** This document previously said the difference was a
+Every target is byte-identical, and the earlier claim that Q4_K could
+never be was wrong. This document previously said the difference was a
 property of the compiler that built the reference: clang contracts
 `a*b+c` into a fused multiply-add for C and Rust does not, so a strict
 transcription could not match. The first half of that is true and the
 conclusion was not. The fix is to spell the contraction out. `sumlx +=
-w*x[i]*l` in `ggml-quants.c` is **one** FMA, and writing it as
+w*x[i]*l` in `ggml-quants.c` is one FMA, and writing it as
 `mul_add` in Rust reproduces it exactly; one unit in the last place
 flips `sumlx*sumlx > best*suml2` and rewrites an entire super-block,
 which is why 1.15% of super-blocks differed rather than a
@@ -781,8 +777,8 @@ The metadata matches too, including the four `quantize.imatrix.*` keys
 llama.cpp records; the only difference between the files is the order
 of the header's key-value pairs, which frink writes sorted.
 
-Two things that discipline needs. Goldens must come from the
-**installed** binary: a local release build of the same b7650 source
+Matching byte for byte depends on two things. Goldens must come from
+the installed binary: a local release build of the same b7650 source
 disagrees on exactly these knife-edge blocks, and pinned the wrong
 bytes once. And the fixture must be able to fail: the original
 synthetic one stayed green with every `mul_add` removed, so it now
@@ -807,7 +803,7 @@ weighted grid search with a greedy per-code refinement, instead of
 `63/max`. Q6_K's change is one argument: the raw imatrix slice goes to
 `make_qx_quants` as its `qw`. Q8_0 discards the imatrix (`:2089`). All
 of that lives in `frink-quant`'s `encode/fit.rs` and `encode/qp_quants.rs`
-as a parameter on the SAME super-block fit the plain path uses, not a
+as a parameter on the same super-block fit the plain path uses, not a
 second transcription.
 
 The consumer side is `llama-quant.cpp:913-934`: each tensor looks up its
@@ -820,7 +816,7 @@ writes, or the legacy `.dat` binary older builds wrote.
 
 One refusal to know about: a tensor whose row width is not a multiple of
 256 stops the run. llama.cpp answers that case by changing the tensor's
-TYPE, to Q5_0 or F16, and frink has neither encoder; padding the row
+type, to Q5_0 or F16, and frink has neither encoder; padding the row
 would shift every following row on decode. SmolLM2-135M cannot be Q4_K
 quantized here for that reason, its embedding being 576 wide.
 
@@ -876,11 +872,11 @@ method; no `--in-file` combining of earlier matrices; and
 expert streaming (`Stored` experts) is refused because a streamed
 expert's weight view has no stable identity.
 
-**What matches llama.cpp's file and what does not, measured.** The
+Measured, here is what matches llama.cpp's file and what does not. The
 names, the counts, the shapes and the accumulation rule are the same,
 so the files are interchangeable and `frink quantize --imatrix` on a
 `llama-imatrix` file is byte-identical to `llama-quantize` (table
-above). The sums are NOT bit-identical, because the activations are
+above). The sums are not bit-identical, because the activations are
 not, and `--compare` prints the gap per entry. On Qwen3-0.6B (BF16 and
 an F32 copy, same result), 8 chunks of 512 tokens of plain prose on
 which both tokenizers agree exactly:
@@ -901,15 +897,15 @@ the `vec_dot_type` rounding as the cause on this checkpoint. Where the
 attention arithmetic diverges is a `frink parity` question, not an
 imatrix one; on a K-quant checkpoint the documented Q8_K activation
 rounding would add to whatever it is. Percent-level differences in an
-importance weight are far below what moves a quantized super-block --
-the weights enter the fit as relative importances -- but that is a
+importance weight are far below what moves a quantized super-block
+(the weights enter the fit as relative importances), but that is a
 statement about the effect, not a claim the files match.
 
 Two things to check before trusting a comparison. The text must
 tokenize identically, and it once did not: on the repo's own markdown
 docs frink's Qwen2-style BPE produced 17208 tokens where
 `llama-tokenize --no-escape` produced 17209, one fewer at each
-mention of `<s>` -- Qwen2.5's vocabulary carries `<s>` as an ordinary
+mention of `<s>`. Qwen2.5's vocabulary carries `<s>` as an ordinary
 entry that llama.cpp never treats as special, and frink promoted it
 on its shape. That is fixed, and `frink imatrix` now tokenizes its
 text with special-token markers left as text, which is
@@ -959,12 +955,12 @@ takes.
 Four things differ from llama.cpp's tool, all of them refusals it does
 not make:
 
-* Splitting a file that is **already a shard** stops. llama.cpp would
+* Splitting a file that is already a shard stops. llama.cpp would
   write a set whose `split.tensors.count` covered that one shard, which
   no loader can reassemble.
-* A first tensor **larger than `--split-max-size`** is named, with both
+* A first tensor larger than `--split-max-size` is named, with both
   numbers. llama.cpp prints "one of splits have 0 tensors" and exits.
-* `--merge` **refuses the `--split-*` options** instead of parsing and
+* `--merge` refuses the `--split-*` options instead of parsing and
   ignoring them.
 * A missing shard names the file it wanted, at plan time, before the
   output is opened.
@@ -978,8 +974,8 @@ previous merge leaves behind; otherwise the merged file gains exactly
 those three keys and nothing else changes.
 
 Cross-checked against the installed `llama-gguf-split` (build 7650, 68b4d516c) on the
-21-tensor test fixture at `--split-max-tensors 4`. All **6 of 6** shards
-came out the identical SIZE, byte for byte, and differ only where the
+21-tensor test fixture at `--split-max-tensors 4`. All 6 of 6 shards
+came out the identical size, byte for byte, and differ only where the
 metadata keys are ordered: 54 bytes on each later shard (the three
 `split.*` keys) and 754 on the first (the whole header). Both directions
 work across the two tools: llama.cpp merges a set frink split, and
@@ -993,7 +989,7 @@ by name (`conversion/bert.py`, `BertModel.filter_tensors`, "we are only
 using BERT for embeddings so we don't need the pooling layer";
 unconditional on `master` as of 2026-09-11). The head then runs as
 `classifier(cls)` where the checkpoint was trained as
-`classifier(tanh(pooler(cls)))`: same ORDER, a score range about fifty
+`classifier(tanh(pooler(cls)))`: the same order, a score range about fifty
 times narrower, so a threshold copied from the model card never fires
 (issue #82). This writes a GGUF that carries the tensor.
 
@@ -1011,11 +1007,11 @@ further change and `/v1/rerank` reports
 `frink_score_head: classifier(tanh(pooler(cls)))`; llama.cpp loads it
 too, and its `build_pooling` RANK arm runs the pooler as well.
 
-**The pooler is tied to the checkpoint by the classifier, not by a
-name.** The GGUF's own metadata is not evidence: the published
+The pooler is matched to the checkpoint by its classifier, not by
+name. The GGUF's own metadata is not evidence: the published
 `ms-marco-MiniLM-L6-v2-Q8_0.gguf` says `general.name = Ms Marco MiniLM L
 12 v2` and points `base_model.0.repo_url` at the L12 repo, while its six
-layers and its scores are L6's. So the one tensor BOTH files carry,
+layers and its scores are L6's. So the one tensor both files carry,
 `cls.output.*` in the GGUF and `classifier.*` in the safetensors, must
 agree element-wise to within the GGUF's own storage precision (1/128 of
 the tensor's largest magnitude, which admits F32, F16, BF16 and Q8_0
@@ -1055,7 +1051,7 @@ frink serve -hf bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
 frink -hf bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M -p "Hi" -n 64
 ```
 
-The tag after the colon is a **quant label, not a git revision**, which
+The tag after the colon is a quant label, not a git revision, which
 is worth saying because `repo:thing` means a revision nearly everywhere
 else. It matches without regard to case, because repos spell it
 `Q4_K_M` and `q4_k_m` about equally often. A tag the repo does not
@@ -1150,7 +1146,7 @@ Llama-3.2-1B-Instruct Q8_0 with a rank-8 adapter 5.2e-4 against a
 base-only floor of 1.9e-4 (the adapter itself moves the distribution
 by 1.5e-1).
 
-What is refused, by name, rather than approximated: an adapter for
+These are refused by name rather than approximated: an adapter for
 another architecture, one naming a tensor the base does not carry or
 of a shape it does not fit (the three checks `llama-adapter.cpp`
 makes), a routed-expert (`*_exps`) target, an activated LoRA
@@ -1159,8 +1155,8 @@ whose output head is tied to its embedding (libllama aborts in
 `ggml_mul_mat` on that pair), and the flag on the MLA, Gemma-4,
 GLM-5.2 and Kimi engines.
 
-On Metal an adapted model runs on the per-matrix path -- each
-projection's matvec on the device, the rank-sized delta on the host --
+On Metal an adapted model runs on the per-matrix path (each
+projection's matvec on the device, the rank-sized delta on the host),
 because the fused stacks read weight bytes past the seam the delta
 lives in and are fenced off for the whole model. The output is the
 same tokens as CPU (measured), at per-matrix speed: Llama-3.2-1B Q8_0
@@ -1193,7 +1189,7 @@ have.
 | `--no-warmup` | Accepted; there is no warm-up pass to skip |
 | `--flash-attn` / `-fa` | Accepted. Fused attention is a backend property here, not a per-run switch |
 
-Two are **refused by name** rather than ignored, because ignoring them
+Two are refused by name rather than ignored, because ignoring them
 would change the answer without saying so:
 
 - `--no-jinja`. There is no template-free mode to fall back to, and a
@@ -1252,7 +1248,7 @@ shares the stream.
 `--exit-on-stdin-close` (or `FRINK_EXIT_ON_STDIN_CLOSE=1`) exits when
 stdin reaches EOF, which is the one orphan-prevention mechanism that
 behaves identically on macOS, Windows and Linux and survives a parent
-that dies rather than exiting cleanly. It is **opt-in**: a server
+that dies rather than exiting cleanly. It is opt-in: a server
 started with stdin redirected from `/dev/null` (systemd, cron, `nohup`)
 sees EOF immediately, so the parent that wants the guarantee is the one
 that asks for it and keeps the pipe open.
@@ -1350,7 +1346,7 @@ the server around them: each prompt goes through
 `Decoder::forward_batch_last_host_kv` in `-ub` chunks, and every decode
 step is one `Decoder::forward_multi_seq` call across the `B` sequences,
 the same call `frink-server` makes per tick under
-`FRINK_CONTINUOUS_BATCHING=1`. Two honest differences from upstream:
+`FRINK_CONTINUOUS_BATCHING=1`. Two differences from upstream:
 frink has no cross-sequence prefill, so `B` prompts are `B` calls
 rather than one batch (the number reported is still the time to
 prefill all of them); and the batched decode attends on the host on
@@ -1370,7 +1366,7 @@ attention. `frink serve-bench` measures the same batcher over HTTP.
 | `--receipt`, `--backend-label` | Write a JSON receipt; the label must name the backend that ran or the receipt is refused, before the sweep and again at write time |
 | `--max-load` | The same quiet-host bar as `frink bench`, waiving the thermal and free-memory checks with it at `0`. The free-memory check counts the largest row's KV on top of the weights |
 
-Flags `llama-batched-bench` takes that this tool **refuses by name**
+Flags `llama-batched-bench` takes that this tool refuses by name
 rather than accepting and ignoring: `-b` (`n_batch`; frink has no
 logical batch distinct from `-ub`), `-kvu` (every sequence has its own
 cache here, so `N_KV` is `B*(PP+TG)` with or without `-pps`), `-fa`
@@ -1390,8 +1386,8 @@ re-read from every sequence's KV afterwards (the copied caches under
 ### One model at a time
 
 Every command that loads weights (`run`, `bench`, `verify`, `smoke`,
-`run-kimi`, and `frink-server`) registers itself, and **stops with an
-error when another frink process is already holding a model**:
+`run-kimi`, and `frink-server`) registers itself, and stops with an
+error when another frink process is already holding a model:
 
 ```
 $ frink -m model.gguf -p "hi"
@@ -1404,7 +1400,7 @@ FRINK_ALLOW_MULTIPLE_INSTANCES=1) to start anyway.
 ```
 
 Prefill is a dense GEMM across every core, and the decode pool spins.
-Two instances do not run at half speed each. They fight over the same
+Two instances do not each run at half speed; they fight over the same
 cores. Pass `--allow-multiple-instances` (or set
 `FRINK_ALLOW_MULTIPLE_INSTANCES=1`) when you want them anyway.
 
@@ -1417,15 +1413,15 @@ their own.
 The registry is a directory of one small file per live process
 (`$FRINK_INSTANCE_DIR`, default `~/.cache/frink/instances`). When a
 process is gone, after a `kill -9` or a crash, the next run prunes its
-entry instead of being blocked by it. This is **advisory, not a lock**.
+entry instead of being blocked by it. The registry is advisory, not a lock.
 Two processes starting in the same instant each see the other and both
 stop, which is the safe direction, and nothing here holds back a
 determined caller.
 
 Add or change models in [`benchmarks/suite.json`](../benchmarks/suite.json)
-(`id`, `name`, `gguf`, `backends`, `estimated_ram_gb`). No HTTP, no
-chat template, no tokenizer, no sampling. That is the same line
-llama.cpp draws between `llama-bench` and `llama-server`. Details:
+(`id`, `name`, `gguf`, `backends`, `estimated_ram_gb`). The benchmark
+involves no HTTP, chat template, tokenizer or sampling, which is the
+same line llama.cpp draws between `llama-bench` and `llama-server`. Details:
 [`benchmarks/README.md`](../benchmarks/README.md).
 
 See also: [`FEATURES.md`](FEATURES.md) · [`MODELS.md`](MODELS.md) · [`API.md`](API.md).

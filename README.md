@@ -29,61 +29,64 @@
 ---
 
 Frink loads GGUF checkpoints and runs them on the hardware you already
-own. No llama.cpp bindings, no ggml wrapper. The loader, the quantized
-kernels, attention and expert routing are written here, in Rust.
+own. It does not bind to llama.cpp or wrap ggml: the loader, the
+quantized kernels, attention and expert routing are all written here,
+in Rust.
 
-- **One binary, no runtime.** 23 MB on macOS arm64 with Metal and the
-  server, and completions, the API server, `download`, `bench`,
-  `batched-bench`, `quantize`, `imatrix`, `gguf-split` and `verify` are
-  all inside it. No wheels, no CUDA userspace to match against a
-  driver. PyTorch alone is 402 MB, before a serving stack sits on top.
-- **Quantized end to end.** Weights stay quantized on mmap and
-  dequantize inside the matmul, so an 8B model fits on a laptop.
-  K-quants, the IQ tiers, MXFP4, F16 and BF16.
-- **Drop-in for llama.cpp.** Same flags, same sampler chain in the same
-  order, and the same tools: `quantize` writes Q8_0 and the K-quants
-  byte-identically to `llama-quantize`, with or without an importance
-  matrix, and `gguf-split`, `imatrix` and `batched-bench` are ports.
-  Tokenization is verified against libllama on twenty checkpoints under
-  both special-token settings, and every engine number in
-  [the speed table](benchmarks/RESULTS.md) was measured against
-  llama.cpp on the same host and the same file. 100 architectures run
-  with a logit comparison to back it; the rest stop and say what is
-  missing rather than guess.
-- **OpenAI-compatible server.** On Metal, multiple concurrent clients
-  share one batched decode worker (llama.cpp slots + continuous batching,
-  on by default). Paged KV shared across conversations, runtime model
-  swap and sleep/wake, slot save and restore that refuses a mismatched
-  checkpoint by name, resumable streams, Anthropic and Responses
-  endpoints, and speculative decoding that stays lossless at any
-  temperature. Point your existing client at it.
-  [What that is worth, measured](benchmarks/RESULTS.md#serving-features-measured):
-  1.28x aggregate throughput at eight concurrent requests, and 736 of
+- Everything ships as one 23 MB binary (macOS arm64, with Metal and the
+  server): completions, the API server, `download`, `bench`,
+  `batched-bench`, `quantize`, `imatrix`, `gguf-split` and `verify`.
+  There are no Python wheels to install and no CUDA userspace to match
+  against a driver. For comparison, PyTorch alone is 402 MB before a
+  serving stack sits on top.
+- Weights stay quantized on mmap and are dequantized inside the matmul,
+  so an 8B model fits on a laptop. Supported formats are the K-quants,
+  the IQ tiers, MXFP4, F16 and BF16.
+- It works as a drop-in for llama.cpp. The flags are the same, the
+  sampler chain runs in the same order, and the tools match: `quantize`
+  writes Q8_0 and the K-quants byte-identically to `llama-quantize`,
+  with or without an importance matrix, and `gguf-split`, `imatrix` and
+  `batched-bench` are ports. Tokenization is verified against libllama
+  on twenty checkpoints under both special-token settings, and every
+  engine number in [the speed table](benchmarks/RESULTS.md) was measured
+  against llama.cpp on the same host with the same file. 100
+  architectures run with a logit comparison behind them. Any other
+  architecture stops with an error that says what is missing.
+- The server is OpenAI-compatible. On Metal, concurrent clients share
+  one batched decode worker (llama.cpp slots plus continuous batching,
+  on by default). It also has paged KV shared across conversations,
+  runtime model swap and sleep/wake, slot save and restore that names
+  the checkpoint when it refuses a mismatch, resumable streams,
+  Anthropic and Responses endpoints, and speculative decoding that
+  stays lossless at any temperature. Your existing client can point at
+  it unchanged.
+  [Measured](benchmarks/RESULTS.md#serving-features-measured), that comes
+  to 1.28x aggregate throughput at eight concurrent requests, and 736 of
   757 prompt tokens reused on a shared system prompt.
-- **The sampling surface, not a subset of it.** `n` and `best_of` from
-  one shared prefill, interleaved when streaming; `logprobs` and
+- The full sampling API is there: `n` and `best_of` from one shared
+  prefill, interleaved when streaming; `logprobs` and
   `prompt_logprobs`; `logit_bias`, `allowed_token_ids` and `bad_words`;
-  `echo`, `truncate_prompt_tokens`, `cache_salt`. A field this server
-  does not implement is refused BY NAME rather than dropped, because a
-  dropped field is indistinguishable from an honoured one.
-- **Structured output, enforced per token.** A GBNF grammar, a forced
-  `tool_choice` in ten of the eleven tool-call wire formats, or a tool's
-  own `parameters` schema: a stack machine masks every token that would
-  break the constraint, so an invalid answer is not reachable. No retry
-  loop, no repair pass.
-- **Built for agents.** Reasoning streams into `reasoning_content`, tool
-  calls parse in the eleven formats real checkpoints emit, and prompts
-  are framed by the GGUF's own `tokenizer.chat_template`, compiled and
-  evaluated rather than sniffed.
-- **Mixture-of-experts is a first-class path.** GPU routing, indexed
-  expert GEMMs, residency planning. Experts stream from the checkpoint
-  when they do not fit, and never when they do.
-- **Embeddings, reranking and scoring from real encoder models.** Point
+  `echo`, `truncate_prompt_tokens` and `cache_salt`. A field the server
+  does not implement gets an error naming that field. Silently dropping
+  it would look the same to the client as honouring it.
+- Structured output is enforced per token. Given a GBNF grammar, a
+  forced `tool_choice` in ten of the eleven tool-call wire formats, or a
+  tool's own `parameters` schema, a stack machine masks every token that
+  would break the constraint, so the model cannot produce an invalid
+  answer and there is nothing to retry or repair.
+- For agents, reasoning streams into `reasoning_content`, tool calls
+  parse in the eleven formats real checkpoints emit, and prompts are
+  framed by the GGUF's own `tokenizer.chat_template`, which is compiled
+  and evaluated.
+- Mixture-of-experts models get GPU routing, indexed expert GEMMs and
+  residency planning. Experts stream from the checkpoint when they do
+  not fit in memory, and never when they do.
+- Embeddings, reranking and scoring run on real encoder models. Point
   `-m` at a BGE, E5 or GTE checkpoint and `/v1/embeddings` serves it,
-  pooled the way the file says to. Not a decoder's hidden states
-  borrowed for the job. A cross-encoder with a rank head answers
-  `/v1/rerank` through the head itself; `/v1/score` takes either kind
-  and says which one answered.
+  pooled the way the file specifies, with no decoder hidden states
+  standing in. A cross-encoder with a rank head answers `/v1/rerank`
+  through that head; `/v1/score` accepts either kind and reports which
+  one answered.
 
 ## Install
 
@@ -112,11 +115,10 @@ cargo install frink-server --features metal
 cargo build --release -p frink-cli --features metal
 ```
 
-**The only flag you need is your GPU.** `--features metal` on Apple
-silicon, `--features cuda` on Linux with an NVIDIA card, nothing on a
-CPU-only machine. Everything else is already in: `frink serve`,
-`frink download`, `frink bench`, `frink verify` and completions all
-work out of the box.
+The only feature flag to choose is the GPU backend: `--features metal`
+on Apple silicon, `--features cuda` on Linux with an NVIDIA card, and
+none on a CPU-only machine. `frink serve`, `frink download`,
+`frink bench`, `frink verify` and completions are included by default.
 
 Using frink as a Rust library rather than a command? Depend on
 [`frink-inference`](https://crates.io/crates/frink-inference), or on
@@ -153,28 +155,25 @@ frink bench -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 512 -n 128 -r 3 --com
 ```
 
 On `Q8_0` and `IQ4_NL`, frink's logits match llama.cpp's. On K-quants
-they drift, for a
-[known reason](docs/plans/llama-cpp-gap-inventory.md) that is not a
-frink bug: llama.cpp quantizes activations to `Q8_K` before the dot
-product and frink keeps them in f32.
+they drift, for a [known reason](docs/plans/llama-cpp-gap-inventory.md)
+that is not a frink bug: llama.cpp quantizes activations to `Q8_K`
+before the dot product, and frink keeps them in f32.
 
-**`IQ4_XS` is on the drifting side, not the matching one**, which the
-pair of names above makes easy to misread. ggml declares
-`vec_dot_type = Q8_K` for `IQ4_XS` and `Q8_0` for `IQ4_NL`, so they
-behave oppositely here despite the spelling. `frink parity` on an
-`IQ4_XS` checkpoint reads `DRIFT` by design and says so in its own
-output. Use whichever quant you would
-use with llama.cpp; if you are comparing the two, `Q8_0` is the one
-that answers the question without that variable in it.
-[docs/MODELS.md](docs/MODELS.md) lists what runs today, and which
+Despite the similar name, `IQ4_XS` drifts too. ggml declares
+`vec_dot_type = Q8_K` for `IQ4_XS` and `Q8_0` for `IQ4_NL`, so
+`frink parity` on an `IQ4_XS` checkpoint reports `DRIFT` and explains
+why in its output. Use whichever quant you would use with llama.cpp.
+If you want to compare the two engines, use `Q8_0`, which takes
+activation quantization out of the comparison.
+[docs/MODELS.md](docs/MODELS.md) lists what runs today and which
 checkpoints stop with an error instead.
 
 ## Frink Studio
 
 A web UI for the server: chat, the model inventory, live request
 activity, and copy-pasteable connection snippets. It is a separate app
-that talks to `frink-server` over the same public API every other
-client uses, so nothing in it can work that the API does not expose.
+that talks to `frink-server` over the same public API as any other
+client, so everything it does is something the API exposes.
 
 <img src="docs/assets/studio-chat.webp" alt="Frink Studio chat" width="100%" />
 
@@ -226,27 +225,27 @@ published separately if you want one rather than the stack:
 
 ## AI full disclosure
 
-This software is developed with strong assistance from Cursor, Grok 4.5,
+This software is developed with heavy assistance from Cursor, Grok 4.5,
 GPT 5.6, and Claude Fable 5. Humans lead the ideas, the testing, and the
-debugging. We say this openly because it shaped how the project was
-built. If you are not happy with AI-developed code, this software is not
-for you. The acknowledgement below matters as much: none of this would
-exist without [llama.cpp](https://github.com/ggerganov/llama.cpp) and
-GGML, largely written by hand.
+debugging. We say so up front because it shaped how the project was
+built, and if you don't want AI-developed code, this software is not
+for you. It also would not exist without
+[llama.cpp](https://github.com/ggerganov/llama.cpp) and GGML, which
+were largely written by hand.
 
 ## Acknowledgements to llama.cpp and GGML
 
-Frink does not link against GGML. It exists because llama.cpp opened
-the path: the kernels, the quantization formats, the GGUF ecosystem, and
-years of engineering knowledge worked out there in the open. We are
-thankful and indebted to llama.cpp and its contributors. Their
-implementation, kernels, tests, and design choices were an essential
-reference while this pure-Rust GGUF / MoE inference path was built. Some
-source-level pieces are retained or adapted here under the MIT license,
-notably the IQ quantization codebook tables. Many other pieces (GGUF
-layouts, quant/dot semantics, CLI and server conventions) were written
-independently against that public design. For that reason, and because
-we are genuinely grateful, we keep the GGML authors' copyright notice in
+Frink does not link against GGML, but it exists because of llama.cpp:
+its kernels, its quantization formats, the GGUF ecosystem, and years of
+engineering knowledge worked out in the open. We are thankful to
+llama.cpp and its contributors. Their implementation, kernels, tests,
+and design choices were our main reference while building this
+pure-Rust GGUF / MoE inference path. Some source-level pieces are
+retained or adapted here under the MIT license, notably the IQ
+quantization codebook tables. Other pieces (GGUF layouts, quant/dot
+semantics, CLI and server conventions) were written independently
+against that public design. For that reason, and out of gratitude, we
+keep the GGML authors' copyright notice in
 [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md).
 
 ## License

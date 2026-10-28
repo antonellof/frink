@@ -36,10 +36,10 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint. `PTQ1_0` runs on CPU and Metal; `PQ2_0` is recognised, not executed |
 | BERT, nomic-bert, jina-bert-v3 | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
 
-**100 architectures run with** a benchmark row, a pinned logit
-comparison against real `libllama`, or a fixture behind each. The list
-above is by family; `frink archs` is by GGUF architecture string and is
-the authoritative one.
+100 architectures run, each backed by a benchmark row, a pinned logit
+comparison against real `libllama`, or a fixture. The list above is by
+family. `frink archs` lists them by GGUF architecture string and is the
+authoritative list.
 
 ## What does not run
 
@@ -55,32 +55,32 @@ the authoritative one.
 
 A model whose graph Frink only partly implements would load, run fast,
 and return fluent text computed by the wrong maths, with nothing in the
-output to tell you. An error you can read beats output you cannot
-trust, so the loader refuses. The message always names the reason, and
-one of six things caused it.
+output to tell you. The loader refuses such a model with an error
+instead. The message names the reason, which is one of these six.
 
-1. **The architecture is unknown.** Not in the capability registry.
+1. **The architecture is unknown.** It is not in the capability registry.
 
 2. **Known, not implemented.** The refusal names the missing feature.
 
 3. **The file carries weights Frink never reads.** The loader records
    every tensor name it looks up and stops if any are left over. This
-   catches a missing graph feature automatically rather than one at a
-   time, which is how `attn_sinks` and `exp_probs_b` were both found.
+   catches a missing graph feature automatically instead of one at a
+   time by hand, which is how
+   `attn_sinks` and `exp_probs_b` were both found.
    Tensors for parts Frink does not claim to run (`mm.`, `v.`,
    `mmproj.`, `resampler.`, `audio.`) are ignored.
 
 4. **The file declares a scale factor Frink does not apply.**
    `{arch}.logit_scale`, `{arch}.residual_scale`,
    `{arch}.embedding_scale` and `{arch}.attention.scale` are
-   hyperparameters rather than weights, so check 3 cannot see them, and
-   a file declaring one would otherwise load while computing a
-   differently-scaled graph than it was trained as.
+   hyperparameters, not weights, so check 3 cannot see them. Without
+   this check, a file declaring one would load and compute a graph
+   scaled differently from the one it was trained as.
 
 5. **Position is encoded some other way than RoPE.** ALiBi, a learned
-   absolute position table, or no rotation at all. All of these run;
-   the check remains because the generic path's guess is "plain GQA
-   with RoPE" and it was wrong for exactly this group five times.
+   absolute position table, or no rotation at all. All of these run.
+   The check stays because the generic path assumes "plain GQA with
+   RoPE", and that assumption was wrong for this group five times.
 
 6. **Nobody has verified this architecture against llama.cpp.** The
    shared generic-GQA decoder is a guess, so it is opt-in.
@@ -91,10 +91,9 @@ one of six things caused it.
 
 None of the 11 is a fixture away. Two are a single match arm away
 (table rows on seams frink already serves), and the rest need code or a
-reading nobody has done. All 11 have now been read on both sides, and
-each refusal prints its own blocker with the
-`llama.cpp/src/models/*.cpp` line that decides it, so
-`frink -m <file>` is the authoritative answer rather than this table.
+reading nobody has done. All 11 have now been read on both sides. Each
+refusal prints its own blocker with the `llama.cpp/src/models/*.cpp`
+line that decides it, so trust `frink -m <file>` over this table.
 
 | Class | Count |
 |---|---|
@@ -107,7 +106,8 @@ The count was 4 until 2026-10-28, when the llama.cpp pin moved from
 `5b59b83` to `604cc430` and seven of its thirteen new architecture names
 turned out to be generic-path candidates
 ([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md)).
-A count against a moving upstream goes up when the pin moves.
+Because upstream keeps adding architectures, this count rises whenever
+the pin moves.
 
 | Architecture | What is missing |
 |---|---|
@@ -124,8 +124,8 @@ A count against a moving upstream goes up when the pin moves.
 | `phi4` | Not in llama.cpp's `LLM_ARCH_NAMES`, so there is no reference graph to diff against. Frink would admit it as `phi3`'s graph on the assumption that a file spelling it means the same thing, and refuses until a real file settles that |
 
 The counts here are pinned against the catalog by
-`crates/frink-models/tests/documented_counts.rs`: they had gone stale
-once in the direction that matters, reading `new code 1` while the
+`crates/frink-models/tests/documented_counts.rs`. They once went
+stale in the direction that matters, reading `new code 1` while the
 catalog held three.
 
 ## `mistral`, `mixtral` and `yi` are not architectures
@@ -134,10 +134,10 @@ None is in llama.cpp's `LLM_ARCH_NAMES` or gguf-py's
 `MODEL_ARCH_NAMES`, and libllama refuses a file declaring one. Every
 real checkpoint of all three declares `general.architecture = llama`,
 which is audited and runs. Frink refuses the three strings by name and
-says the actionable thing: re-convert with `convert_hf_to_gguf.py` and
-the file loads as `llama`.
+tells you to re-convert with `convert_hf_to_gguf.py`, after which the
+file loads as `llama`.
 
-That also closed a live hazard: the three sat on the generic path with
+This also fixed a real defect. The three sat on the generic path with
 NEOX RoPE while `llama` is in llama.cpp's NORM group, so a file
 spelling `mistral` would have been rotated on the wrong pairs of every
 Q/K head.
