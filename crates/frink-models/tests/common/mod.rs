@@ -367,3 +367,82 @@ pub fn prompt_tokens(file: &frink_gguf::ShardedGguf, prompt: &str, want: usize) 
     }
     stretch(tokens, want, bos)
 }
+
+/// Streamed experts (`ExpertBacking::Stored`) must compute EXACTLY what
+/// resident ones do: prefill as a batch, then decode, at a budget that
+/// caches everything and at a 1-byte one where every acquire is an
+/// uncached pass-through and the store's buffers are freed and
+/// reallocated hardest. Same bytes, same kernels, so `assert_eq!` on
+/// the f32 vectors, no tolerance.
+///
+/// Three MoE bodies, because the backing used to pick between them: a
+/// SHORT prefill and decode run the per-position top-k body
+/// (`cpu_moe_topk_parallel_slots`, which a streamed layer was denied),
+/// and a prefill of 32+ tokens runs the bucketed batch GEMM
+/// (`moe_ffn_batch`, resident-only until the same change).
+///
+/// ONE body for both int-dot arms. `FRINK_CPU_INT_DOT` is read once per
+/// process, so the arm a suite tests is decided by which test binary
+/// calls this: `gguf_roundtrip` runs the library default (int-dot off,
+/// the f32 dequant-dot), `streaming_int_dot` the shipped default (on,
+/// the repacked kernels and the repack cache). Only the second can see
+/// a repack-cache defect, because the first never repacks anything.
+pub fn assert_store_backed_matches_resident(fixture: &str, cfg: fn() -> ModelConfig) {
+    const DECODE: [usize; 4] = [6, 8, 10, 4];
+    let short: Vec<usize> = vec![2, 5, 9, 1, 7, 3];
+    // Past `moe_ffn_batch`'s 32-row floor, every token id in range.
+    let long: Vec<usize> = (0..40).map(|i| (i * 7 + 3) % 32).collect();
+    let run = |d: &Decoder, prompt: &[usize]| -> Vec<Vec<f32>> {
+        let vocab = d.config.vocab_size;
+        assert!(prompt.iter().chain(DECODE.iter()).all(|&t| t < vocab));
+        let mut caches: Vec<KvCache> = d.config.new_kv_caches();
+        let mut out = d.forward_batch(prompt, 0, &mut caches);
+        for (i, tok) in DECODE.iter().enumerate() {
+            out.push(d.forward_token(*tok, prompt.len() + i, &mut caches));
+        }
+        out
+    };
+
+    let resident = Decoder::from_gguf(fixture, cfg()).expect("resident load");
+    for prompt in [&short, &long] {
+        assert_prompt_matches(&resident, fixture, cfg, prompt, &|d| run(d, prompt));
+    }
+}
+
+fn assert_prompt_matches(
+    resident: &Decoder,
+    fixture: &str,
+    cfg: fn() -> ModelConfig,
+    prompt: &[usize],
+    run: &dyn Fn(&Decoder) -> Vec<Vec<f32>>,
+) {
+    let want = run(resident);
+    let n = prompt.len();
+    for budget in [64 * 1024 * 1024u64, 1u64] {
+        let stored = Decoder::from_gguf_with_expert_cache(fixture, cfg(), Some(budget))
+            .expect("store-backed load");
+        let got = run(&stored);
+        let stats = stored
+            .expert_store_stats()
+            .expect("a cache budget must make the experts store-backed");
+        assert!(
+            stats.misses > 0,
+            "budget={budget}: the store was never read, so nothing was streamed"
+        );
+        if budget == 1 {
+            assert!(
+                stats.pass_throughs > 0,
+                "budget=1: every acquire should be an uncached pass-through"
+            );
+        }
+        assert_eq!(got.len(), want.len(), "budget={budget}: row count");
+        for (row, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            let phase = if row < n { "prefill" } else { "decode" };
+            assert_eq!(
+                g, w,
+                "budget={budget}, {n}-token prompt: streamed experts must be \
+                 bit-identical to resident at {phase} row {row}"
+            );
+        }
+    }
+}

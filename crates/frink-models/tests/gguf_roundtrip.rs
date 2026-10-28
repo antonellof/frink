@@ -11,6 +11,8 @@
 //! internally self-consistent (Rust checking Rust), it is cross-checked
 //! against a second, independent implementation reading the same bytes.
 
+mod common;
+
 use frink_core::cache::KvCache;
 use frink_models::{config::test_dense_fixture, Decoder, ModelConfig};
 
@@ -469,35 +471,21 @@ fn metal_fused_moe_agrees_between_streamed_and_resident_experts() {
 }
 
 /// `ExpertStore` must produce logits bit-identical to the resident
-/// (mmap) path -- with a generous budget (everything cacheable) AND
-/// with a budget smaller than one decode step's expert union (every
-/// acquire degrades to an uncached pass-through read). Same bytes,
-/// same kernels, so `assert_eq!` on f32 vectors, no tolerance.
+/// (mmap) path, on the LIBRARY's default kernels (int-dot off, the f32
+/// dequant-dot). That arm never repacks a weight, so it cannot see a
+/// repack-cache defect: it passed at a 1-byte budget for the whole life
+/// of the OLMoE streaming bug for exactly that reason.
+/// `tests/streaming_int_dot.rs` runs the same body on the shipped
+/// default, which can.
 #[test]
 fn store_backed_experts_produce_bit_identical_logits_to_resident() {
-    let fixture_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/frink_real_moe_test.gguf"
+    common::assert_store_backed_matches_resident(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/frink_real_moe_test.gguf"
+        ),
+        frink_models::config::test_moe_fixture,
     );
-    let cfg = frink_models::config::test_moe_fixture;
-
-    let resident = Decoder::from_gguf(fixture_path, cfg()).expect("resident load");
-    for budget in [64 * 1024 * 1024u64, 1u64] {
-        let stored = Decoder::from_gguf_with_expert_cache(fixture_path, cfg(), Some(budget))
-            .expect("store-backed load");
-
-        let mut caches_a: Vec<KvCache> = resident.config.new_kv_caches();
-        let mut caches_b: Vec<KvCache> = stored.config.new_kv_caches();
-
-        for (pos, tok) in [2usize, 5, 9, 1].iter().enumerate() {
-            let a = resident.forward_token(*tok, pos, &mut caches_a);
-            let b = stored.forward_token(*tok, pos, &mut caches_b);
-            assert_eq!(
-                a, b,
-                "budget={budget}: stored-expert logits must be bit-identical at pos {pos}"
-            );
-        }
-    }
 }
 
 /// `frink gguf-split --split` has to produce shards the loader people
