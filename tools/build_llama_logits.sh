@@ -83,20 +83,23 @@ case "$OUT" in
 esac
 mkdir -p "$(dirname "$OUT")"
 
+# The library goes AFTER the source: GNU ld resolves left to right and
+# drops a -l nothing before it needs yet (macOS's linker does not care).
+#
 # Homebrew-style layout: PREFIX/include + PREFIX/lib
 if [[ -f "$PREFIX/include/llama.h" ]]; then
   cc -std=c11 -O2 -Wall -Wextra \
     -I"$PREFIX/include" \
-    -L"$PREFIX/lib" -lllama -Wl,-rpath,"$PREFIX/lib" \
-    "$ROOT/tools/llama_logits.c" -o "$OUT"
+    "$ROOT/tools/llama_logits.c" -o "$OUT" \
+    -L"$PREFIX/lib" -lllama -Wl,-rpath,"$PREFIX/lib"
   echo "built $OUT (llama.cpp at $PREFIX)"
 # CMake build layout: libllama in PREFIX/bin, headers in SOURCE tree
 elif [[ -f "$SOURCE/include/llama.h" ]] && ls "$PREFIX"/bin/libllama.* >/dev/null 2>&1; then
   cc -std=c11 -O2 -Wall -Wextra \
     -I"$SOURCE/include" \
     -I"$SOURCE/ggml/include" \
-    -L"$PREFIX/bin" -lllama -Wl,-rpath,"$PREFIX/bin" \
-    "$ROOT/tools/llama_logits.c" -o "$OUT"
+    "$ROOT/tools/llama_logits.c" -o "$OUT" \
+    -L"$PREFIX/bin" -lllama -Wl,-rpath,"$PREFIX/bin"
   echo "built $OUT (libllama at $PREFIX/bin, headers at $SOURCE)"
 else
   echo "no llama.h under $PREFIX/include and no cmake layout at $PREFIX/bin + $SOURCE/include" >&2
