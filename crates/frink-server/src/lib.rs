@@ -56,6 +56,7 @@ mod health;
 mod journal;
 mod json_mode;
 mod limits;
+pub mod llama_env;
 mod loaded;
 mod logit_bias;
 mod logprobs;

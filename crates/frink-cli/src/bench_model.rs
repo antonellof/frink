@@ -82,7 +82,25 @@ impl Row {
 /// So this asks `active_backend()` immediately, which both forces the
 /// cache while the env is still fresh and reveals a disagreement, and
 /// it fails loudly rather than measuring the wrong device.
-pub fn apply_env(threads: usize, n_gpu_layers: usize) -> anyhow::Result<()> {
+///
+/// `model` is the GGUF the run will load, when there is one: a PARTIAL
+/// `-ngl` (above zero, below its layer count) is refused against it.
+/// llama-bench's `-ngl 10` offloads ten layers; frink has no partial
+/// placement, and offloading all of them while the receipt says 10 is
+/// a row measuring something other than what it is labelled.
+pub fn apply_env(threads: usize, n_gpu_layers: usize, model: Option<&str>) -> anyhow::Result<()> {
+    if let (Some(path), true) = (model, n_gpu_layers > 0) {
+        if let Ok(file) = frink_gguf::ShardedGguf::open(path) {
+            let arch = file
+                .metadata_str("general.architecture")
+                .unwrap_or("unknown");
+            if let Some(n_layers) = file.metadata_u64(&format!("{arch}.block_count")) {
+                let layers = u32::try_from(n_gpu_layers).unwrap_or(u32::MAX);
+                frink_models::gpu_layers::GpuLayers::Count(layers)
+                    .check_supported(n_layers as usize)?;
+            }
+        }
+    }
     // SAFETY: called from `main` before rayon/Metal workers spawn.
     unsafe {
         if threads > 0 {

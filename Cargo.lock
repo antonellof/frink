@@ -490,6 +490,7 @@ name = "frink-core"
 version = "0.50.0"
 dependencies = [
  "anyhow",
+ "clap",
  "cudarc",
  "frink-cuda",
  "frink-gguf",

@@ -57,6 +57,41 @@ are the ones worth reading twice.
   runs the forward, and scatters rows back by offset; the forward
   evicted the scratch and the scatter found fewer rows than it wrote.
   The scratch copy, and a slot save's prefill, now keep every row.
+- **`-md draft.gguf` replaced the model path with `d`.** clap read the
+  token as the short cluster `-m d`. Single-dash names are now read
+  whole, from the clap command's own aliases, and an unknown one is an
+  error. The same change fixed `frink serve -np 4`, `-cb` and `-b`,
+  which only the standalone `frink-server` had rewritten.
+- **`frink-server -ngl 10` offloaded every layer.** A partial count is
+  now refused against the model's layer count, as `frink run` refused
+  it, from one shared `GpuLayers` type; `frink bench` and
+  `batched-bench` refuse it too, and so do the MLA, Gemma-4 and GLM-5.2
+  engine paths of `frink run`.
+- Accepted and not honoured, now errors or honoured: `--sampler-seq`
+  read llama.cpp's characters as one sampler name; `--model-draft` was
+  ignored on the dedicated engines; `--verbose-prompt` printed nothing
+  there; `--system` was dropped under `--no-cnv`; `--alias a,b` served
+  the name `a,b`.
+
+### Added
+
+- **The gap to llama.cpp's flags is a pinned number.**
+  `crates/frink-cli/tests/llama_cpp_flags.txt` lists every flag of
+  `llama-cli`, `llama-server` and `llama-bench` at the pin
+  (`scripts/llama_cpp_flags.py`), and a test classifies each against
+  frink's clap commands as accepted, deliberately different (one table
+  in `docs/CLI.md`) or not accepted, pinning the not-accepted count per
+  tool. Before this change: cli 171, server 239, bench 40 of 208, 261
+  and 46. Now 163, 235 and 40.
+- llama.cpp spellings `-hfr`, `--temperature`, `-sys` /
+  `--system-prompt`, `-md` / `--spec-draft-model`, `--draft-n`,
+  `--spec-draft-p-min`, `--sampler-seq` / `--sampling-seq` (the
+  character form) on `frink run`; `-a`, `-hfr`, `-hff`, `-nocb` on the
+  server.
+- `frink-server` reads llama-server's environment variables
+  (`LLAMA_ARG_MODEL`, `LLAMA_ARG_CTX_SIZE`, `LLAMA_ARG_N_GPU_LAYERS`,
+  ...) as the flags they are declared on, from one table.
+
 
 ## [0.50.0] - 2026-10-28
 

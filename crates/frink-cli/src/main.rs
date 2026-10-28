@@ -1,6 +1,7 @@
 //! frink CLI, llama.cpp-style GGUF completion (`-m`/`-p`/`-n`/…) plus
 //! inspect / presets / smoke / Kimi helpers. See `docs/CLI.md`.
 
+mod argv;
 mod batched_bench;
 mod bench_bw;
 mod bench_client;
@@ -18,6 +19,8 @@ mod host_state;
 mod http;
 mod imatrix;
 mod layer_divergence;
+#[cfg(test)]
+mod llama_flags;
 mod parity;
 mod perplexity;
 mod pull;
@@ -52,6 +55,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per process, so the size of the largest variant costs
+// nothing worth a `Box`. Only the build without `serve` trips it, where
+// the `Serve` stub is small beside `Run`.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// GGUF completion (llama.cpp-style `-m`/`-p`/`-n`/…).
     ///
@@ -409,8 +416,10 @@ enum Commands {
         /// CPU threads (`0` = performance-core default)
         #[arg(short = 't', long, default_value_t = 0)]
         threads: usize,
-        /// GPU layers: `0` forces CPU, anything else offloads
-        #[arg(long = "n-gpu-layers", default_value_t = 0)]
+        /// GPU layers, llama-bench's `-ngl`: `0` forces CPU, the model's
+        /// layer count or more offloads all of them, and a partial count
+        /// in between is refused (frink has no partial placement).
+        #[arg(long = "n-gpu-layers", visible_alias = "ngl", default_value_t = 0)]
         n_gpu_layers: usize,
         /// Context size (`0` = GGUF default)
         #[arg(short = 'c', long, default_value_t = 0)]
@@ -558,53 +567,6 @@ Rebuild with it:  cargo install frink-cli   (serve is on by default)
 Or run the standalone binary:  frink-server -m model.gguf
 (This only happens in a build that passed --no-default-features.)";
 
-/// Every subcommand `Commands` declares, as clap will name it.
-///
-/// This list is what tells [`rewrite_llama_style_argv`] that `frink
-/// serve …` is a subcommand and not llama.cpp-style top-level flags.
-/// A subcommand missing from here does not fail loudly -- it is silently
-/// rewritten into `frink run …` and starts a *completion*. Adding a
-/// variant to `Commands` therefore means adding it here too, which
-/// `every_clap_subcommand_survives_the_argv_rewriter` enforces against
-/// clap's own subcommand list.
-const SUBCOMMANDS: &[&str] = &[
-    "run",
-    // llama.cpp's launcher spells `run` as `cli`, and the two
-    // informational commands it offers beside it. All three have to be
-    // here or the rewriter turns `frink version` into a completion
-    // whose prompt is the word "version".
-    "cli",
-    "version",
-    "licenses",
-    "pull",
-    "download",
-    "chat",
-    "serve",
-    "serve-bench",
-    "bench-bw",
-    "inspect",
-    "inspect-plan",
-    "presets",
-    "archs",
-    "caps",
-    "smoke",
-    "run-real",
-    "bench",
-    "batched-bench",
-    "verify",
-    "layer-divergence",
-    "quant-sensitivity",
-    "quantize",
-    "imatrix",
-    "gguf-split",
-    "splice-pooler",
-    "parity",
-    "perplexity",
-    "speculative",
-    "run-kimi",
-    "help",
-];
-
 // A backend feature on `frink` has to reach the server it links, or one
 // binary answers two different ways: `frink run --device metal` uses the
 // GPU and `frink serve --device metal` refuses with "built without
@@ -623,80 +585,6 @@ const _: () = assert!(
     "frink-cli's `cuda` feature must forward to frink-server: \
      cuda = [.., \"frink-server?/cuda\"]"
 );
-
-/// Root flags that take no value and may legally appear *before* a
-/// subcommand, because clap declares them `global = true`.
-const GLOBAL_FLAGS: &[&str] = &["--allow-multiple-instances"];
-
-/// Rewrite `frink -m …` into `frink run -m …` so llama.cpp-style
-/// top-level flags work without typing the `run` subcommand.
-fn rewrite_llama_style_argv(args: Vec<String>) -> Vec<String> {
-    let args: Vec<String> = args
-        .into_iter()
-        .map(|arg| match arg.as_str() {
-            "-ngl" => "--n-gpu-layers".into(),
-            "-dev" => "--device".into(),
-            // llama.cpp's parser is hand-written, so `-hf` is ONE
-            // token. clap reads it as `-h` plus `f` and prints help,
-            // which is what `frink serve -hf repo:Q4_K_M` did: it
-            // looked like the flag did not exist.
-            "-hf" => "--hf-repo".into(),
-            "-hff" => "--hf-file".into(),
-            // `llama-batched-bench`'s own spellings, for `batched-bench`.
-            "-npp" => "--n-pp".into(),
-            "-ntg" => "--n-tg".into(),
-            "-npl" => "--n-pl".into(),
-            "-pps" => "--pp-shared".into(),
-            "-tgs" => "--tg-separate".into(),
-            "-ub" => "--ubatch-size".into(),
-            "-kvu" => "--kv-unified".into(),
-            "-fa" => "--flash-attn".into(),
-            "-tb" => "--threads-batch".into(),
-            // llama.cpp 0.4's `-st` / `--single-turn`. Like `-hf` it is
-            // one token to its hand-written parser and two short flags
-            // to clap, and `-s` is already `--seed` here, so it cannot
-            // be a clap short at all.
-            //
-            // It does NOT mean `--no-cnv`: `-st` runs the conversation
-            // for one turn with the chat template applied, where
-            // `--no-cnv` skips the template entirely. An early version
-            // of this row mapped them together and changed the answer.
-            "-st" => "--single-turn".into(),
-            _ => arg,
-        })
-        .collect();
-    if args.len() < 2 {
-        return args;
-    }
-    // A `global = true` flag is allowed to precede the subcommand it
-    // applies to, so `frink --allow-multiple-instances serve` has to
-    // find `serve` at position 2. Without this skip the rewriter sees a
-    // flag, assumes llama.cpp style, and produces `frink run
-    // --allow-multiple-instances serve …`, which dies on "unexpected
-    // argument 'serve'". Only value-less root flags belong in this list
-    // -- one that took a value would make position 2 its value, not a
-    // subcommand.
-    let first_word = args
-        .iter()
-        .skip(1)
-        .position(|a| !GLOBAL_FLAGS.contains(&a.as_str()))
-        .map(|offset| offset + 1)
-        .unwrap_or(1);
-    let first = args[first_word].as_str();
-    if SUBCOMMANDS.contains(&first)
-        || first == "-h"
-        || first == "--help"
-        || first == "-V"
-        || first == "--version"
-    {
-        return args;
-    }
-    let mut out = Vec::with_capacity(args.len() + 1);
-    out.push(args[0].clone());
-    out.push("run".into());
-    out.extend(args.into_iter().skip(1));
-    out
-}
 
 /// Registers this process in the instance registry when the command is
 /// about to load a model, and refuses to start if another live frink
@@ -787,7 +675,12 @@ fn claim_instance(cli: &Cli) -> anyhow::Result<Option<frink_core::instance::Inst
 fn main() -> anyhow::Result<()> {
     init_rayon_threads();
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse_from(rewrite_llama_style_argv(std::env::args().collect()));
+    let argv = argv::rewrite_llama_style_argv(std::env::args().collect()).unwrap_or_else(|e| {
+        argv::built_cli()
+            .error(clap::error::ErrorKind::UnknownArgument, e)
+            .exit()
+    });
+    let cli = Cli::parse_from(argv);
 
     // BEFORE `claim_instance`, and that ordering is the whole point.
     //
@@ -806,6 +699,7 @@ fn main() -> anyhow::Result<()> {
             n_gpu_layers,
             suite,
             render,
+            model,
             ..
         } => {
             // `--suite` and `--render` do not benchmark in THIS process:
@@ -813,13 +707,15 @@ fn main() -> anyhow::Result<()> {
             // receipts, so applying a backend here would pin the parent
             // to one backend for children that each want their own.
             if !suite && !render {
-                bench_model::apply_env(*threads, *n_gpu_layers)?;
+                bench_model::apply_env(*threads, *n_gpu_layers, model.as_deref())?;
             }
         }
         // Same ordering constraint, same function: the batched bench
         // writes the same kind of receipt and is refused the same way
         // when the label and the backend disagree.
-        Commands::BatchedBench(args) => bench_model::apply_env(args.threads, args.n_gpu_layers)?,
+        Commands::BatchedBench(args) => {
+            bench_model::apply_env(args.threads, args.n_gpu_layers, Some(&args.model))?
+        }
         _ => {}
     }
 
@@ -1194,7 +1090,7 @@ fn main() -> anyhow::Result<()> {
                 // freeze the backend. Kept as a no-op call rather than
                 // deleted so a future caller of this arm cannot get an
                 // unconfigured process.
-                bench_model::apply_env(threads, n_gpu_layers)?;
+                bench_model::apply_env(threads, n_gpu_layers, Some(&model))?;
                 return bench_model::run(bench_model::BenchArgs {
                     model,
                     n_prompt,
@@ -1653,388 +1549,4 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod cli_tests {
-    use super::{rewrite_llama_style_argv, SUBCOMMANDS};
-
-    fn rewrite(argv: &[&str]) -> Vec<String> {
-        rewrite_llama_style_argv(argv.iter().copied().map(String::from).collect())
-    }
-
-    /// `try_parse_from`, not `parse_from`: clap's non-`try` parser exits
-    /// the *process* on a parse error, which takes the whole test binary
-    /// down with it and reports as "test exited abnormally" instead of
-    /// naming the test that broke.
-    fn parse_cli(argv: Vec<String>) -> super::Cli {
-        use clap::Parser;
-        super::Cli::try_parse_from(&argv)
-            .unwrap_or_else(|e| panic!("`{}` did not parse: {e}", argv.join(" ")))
-    }
-
-    /// Every subcommand clap knows about has to be in `SUBCOMMANDS`, or
-    /// the rewriter turns it into an implicit `run` and the user gets a
-    /// completion instead of the command they typed. This is a silent
-    /// failure -- no error, no clue -- so it is asserted structurally
-    /// against clap's own list rather than against a second hand-written
-    /// one that can drift the same way.
-    #[test]
-    fn every_clap_subcommand_survives_the_argv_rewriter() {
-        use clap::CommandFactory;
-        for sub in super::Cli::command().get_subcommands() {
-            let name = sub.get_name().to_string();
-            assert!(
-                SUBCOMMANDS.contains(&name.as_str()),
-                "subcommand `{name}` is missing from SUBCOMMANDS: `frink {name} …` would be \
-                 rewritten into an implicit `run`"
-            );
-            let rewritten = rewrite(&["frink", &name, "-m", "model.gguf"]);
-            assert_eq!(
-                rewritten[1], name,
-                "`frink {name}` must reach clap as `{name}`, not as `{}`",
-                rewritten[1]
-            );
-        }
-    }
-
-    /// `frink quantize --help` and `Target::ALL` are two structures that
-    /// must agree about which targets write, and for three PRs they did
-    /// not: the help said "Q8_0, plus Q4_K_S / Q4_K_M with --pure" while
-    /// the code wrote six targets, mixes included. So the help is checked
-    /// against the table: every target the policy accepts is named in
-    /// the subcommand's long help, and `--imatrix` is mentioned because
-    /// the encoders take one.
-    #[test]
-    fn the_quantize_help_names_every_target_the_policy_accepts() {
-        use clap::CommandFactory;
-        let cmd = super::Cli::command();
-        let quantize = cmd
-            .get_subcommands()
-            .find(|c| c.get_name() == "quantize")
-            .expect("quantize subcommand");
-        let help = quantize
-            .get_long_about()
-            .map(|s| s.to_string())
-            .expect("quantize has a long help");
-        for target in crate::quantize::policy::Target::ALL {
-            assert!(
-                help.contains(target.name()),
-                "quantize's help does not mention {}, which `--type` accepts",
-                target.name()
-            );
-        }
-        assert!(
-            help.contains("--imatrix"),
-            "quantize's help does not mention --imatrix"
-        );
-        assert!(
-            !help.contains("with `--pure`"),
-            "quantize's help still ties the K-quants to --pure"
-        );
-    }
-
-    /// The named case of the above, kept explicit because `serve` is the
-    /// one that would start a *completion* while the user waited for an
-    /// HTTP server: it prints tokens and exits 0, so a supervisor
-    /// watching for the `frink.server.ready` line just hangs.
-    #[test]
-    fn serve_is_not_rewritten_into_an_implicit_run() {
-        assert_eq!(
-            rewrite(&["frink", "serve", "-m", "model.gguf", "--port", "0"]),
-            ["frink", "serve", "-m", "model.gguf", "--port", "0"]
-        );
-    }
-
-    /// The rewriter still has to translate llama.cpp's multi-character
-    /// short options *inside* a `serve` invocation -- `frink-server`
-    /// accepted `-ngl`/`-dev`, so `frink serve` has to as well.
-    #[test]
-    fn serve_keeps_the_llama_style_short_options() {
-        assert_eq!(
-            rewrite(&["frink", "serve", "-ngl", "all", "-dev", "metal"]),
-            [
-                "frink",
-                "serve",
-                "--n-gpu-layers",
-                "all",
-                "--device",
-                "metal"
-            ]
-        );
-    }
-
-    /// `serve` must not claim a registry slot from here: the server
-    /// claims its own as `"server"`, and a second guard on the same pid
-    /// would deregister the live server when it dropped.
-    #[test]
-    fn serve_does_not_claim_the_instance_registry_from_the_cli_side() {
-        let cli = parse_cli(rewrite(&["frink", "serve", "-m", "model.gguf"]));
-        assert!(
-            super::instance_target(&cli.command).is_none(),
-            "`frink serve` must leave the registry to frink_server::run_server"
-        );
-
-        // The other half of the invariant: a completion run still
-        // registers, so this test fails if `instance_target` were
-        // "fixed" by making it return None for everything.
-        let cli = parse_cli(rewrite(&["frink", "-m", "model.gguf"]));
-        assert_eq!(
-            super::instance_target(&cli.command).map(|(c, _)| c),
-            Some("run")
-        );
-    }
-
-    /// Flag parity with the standalone binary, asserted against
-    /// `ServerArgs` itself rather than against the documented subset:
-    /// `docs/CLI.md` lists eight of the eleven flags and reads as
-    /// exhaustive, so a `serve` written from the docs would ship a
-    /// downgrade nobody noticed.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn serve_exposes_every_flag_frink_server_has() {
-        use clap::CommandFactory;
-        let ids = |cmd: &clap::Command| -> std::collections::BTreeSet<String> {
-            cmd.get_arguments()
-                .map(|a| a.get_id().to_string())
-                .filter(|id| id != "help" && id != "version")
-                .collect()
-        };
-        let standalone = ids(&frink_server::ServerArgs::command());
-        let root = super::Cli::command();
-        let serve = ids(root.find_subcommand("serve").expect("serve subcommand"));
-        assert!(
-            standalone.is_subset(&serve),
-            "`frink serve` is missing flags `frink-server` accepts: {:?}",
-            standalone.difference(&serve).collect::<Vec<_>>()
-        );
-    }
-
-    /// Parity of *values*, not just of flag names: every flag has to
-    /// land in the same field with the same value it would have reached
-    /// through `frink-server`'s own argv path. `--port 0` is in here on
-    /// purpose -- it is a request for a kernel-assigned port, and a
-    /// front end that dropped it would silently serve on 8383.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn serve_parses_the_same_command_line_as_frink_server() {
-        use clap::Parser;
-        let flags = [
-            "-m",
-            "model.gguf",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "0",
-            "-t",
-            "4",
-            "--device",
-            "metal",
-            "--n-gpu-layers",
-            "all",
-            "--mcp-config",
-            "mcp.json",
-            "--exit-on-stdin-close",
-            "--allow-multiple-instances",
-        ];
-
-        let standalone =
-            frink_server::ServerArgs::try_parse_from(std::iter::once("frink-server").chain(flags))
-                .expect("frink-server accepts this command line");
-
-        let mut argv = vec!["frink".to_string(), "serve".to_string()];
-        argv.extend(flags.iter().map(|f| f.to_string()));
-        let cli = parse_cli(rewrite_llama_style_argv(argv));
-        let super::Commands::Serve(via_cli) = cli.command else {
-            panic!("`frink serve …` did not parse as the serve subcommand");
-        };
-
-        assert_eq!(via_cli, standalone);
-    }
-
-    /// `--allow-multiple-instances` is declared `global = true`, so both
-    /// sides of the subcommand are legal places to type it and both have
-    /// to reach the server -- if the leading form silently did nothing,
-    /// the server would refuse to start on a host where the operator
-    /// had already said a second instance was fine.
-    ///
-    /// Two mechanisms make it work, one of them not ours: the argv
-    /// rewriter must not mistake the leading flag for llama.cpp-style
-    /// argv (it used to, see the test below), and clap propagates the
-    /// root global's *value* into the subcommand's own flag because both
-    /// carry the id `allow_multiple_instances`. That second half is
-    /// clap's behaviour, not a guarantee we wrote, which is exactly why
-    /// it is pinned here: rename either side and this test fails while
-    /// nothing else would.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn allow_multiple_instances_reaches_serve_from_either_side_of_the_subcommand() {
-        use clap::Parser;
-        let expected = frink_server::ServerArgs::try_parse_from([
-            "frink-server",
-            "-m",
-            "model.gguf",
-            "--allow-multiple-instances",
-        ])
-        .unwrap();
-
-        for argv in [
-            &[
-                "frink",
-                "serve",
-                "-m",
-                "model.gguf",
-                "--allow-multiple-instances",
-            ][..],
-            &[
-                "frink",
-                "--allow-multiple-instances",
-                "serve",
-                "-m",
-                "model.gguf",
-            ][..],
-        ] {
-            let cli = parse_cli(rewrite(argv));
-            assert!(
-                cli.allow_multiple_instances,
-                "`{}` did not set the root flag",
-                argv.join(" ")
-            );
-            let super::Commands::Serve(args) = cli.command else {
-                panic!("`{}` did not parse as the serve subcommand", argv.join(" "));
-            };
-            assert_eq!(
-                args,
-                expected,
-                "`{}` did not reach the server as an opt-in",
-                argv.join(" ")
-            );
-        }
-    }
-
-    /// The rewriter half of the above, stated on its own: a global flag
-    /// before the subcommand must not turn the subcommand into an
-    /// argument of an implicit `run`.
-    #[test]
-    fn a_global_flag_before_a_subcommand_does_not_trigger_the_run_rewrite() {
-        assert_eq!(
-            rewrite(&[
-                "frink",
-                "--allow-multiple-instances",
-                "serve",
-                "-m",
-                "x.gguf"
-            ]),
-            [
-                "frink",
-                "--allow-multiple-instances",
-                "serve",
-                "-m",
-                "x.gguf"
-            ]
-        );
-        // …and llama.cpp-style argv behind the same flag still gets it.
-        assert_eq!(
-            rewrite(&["frink", "--allow-multiple-instances", "-m", "x.gguf"]),
-            ["frink", "run", "--allow-multiple-instances", "-m", "x.gguf"]
-        );
-    }
-
-    /// `--list-devices` is the flag that is easiest to lose, because it
-    /// exits before anything is served and so no smoke test covers it.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn serve_accepts_list_devices_on_its_own() {
-        use clap::Parser;
-        let cli = parse_cli(rewrite(&["frink", "serve", "--list-devices"]));
-        let super::Commands::Serve(args) = cli.command else {
-            panic!("not the serve subcommand");
-        };
-        assert_eq!(
-            args,
-            frink_server::ServerArgs::try_parse_from(["frink-server", "--list-devices"]).unwrap()
-        );
-    }
-
-    /// Without the feature the subcommand still exists and still
-    /// swallows the server's flags, so the user gets the sentence that
-    /// names the fix instead of clap's "unrecognized subcommand".
-    #[cfg(not(feature = "serve"))]
-    #[test]
-    fn serve_without_the_feature_explains_itself_instead_of_erroring_out_of_clap() {
-        let cli = parse_cli(rewrite(&["frink", "serve", "-m", "model.gguf"]));
-        let super::Commands::Serve { args } = cli.command else {
-            panic!("`frink serve …` did not parse as the serve subcommand");
-        };
-        assert_eq!(args, ["-m", "model.gguf"]);
-        assert!(super::SERVE_FEATURE_MISSING.contains("serve is on by default"));
-    }
-
-    #[test]
-    fn rewrites_llama_multi_character_short_options() {
-        let args = ["frink", "-m", "model.gguf", "-dev", "none", "-ngl", "0"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(
-            rewrite_llama_style_argv(args),
-            [
-                "frink",
-                "run",
-                "-m",
-                "model.gguf",
-                "--device",
-                "none",
-                "--n-gpu-layers",
-                "0"
-            ]
-        );
-    }
-
-    /// **`-st` is not `--no-cnv`.**
-    ///
-    /// llama.cpp 0.4 dropped `--no-cnv` and offers `-st` /
-    /// `--single-turn`, and the two are easy to read as synonyms.
-    /// They are not: `-st` runs the CONVERSATION for one turn, with
-    /// the chat template applied, where `--no-cnv` skips the template
-    /// entirely.
-    ///
-    /// An early version of that rewriter row mapped them together,
-    /// and it changed the answer -- measured on the same prompt and
-    /// the same file, the templated reply is "The capital of France
-    /// is Paris." and the raw one continues " Paris\nThe capital city
-    /// of France is...". Nothing would have caught that but reading
-    /// two outputs side by side, which is why it is a test now.
-    #[test]
-    fn single_turn_keeps_the_chat_template() {
-        let out = rewrite(&["frink", "-m", "model.gguf", "-p", "hi", "-st"]);
-        assert!(
-            out.contains(&"--single-turn".to_string()),
-            "-st must reach the single-turn flag: {out:?}"
-        );
-        assert!(
-            !out.contains(&"--no-cnv".to_string()),
-            "-st must NOT become --no-cnv: it keeps the chat template, \
-             and mapping the two together changes the generated text: {out:?}"
-        );
-    }
-
-    /// And the two flags stay distinct at the clap layer, so neither
-    /// is an alias of the other.
-    #[test]
-    fn single_turn_and_no_cnv_are_separate_flags() {
-        use clap::CommandFactory;
-        let run = crate::Cli::command();
-        let run = run
-            .get_subcommands()
-            .find(|c| c.get_name() == "run")
-            .expect("run subcommand");
-        let names: Vec<&str> = run
-            .get_arguments()
-            .filter_map(|a| a.get_long())
-            .filter(|l| *l == "no-cnv" || *l == "single-turn")
-            .collect();
-        assert_eq!(
-            names.len(),
-            2,
-            "both flags must exist independently, found {names:?}"
-        );
-    }
-}
+mod cli_tests;

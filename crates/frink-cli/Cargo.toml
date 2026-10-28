@@ -20,7 +20,7 @@ frink-quant = { workspace = true }
 frink-cuda = { workspace = true }
 frink-metal = { workspace = true }
 half = { workspace = true }
-frink-core = { workspace = true }
+frink-core = { workspace = true, features = ["argv"] }
 frink-models = { workspace = true, features = ["hub"] }
 frink-safetensors = { workspace = true }
 # Optional, and off by default -- see the `serve` feature below.
