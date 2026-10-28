@@ -108,7 +108,7 @@ content closed, and when it is, the content says which parts.
 
 Two items are big enough to have their own design document:
 
-- [`model-layer-reorg.md`](../model-layer-reorg.md), splitting the
+- [`model-layer-reorg.md`](model-layer-reorg.md), splitting the
   decoder so architectures scale. It was 6438 lines when that document
   was written and is 6702 today, the first time it has shrunk.
 - [`out-of-core-moe.md`](../out-of-core-moe.md), running a 155 GB model on

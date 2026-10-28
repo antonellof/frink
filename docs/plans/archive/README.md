@@ -20,6 +20,7 @@ open work.
 | `one-binary-serve.md` | 1 item: the cross-target gate, half landed | Theme F |
 | `project-status-2026-09.md` | Not a plan: the September closure log, moved out of `../README.md` | The dated status in `../README.md` |
 | `roadmap-2026-09.md` | The single roadmap of 2026-09-02: 20 items in themes A to H, merged from the first five plans in this table | Archived 2026-10-28 with several pending items landed; open work is GitHub issues, ranked by `../north-star.md` |
+| `model-layer-reorg.md` | Making an architecture a new file: the decoration audit, the shared `attn_block`, the 2026-10-28 file splits | Superseded by `../arch-registry-migration.md` (ADR 0003) |
 | `metal-parallel-concurrency.md` | Metal parallel decode and the continuous-batching prefill fix | Shipped in 0.15.2 (#47) and 0.15.3 |
 | `llama-cpp-full-parity-audit-2026-09-02.md` | Not a plan: a file-by-file llama.cpp to frink map, a parity sweep and a priority list | Superseded by `../parity-audit-2026-09-19.md` and `../parity-audit-2026-10-28.md` |
 | `llama-cpp-parity-review-2026-09-02.md` | Not a plan: the ranked next actions for llama.cpp parity as a serving and CLI stack | Its actions landed or moved to the roadmap; the current audits supersede it |

@@ -141,7 +141,7 @@ Align: `-n` default (-1 = EOS), `-cnv`/`-no-cnv`, `-sys` spelling, `-hf` on run 
 
 ## P2 — Architecture scale
 
-- **Model layer reorg** ([`model-layer-reorg.md`](../model-layer-reorg.md)) — prerequisite for 140-arch maintenance
+- **Model layer reorg** ([`model-layer-reorg.md`](model-layer-reorg.md)) — prerequisite for 140-arch maintenance
 - **Out-of-core MoE** — separate track
 - **Vulkan** — verdict GO; backend seam refactor pending
 

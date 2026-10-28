@@ -47,4 +47,5 @@ fixture, one golden. Reviewers compare `models/<arch>.rs` against
 `src/models/<arch>.cpp` side by side. The triage prose in
 `capability.rs` moves to the triage test and shrinks to one line per
 row. This supersedes the open half of
-`docs/plans/model-layer-reorg.md`.
+`docs/plans/archive/model-layer-reorg.md`; the steps are in
+`docs/plans/arch-registry-migration.md`.
