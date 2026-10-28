@@ -20,7 +20,7 @@ request that arrives mid-generation is admitted on the next tick and
 joins the same decode step as the rows already running; it does not
 wait for them to finish.
 
-- Admission: `worker.rs:61` (`admit`), capped by both a sequence count
+- Admission: `worker.rs:62` (`admit`), capped by both a sequence count
   and a block budget (`block_budget.rs`). A head job that does not fit
   stops the line rather than being skipped, because skipping on SIZE
   is a starvation bug.
@@ -49,6 +49,53 @@ make room for a waiting one; admission refuses instead and the request
 queues. `serving/mod.rs:11` records why the scheduling quantum is a
 chunk duration, which is the related half.
 
+### The per-step token budget
+
+A tick runs one prefill chunk and then one decode step over every
+in-flight row. The chunk was a CONSTANT and the decode step is
+`rows.len()` tokens wide, so a tick cost `chunk + rows`, growing with
+the batch, and nothing bounded the pair.
+
+That cost lands on the wrong request: every decoding row waits out the
+whole prefill chunk before its next token, so admitting one prompt
+raises inter-token latency for everybody already answering, and the
+more rows are decoding the more waiting the same chunk causes. The
+knob that bounds it cannot exist while prefill and decode are budgeted
+separately, because the quantity to bound is their SUM.
+
+The high-throughput serving engines answer this with one budget per
+step, spent by prompt tokens and generated tokens alike, with no phase
+distinction. `serving/batch/step_budget.rs` is that at this worker's
+shape: the decode width is known before the prefill chunk runs, so the
+chunk takes what is left of `max_batch_tokens`
+(`step_budget.rs:55`, `FRINK_CB_MAX_BATCH_TOKENS`) rather than a fixed
+number.
+
+Two properties, both tested rather than argued:
+
+- **It can only take work away.** The configured `prefill_chunk` stays
+  the ceiling, so a server tuned by that knob keeps its meaning, and a
+  tick never costs more than it did before.
+- **It cannot deadlock.** A budget alone does: once enough rows are
+  decoding the remainder is zero, no prompt advances, and the rows that
+  would free the budget wait on a prompt that never runs.
+  `MIN_PREFILL_CHUNK` (`step_budget.rs:63`) is the floor, driven to
+  completion by `a_saturated_batch_still_advances_its_prompts` rather
+  than read off the constant.
+
+The floor means the budget is a TARGET and not a cap: a batch wider
+than the budget still costs `rows + MIN_PREFILL_CHUNK`. Bounding it
+strictly would mean preempting a decoding row, which this engine does
+not do.
+
+**The first version of the test asserted the wrong property.** It said
+per-tick work was FLAT, and it is not: at a narrow batch the
+configured chunk binds rather than the budget, so a tick costs
+`rows + chunk` there and `max_batch_tokens` once the budget starts
+binding. The test failed and the claim was wrong, which is the same
+lesson `cache_aware`'s "reordering alone saves nothing" already
+carries.
+
 ## Paged KV
 
 **Implemented.** `crates/frink-core/src/cache.rs` is the store:
@@ -62,7 +109,7 @@ are returned when it ends.
   sliding-window model (`ForkRefused::SlidingWindow`), because two
   sequences recycling out of one page set is a use-after-free that
   reads as another position's tokens.
-- Chunked prefill: `serving/batch/prefill.rs:144`, with a test pinning
+- Chunked prefill: `serving/batch/prefill.rs:158`, with a test pinning
   that chunking does not change the logits.
 - Quantized KV wires: `f16`, `q8_0`, `fp8`, `q4`, the last with a
   Hadamard rotation on K.

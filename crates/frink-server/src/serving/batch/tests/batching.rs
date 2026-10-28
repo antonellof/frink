@@ -422,18 +422,24 @@ fn prefill_step_chunk_is_bounded_and_resumable() {
     assert_eq!(state.tokens_remaining(), 7);
     assert_eq!(state.tokens_processed(), 0);
 
-    assert!(!state.step_chunk());
+    assert!(!state.step_chunk(state.chunk_ceiling()));
     assert_eq!(state.tokens_processed(), 3, "a chunk may not overrun");
     assert_eq!(state.tokens_remaining(), 4);
 
-    assert!(!state.step_chunk());
+    assert!(!state.step_chunk(state.chunk_ceiling()));
     assert_eq!(state.tokens_processed(), 6);
 
-    assert!(state.step_chunk(), "final short chunk finishes the prompt");
+    assert!(
+        state.step_chunk(state.chunk_ceiling()),
+        "final short chunk finishes the prompt"
+    );
     assert_eq!(state.tokens_processed(), 7);
     assert_eq!(state.tokens_remaining(), 0);
     assert!(state.is_done());
-    assert!(state.step_chunk(), "stepping a finished prefill is a no-op");
+    assert!(
+        state.step_chunk(state.chunk_ceiling()),
+        "stepping a finished prefill is a no-op"
+    );
     assert_eq!(state.tokens_processed(), 7);
 }
 
@@ -444,7 +450,7 @@ fn empty_prompt_prefills_one_stand_in_token() {
     let decoder = tiny_decoder();
     let mut state = PrefillState::new(Arc::clone(&decoder), &[], 4);
     assert_eq!(state.tokens_remaining(), 1);
-    assert!(state.step_chunk());
+    assert!(state.step_chunk(state.chunk_ceiling()));
     let (_caches, logits, pos, _ids) = state.into_decode_start();
     assert_eq!(pos, 1);
     assert_eq!(logits.len(), decoder.config.vocab_size);
@@ -469,7 +475,7 @@ fn prefill_chunking_does_not_change_logits() {
 
     for chunk in [1usize, 2, 5, 11, 64] {
         let mut state = PrefillState::new(Arc::clone(&decoder), &prompt, chunk);
-        while !state.step_chunk() {}
+        while !state.step_chunk(state.chunk_ceiling()) {}
         let (_caches, logits, pos, _ids) = state.into_decode_start();
         assert_eq!(pos, prompt.len());
         assert_eq!(logits.len(), sequential.len());

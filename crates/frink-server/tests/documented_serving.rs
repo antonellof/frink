@@ -47,7 +47,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     // Continuous batching.
     (
         "crates/frink-server/src/serving/batch/worker.rs",
-        61,
+        62,
         "fn admit",
     ),
     // Paged KV.
@@ -55,8 +55,19 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ("crates/frink-server/src/generate.rs", 415, "fn fork"),
     (
         "crates/frink-server/src/serving/batch/prefill.rs",
-        144,
+        158,
         "fn step_chunk",
+    ),
+    // Per-step token budget.
+    (
+        "crates/frink-server/src/serving/batch/step_budget.rs",
+        55,
+        "DEFAULT_MAX_BATCH_TOKENS",
+    ),
+    (
+        "crates/frink-server/src/serving/batch/step_budget.rs",
+        63,
+        "MIN_PREFILL_CHUNK",
     ),
     // Prefix caching.
     (

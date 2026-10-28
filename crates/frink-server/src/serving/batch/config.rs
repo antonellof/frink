@@ -62,6 +62,12 @@ pub struct BatcherConfig {
     pub max_seqs: usize,
     /// Prompt tokens per `PrefillState::step_chunk` call.
     pub prefill_chunk: usize,
+    /// Tokens one tick may run, prompt and generated together.
+    ///
+    /// The prefill chunk is sized against this minus the decode width,
+    /// so a tick's cost stays near it instead of growing with the
+    /// batch. See [`super::step_budget`].
+    pub max_batch_tokens: usize,
     /// Jobs that may wait for admission before new ones are refused.
     pub max_queue: usize,
     /// Token positions per KV block, the admission quantum.
@@ -79,6 +85,7 @@ impl Default for BatcherConfig {
         BatcherConfig {
             max_seqs: usize::MAX,
             prefill_chunk: DEFAULT_PREFILL_CHUNK,
+            max_batch_tokens: super::step_budget::DEFAULT_MAX_BATCH_TOKENS,
             max_queue: DEFAULT_MAX_QUEUE,
             kv_block_size: DEFAULT_KV_BLOCK_SIZE,
             kv_blocks: None,
@@ -95,6 +102,8 @@ impl BatcherConfig {
                 crate::prefill_batch::PREFILL_CHUNK_ENV_KEYS[crate::prefill_batch::BATCH_PATH_KEY],
             )
             .unwrap_or(DEFAULT_PREFILL_CHUNK),
+            max_batch_tokens: env_positive("FRINK_CB_MAX_BATCH_TOKENS")
+                .unwrap_or(super::step_budget::DEFAULT_MAX_BATCH_TOKENS),
             max_queue: env_positive("FRINK_CB_MAX_QUEUE").unwrap_or(DEFAULT_MAX_QUEUE),
             kv_block_size: env_positive("FRINK_CB_KV_BLOCK_SIZE").unwrap_or(DEFAULT_KV_BLOCK_SIZE),
             kv_blocks: env_positive("FRINK_CB_KV_BLOCKS"),
