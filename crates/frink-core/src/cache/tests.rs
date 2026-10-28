@@ -518,10 +518,39 @@ fn an_unarmed_cache_never_drops_a_row() {
 }
 
 /// Speculative decoding rolls the cache back by the number of
-/// rejected draft tokens. That is representable while the target is
-/// still resident.
+/// rejected draft tokens. That is representable as long as what is left
+/// still covers the window the next query reads, which the window's
+/// rollback reserve guarantees for up to `max_rollback` positions.
 #[test]
-fn truncate_still_works_inside_the_resident_window() {
+fn truncate_still_works_inside_the_rollback_reserve() {
+    let window = KvWindow::new(8, 3)
+        .and_then(|w| w.with_reserve(3))
+        .expect("reserve inside the slack");
+    assert_eq!(window.max_rollback(), 4);
+    let mut cache = KvCache::new(1, 2);
+    cache.arm_window(window);
+    let step = vec![1.0f32; 2];
+    for _ in 0..50 {
+        cache.push(&step, &step).expect("unbounded growth");
+        cache.evict_behind_window();
+    }
+    assert_eq!(cache.rollback_limit(), 4);
+    let rows_before = cache.rows();
+    assert!(cache.can_truncate_to(46));
+    cache.truncate(46);
+    assert_eq!(cache.positions(), 46);
+    assert_eq!(cache.rows(), rows_before - 4);
+}
+
+/// **What shipped before the reserve.** A window with no reserve that
+/// had just drained to 10 rows let a truncate take it back four
+/// positions, to 6 rows, and the next query on an 8-row window reads 7
+/// behind itself. Nothing panicked; the next token was answered across
+/// a one-row hole. The rows were resident, so the old check
+/// (`dropped <= rows`) passed. `can_truncate_to` now asks the question
+/// the next query depends on, and says no.
+#[test]
+fn a_rollback_that_would_leave_a_hole_in_the_window_is_refused() {
     let window = KvWindow::new(8, 3).expect("positive window");
     let mut cache = KvCache::new(1, 2);
     cache.arm_window(window);
@@ -530,10 +559,76 @@ fn truncate_still_works_inside_the_resident_window() {
         cache.push(&step, &step).expect("unbounded growth");
         cache.evict_behind_window();
     }
-    let rows_before = cache.rows();
-    cache.truncate(46);
-    assert_eq!(cache.positions(), 46);
-    assert_eq!(cache.rows(), rows_before - 4);
+    assert_eq!(cache.rows(), 10, "the fixture must sit just after a drain");
+    assert!(
+        cache.can_truncate_to(47),
+        "three back leaves the 7 rows it reads"
+    );
+    assert!(
+        !cache.can_truncate_to(46),
+        "four back leaves 6 rows under a query that reads 7"
+    );
+    assert_eq!(cache.rollback_limit(), 1);
+}
+
+/// The speculative pattern end to end on a real cache: write a block,
+/// let the drain run, reject part of it, and continue. At every step the
+/// rows a windowed kernel reads must be byte-for-byte the rows an
+/// unwindowed cache would hand it, which is the token-identity argument
+/// made on the store itself rather than through a model.
+#[test]
+fn a_speculative_write_and_rollback_reads_what_an_unwindowed_cache_reads() {
+    let window = KvWindow::with_default_slack(12).expect("positive window");
+    let block = window.max_rollback();
+    let (n_kv_heads, head_dim) = (1usize, 2usize);
+    let per = n_kv_heads * head_dim;
+    let mut evicting = KvCache::new(n_kv_heads, head_dim);
+    evicting.arm_window(window);
+    let mut plain = KvCache::new(n_kv_heads, head_dim);
+    let row = |p: usize, salt: usize| -> Vec<f32> {
+        (0..per)
+            .map(|i| (p * 1000 + salt * 10 + i) as f32)
+            .collect()
+    };
+    let mut pos = 0usize;
+    for round in 0..60usize {
+        assert!(evicting.rollback_limit() >= block);
+        // A draft block, some of which is rejected: `round % (block + 1)`
+        // of it is kept, so every rejection depth is exercised.
+        for i in 0..block {
+            let k = row(pos + i, round);
+            for c in [&mut evicting, &mut plain] {
+                c.push(&k, &k).expect("unbounded growth");
+            }
+        }
+        evicting.evict_behind_window();
+        let keep = round % (block + 1);
+        let target = pos + keep;
+        assert!(evicting.can_truncate_to(target), "round {round}");
+        evicting.truncate(target);
+        plain.truncate(target);
+        // The next real token.
+        let k = row(target, 999);
+        for c in [&mut evicting, &mut plain] {
+            c.push(&k, &k).expect("unbounded growth");
+        }
+        evicting.evict_behind_window();
+        pos = target + 1;
+
+        let read = window.window().min(pos);
+        let e = evicting.k.as_f32().unwrap();
+        let p = plain.k.as_f32().unwrap();
+        assert!(
+            evicting.rows() >= read,
+            "round {round}: a hole in the window"
+        );
+        assert_eq!(
+            &e[(evicting.rows() - read) * per..],
+            &p[(plain.rows() - read) * per..],
+            "round {round}: the read set diverged"
+        );
+        assert!(evicting.rows() <= window.max_rows() + block);
+    }
 }
 
 /// ...and stops, loudly, when it is not. A cache that rolled back to
@@ -638,4 +733,44 @@ fn an_evicting_pooled_cache_never_hands_its_capacity_back_to_reacquire_it() {
     );
     assert_eq!(cache.positions(), 512);
     assert!(cache.rows() <= 5);
+}
+
+/// A cache marked to keep every row ignores the window its layer has,
+/// which is what the paged prefill's scratch copy needs: the scatter
+/// after the forward reads rows back by offset. Its clone is a new
+/// holder and may window again.
+#[test]
+fn a_cache_that_forbids_eviction_keeps_every_row_and_its_clone_does_not() {
+    let window = KvWindow::new(4, 1).expect("positive window");
+    let mut cache = KvCache::new(1, 2);
+    cache.forbid_eviction();
+    cache.arm_window(window);
+    assert!(cache.window().is_none(), "a forbidden cache must not arm");
+    let step = vec![1.0f32; 2];
+    for _ in 0..20 {
+        cache.push(&step, &step).expect("unbounded growth");
+        assert_eq!(cache.evict_behind_window(), 0);
+    }
+    assert_eq!(cache.rows(), 20);
+
+    let mut copy = cache.clone();
+    copy.arm_window(window);
+    assert_eq!(copy.window(), Some(window), "a clone drops the mark");
+    assert!(copy.evict_behind_window() > 0);
+}
+
+/// Forbidding eviction after rows have gone would leave an unarmed
+/// cache holding fewer rows than positions, which every reader of an
+/// unarmed cache takes as a whole history.
+#[test]
+#[should_panic(expected = "already dropped")]
+fn forbidding_eviction_after_rows_have_gone_is_refused() {
+    let mut cache = KvCache::new(1, 2);
+    cache.arm_window(KvWindow::new(4, 1).expect("positive window"));
+    let step = vec![1.0f32; 2];
+    for _ in 0..20 {
+        cache.push(&step, &step).expect("unbounded growth");
+        cache.evict_behind_window();
+    }
+    cache.forbid_eviction();
 }

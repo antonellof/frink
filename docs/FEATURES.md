@@ -379,18 +379,25 @@ OpenAI-compatible HTTP API:
   drifts a window past it. An alternating-SWA model (gpt-oss,
   Gemma-3) does not slide *there*: a page group holds one block in
   every layer, and the full-attention layers still read position 0
-- On the contiguous host store, eviction is per layer, so the
-  alternating models do get it: each layer's `KvCache` carries its own
-  window from `attention.sliding_window` /
-  `attention.sliding_window_pattern` and drops the rows behind it, while
-  the full-attention layers keep everything. Off unless
-  `FRINK_KV_WINDOW` is set, and it turns itself off under Metal
-  attention, on a draft model, and beside the prefix cache. Output is
-  token-identical with it on or off, asserted on logits as well as token
-  ids against gemma-2-2b-it-Q4_K_M. `--ctx-size auto` and the pre-load
-  admission check are priced against the same per-layer residency the
-  stores evict with, so the saving is context a user is actually offered
-  rather than memory nothing spends. See [`CONFIG.md`](CONFIG.md)
+- On the contiguous host store, eviction is per layer and on by
+  default, so the alternating models get it: each layer's `KvCache`
+  carries its own window from `attention.sliding_window` and
+  `attention.sliding_window_pattern` (or the file's per-layer array) and
+  keeps only `window` rows plus slack, while the full-attention layers
+  keep everything. Gemma-3-4B at a 32k context holds 1.68 GiB of host
+  f32 KV instead of 9.13 GiB. Speculative decoding, the prefix cache and
+  `n > 1` forks all work on an evicting cache: a drain keeps a rollback
+  reserve and drafts are bounded by it, and a prefix-cache match deeper
+  than the cache can truncate to is a miss rather than a history with a
+  hole in it. `FRINK_KV_WINDOW=0` keeps every row. It turns itself off
+  under `FRINK_METAL_ATTN` and on a draft model, and the paged store and
+  the KV pool do not evict. Output is token-identical with it on or off,
+  asserted on logits as well as token ids against gemma-2-2b-it-Q4_K_M
+  and through rejected drafts on a fixture decoding several windows
+  past the end. `--ctx-size auto` and the pre-load admission check are
+  priced against the same per-layer residency the stores evict with, so
+  the saving is context a user is actually offered rather than memory
+  nothing spends. See [`CONFIG.md`](CONFIG.md)
 - `frink serve-bench`: concurrency, TTFT, TPOT and queueing numbers
   for a live server, with the methodology (positional split, pooled
   nearest-rank percentiles, whole-run throughput) tested socket-free.

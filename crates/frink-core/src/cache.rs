@@ -199,6 +199,21 @@ pub struct KvCache {
     /// that eviction is *safe for this run* lives in
     /// `frink_models::decoder::kv_window`. See [`Self::arm_window`].
     window: Option<KvWindow>,
+    /// Set on a cache whose holder needs every row it was pushed, so
+    /// [`Self::arm_window`] must not arm it whatever the layer's window
+    /// is. Three holders today, each of which reads the rows back as a
+    /// whole history rather than attending over them:
+    ///
+    /// - the paged prefill's gathered scratch copy
+    ///   ([`PagedKvCache::to_contiguous`]): the forward appends the
+    ///   prompt's rows to it and the scatter then copies rows
+    ///   `seq_len..` back into the page store by offset. Evicting the
+    ///   scratch's front would shift every one of those rows, and the
+    ///   scatter would copy the wrong rows or panic on a short buffer;
+    /// - a slot save's prefill, whose file holds one row per position;
+    /// - `frink layer-divergence`, which compares every row with a
+    ///   device copy that does not evict.
+    eviction_forbidden: bool,
     /// A recurrent layer's state (`crate::recurrent_state`), `None` for
     /// every attention layer and for a recurrent layer's sequence that
     /// has not run a token yet. Created by the layer's block at the
@@ -231,6 +246,11 @@ impl Clone for KvCache {
             // and pretending otherwise would let the clone's
             // `positions` be read as a row count again.
             window: self.window,
+            // Reset, not carried: the mark is about one holder reading
+            // rows back by offset, and a clone is a new holder. A clone
+            // of a cache that has never evicted is a whole history, and
+            // a decoder may window it from here like any other.
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             recurrent: self.recurrent.clone(),
@@ -344,6 +364,7 @@ impl KvCache {
             planned_capacity: None,
             pool_state: None,
             window: None,
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             recurrent: None,
@@ -374,6 +395,7 @@ impl KvCache {
             planned_capacity: Some(max_seq_len),
             pool_state: None,
             window: None,
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             recurrent: None,
@@ -440,6 +462,7 @@ impl KvCache {
                 blocks_held: blocks_needed,
             }),
             window: None,
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             recurrent: None,
@@ -555,8 +578,57 @@ impl KvCache {
     /// over the whole prefix and has no "one token ago"
     /// (`crate::recurrent_state`). Every caller that rolls a cache back
     /// to a middle position asks this first, or is fenced off the model.
+    ///
+    /// For a windowed cache (#61), only while the rows left behind still
+    /// cover the window the next query reads
+    /// ([`KvWindow::rows_needed_at`]). A cache that has drained to
+    /// `window` rows and is rolled back `d` positions would otherwise
+    /// hand the next query `d - 1` rows fewer than the model attends
+    /// over, with nothing to say so. [`Self::rollback_limit`] is how far
+    /// a caller may plan to roll back before it writes.
     pub fn can_truncate_to(&self, new_seq_len: usize) -> bool {
-        self.recurrent.is_none() || new_seq_len == 0 || new_seq_len == self.positions
+        if new_seq_len > self.positions {
+            return false;
+        }
+        let recurrent_ok =
+            self.recurrent.is_none() || new_seq_len == 0 || new_seq_len == self.positions;
+        let dropped = self.positions - new_seq_len;
+        let rows = self.rows();
+        // Only a windowed cache can hold fewer rows than positions. An
+        // unwindowed one with no rows at all is a recurrent layer's,
+        // whose history is its state and not its rows.
+        let window_ok = match self.window {
+            None => true,
+            Some(w) => {
+                dropped <= rows
+                    && (new_seq_len == 0 || rows - dropped >= w.rows_needed_at(new_seq_len))
+            }
+        };
+        recurrent_ok && window_ok
+    }
+
+    /// How many of the positions written from now on a later
+    /// [`Self::truncate`] is guaranteed to be able to undo.
+    ///
+    /// The question a speculative decoder asks BEFORE it writes a draft
+    /// block, because asking [`Self::can_truncate_to`] afterwards is too
+    /// late: the rows are written and some of them are already wrong.
+    ///
+    /// - Unbounded for an ordinary attention cache: its rows are a
+    ///   history.
+    /// - Zero for one holding a recurrent state, which is a reduction
+    ///   over the whole prefix with no "one token ago".
+    /// - [`KvWindow::max_rollback`] for a windowed one, because the
+    ///   drain may run between the write and the rollback and only the
+    ///   window's reserve is kept for it.
+    pub fn rollback_limit(&self) -> usize {
+        if self.recurrent.is_some() {
+            return 0;
+        }
+        match self.window {
+            None => usize::MAX,
+            Some(w) => w.max_rollback(),
+        }
     }
 
     /// Rolls the cache back to exactly `new_seq_len` positions,
@@ -564,20 +636,20 @@ impl KvCache {
     /// decoded draft tokens that turned out wrong: their K/V were
     /// already pushed during batched verification, and rejection means
     /// removing them so the next real decode step continues from the
-    /// last *accepted* position, not the last *attempted* one.
-    /// Rolls the cache back to exactly `new_seq_len` POSITIONS.
+    /// last *accepted* position, not the last *attempted* one. The
+    /// target is in POSITIONS.
     ///
-    /// A windowed cache can only roll back into rows it still holds. A
-    /// target further back than [`Self::rows`] names a position this
-    /// cache dropped behind its window, and there is no honest thing to
-    /// return for it -- so it stops, rather than silently rolling back
-    /// to the oldest row it happens to have and answering the next
-    /// token out of a history with a hole in it.
+    /// A windowed cache can only roll back into rows it still holds, and
+    /// only as far as leaves the window the next query reads still
+    /// resident ([`Self::can_truncate_to`]). Further back names a
+    /// position this cache dropped, or leaves a hole the next query
+    /// would attend across, and there is no honest thing to return for
+    /// either. So it stops, rather than silently answering the next
+    /// token out of a shorter history than the model reads.
     ///
     /// Unreachable for a cache that has not been armed by
-    /// [`Self::arm_window`], which is every cache unless
-    /// `FRINK_KV_WINDOW` is on: `rows == positions` there, so the
-    /// second precondition is implied by the first.
+    /// [`Self::arm_window`]: `rows == positions` there, so every target
+    /// at or below `positions` is a row it holds.
     pub fn truncate(&mut self, new_seq_len: usize) {
         assert!(
             new_seq_len <= self.positions,
@@ -587,10 +659,12 @@ impl KvCache {
         let rows = self.rows();
         let dropped = self.positions - new_seq_len;
         assert!(
-            dropped <= rows,
+            self.recurrent.is_some() || self.can_truncate_to(new_seq_len),
             "truncate target {new_seq_len} is {dropped} positions back but only {rows} rows \
-             are resident: this cache evicted behind a {:?} window (#61). Turn off \
-             FRINK_KV_WINDOW for a workload that rolls the KV cache back this far.",
+             are resident: this cache evicted behind a {:?} window (#61), and what is left \
+             would not cover the window the next query reads. A caller that rolls back asks \
+             `rollback_limit` before it writes, or `can_truncate_to` before it truncates; \
+             FRINK_KV_WINDOW=0 keeps every row for a workload that needs more.",
             self.window.map(|w| w.window())
         );
         assert!(
@@ -604,7 +678,7 @@ impl KvCache {
         if new_seq_len == 0 {
             self.recurrent = None;
         }
-        let keep_rows = rows - dropped;
+        let keep_rows = rows.saturating_sub(dropped);
         self.k.truncate(keep_rows * self.k_width());
         self.v.truncate(keep_rows * self.v_width());
         self.positions = new_seq_len;
@@ -627,8 +701,30 @@ impl KvCache {
     ///
     /// Idempotent; a second call with a different window replaces the
     /// first, and rows already dropped stay dropped.
+    ///
+    /// A no-op on a cache that [`Self::forbid_eviction`] has marked.
     pub fn arm_window(&mut self, window: KvWindow) {
-        self.window = Some(window);
+        if !self.eviction_forbidden {
+            self.window = Some(window);
+        }
+    }
+
+    /// Marks this cache as one that must keep every row it is pushed,
+    /// whatever window its layer has. See the field it sets for the
+    /// callers and why. Disarms a window already armed.
+    ///
+    /// Panics on a cache that has already evicted: rows already dropped
+    /// stay dropped, and a disarmed cache holding fewer rows than
+    /// positions would read as an unwindowed one with a hole in it.
+    pub fn forbid_eviction(&mut self) {
+        assert!(
+            self.k_width() == 0 || self.rows() == self.positions,
+            "forbid_eviction on a cache that already dropped {} of its {} positions",
+            self.positions - self.rows(),
+            self.positions
+        );
+        self.eviction_forbidden = true;
+        self.window = None;
     }
 
     /// The window this cache evicts behind, or `None` if it keeps

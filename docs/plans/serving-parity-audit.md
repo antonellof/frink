@@ -187,6 +187,7 @@ the one number in this document that did not come off a socket.
 |---|---|
 | Preemption / row eviction | Not implemented. Admission refuses; the request queues. |
 | KV swap to host | Not implemented. Pages come back from the tree or the request waits. |
+| Per-layer sliding-window eviction on paged KV | Not implemented. A page group holds one block in every layer, so the paged store slides only a model whose every layer shares one window; an alternating model (Gemma-2/3, gpt-oss) holds its whole context there. The contiguous store, which the server uses without `FRINK_PAGED_KV_BLOCKS`, evicts per layer by default, with speculative rollback, the prefix cache and `n > 1` forks working on it ([#61](https://github.com/antonellof/frink/issues/61)). |
 | Tensor / pipeline parallel | Not implemented. Single process, single device. |
 | Disaggregated prefill | Not implemented. |
 | Multi-device expert residency | Policy only. `frink-core`'s expert-residency stack decides and nothing executes it except a compile-only CUDA pool whose hardware test is `#[ignore]`d. |

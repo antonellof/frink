@@ -464,6 +464,10 @@ impl PagedKvCache {
         // The paged store does not evict either, so its positions and
         // its rows agree and this one assignment is both.
         cache.set_positions(self.seq_len);
+        // And the copy must not start: the paged prefill scatters rows
+        // `seq_len..` of it back into the store after the forward, by
+        // absolute offset (#61). See `KvCache::forbid_eviction`.
+        cache.forbid_eviction();
         cache.recurrent = self.recurrent.clone();
         cache
     }

@@ -513,7 +513,7 @@ impl Decoder {
                 };
                 // AFTER the read, never inside `push`: the rows this
                 // drops are rows every kernel above has finished with
-                // (#61). A no-op unless `FRINK_KV_WINDOW` is on and
+                // (#61). A no-op with `FRINK_KV_WINDOW=0`, and unless
                 // this layer is windowed -- and note that it is the same
                 // `window` the kernels just used, taken from the same
                 // `ModelConfig`, because keeping fewer rows than the

@@ -625,7 +625,20 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
         // when it runs out mid-block -- and it costs nothing, because
         // the drafted position it gives up is one whose KV would have
         // had to be discarded anyway.
-        let draft_budget = options.max_new_tokens - generated.len() - 1;
+        //
+        // And no longer than the caches can roll back. The block is the
+        // anchor plus the draft, and a rejection undoes at most the
+        // draft. A layer that evicts behind its sliding window keeps
+        // only `KvWindow::max_rollback` positions of headroom for that
+        // (#61), so a longer draft could be drained before it is
+        // rejected and leave the next query reading across a hole.
+        // Shortening the draft costs speed, never the answer.
+        let rollback = kv_caches
+            .iter()
+            .map(|c| c.rollback_limit())
+            .min()
+            .unwrap_or(usize::MAX);
+        let draft_budget = (options.max_new_tokens - generated.len() - 1).min(rollback);
 
         // The drafter is asked to continue a history that *includes*
         // `pending`, because the first drafted token lands at pos + 1.

@@ -1052,8 +1052,8 @@ impl Kv {
     /// forwards ([`Decoder::forward_batch`]).
     ///
     /// `None` means this store cannot serve speculation, and the
-    /// caller takes the ordinary path rather than guessing. Two
-    /// reasons, both real:
+    /// caller takes the ordinary path rather than guessing. Three
+    /// reasons, all real:
     ///
     /// * **Paged.** Rejecting a draft means releasing the positions it
     ///   wrote, and a paged store hands those out through a block
@@ -1063,8 +1063,19 @@ impl Kv {
     ///   honest answer until it lands.
     /// * **Recurrent.** A Mamba-style state is a REDUCTION over the
     ///   whole prefix rather than a row per position, so there is
-    ///   nothing to drop. `KvCache::can_truncate_to` says so, and
-    ///   [`Self::truncate_to`] asks it rather than assuming.
+    ///   nothing to drop. `KvCache::rollback_limit` is zero for it.
+    /// * **Windowed, past the reserve.** A layer that evicts behind its
+    ///   sliding window (#61) keeps only `KvWindow::max_rollback`
+    ///   positions of headroom for a rejected draft, and a block longer
+    ///   than that could be drained before it is rolled back.
+    ///   `KvCache::rollback_limit` says how long a block may be.
+    ///
+    /// The gate is asked BEFORE the forward, about the whole block: a
+    /// rollback undoes at most `tokens.len()` positions, so a store whose
+    /// limit covers that can undo whatever the verification rejects.
+    /// Asking `can_truncate_to(pos)` here instead, as this used to, asks
+    /// about a position the store is already at, which every store can
+    /// reach, so it passed for the recurrent case it named.
     #[allow(
         dead_code,
         reason = "called by the speculative loop; see sampling_loop::verify_block"
@@ -1080,7 +1091,7 @@ impl Kv {
                 // Asked BEFORE the forward, not after: a store that
                 // cannot roll back must not be written speculatively
                 // in the first place.
-                if !caches.iter().all(|c| c.can_truncate_to(pos)) {
+                if !caches.iter().all(|c| c.rollback_limit() >= tokens.len()) {
                     return None;
                 }
                 Some(decoder.forward_batch(tokens, pos, caches))
@@ -1761,8 +1772,16 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
     fn truncate(&mut self, pos: usize) {
         // `step_batch` refused the stores that cannot do this, so a
         // failure here would mean the two have drifted apart.
-        debug_assert!(
-            self.kv.truncate_to(pos),
+        //
+        // The call is OUTSIDE the assertion. It used to be the
+        // assertion's argument, and `debug_assert!` does not evaluate
+        // its argument in a release build: every rejected draft in a
+        // release server left its rows in the cache, and the next token
+        // was answered over a history that never happened. A hard
+        // `assert!` because the alternative to stopping is exactly that.
+        let rolled_back = self.kv.truncate_to(pos);
+        assert!(
+            rolled_back,
             "a store that accepted a speculative batch must be able to roll it back"
         );
         self.sync_after_step();
