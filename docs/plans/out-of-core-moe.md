@@ -56,6 +56,41 @@ isProject: false
 Expands `north-star.md`'s `t1-out-of-core-execution`. Primary reference
 is `.scratch/ds4` (DwarfStar), a C engine that already ships this.
 
+## Status, 2026-10-28
+
+Read this before the corrections below, two of which no longer hold.
+
+- **Streaming is correct on CPU and pinned.** The OLMoE-1B-7B Q4_0
+  garbage (" amongst amongst" streamed, " Paris." resident) came from the
+  int-dot repack cache keying interleaved copies by buffer ADDRESS while
+  the store freed and reused buffers. It was fixed on 2026-08-28 and
+  never pinned, because the fixture test ran with `FRINK_CPU_INT_DOT`
+  off, the library default, and only the int-dot kernels use the cache.
+  `tests/streaming_int_dot.rs` runs the shared store-vs-resident check
+  with int-dot on, and putting the address key back turns it red. The
+  same work found streamed experts running DIFFERENT kernels from
+  resident ones (a serial routed body, and no batched prefill), which
+  showed in the last bits of the logits; one `MoeWeights::with_experts`
+  now hands either backing to the same body.
+- **The second correction below is stale.** `ExpertBacking::Stored`
+  passes `layer_supports_metal_moe_resident` now
+  (`crates/frink-models/src/decoder/metal_eligibility.rs`): the fused
+  launch materialises each expert into an owned view that pins its store
+  entry. A streamed layer still copies the expert into an `MTLBuffer`
+  per use rather than holding it in a device slot, so the two-copies
+  problem in "Two caches, one RAM" stands.
+- **The Metal `SlotDevice` is not started**, deliberately: it was
+  deferred on 2026-10-28 because the session doing this work could not
+  compile Metal kernels, and a slot pool whose kernels nobody ran is
+  the `CudaExpertPool` situation again. What it needs is the
+  `metal-slot-device` todo above, unchanged. The one thing to add to it:
+  slots are REUSED, so a slot's address says nothing about what it
+  holds, and a slot view must stay out of the repack cache (hand it out
+  as `WeightBytes::Shared`, which `WeightBytes::map_id` already refuses
+  to key). That is the August bug, one layer down.
+- **Not yet done:** a run on a real MoE with shared experts (Qwen1.5-MoE)
+  and any Metal run of the streamed path.
+
 ## Three corrections the investigation produced
 
 **Frink already streams experts.** `crates/frink-core/src/expert_store.rs`
