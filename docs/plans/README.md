@@ -76,7 +76,9 @@ Every file in this directory is listed here once.
   `llama-cpp-parity-update-2026-09-03.md`, `llama-cpp-parity-push.md`,
   `freetoken-parity.md`, `amd-strix-halo.md`,
   `serving-and-tiered-kv.md`, `one-binary-serve.md`,
-  `completion-push.md` and `project-status-2026-09.md`.
+  `completion-push.md`, `project-status-2026-09.md`, and
+  `closures-2026-09.md` (how each architecture closed, moved out of
+  `CLAUDE.md`).
 - **[`done/`](done/)** holds plans that finished:
   `several-completions-per-request.md` (`n` > 1 as a KV fork, not as a
   loop that re-prefills).

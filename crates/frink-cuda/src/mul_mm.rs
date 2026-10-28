@@ -1,16 +1,16 @@
 //! `mul_mm`: a batched quantized GEMM for CUDA -- the CUDA C source and
 //! the per-quant-kind dispatch table.
 //!
-//! # UNRUN ON HARDWARE
+//! # Run on hardware
 //!
-//! **No kernel in this module has ever executed on a GPU.** There is no
-//! NVIDIA hardware in the environment it was written in, and this repo's
-//! standing rule (`docs/plans/archive/roadmap-2026-09.md`, "CUDA stays at *must
-//! compile*") is that a CUDA claim is worth nothing until someone
-//! measures it. Nothing here may be described as a measured capability
-//! in `docs/FEATURES.md` or `docs/MODELS.md` until
-//! `cargo test -p frink-cuda --features cuda -- --ignored` has been run
-//! on a real device and the result written down.
+//! The kernels have executed on a GPU: the `--ignored` hardware tests
+//! (`cargo test -p frink-cuda --features cuda -- --ignored`) passed on an
+//! RTX 3090 on 2026-09-15, covering every kind [`KINDS`] held that day, and the
+//! tensor-core body has served batched prefill since 0.22.0 (see
+//! `CHANGELOG.md` and `docs/plans/cpu-cuda-parity.md`). The standing rule
+//! still applies to any new kind or body added here: a CUDA claim is
+//! worth nothing until that command has run on a real device and the
+//! result is written down.
 //!
 //! What *is* established, and how:
 //!

@@ -24,6 +24,7 @@ open work.
 | `llama-cpp-full-parity-audit-2026-09-02.md` | Not a plan: a file-by-file llama.cpp to frink map, a parity sweep and a priority list | Superseded by `../parity-audit-2026-09-19.md` and `../parity-audit-2026-10-28.md` |
 | `llama-cpp-parity-review-2026-09-02.md` | Not a plan: the ranked next actions for llama.cpp parity as a serving and CLI stack | Its actions landed or moved to the roadmap; the current audits supersede it |
 | `llama-cpp-parity-update-2026-09-03.md` | Not a plan: the post-merge delta to the 2026-09-02 audit | Superseded by the same two audits |
+| `closures-2026-09.md` | Not a plan: the dated record of how each generic-path architecture closed and what building it found, 2026-08 to 2026-10 | Moved out of `CLAUDE.md` on 2026-10-28 so that file stays short guidance |
 | `completion-push.md` | A schedule, not a feature plan: file ownership and merge discipline | The rules at the end of `roadmap-2026-09.md` and `../README.md` |
 
 `completion-push.md` is worth reading before dispatching parallel work
