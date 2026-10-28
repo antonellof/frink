@@ -199,7 +199,9 @@ It refuses to run in five cases:
 has no draft model, and runs on synthetic random weights, so the hit
 rate it prints tells you nothing about a real drafter. The numbers it
 does report reliably are the acceptance length and the per-position
-accept rate, alongside the call counts.
+accept rate, alongside the call counts. `--ngram-size` (default 4) is
+the length of the n-gram it looks up in the history, and
+`--max-draft-len` (default 8) caps how many tokens it drafts per step.
 
 `frink-server` speculates too, with the prompt-lookup drafter and no
 flag: it is on for any request whose sampling the verification can
@@ -364,6 +366,21 @@ llama.cpp does at load, and the same prompt reads about 143 t/s.
 ./target/release/frink run-kimi /path/to/kimi --prompt "Hi" --max-new-tokens 32
 ```
 
+- `inspect-plan --context N` sizes each request's KV cache for `N`
+  tokens; omitted, it prices the model's own `{arch}.context_length`.
+  `--concurrency N` (default 1) budgets that many caches.
+- `inspect-plan --expert-cache-bytes N` streams routed experts through
+  a bounded cache of `N` bytes instead of counting them fully resident.
+- `archs --write PATH` writes the manifest to `PATH` instead of
+  printing it; it is how `docs/manifests/architecture_manifest.md` is
+  regenerated.
+- `smoke --steps N` sets how many decode steps the smoke test runs
+  (default 8).
+- `run-kimi` samples with `--temperature` (default `0.0`, greedy),
+  `--top-p` (default `1.0`), `--top-k` (default `0`, off),
+  `--repetition-penalty` (default `1.0`, off; it looks back over the
+  last 64 tokens) and `--seed` (default `0`).
+
 ## Serving benchmark (`serve-bench`)
 
 `frink bench` is single-stream and HTTP-free: it measures kernels
@@ -417,6 +434,12 @@ no prefix cache says so rather than reporting zero. `--cache-salt`
 puts the run in its own namespace, which two runs under different salts
 do not share even with identical prompts.
 
+`--prompt-chars N` (default 512) sets each request's prompt length in
+characters, not tokens. An exact token length would need the server's
+own tokenizer driven to a fixed point, a round trip against the server
+under test for every step, so the command sends characters and reports
+the prompt-token count the server says it received.
+
 Every number this command printed before 0.48.0 was flattered by
 reuse it was written to avoid. The filler was deliberately varied
 *within* a prompt and identical *across* requests, so the second half
@@ -443,6 +466,14 @@ cargo build --release -p frink-cli --features cuda
 ./target/release/frink bench-bw --format q4_k
 ./target/release/frink bench-bw --dry-run          # measure, write nothing
 ```
+
+`--bytes` (default 536870912, 512 MiB) is how much one timed pass
+moves; it must exceed the last-level cache, or the number measures the
+cache rather than memory. `--reps` (default 5) is the number of timed
+passes, and the best one is kept, since a slower pass means something
+else had the machine. `--threshold` (default `1.0`) is the line between
+hybrid and offload: the policy computes on the CPU when
+`cpu_bw > threshold * pcie_bw`.
 
 It writes `$XDG_CACHE_HOME/frink/benchbw/<gpu-uuid>.json`, which the
 loader finds on its own. A profile is keyed to the card it was taken
@@ -621,7 +652,10 @@ below it are exonerated.
 
 Measured noise floor between CPU and Metal on a healthy model
 (Llama-3.2-1B Q4_K_M, 16 tokens): spread 1.6e-5 to 1.3e-4. The default
-`--tol 1e-3` sits about 8x above the worst of that.
+`--tol 1e-3` sits about 8x above the worst of that. `--at` picks the
+positions scored: `all` (the default) scores every prompt position,
+`last` only the final one, which is the position the next token is
+decoded from.
 
 MoE checkpoints also get a routing column: the total-variation distance
 between the two backends' expert-selection histograms. `no counts` there
@@ -650,6 +684,9 @@ It runs on CPU by construction and refuses to start with
 and would hand a swapped-in tensor another tensor's repacked bytes.
 Cost is one forward pass per tensor: about two minutes for a 1B model's
 112 tensors at 16 prompt tokens. `--layers 0:4` restricts the sweep.
+On a MoE checkpoint, `--experts N` (default 1) probes the first `N`
+routed experts of each layer, and each one costs three more forward
+passes per layer.
 
 ## Perplexity (`frink perplexity`)
 
@@ -721,6 +758,8 @@ frink quantize model-f16.gguf model-q4_k_m.gguf --type q4_k_m
 frink quantize model-f16.gguf model-q4_k_m.gguf --type q4_k_m --imatrix imatrix.gguf
 frink quantize model-f16.gguf model-q4_k.gguf   --type q4_k_m --pure   # no per-tensor mix
 ```
+
+An existing output file is not overwritten unless you pass `--force`.
 
 The refusal is deliberate. Q2_K/Q3_K, the IQ tiers, MXFP4 and the legacy Q4_0 family each need
 their own transcription of an iterative fit, and a K-quant encoder
@@ -1092,6 +1131,8 @@ frink -m org/model      # downloads when the path is missing
 ```
 
 Cache default for `pull`: `~/.cache/frink/hf/<org--model>/`.
+`--dir DIR` stores the download there instead (passed to
+`hf download --local-dir`).
 `download` defaults to `models/`.
 
 | Variable | Effect |
@@ -1124,6 +1165,7 @@ FRINK_MODEL_PATH=model.gguf FRINK_ADDR=127.0.0.1:8383 ./target/release/frink-ser
 | `--url` | Server base URL (default `http://127.0.0.1:8383`) |
 | `--system` | Optional system message |
 | `--max-tokens` / `--temperature` / `--top-p` | Sampling |
+| `--stream` | Stream the reply over SSE and print tokens as they arrive. On by default; `--no-stream` turns it off |
 | `--no-stream` | Wait for full JSON instead of SSE |
 
 ## Server
@@ -1304,6 +1346,8 @@ line up.
 | `--max-load` | The 1-minute load average a timed run needs to be under (default `2.0`, raw, not per core). `0` waives this and the thermal and free-memory checks with it. `--suite` checks once up front, forwards the bar to every child, and waits between entries for the previous entry's own load to decay |
 | `--bench-dir` | Where `suite.json`, `RESULTS.md` and `receipts/` live (default `benchmarks`) |
 | `--receipt` | Write a single run's raw timings to this path |
+| `--hidden` / `--ffn-dim` | Synthetic microbenchmark only (no `-m`): the weight matrix is `[ffn-dim x hidden]`. Defaults 4096 and 14336 |
+| `--iters` | Synthetic microbenchmark only: timed iterations per variant (default 20) |
 
 A run stops before the timer starts when the host is busy, thermally
 limited, or short enough on free memory that the weights would page to
@@ -1358,7 +1402,7 @@ attention. `frink serve-bench` measures the same batcher over HTTP.
 | `-m/--model` | GGUF to benchmark (generic decoder architectures only; the dedicated engines have no multi-sequence step and are refused by name) |
 | `-npp`, `-ntg`, `-npl` | Comma-separated sweeps; all three required, every value > 0 (upstream prints a `NaN` row for `0`, this refuses it) |
 | `-pps` | One prompt shared by every sequence: prefilled once, its KV copied to the others between the two timers (`batched-bench.cpp:168-185`) |
-| `-tgs` | Decode each sequence to completion in turn instead of one step across all of them per call (`:189-223`) |
+| `-tgs` / `--tg-separate` | Decode each sequence to completion in turn instead of one step across all of them per call (`:189-223`) |
 | `-c` | `n_kv_max`; a combination needing more is skipped, and the skip is printed rather than silent. `0` = the GGUF's `{arch}.context_length` |
 | `-ub` | Prompt tokens per forward call (default 512, upstream's `n_ubatch`) |
 | `-t`, `-ngl` | As `frink bench` |
@@ -1368,9 +1412,13 @@ attention. `frink serve-bench` measures the same batcher over HTTP.
 
 Flags `llama-batched-bench` takes that this tool refuses by name
 rather than accepting and ignoring: `-b` (`n_batch`; frink has no
-logical batch distinct from `-ub`), `-kvu` (every sequence has its own
-cache here, so `N_KV` is `B*(PP+TG)` with or without `-pps`), `-fa`
-(no flash-attention switch to honour) and `-tb` (one thread pool).
+logical batch distinct from `-ub`), `-kvu` / `--kv-unified` (every
+sequence has its own cache here, so `N_KV` is `B*(PP+TG)` with or
+without `-pps`), `-fa` (no flash-attention switch to honour) and
+`-tb` / `--threads-batch` (one thread pool). All four are left out of
+the short `-h` help (the long help still lists them), because they are
+accepted only so that a llama.cpp command line fails with a reason
+instead of an unknown-flag error.
 For the same reason the JSONL rows omit `n_batch`, `flash_attn` and
 `n_threads_batch` instead of printing a made-up value for them.
 
