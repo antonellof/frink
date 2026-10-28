@@ -1,18 +1,18 @@
 ---
 name: "north star: the Rust alternative to llama.cpp"
-overview: "THE GOAL, stated once so every other plan can be ranked against it: Frink should be what somebody reaches for INSTEAD OF llama.cpp. Same models, same command shapes, same or better performance, on the hardware people actually own. That is a bigger claim than 'a fast Rust inference engine' and it sets a bar that is checkable rather than aspirational: for any GGUF a user can run under llama.cpp, frink should run it, produce the same tokens, and not be slower. WHERE THE PROJECT ACTUALLY IS, counted rather than estimated: llama.cpp hand-writes 140 per-architecture graphs in `src/models/*.cpp`. Frink has 150 catalog rows: 57 on ONE shared generic GQA path, 58 dedicated, 32 deferred, 3 test fixtures. RE-COUNTED 2026-09-01: only 11 of the 57 are AUDITED and run; the other 46 REFUSE, because the generic path was made opt-in. Four dedicated engines (Mla, Glm52, Kimi, Gemma4) load with no cross-engine evidence. The five strings found computing ALiBi and learned absolute position embeddings as though they were NEOX RoPE (`gpt2`, `mpt`, `refact`, `bloom`, `jais`) are refusals now, so the loads-and-is-WRONG class is CLOSED. On speed: Metal is at or past parity (every dense pp512 row 0.98x-1.10x, 8 of 12 tg128 rows FASTER than llama.cpp), and CPU is not (all 16 comparable rows red, 1.41x to 5.06x). THE SEQUENCING ARGUMENT: 'same models as llama.cpp' is 140 architectures and years of work. The wedge that gets there while being useful the whole way is RECENT BIG MODELS ON CONSUMER HARDWARE, including models too big for the machine's memory, because that is where llama.cpp is weakest and where a new engine can be chosen on merit rather than on being a rewrite. This plan ranks the other plans. It contains no engineering."
+overview: "THE GOAL, stated once so every other plan can be ranked against it: Frink should be what somebody reaches for INSTEAD OF llama.cpp. Same models, same command shapes, same or better performance, on the hardware people actually own. That is a bigger claim than 'a fast Rust inference engine' and it sets a bar that is checkable rather than aspirational: for any GGUF a user can run under llama.cpp, frink should run it, produce the same tokens, and not be slower. WHERE THE PROJECT ACTUALLY IS, re-counted 2026-10-28 against llama.cpp `604cc430`, which names 166 architectures: 100 run on ONE shared generic path, each with a libllama golden (`capability::AUDITED_GENERIC_GQA`); 4 more have dedicated engines, two of them with cross-engine evidence; 11 text-generation architectures refuse as unaudited, each triaged with the line that decides it; the rest are deferred scopes (encoder/embedding, multimodal, diffusion, audio). The loads-and-is-WRONG class is CLOSED because the generic path is opt-in. On speed (receipts from builds 0.17 to 0.21, re-measurement pending): Metal is at or past parity (pp512 0.99x-1.09x, tg128 0.60x-0.96x), CPU is close on decode and behind on prefill (1.04x-1.34x and 1.04x-4.45x on a Ryzen 9 3900X), and CUDA is far behind (22x-43x prefill, 2x-9x decode). THE SEQUENCING ARGUMENT: 'same models as llama.cpp' is 140 architectures and years of work. The wedge that gets there while being useful the whole way is RECENT BIG MODELS ON CONSUMER HARDWARE, including models too big for the machine's memory, because that is where llama.cpp is weakest and where a new engine can be chosen on merit rather than on being a rewrite. This plan ranks the other plans. It contains no engineering."
 todos:
   - id: the-bar
     content: "NOT A TASK, the definition of done for the whole project, written so it can be argued with. Frink reaches parity when, for a GGUF a user can run under llama.cpp: (1) it LOADS, or refuses with a sentence naming exactly what is missing, and never loads-and-computes-something-else; (2) it produces the SAME TOKENS at temperature 0, checked against llama.cpp's own logits rather than against a golden file this project wrote; (3) it is NOT SLOWER on the same host, file and backend; (4) the COMMAND a user already knows works, or the difference is documented. Item (2) is the one that cannot be faked and the one this project already has the tool for: `frink parity` with `tools/llama_logits.c`. Item (1) is where frink currently differs most from llama.cpp, and deliberately so: llama.cpp will often run something approximately, this project's standing rule is to refuse. That rule stays. A refusal is a gap, not a defect."
     status: pending
   - id: t1-scale-the-model-layer
-    content: "TIER 1, and it gates every other model item, which is why it is first. `crates/frink-models/src/decoder.rs` is 6438 LINES and holds the generic path plus per-architecture branching. Adding a model means editing it, and reviewing a model change means reading it. llama.cpp adds a model as ONE SMALL FILE in `src/models/`, which is why it has 140 of them and frink has 47. This is not a style preference, it is the reason the counts differ. Evidence it already costs correctness: wave 0 found FIVE model features (`attention_scale`, `post_attn_norm`, `post_ffn_norm`, gpt-oss `o_bias`, `gpt_oss_ffn`) that the paged decode loop had LOST by being a copy of the contiguous one, three of them wrong on CPU too. A copy-per-path structure loses features one at a time and nothing notices. See `model-registry-reorg.md` for the design. DONE MEANS: adding an architecture is a new file, a trait impl, a registry line, a fixture and a parity test, with no edit to a shared multi-thousand-line file."
+    content: "STATUS 2026-10-28: decoder.rs reached 8050 lines and loader.rs 6024, and both were split into modules; the registry-of-small-files end state below is not reached yet. TIER 1, and it gates every other model item, which is why it is first. `crates/frink-models/src/decoder.rs` is 6438 LINES and holds the generic path plus per-architecture branching. Adding a model means editing it, and reviewing a model change means reading it. llama.cpp adds a model as ONE SMALL FILE in `src/models/`, which is why it has 140 of them and frink has 47. This is not a style preference, it is the reason the counts differ. Evidence it already costs correctness: wave 0 found FIVE model features (`attention_scale`, `post_attn_norm`, `post_ffn_norm`, gpt-oss `o_bias`, `gpt_oss_ffn`) that the paged decode loop had LOST by being a copy of the contiguous one, three of them wrong on CPU too. A copy-per-path structure loses features one at a time and nothing notices. See `model-registry-reorg.md` for the design. DONE MEANS: adding an architecture is a new file, a trait impl, a registry line, a fixture and a parity test, with no edit to a shared multi-thousand-line file."
     status: pending
   - id: t1-close-the-68
-    content: "TIER 1. 57 architectures share one generic GQA path against llama.cpp's bespoke graphs, and five were found silently wrong. TWO STEPS ARE DONE. (1) THE CHEAP FIX: the generic path is now OPT-IN. An architecture not on `capability::AUDITED_GENERIC_GQA` returns `LoadError::UnauditedArchitecture` rather than falling onto generic GQA and running, which converted the unaudited set from 'silently wrong' into 'honestly refused'. (2) THE TRIAGE, landed 2026-09-01: all 46 refusals are classified fixture-away (9) / one-match-arm (7) / new-code (26) / unknown (4), each naming the `llama.cpp/src/models/*.cpp` line that decides it, pinned by `tests/unaudited_triage.rs`. That triage IS the work queue. WHAT REMAINS: execute it, auditing outward from what people run: `qwen3moe` (done, fixture-pinned), `glm4moe`, `deepseek2` (MLA), `minimax-m2` (fixture-away), `gemma4`, before the 2023 tail. The tail IS in scope under this goal, unlike under a purely edge-focused one: 'same models as llama.cpp' includes `bloom` and `gpt2`. It is last, not excluded."
+    content: "STATUS 2026-10-28: 100 audited, 11 triaged refusals left after the pin moved to 604cc430 (0 fixture-away, 2 one match arm, 8 new code, 1 unknown). TIER 1. 57 architectures share one generic GQA path against llama.cpp's bespoke graphs, and five were found silently wrong. TWO STEPS ARE DONE. (1) THE CHEAP FIX: the generic path is now OPT-IN. An architecture not on `capability::AUDITED_GENERIC_GQA` returns `LoadError::UnauditedArchitecture` rather than falling onto generic GQA and running, which converted the unaudited set from 'silently wrong' into 'honestly refused'. (2) THE TRIAGE, landed 2026-09-01: all 46 refusals are classified fixture-away (9) / one-match-arm (7) / new-code (26) / unknown (4), each naming the `llama.cpp/src/models/*.cpp` line that decides it, pinned by `tests/unaudited_triage.rs`. That triage IS the work queue. WHAT REMAINS: execute it, auditing outward from what people run: `qwen3moe` (done, fixture-pinned), `glm4moe`, `deepseek2` (MLA), `minimax-m2` (fixture-away), `gemma4`, before the 2023 tail. The tail IS in scope under this goal, unlike under a purely edge-focused one: 'same models as llama.cpp' includes `bloom` and `gpt2`. It is last, not excluded."
     status: pending
   - id: t1-out-of-core-execution
-    content: "TIER 1, and the strongest single reason to choose frink over llama.cpp rather than merely tie with it. Make a model larger than memory run. A 200B MoE at Q4 is roughly 110 GiB; consumer machines have 16 to 128. An MoE touches only top-k of N experts per token, so the working set is a fraction of the weights, which is what makes this reachable. frink-core ALREADY HOLDS THE POLICY: `expert_cache` (LRU with copy plans), `expert_slots` (bounded pool behind a `SlotDevice` trait), `placement`, `residency`, `footprint`, `pool`. NOTHING EXECUTES IT except `expert_pool::CudaExpertPool`, which is compile-verified only with its hardware test `#[ignore]`d. So the capability exists on paper and not in the engine. NEEDS: a `SlotDevice` for Metal and one for host RAM. START WITH MoE, not dense weight streaming, which is a far worse trade and is not in scope."
+    content: "STATUS 2026-10-28: streamed experts now run the same kernels as resident ones and the OLMoE garbage is pinned by a test; still nothing executes the residency policy, and no Metal or host-RAM SlotDevice exists. TIER 1, and the strongest single reason to choose frink over llama.cpp rather than merely tie with it. Make a model larger than memory run. A 200B MoE at Q4 is roughly 110 GiB; consumer machines have 16 to 128. An MoE touches only top-k of N experts per token, so the working set is a fraction of the weights, which is what makes this reachable. frink-core ALREADY HOLDS THE POLICY: `expert_cache` (LRU with copy plans), `expert_slots` (bounded pool behind a `SlotDevice` trait), `placement`, `residency`, `footprint`, `pool`. NOTHING EXECUTES IT except `expert_pool::CudaExpertPool`, which is compile-verified only with its hardware test `#[ignore]`d. So the capability exists on paper and not in the engine. NEEDS: a `SlotDevice` for Metal and one for host RAM. START WITH MoE, not dense weight streaming, which is a far worse trade and is not in scope."
     status: pending
   - id: t1-moe-execution-quality
     content: "TIER 1, because the recent models worth running are overwhelmingly MoE and MoE is where this engine is weakest. Three defects, all measured. (1) The Metal MoE path NEVER records `activation_counts`: `crates/frink-metal/src/attn.rs:5620` returns `vec![Vec::new(); layers.len()]`, commented as avoiding a sync tax, and `MoeDecodeScratch.ids` is a single top_k buffer reused per layer so it must be widened to `top_k * n_layers` or replaced by an atomic histogram. `placement_plan` has been reading an all-zero hotness signal on Metal, which matters DIRECTLY for out-of-core since eviction is only as good as its hotness input. (2) OLMoE CPU is 2.19x prefill / 2.46x decode while its Metal rows are at parity. (3) `concurrent-cpu-moe-executor` and `double-buffered-prefill` are unstarted. MoE bench coverage rested on ONE model until Qwen1.5-MoE (shared experts, which OLMoE lacks) was added."
@@ -64,57 +64,51 @@ stays. A refusal is a gap, not a defect.
 
 ## Counted, not estimated
 
-Re-counted 2026-09-01 against `capability::architecture_catalog` and
+Re-counted 2026-10-28 against `capability::architecture_catalog`,
+`tests/llama_cpp_arch_names.txt` (llama.cpp `604cc430`, 166 names) and
 [`../manifests/architecture_manifest.md`](../manifests/architecture_manifest.md),
-by what actually happens when a real checkpoint loads rather than by
-whether the name is known:
+by what happens when a real checkpoint loads rather than by whether the
+name is known:
 
 | Outcome | Count |
 |---|---|
-| **A. Runs, with evidence** (bench row, pinned llama.cpp logits, or a fixture) | **11** |
-| **B. Loads on a dedicated engine, no cross-engine evidence** | 4 engines |
-| **C. Refuses as unaudited**, with the missing piece triaged and named | 46 |
-| **D. Refuses by name, off the generic path** | 90 rows (58 `dedicated`, 32 `deferred`) |
+| **A. Runs on the generic path, with a libllama golden** | **100** |
+| **B. Dedicated engines** | 4 (`Mla` and `Gemma4` with cross-engine evidence, `Glm52` and `Kimi` without) |
+| **C. Refuses as unaudited**, triaged and named | 11 (0 fixture-away, 2 one match arm, 8 new code, 1 unknown) |
+| **D. Deferred scope** | 31 (13 encoder/embedding, 11 multimodal, 4 diffusion, 3 audio) |
 | **E. Loads and is WRONG** | **closed** |
 
-Category A in full, from `capability::AUDITED_GENERIC_GQA`: `llama`
-(covering TinyLlama, Mistral, Mixtral, SmolLM2), `qwen2`, `qwen2moe`,
-`qwen3`, `qwen3moe`, `olmoe`, `gemma2`, `gemma3`, `phi3` (which Phi-4
-tags as), plus `gpt-oss` and `dots1` pinned against real `libllama`
-logits. Category B is `Mla`, `Glm52`, `Kimi` and `Gemma4`, which load
-and have never been checked against another engine. That is the honest
-extent of proven coverage.
-
-Category E closed when the generic path became **opt-in**. The five
-strings found computing ALiBi or learned absolute position embeddings as
-though they were NEOX RoPE (`gpt2`, `mpt`, `refact`, `bloom`, `jais`)
-are now refusals, pinned by a test that they can never be re-listed as
-audited.
+Category A was 11 on 2026-09-01. Category C fell from 46 to 2 over
+September and rose to 11 when the pin moved six weeks, which is what
+parity with a moving target looks like: nine of the thirteen new
+upstream names are text generation
+([`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)).
 
 | | llama.cpp | frink |
 |---|---|---|
-| Per-architecture graphs | 140 hand-written | 150 catalog rows, **11 proven** |
-| Shared generic path | none | **57 architectures**, 11 of them audited |
-| Metal `pp512` | baseline | 0.98x-1.10x, at parity |
-| Metal `tg128` | baseline | **8 of 12 rows faster** |
-| CPU, all rows | baseline | **1.41x-5.06x slower** |
-| GPU backends | CUDA, Metal, Vulkan, SYCL, HIP | CUDA, Metal |
+| Architectures | 166 named, 169 graph files | **100 generic with goldens**, 4 engines, 11 triaged refusals |
+| Metal `pp512` | baseline | 0.99x-1.09x, at parity |
+| Metal `tg128` | baseline | **0.60x-0.96x, faster on every row** |
+| CPU `pp512` / `tg128` | baseline | 1.04x-4.45x / 1.04x-1.34x slower (Ryzen 9 3900X) |
+| CUDA `pp512` / `tg128` | baseline | 22x-43x / 2x-9x slower |
+| GPU backends | CUDA, Metal, Vulkan, SYCL, HIP | CUDA, Metal; Vulkan at a Q8_0-matvec beachhead |
 
-Two numbers do most of the work. **6875** is the scaling problem: the
-line count of `decoder.rs`, the file you must edit to add a model, and
-the reason the left column says 140 and the right says 11 proven. It was
-6438 when this was first written, which is the direction of travel.
+The speed rows are receipts from builds 0.17 to 0.21 and are marked
+stale in [`../../benchmarks/RESULTS.md`](../../benchmarks/RESULTS.md).
+A gap measured against a moving binary means nothing until it is
+measured again.
 
-## Why the model layer is first
+## Why the model layer was first
 
-llama.cpp has 140 architectures because adding one is a small new file.
-Frink proves 11 because adding one means editing a 6875-line file. The
-counts differ for a structural reason, not an effort reason.
-
-It already costs correctness: the paged decode loop had **lost five
-model features** by being a copy of the contiguous one, three of them
-wrong on CPU too. Copy-per-path loses features one at a time and
-nothing notices.
+llama.cpp has its architecture count because adding one is a small new
+file. Frink got from 11 proven to 100 by building SEAMS (a table row
+per architecture on a shared body, one fixture and one golden each)
+rather than by editing a 6800-line file per model. The file grew anyway,
+to 8050 lines, and was split into modules on 2026-10-28
+([`model-layer-reorg.md`](model-layer-reorg.md)). The lesson that put
+this first still holds: a copy-per-path structure loses features one at
+a time and nothing notices. The paged decode loop once lost five, three
+of them wrong on CPU too.
 
 ## The cheap fix that beat the expensive audit: DONE
 
@@ -147,8 +141,8 @@ cross-engine oracle means refactoring known-wrong code with no way to
 tell if you broke it.
 
 ```
-TIER 1  scale the model layer     6875 lines is why we prove 11 not 140
-        close the 46              inversion DONE, triage DONE, audit outward
+TIER 1  scale the model layer     seams DONE (100 proven); file split 2026-10-28
+        close the refusals        11 left, 2 of them one match arm away
         out-of-core execution     the reason to choose frink, not tie
         MoE execution quality     hotness signal, CPU executor, residency
 
