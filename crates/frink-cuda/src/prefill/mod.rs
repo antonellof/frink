@@ -1,4 +1,5 @@
-//! One dense prefill layer on the device, end to end.
+//! A run of dense layers on the device, end to end: a prefill batch or
+//! one decode token.
 //!
 //! Before this module a batched prefill ran a dense layer as seven
 //! `launch_mul_mm` calls, each a synchronous round trip (a pageable
@@ -9,32 +10,46 @@
 //! the time (#259, `docs/plans/cpu-cuda-parity.md` step 2b). This is
 //! the Metal shape (`frink_metal::attn::launch_prefill_dense_layer`)
 //! for CUDA: the hidden batch goes up once, every op between the
-//! matmuls is a kernel, and what comes back is the new hidden batch and
-//! the batch's K and V rows for the host `KvCache`, which stays
-//! authoritative -- there is no CUDA KV arena on this path yet, so a
-//! prefix already in the cache is uploaded per layer for the attention
-//! kernel to read.
+//! matmuls is a kernel, and what comes back, in ONE download at the
+//! end, is the new hidden batch and every layer's K and V rows for the
+//! host `KvCache`, which stays authoritative.
 //!
-//! What it serves is exactly what the host batched body does for a
-//! layer `Decoder::fused_prefill_dense_layer_eligible` admits; every
-//! decision about WHICH layers is the decoder's, made through the same
+//! Decode is the same stack at `batch == 1` (#133), and only two
+//! things differ, each a parameter rather than a second body (ADR
+//! 0004): the projections multiply by the matvec instead of the GEMM
+//! ([`proj::ProjWeights::uses_matvec`]), and the attention reads the
+//! sequence's device mirror of its history ([`StackKv::Mirrors`],
+//! [`kv_mirror`]) instead of uploading the host prefix, through the
+//! one-row split-key kernel ([`crate::decode_attn`]). Before this the
+//! CUDA decode token made five synchronous round trips per layer, with
+//! the norms, RoPE, the attention and the residual adds on the host.
+//!
+//! What it serves is exactly what the host bodies do for a layer
+//! `Decoder::fused_prefill_dense_layer_eligible` admits; every decision
+//! about WHICH layers is the decoder's, made through the same
 //! predicates the Metal stack asks, so the two backends cannot admit
 //! different sets. The refusals here are the shapes the kernels cannot
-//! take (`head_dim > 256`, a GELU FFN, an odd rotary width), and each
-//! is `CudaError::Unsupported` so the caller falls back to the host
-//! body rather than computing something else.
+//! take (`head_dim > 256`, a GELU FFN, an odd rotary width, a one-row
+//! step on a kind with no matvec), and each is `CudaError::Unsupported`
+//! so the caller falls back to the host body rather than computing
+//! something else.
 
 pub mod enqueue;
 pub mod kernels;
+pub mod kv_mirror;
+pub mod proj;
 
-use crate::gpu::{shared_device, silu_mul_device, CudaError};
+use crate::gpu::{resident_cuda_f32, shared_device, silu_mul_device, CudaError};
 use crate::mul_mm::{validate_shape, MulMmKind};
-use crate::mul_mm_launch::enqueue_mul_mm;
-use cudarc::driver::CudaSlice;
+use crate::xfer;
+use cudarc::driver::{CudaDevice, CudaSlice};
 use enqueue::{
-    enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_rmsnorm_rows,
-    enqueue_rope_rows, AttnArgs, RopeArgs,
+    enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
+    enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
 };
+pub use kv_mirror::CudaKvMirror;
+pub use proj::ProjWeights;
+use std::sync::Arc;
 
 /// One quantized projection as the GEMM takes it: the GGUF bytes, the
 /// kernel row for their kind, and the shape. `WeightMatrix::
@@ -49,7 +64,7 @@ pub struct MulMmWeights<'a> {
 }
 
 impl MulMmWeights<'_> {
-    fn validate(&self, batch: usize) -> Result<(), CudaError> {
+    pub(crate) fn validate(&self, batch: usize) -> Result<(), CudaError> {
         validate_shape(
             self.kind,
             self.data.len(),
@@ -104,13 +119,13 @@ pub struct AttnExtrasCuda<'a> {
 pub struct PrefillDenseLayerCuda<'a> {
     pub attn_norm_w: &'a [f32],
     pub ffn_norm_w: &'a [f32],
-    pub q: MulMmWeights<'a>,
-    pub k: MulMmWeights<'a>,
-    pub v: MulMmWeights<'a>,
-    pub o: MulMmWeights<'a>,
-    pub gate: MulMmWeights<'a>,
-    pub up: MulMmWeights<'a>,
-    pub down: MulMmWeights<'a>,
+    pub q: ProjWeights<'a>,
+    pub k: ProjWeights<'a>,
+    pub v: ProjWeights<'a>,
+    pub o: ProjWeights<'a>,
+    pub gate: ProjWeights<'a>,
+    pub up: ProjWeights<'a>,
+    pub down: ProjWeights<'a>,
     /// Gemma-2's norms on each branch output before its residual add.
     pub post_attn_norm: Option<&'a [f32]>,
     pub post_ffn_norm: Option<&'a [f32]>,
@@ -132,7 +147,10 @@ pub struct PrefillParams<'a> {
     pub window: Option<usize>,
     /// K and V rows already in the host cache for this layer, laid out
     /// `[start_pos, n_kv_heads, head_dim]` each (post-RoPE K, as the
-    /// cache holds it). Empty when `start_pos == 0`.
+    /// cache holds it). Empty when `start_pos == 0`. Uploaded for the
+    /// attention under [`StackKv::UploadPrefix`]; under
+    /// [`StackKv::Mirrors`] only compared with the mirror, and uploaded
+    /// only when the mirror does not hold them.
     pub prefix_k: &'a [f32],
     pub prefix_v: &'a [f32],
     pub start_pos: usize,
@@ -146,29 +164,39 @@ pub struct PrefillLayerOut {
     pub v_rows: Vec<f32>,
 }
 
-fn upload(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    what: &str,
-    x: &[f32],
-) -> Result<CudaSlice<f32>, CudaError> {
-    dev.htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("{what} upload: {e:?}")))
+/// Where each layer's attention reads its history from.
+pub enum StackKv<'m, 'c> {
+    /// Upload each layer's host prefix ([`PrefillParams::prefix_k`])
+    /// for its attention: right for a prefill step, which reads the
+    /// prefix once.
+    UploadPrefix,
+    /// Each layer's own device mirror, one slot per layer of the run,
+    /// in order: right for a decode token, which would otherwise upload
+    /// the whole history per layer. A slot that is empty or stale is
+    /// rebuilt from the host prefix first (see [`kv_mirror`] for the
+    /// check), and every mirror is appended to on the device.
+    Mirrors(&'m mut [&'c mut Option<CudaKvMirror>]),
 }
 
-fn download<S: cudarc::driver::DevicePtr<f32>>(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    what: &str,
-    d: &S,
-) -> Result<Vec<f32>, CudaError> {
-    dev.dtoh_sync_copy(d)
-        .map_err(|e| CudaError::Launch(format!("{what} download: {e:?}")))
+/// Whether a decode token may take the resident stack. On unless
+/// `FRINK_CUDA_DECODE=host`, which keeps every decode token on the
+/// per-op path (five synchronous round trips per layer, host norms,
+/// RoPE and attention) for the A/B. Read once (`docs/CONFIG.md`).
+pub fn resident_decode_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("FRINK_CUDA_DECODE").as_deref(),
+            Ok("host" | "off" | "0")
+        )
+    })
 }
 
 /// Runs one dense layer over `hidden` (`batch * hidden_dim`, row-major)
-/// on the device: pre-norm, Q/K/V GEMMs, biases, QK norms, RoPE,
+/// on the device: pre-norm, Q/K/V projections, biases, QK norms, RoPE,
 /// causal GQA over prefix + batch, `wo`, post-norm, residual, pre-norm,
-/// gate/up GEMMs, SwiGLU, down GEMM, post-norm, residual. Three
-/// downloads at the end (hidden, K rows, V rows) and no other sync.
+/// gate/up projections, SwiGLU, down projection, post-norm, residual.
+/// One download at the end and no other sync.
 ///
 /// Refuses (`Unsupported`) rather than approximates: a GEMM shape the
 /// kernel cannot tile, a `head_dim` above 256, a rotary width that is
@@ -181,7 +209,8 @@ pub fn launch_prefill_dense_layer(
     params: &PrefillParams<'_>,
     batch: usize,
 ) -> Result<PrefillLayerOut, CudaError> {
-    let mut out = launch_prefill_dense_stack(hidden, &[(layer, params)], batch)?;
+    let mut out =
+        launch_prefill_dense_stack(hidden, &[(layer, params)], batch, StackKv::UploadPrefix)?;
     let (k_rows, v_rows) = out.kv_rows.pop().expect("one layer in, one layer out");
     Ok(PrefillLayerOut {
         hidden: out.hidden,
@@ -198,39 +227,128 @@ pub struct PrefillStackOut {
 }
 
 /// A run of consecutive dense layers with the hidden batch resident
-/// across them: one upload at the start, one download of it at the
-/// end, and two small downloads (K rows, V rows) per layer. This is
-/// what the decoder calls; [`launch_prefill_dense_layer`] is the
+/// across them: one upload at the start and ONE download at the end,
+/// which carries the hidden batch and every layer's K and V rows
+/// together. This is what the decoder calls, for a prefill batch and
+/// for a decode token alike; [`launch_prefill_dense_layer`] is the
 /// one-layer case of it. Every layer is shape-checked before the first
-/// touches the device, so a refusal leaves no partial state anywhere.
+/// touches the device, so a refusal leaves no partial state anywhere
+/// (a mirror rebuilt from the host before a later failure holds the
+/// host's rows, which is a valid state).
 pub fn launch_prefill_dense_stack(
     hidden: &[f32],
     layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
     batch: usize,
+    mut kv: StackKv<'_, '_>,
 ) -> Result<PrefillStackOut, CudaError> {
-    let Some((first, _)) = layers.first() else {
+    let Some((first, first_params)) = layers.first() else {
         return Err(CudaError::Unsupported(
             "prefill dense stack: no layers".to_string(),
         ));
     };
     let hidden_dim = first.attn_norm_w.len();
-    if hidden.len() != batch * hidden_dim {
+    if batch == 0 || hidden.len() != batch * hidden_dim {
         return Err(CudaError::Unsupported(
             "prefill dense stack: hidden batch does not match the first layer's width".to_string(),
         ));
     }
     for (layer, params) in layers {
         check_layer_shapes(layer, params, batch, hidden_dim)?;
+        if params.start_pos != first_params.start_pos {
+            return Err(CudaError::Unsupported(
+                "prefill dense stack: layers of one run at different positions".to_string(),
+            ));
+        }
     }
+    let start_pos = first_params.start_pos;
     let dev = shared_device()?;
-    let mut h = upload(&dev, "hidden", hidden)?;
-    let mut kv_rows = Vec::with_capacity(layers.len());
-    for (layer, params) in layers {
-        let (k_rows, v_rows) = run_layer_resident(&dev, &mut h, layer, params, batch)?;
-        kv_rows.push((k_rows, v_rows));
+
+    // The mirrors, validated TOGETHER: layer 0's newest K row depends
+    // only on (token, position), so two histories can agree there and
+    // nowhere else. One stale layer rebuilds all of them.
+    if let StackKv::Mirrors(slots) = &mut kv {
+        if slots.len() != layers.len() {
+            return Err(CudaError::Unsupported(format!(
+                "resident stack: {} KV mirrors for {} layers",
+                slots.len(),
+                layers.len()
+            )));
+        }
+        let need = start_pos + batch;
+        let fresh = slots.iter().zip(layers).all(|(slot, (_, p))| {
+            slot.as_ref()
+                .is_some_and(|m| m.holds(p.prefix_k, p.prefix_v, p.n_kv_heads * p.head_dim))
+        });
+        for (slot, (_, p)) in slots.iter_mut().zip(layers) {
+            let width = p.n_kv_heads * p.head_dim;
+            match slot.as_mut() {
+                Some(m) if fresh => m.reserve(&dev, need)?,
+                _ => {
+                    **slot = Some(CudaKvMirror::from_host(
+                        &dev, p.prefix_k, p.prefix_v, width, need,
+                    )?)
+                }
+            }
+        }
     }
-    let hidden = download(&dev, "hidden", &h)?;
-    Ok(PrefillStackOut { hidden, kv_rows })
+
+    // ONE buffer for everything the host gets back: the hidden batch,
+    // then per layer the batch's K rows and V rows.
+    let mut kv_offsets = Vec::with_capacity(layers.len());
+    let mut staged_len = batch * hidden_dim;
+    for (_, p) in layers {
+        let n = batch * p.n_kv_heads * p.head_dim;
+        kv_offsets.push((staged_len, n));
+        staged_len += 2 * n;
+    }
+    let mut staged = dev
+        .alloc_zeros::<f32>(staged_len)
+        .map_err(|e| CudaError::Launch(format!("stack staging alloc: {e:?}")))?;
+
+    let mut h = xfer::htod(&dev, "hidden upload", hidden)?;
+    let mut held = Held::default();
+    for (i, (layer, params)) in layers.iter().enumerate() {
+        let mirror = match &mut kv {
+            StackKv::UploadPrefix => None,
+            StackKv::Mirrors(slots) => Some(
+                slots[i]
+                    .as_mut()
+                    .expect("every mirror slot was filled above"),
+            ),
+        };
+        let step = LayerStep {
+            batch,
+            mirror,
+            stage_at: kv_offsets[i],
+        };
+        run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
+    }
+    xfer::dtod(
+        &dev,
+        "hidden stage",
+        &h,
+        &mut staged.slice_mut(..batch * hidden_dim),
+    )?;
+    // The stack's one host wait: everything above was enqueued.
+    let mut all = xfer::dtoh(&dev, "stack download", &staged)?;
+    drop(held);
+
+    let kv_rows: Vec<(Vec<f32>, Vec<f32>)> = kv_offsets
+        .iter()
+        .map(|&(at, n)| (all[at..at + n].to_vec(), all[at + n..at + 2 * n].to_vec()))
+        .collect();
+    if let StackKv::Mirrors(slots) = &mut kv {
+        for ((slot, (_, p)), (k_rows, _)) in slots.iter_mut().zip(layers).zip(&kv_rows) {
+            let width = p.n_kv_heads * p.head_dim;
+            let m = slot.as_mut().expect("every mirror slot was filled above");
+            m.commit(start_pos + batch, &k_rows[k_rows.len() - width..]);
+        }
+    }
+    all.truncate(batch * hidden_dim);
+    Ok(PrefillStackOut {
+        hidden: all,
+        kv_rows,
+    })
 }
 
 /// The host-side shape agreement, before any device work: a mismatch
@@ -252,20 +370,20 @@ fn check_layer_shapes(
     } = *params;
     let q_width = n_heads * head_dim;
     let kv_width = n_kv_heads * head_dim;
-    let ffn_dim = layer.gate.rows;
+    let ffn_dim = layer.gate.rows();
     if layer.attn_norm_w.len() != hidden_dim
         || layer.ffn_norm_w.len() != hidden_dim
-        || layer.q.rows != q_width
-        || layer.k.rows != kv_width
-        || layer.v.rows != kv_width
-        || layer.o.rows != hidden_dim
-        || layer.o.cols != q_width
-        || layer.up.rows != ffn_dim
-        || layer.down.rows != hidden_dim
-        || layer.down.cols != ffn_dim
+        || layer.q.rows() != q_width
+        || layer.k.rows() != kv_width
+        || layer.v.rows() != kv_width
+        || layer.o.rows() != hidden_dim
+        || layer.o.cols() != q_width
+        || layer.up.rows() != ffn_dim
+        || layer.down.rows() != hidden_dim
+        || layer.down.cols() != ffn_dim
         || [layer.q, layer.k, layer.v, layer.gate, layer.up]
             .iter()
-            .any(|m| m.cols != hidden_dim)
+            .any(|m| m.cols() != hidden_dim)
         || prefix_k.len() != start_pos * kv_width
         || prefix_v.len() != start_pos * kv_width
     {
@@ -284,6 +402,12 @@ fn check_layer_shapes(
         &layer.down,
     ] {
         m.validate(batch)?;
+    }
+    if batch == 1 && !crate::decode_attn::head_dim_ok(head_dim) {
+        return Err(CudaError::Unsupported(format!(
+            "resident decode: head_dim {head_dim} (the one-row attention takes a multiple of 4 \
+             up to 256)"
+        )));
     }
     if let Some(rope) = &layer.rope {
         if rope.rot_dim == 0 || !rope.rot_dim.is_multiple_of(2) || rope.rot_dim > head_dim {
@@ -337,15 +461,71 @@ fn norm_rows(w: Option<&[f32]>, width: usize) -> Result<Option<(usize, usize)>, 
     }
 }
 
-/// One layer over the resident hidden batch `h`, in place. Returns
-/// the batch's K/V rows. Shapes were checked by `check_layer_shapes`.
+/// Every resident buffer a launch reads, held until the stack's one
+/// download has synchronised the stream: the kernels read them
+/// asynchronously, and a buffer must not be released under a kernel
+/// that is still reading it.
+#[derive(Default)]
+struct Held {
+    weights: Vec<Arc<crate::gpu::ResidentCudaWeights>>,
+    vectors: Vec<Arc<crate::resident::ResidentCuda<f32>>>,
+}
+
+impl Held {
+    /// A long-lived f32 vector (norm weight, bias, RoPE divisors) on
+    /// the device, held: uploaded on first use, never per call.
+    fn vector(
+        &mut self,
+        dev: &Arc<CudaDevice>,
+        v: &[f32],
+    ) -> Result<Arc<crate::resident::ResidentCuda<f32>>, CudaError> {
+        let r = resident_cuda_f32(dev, v)?;
+        self.vectors.push(r.clone());
+        Ok(r)
+    }
+
+    /// One projection on the device, its weights held.
+    fn proj(
+        &mut self,
+        dev: &Arc<CudaDevice>,
+        m: &ProjWeights<'_>,
+        x: &CudaSlice<f32>,
+        batch: usize,
+    ) -> Result<CudaSlice<f32>, CudaError> {
+        let (out, w) = m.enqueue(dev, x, batch)?;
+        self.weights.push(w);
+        Ok(out)
+    }
+}
+
+/// What one layer of a run varies by beside its weights: the batch,
+/// where its history lives, and where its K/V rows are staged.
+struct LayerStep<'m> {
+    batch: usize,
+    /// The sequence's device history under [`StackKv::Mirrors`].
+    mirror: Option<&'m mut CudaKvMirror>,
+    /// `(offset, len)` of this layer's K rows in the staging buffer;
+    /// its V rows follow them.
+    stage_at: (usize, usize),
+}
+
+/// One layer over the resident hidden batch `h`, in place. Stages the
+/// batch's K/V rows into `staged`. Shapes were checked by
+/// `check_layer_shapes`.
 fn run_layer_resident(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    dev: &Arc<CudaDevice>,
     h: &mut CudaSlice<f32>,
     layer: &PrefillDenseLayerCuda<'_>,
     params: &PrefillParams<'_>,
-    batch: usize,
-) -> Result<(Vec<f32>, Vec<f32>), CudaError> {
+    step: LayerStep<'_>,
+    staged: &mut CudaSlice<f32>,
+    held: &mut Held,
+) -> Result<(), CudaError> {
+    let LayerStep {
+        batch,
+        mirror,
+        stage_at: (at, n_kv),
+    } = step;
     let hidden_dim = layer.attn_norm_w.len();
     let PrefillParams {
         n_heads,
@@ -361,27 +541,19 @@ fn run_layer_resident(
     } = *params;
     let q_width = n_heads * head_dim;
     let kv_width = n_kv_heads * head_dim;
-    let ffn_dim = layer.gate.rows;
+    let ffn_dim = layer.gate.rows();
     let q_norm_shape = norm_rows(layer.extras.q_norm, q_width)?;
     let k_norm_shape = norm_rows(layer.extras.k_norm, kv_width)?;
+    debug_assert_eq!(n_kv, batch * kv_width);
 
-    // Every resident-weight Arc the GEMMs hand back is held here until
-    // the downloads at the end synchronise the stream.
-    let mut held = Vec::with_capacity(7);
-
-    let attn_norm_w = upload(dev, "attn_norm", layer.attn_norm_w)?;
-    let ffn_norm_w = upload(dev, "ffn_norm", layer.ffn_norm_w)?;
+    let attn_norm_w = held.vector(dev, layer.attn_norm_w)?;
+    let ffn_norm_w = held.vector(dev, layer.ffn_norm_w)?;
 
     // --- attention ---
-    let normed = enqueue_rmsnorm_rows(dev, h, &attn_norm_w, batch, hidden_dim, rms_eps)?;
-    let gemm = |m: &MulMmWeights<'_>, x: &CudaSlice<f32>, held: &mut Vec<_>| {
-        let (out, w) = enqueue_mul_mm(dev, m.kind, m.data, x, m.rows, m.cols, batch, m.row_bytes)?;
-        held.push(w);
-        Ok::<_, CudaError>(out)
-    };
-    let mut q = gemm(&layer.q, &normed, &mut held)?;
-    let mut k = gemm(&layer.k, &normed, &mut held)?;
-    let mut v = gemm(&layer.v, &normed, &mut held)?;
+    let normed = enqueue_rmsnorm_rows(dev, h, &attn_norm_w.slice, batch, hidden_dim, rms_eps)?;
+    let mut q = held.proj(dev, &layer.q, &normed, batch)?;
+    let mut k = held.proj(dev, &layer.k, &normed, batch)?;
+    let mut v = held.proj(dev, &layer.v, &normed, batch)?;
     drop(normed);
 
     for (x, bias, width) in [
@@ -396,26 +568,26 @@ fn run_layer_resident(
                     bias.len()
                 )));
             }
-            let d_bias = upload(dev, "qkv bias", bias)?;
-            enqueue_add_bias_rows(dev, x, &d_bias, batch, width)?;
+            let d_bias = held.vector(dev, bias)?;
+            enqueue_add_bias_rows(dev, x, &d_bias.slice, batch, width)?;
         }
     }
     if let (Some(w), Some((n, per))) = (layer.extras.q_norm, q_norm_shape) {
-        let d_w = upload(dev, "q_norm", w)?;
-        q = enqueue_rmsnorm_rows(dev, &q, &d_w, batch * per, n, rms_eps)?;
+        let d_w = held.vector(dev, w)?;
+        q = enqueue_rmsnorm_rows(dev, &q, &d_w.slice, batch * per, n, rms_eps)?;
     }
     if let (Some(w), Some((n, per))) = (layer.extras.k_norm, k_norm_shape) {
-        let d_w = upload(dev, "k_norm", w)?;
-        k = enqueue_rmsnorm_rows(dev, &k, &d_w, batch * per, n, rms_eps)?;
+        let d_w = held.vector(dev, w)?;
+        k = enqueue_rmsnorm_rows(dev, &k, &d_w.slice, batch * per, n, rms_eps)?;
     }
     if let Some(rope) = &layer.rope {
         let d_ff = match rope.freq_factors {
-            Some(ff) => Some(upload(dev, "freq_factors", ff)?),
+            Some(ff) => Some(held.vector(dev, ff)?),
             None => None,
         };
         let args = RopeArgs {
             theta: rope.theta,
-            freq_factors: d_ff.as_ref(),
+            freq_factors: d_ff.as_ref().map(|r| &r.slice),
             rot_dim: rope.rot_dim,
             neox: rope.layout == RopeLayoutCuda::Neox,
             mscale: rope.mscale,
@@ -424,84 +596,117 @@ fn run_layer_resident(
         enqueue_rope_rows(dev, &mut k, batch, n_kv_heads, head_dim, start_pos, &args)?;
     }
 
+    // The batch's K (post-RoPE) and V rows are final here: stage them
+    // for the stack's one download.
+    xfer::dtod(
+        dev,
+        "K rows stage",
+        &k,
+        &mut staged.slice_mut(at..at + n_kv),
+    )?;
+    xfer::dtod(
+        dev,
+        "V rows stage",
+        &v,
+        &mut staged.slice_mut(at + n_kv..at + 2 * n_kv),
+    )?;
+
     // K/V over prefix + batch, in the cache's `[pos, kv_head, dim]`
     // layout: the batch's rows are already in it (row `b` of the
-    // projection IS position `start_pos + b`), so the prefix is
-    // prepended by a device copy rather than a host round trip.
-    let (k_all, v_all) = if start_pos == 0 {
-        (k, v)
-    } else {
-        let total = (start_pos + batch) * kv_width;
-        let mut k_all = dev
-            .alloc_zeros::<f32>(total)
-            .map_err(|e| CudaError::Launch(format!("k_all alloc: {e:?}")))?;
-        let mut v_all = dev
-            .alloc_zeros::<f32>(total)
-            .map_err(|e| CudaError::Launch(format!("v_all alloc: {e:?}")))?;
-        let d_pk = upload(dev, "prefix K", prefix_k)?;
-        let d_pv = upload(dev, "prefix V", prefix_v)?;
-        let n_prefix = start_pos * kv_width;
-        dev.dtod_copy(&d_pk, &mut k_all.slice_mut(..n_prefix))
-            .map_err(|e| CudaError::Launch(format!("prefix K copy: {e:?}")))?;
-        dev.dtod_copy(&d_pv, &mut v_all.slice_mut(..n_prefix))
-            .map_err(|e| CudaError::Launch(format!("prefix V copy: {e:?}")))?;
-        dev.dtod_copy(&k, &mut k_all.slice_mut(n_prefix..))
-            .map_err(|e| CudaError::Launch(format!("batch K copy: {e:?}")))?;
-        dev.dtod_copy(&v, &mut v_all.slice_mut(n_prefix..))
-            .map_err(|e| CudaError::Launch(format!("batch V copy: {e:?}")))?;
-        (k_all, v_all)
+    // projection IS position `start_pos + b`).
+    let n_prefix = start_pos * kv_width;
+    let total = n_prefix + batch * kv_width;
+    let uploaded;
+    let (k_all, v_all): (&CudaSlice<f32>, &CudaSlice<f32>) = match mirror {
+        // The sequence's own device history: append on the device.
+        Some(m) => {
+            debug_assert!(m.rows() == start_pos && m.cap_rows() >= start_pos + batch);
+            xfer::dtod(
+                dev,
+                "K mirror append",
+                &k,
+                &mut m.k.slice_mut(n_prefix..total),
+            )?;
+            xfer::dtod(
+                dev,
+                "V mirror append",
+                &v,
+                &mut m.v.slice_mut(n_prefix..total),
+            )?;
+            (&m.k, &m.v)
+        }
+        None if start_pos == 0 => (&k, &v),
+        // The prefix is uploaded and prepended by a device copy.
+        None => {
+            let mut k_all = dev
+                .alloc_zeros::<f32>(total)
+                .map_err(|e| CudaError::Launch(format!("k_all alloc: {e:?}")))?;
+            let mut v_all = dev
+                .alloc_zeros::<f32>(total)
+                .map_err(|e| CudaError::Launch(format!("v_all alloc: {e:?}")))?;
+            let d_pk = xfer::htod(dev, "prefix K upload", prefix_k)?;
+            let d_pv = xfer::htod(dev, "prefix V upload", prefix_v)?;
+            xfer::dtod(
+                dev,
+                "prefix K copy",
+                &d_pk,
+                &mut k_all.slice_mut(..n_prefix),
+            )?;
+            xfer::dtod(
+                dev,
+                "prefix V copy",
+                &d_pv,
+                &mut v_all.slice_mut(..n_prefix),
+            )?;
+            xfer::dtod(dev, "batch K copy", &k, &mut k_all.slice_mut(n_prefix..))?;
+            xfer::dtod(dev, "batch V copy", &v, &mut v_all.slice_mut(n_prefix..))?;
+            uploaded = (k_all, v_all);
+            (&uploaded.0, &uploaded.1)
+        }
     };
 
-    let attn = enqueue_causal_gqa_prefill(
-        dev,
-        &q,
-        &k_all,
-        &v_all,
-        batch,
-        &AttnArgs {
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            start_pos,
-            window,
-            scale: attn_scale,
-            softcap: attn_softcap,
-        },
-    )?;
+    let args = AttnArgs {
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        start_pos,
+        window,
+        scale: attn_scale,
+        softcap: attn_softcap,
+    };
+    // One query row is the decode kernel's shape, split across the
+    // keys; a batch is the prefill kernel's, one warp per row.
+    let attn = if batch == 1 {
+        enqueue_decode_attn(dev, &q, k_all, v_all, &args)?
+    } else {
+        enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args)?
+    };
     drop(q);
-    let mut o = gemm(&layer.o, &attn, &mut held)?;
+    let mut o = held.proj(dev, &layer.o, &attn, batch)?;
     drop(attn);
     if let Some(post) = layer.post_attn_norm {
-        let d_w = upload(dev, "post_attn_norm", post)?;
-        o = enqueue_rmsnorm_rows(dev, &o, &d_w, batch, hidden_dim, rms_eps)?;
+        let d_w = held.vector(dev, post)?;
+        o = enqueue_rmsnorm_rows(dev, &o, &d_w.slice, batch, hidden_dim, rms_eps)?;
     }
     enqueue_add_rows(dev, h, &o, batch * hidden_dim)?;
     drop(o);
 
     // --- FFN ---
-    let normed2 = enqueue_rmsnorm_rows(dev, h, &ffn_norm_w, batch, hidden_dim, rms_eps)?;
-    let gate = gemm(&layer.gate, &normed2, &mut held)?;
-    let up = gemm(&layer.up, &normed2, &mut held)?;
+    let normed2 = enqueue_rmsnorm_rows(dev, h, &ffn_norm_w.slice, batch, hidden_dim, rms_eps)?;
+    let gate = held.proj(dev, &layer.gate, &normed2, batch)?;
+    let up = held.proj(dev, &layer.up, &normed2, batch)?;
     drop(normed2);
     let act = silu_mul_device(dev, &gate, &up, batch * ffn_dim)?;
     drop((gate, up));
-    let mut down = gemm(&layer.down, &act, &mut held)?;
+    let mut down = held.proj(dev, &layer.down, &act, batch)?;
     drop(act);
     if let Some(post) = layer.post_ffn_norm {
-        let d_w = upload(dev, "post_ffn_norm", post)?;
-        down = enqueue_rmsnorm_rows(dev, &down, &d_w, batch, hidden_dim, rms_eps)?;
+        let d_w = held.vector(dev, post)?;
+        down = enqueue_rmsnorm_rows(dev, &down, &d_w.slice, batch, hidden_dim, rms_eps)?;
     }
     enqueue_add_rows(dev, h, &down, batch * hidden_dim)?;
     drop(down);
-
-    // The batch's rows of K/V are the tail of `k_all` / `v_all`. These
-    // two downloads are the layer's only host syncs; the hidden batch
-    // stays on the device for the next layer.
-    let n_prefix = start_pos * kv_width;
-    let k_rows = download(dev, "K rows", &k_all.slice(n_prefix..))?;
-    let v_rows = download(dev, "V rows", &v_all.slice(n_prefix..))?;
-    drop(held);
-    Ok((k_rows, v_rows))
+    Ok(())
 }
 
 #[cfg(test)]

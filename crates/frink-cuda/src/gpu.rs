@@ -253,11 +253,13 @@ pub(crate) fn ensure_module_loaded_lazy_for_arch(
 /// process-wide and persistent (see `shared_device`/`ensure_module_loaded`) --
 /// quantized weight buffers are also cached by host pointer+length
 /// (`resident_cuda_weights`) so decode does not re-upload multi-GB
-/// matrices every token. Activations still upload per call, and that is
-/// deliberate: keeping them device-resident between matmuls was tried
-/// (PR #136) and measured 22% SLOWER on a GTX 1080, because decode is
-/// kernel-bound at ~90% utilization rather than host-bound. See
-/// `docs/plans/cpu-cuda-parity.md` step 2.
+/// matrices every token. Activations upload per call HERE: this is the
+/// one-matrix launch a lone projection takes (the lm_head, a layer the
+/// resident stack declines). Chaining only adjacent matmuls was tried
+/// (PR #136) and measured 22% SLOWER on a GTX 1080, because norms,
+/// RoPE and attention sat on the host between them; a dense decode
+/// layer now runs whole on the device instead (`crate::prefill`, at one
+/// row). See `docs/plans/cpu-cuda-parity.md` step 2.
 #[allow(clippy::too_many_arguments)] // shared internal launch plumbing; each parameter is a distinct, clearly-named buffer/shape value, not something worth bundling into a struct for one private callee.
 fn launch_matvec(
     kernel_src: &'static str,
@@ -272,9 +274,7 @@ fn launch_matvec(
     // Which kernel actually runs is `enqueue_matvec`'s decision, so
     // every caller gets the same one -- see `matvec_launch_plan`.
     let dev = shared_device()?;
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("{e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "matvec x upload", x)?;
     let launch = MatvecLaunch {
         kernel_src,
         module_name,
@@ -286,8 +286,7 @@ fn launch_matvec(
     };
     // `_weights` holds the resident-weight Arc alive until the DtoH sync.
     let (d_out, _weights) = enqueue_matvec(&dev, &launch, &d_x)?;
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("{e:?}")))
+    crate::xfer::dtoh(&dev, "matvec out download", &d_out)
 }
 
 /// How many warps a coalesced matvec block carries; one holder, in
@@ -384,7 +383,7 @@ impl MatvecPlan {
 /// asynchronously). This is the single per-launch primitive shared by
 /// [`launch_matvec`], [`launch_matvec_multi`] and
 /// [`launch_dense_ffn_swiglu`].
-fn enqueue_matvec(
+pub(crate) fn enqueue_matvec(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launch: &MatvecLaunch<'_>,
     d_x: &cudarc::driver::CudaSlice<f32>,
@@ -454,7 +453,7 @@ fn enqueue_matvec_at(
 
 // The resident weight cache moved to `crate::resident`; re-exported
 // here so `crate::gpu::resident_cuda_weights` still resolves.
-pub(crate) use crate::resident::{resident_cuda_weights, ResidentCudaWeights};
+pub(crate) use crate::resident::{resident_cuda_f32, resident_cuda_weights, ResidentCudaWeights};
 
 // The kernel TEXT moved to `matvec_kinds`, one module per format
 // family; `gpu.rs` keeps the device plumbing. Re-exported so every
@@ -657,6 +656,7 @@ pub fn launch_q6_k_matvec(
 /// never a temporary `to_vec()` copy. [`resident_cuda_weights`] keys by
 /// pointer+length; a per-call clone would miss the cache and re-upload
 /// multi-GB matrices every QKV fuse (the Vast ~2 tok/s failure mode).
+#[derive(Clone, Copy)]
 pub struct MatvecLaunch<'a> {
     pub kernel_src: &'static str,
     pub module_name: &'static str,
@@ -682,9 +682,7 @@ pub fn launch_matvec_multi(
 
     let dev = shared_device()?;
 
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("x upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "x upload", x)?;
 
     // Hold weight Arcs + device outs until after all launches so kernels
     // can overlap before any host sync (llama: sync only at graph edge).
@@ -700,9 +698,7 @@ pub fn launch_matvec_multi(
 
     let mut results = Vec::with_capacity(d_outs.len());
     for (i, d_out) in d_outs.into_iter().enumerate() {
-        let out = dev.dtoh_sync_copy(&d_out).map_err(|e| {
-            CudaError::Launch(format!("output download {}: {e:?}", launches[i].fn_name))
-        })?;
+        let out = crate::xfer::dtoh(&dev, launches[i].fn_name, &d_out)?;
         results.push(out);
     }
 
@@ -839,15 +835,9 @@ pub fn launch_fused_add_rmsnorm(
             )
         })?;
 
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm x upload: {e:?}")))?;
-    let d_residual = dev
-        .htod_copy(residual.to_vec())
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm residual upload: {e:?}")))?;
-    let d_weight = dev
-        .htod_copy(weight.to_vec())
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm weight upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "fused_add_rmsnorm x upload", x)?;
+    let d_residual = crate::xfer::htod(&dev, "fused_add_rmsnorm residual upload", residual)?;
+    let d_weight = crate::xfer::htod(&dev, "fused_add_rmsnorm weight upload", weight)?;
     let mut d_out = dev
         .alloc_zeros::<f32>(n)
         .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm out alloc: {e:?}")))?;
@@ -866,8 +856,7 @@ pub fn launch_fused_add_rmsnorm(
         .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm launch: {e:?}")))?;
     }
 
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm download: {e:?}")))
+    crate::xfer::dtoh(&dev, "fused_add_rmsnorm download", &d_out)
 }
 
 /// Fused dense SwiGLU FFN entirely on-device: uploads `x` once, runs
@@ -893,9 +882,7 @@ pub fn launch_dense_ffn_swiglu(
 ) -> Result<Vec<f32>, CudaError> {
     let dev = shared_device()?;
 
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("ffn x upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "ffn x upload", x)?;
 
     // Bind the resident-weight Arcs (`_wg`/`_wu`/`_wd`) for the whole
     // function so every kernel's weight buffer outlives the final sync.
@@ -904,8 +891,7 @@ pub fn launch_dense_ffn_swiglu(
     let d_act = silu_mul_device(&dev, &d_gate, &d_up, gate.rows)?;
     let (d_out, _wd) = enqueue_matvec(&dev, down, &d_act)?;
 
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("ffn out download: {e:?}")))
+    crate::xfer::dtoh(&dev, "ffn out download", &d_out)
 }
 
 #[cfg(test)]

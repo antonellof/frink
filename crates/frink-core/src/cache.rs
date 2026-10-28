@@ -161,6 +161,14 @@ pub struct KvCache {
     /// exchange for not having to find every such place.
     #[cfg(feature = "metal")]
     pub metal_attn: Option<frink_metal::attn::MetalKvBuffers>,
+    /// This sequence's KV on the CUDA device, for the resident decode
+    /// stack (`frink_cuda::prefill::kv_mirror`). The same contract as
+    /// `metal_attn` above: per sequence, a mirror and never the
+    /// authority, reset by a clone, and used only while it holds
+    /// exactly this cache's rows (checked by row count AND by the
+    /// newest K row, so a truncate grown back by a host path is caught).
+    #[cfg(feature = "cuda")]
+    pub cuda_attn: Option<frink_cuda::prefill::CudaKvMirror>,
     /// Positions this sequence has consumed.
     ///
     /// **Not the same thing as the number of rows in `k`/`v`**, and the
@@ -233,6 +241,8 @@ impl Clone for KvCache {
             window: self.window,
             #[cfg(feature = "metal")]
             metal_attn: None,
+            #[cfg(feature = "cuda")]
+            cuda_attn: None,
             recurrent: self.recurrent.clone(),
         }
     }
@@ -346,6 +356,8 @@ impl KvCache {
             window: None,
             #[cfg(feature = "metal")]
             metal_attn: None,
+            #[cfg(feature = "cuda")]
+            cuda_attn: None,
             recurrent: None,
         }
     }
@@ -376,6 +388,8 @@ impl KvCache {
             window: None,
             #[cfg(feature = "metal")]
             metal_attn: None,
+            #[cfg(feature = "cuda")]
+            cuda_attn: None,
             recurrent: None,
         }
     }
@@ -442,6 +456,8 @@ impl KvCache {
             window: None,
             #[cfg(feature = "metal")]
             metal_attn: None,
+            #[cfg(feature = "cuda")]
+            cuda_attn: None,
             recurrent: None,
         })
     }

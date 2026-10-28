@@ -98,6 +98,31 @@ fn host_causal_gqa(q: &[f32], k: &[f32], v: &[f32], n_q: usize, a: &AttnArgs) ->
     out
 }
 
+/// A Q8_0 projection with both views, as `frink-core` builds one:
+/// the GEMM's and the matvec's, over the same bytes.
+fn q8_0_proj(data: &'static [u8], rows: usize, cols: usize) -> ProjWeights<'static> {
+    let (kernel_src, module_name, fn_name) =
+        crate::gpu::matvec_launch_meta("Q8_0").expect("Q8_0 has a matvec");
+    ProjWeights {
+        gemm: MulMmWeights {
+            kind: &Q8_0,
+            data,
+            rows,
+            cols,
+            row_bytes: cols / 32 * 34,
+        },
+        matvec: Some(crate::gpu::MatvecLaunch {
+            kernel_src,
+            module_name,
+            fn_name,
+            weights: data,
+            rows,
+            row_bytes: cols / 32 * 34,
+            n_blocks_per_row: cols / 32,
+        }),
+    }
+}
+
 fn wave(n: usize, seed: f32) -> Vec<f32> {
     (0..n).map(|i| ((i as f32) * 0.037 + seed).sin()).collect()
 }
@@ -122,12 +147,14 @@ fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
 fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
     // `o.cols` is not `n_heads * head_dim`: refused by the host check,
     // which on a GPU-less host is the only way this test can pass.
-    let m = |rows, cols| MulMmWeights {
-        kind: &Q8_0,
-        data: &[],
-        rows,
-        cols,
-        row_bytes: cols / 32 * 34,
+    let m = |rows, cols| {
+        ProjWeights::gemm_only(MulMmWeights {
+            kind: &Q8_0,
+            data: &[],
+            rows,
+            cols,
+            row_bytes: cols / 32 * 34,
+        })
     };
     let w = vec![1.0f32; 64];
     let layer = PrefillDenseLayerCuda {
@@ -303,13 +330,7 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     let (gd, ..) = mk(ffn, hidden, 5);
     let (ud, ..) = mk(ffn, hidden, 6);
     let (dd, ..) = mk(hidden, ffn, 7);
-    let view = |data: &'static [u8], rows, cols| MulMmWeights {
-        kind: &Q8_0,
-        data,
-        rows,
-        cols,
-        row_bytes: cols / 32 * 34,
-    };
+    let view = |data: &'static [u8], rows, cols| q8_0_proj(data, rows, cols);
     // Leak the fixtures: the views borrow them for the whole test.
     let leak = |v: Vec<u8>| -> &'static [u8] { Box::leak(v.into_boxed_slice()) };
     let (qd, kd, vd, od, gd, ud, dd) = (
@@ -480,9 +501,13 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     // The stack: the same layer twice with the hidden batch resident
     // between them must equal two single launches, K/V rows per layer.
     let second = launch_prefill_dense_layer(&out.hidden, &layer, &params, batch).unwrap();
-    let stacked =
-        launch_prefill_dense_stack(&hidden_in, &[(&layer, &params), (&layer, &params)], batch)
-            .unwrap();
+    let stacked = launch_prefill_dense_stack(
+        &hidden_in,
+        &[(&layer, &params), (&layer, &params)],
+        batch,
+        StackKv::UploadPrefix,
+    )
+    .unwrap();
     assert_eq!(stacked.kv_rows.len(), 2);
     assert_close(&stacked.kv_rows[0].0, &out.k_rows, 1e-5, "stack layer 0 K");
     assert_close(
@@ -498,4 +523,345 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
         "stack layer 1 V",
     );
     assert_close(&stacked.hidden, &second.hidden, 1e-5, "stack hidden");
+}
+
+/// Q8_0 fixture bytes with every block scale near `2^-9`, so a
+/// layer's activations stay near 1 (see the note in the layer test
+/// above), leaked for the `'static` views.
+fn small_q8_0(rows: usize, cols: usize, seed: u32) -> &'static [u8] {
+    let mut data = fixtures::weights(&Q8_0, rows, cols, seed);
+    for block in data.as_chunks_mut::<34>().0 {
+        let bits = u16::from(block[0]) | (u16::from(block[1]) << 8);
+        let bits = (bits & 0x83FF) | (6 << 10);
+        block[0] = bits as u8;
+        block[1] = (bits >> 8) as u8;
+    }
+    Box::leak(data.into_boxed_slice())
+}
+
+/// A one-row step multiplies by the matvec; a projection that has
+/// only the GEMM's view must be refused before the device, not run
+/// through a tile that wastes all but one column, and not silently.
+#[test]
+fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
+    let gemm = |rows, cols| {
+        ProjWeights::gemm_only(MulMmWeights {
+            kind: &Q8_0,
+            data: &[],
+            rows,
+            cols,
+            row_bytes: cols / 32 * 34,
+        })
+    };
+    let w = vec![1.0f32; 64];
+    let layer = PrefillDenseLayerCuda {
+        attn_norm_w: &w,
+        ffn_norm_w: &w,
+        q: gemm(64, 64),
+        k: gemm(32, 64),
+        v: gemm(32, 64),
+        o: gemm(64, 64),
+        gate: gemm(96, 64),
+        up: gemm(96, 64),
+        down: gemm(64, 96),
+        post_attn_norm: None,
+        post_ffn_norm: None,
+        extras: AttnExtrasCuda::default(),
+        rope: None,
+    };
+    let params = PrefillParams {
+        n_heads: 2,
+        n_kv_heads: 1,
+        head_dim: 32,
+        rms_eps: 1e-5,
+        attn_scale: 32f32.sqrt().recip(),
+        attn_softcap: None,
+        window: None,
+        prefix_k: &[],
+        prefix_v: &[],
+        start_pos: 0,
+    };
+    let err = launch_prefill_dense_stack(&w, &[(&layer, &params)], 1, StackKv::UploadPrefix)
+        .err()
+        .expect("a one-row step with no matvec must be refused");
+    assert!(
+        matches!(&err, CudaError::Unsupported(m) if m.contains("matvec")),
+        "{err:?}"
+    );
+}
+
+/// The two views of a projection must describe the same bytes: a
+/// matvec over one tensor beside the shape of another would multiply
+/// the wrong weights with every check passing.
+#[test]
+fn a_matvec_view_of_other_bytes_is_refused() {
+    let a: &'static [u8] = Box::leak(vec![0u8; 64 * 2 * 34].into_boxed_slice());
+    let b: &'static [u8] = Box::leak(vec![0u8; 64 * 2 * 34].into_boxed_slice());
+    let mut p = q8_0_proj(a, 64, 64);
+    assert!(p.validate(1).is_ok());
+    p.matvec.as_mut().unwrap().weights = b;
+    let err = p.validate(1).expect_err("different bytes");
+    assert!(matches!(err, CudaError::Unsupported(_)), "{err:?}");
+    // A GEMM step does not read the matvec view at all.
+    assert!(p.validate(4).is_ok());
+}
+
+#[test]
+#[ignore = "requires real CUDA hardware; not yet run"]
+fn decode_attn_matches_its_twin_across_chunks_a_window_and_a_softcap() {
+    let dev = shared_device().unwrap();
+    for (n_heads, n_kv_heads, head_dim) in [(24usize, 8usize, 128usize), (4, 2, 64), (2, 1, 256)] {
+        for (seq_len, window, softcap) in [
+            (1usize, None, None),
+            (63, None, None),
+            (64, None, None),
+            (65, None, None),
+            (777, None, None),
+            (777, Some(300), None),
+            (130, None, Some(50.0)),
+        ] {
+            let q = wave(n_heads * head_dim, 0.2);
+            let k = wave(seq_len * n_kv_heads * head_dim, 0.4);
+            let v = wave(seq_len * n_kv_heads * head_dim, 0.6);
+            let scale = (head_dim as f32).sqrt().recip();
+            let want = crate::decode_attn::decode_attn_twin(
+                &q, &k, &v, n_heads, n_kv_heads, head_dim, seq_len, window, scale, softcap,
+            );
+            let args = AttnArgs {
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                start_pos: seq_len - 1,
+                window,
+                scale,
+                softcap,
+            };
+            let d_q = dev.htod_copy(q.clone()).unwrap();
+            let d_k = dev.htod_copy(k.clone()).unwrap();
+            let d_v = dev.htod_copy(v.clone()).unwrap();
+            let out = enqueue_decode_attn(&dev, &d_q, &d_k, &d_v, &args).unwrap();
+            let got = dev.dtoh_sync_copy(&out).unwrap();
+            let what = format!("decode attn h={n_heads} hd={head_dim} seq={seq_len} w={window:?}");
+            assert_close(&got, &want, 1e-4, &what);
+            // And against the definition, through the prefill kernel's
+            // host loop at one query row.
+            let naive = host_causal_gqa(&q, &k, &v, 1, &args);
+            assert_close(&got, &naive, 1e-4, &format!("{what} vs naive"));
+        }
+    }
+}
+
+/// A Llama-shaped layer (no biases, no QK norm, NORM RoPE with
+/// divisors) on the host at one row: the arithmetic the stack's
+/// one-row step must reproduce. Returns the new hidden row, K, V.
+#[allow(clippy::too_many_arguments)]
+fn host_llama_row(
+    w: &[&[u8]; 7],
+    dims: (usize, usize, usize, usize, usize),
+    norms: (&[f32], &[f32]),
+    ff: &[f32],
+    hidden_in: &[f32],
+    prefix_k: &[f32],
+    prefix_v: &[f32],
+    pos: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let (hidden, n_heads, n_kv_heads, head_dim, ffn) = dims;
+    let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
+    let mv = |data: &[u8], rows, cols, x: &[f32]| {
+        mul_mm_reference(&Q8_0, data, x, rows, cols, 1, cols / 32 * 34).unwrap()
+    };
+    let eps = 1e-5;
+    let normed = host_rms_norm_rows(hidden_in, norms.0, hidden, eps);
+    let mut q = mv(w[0], q_w, hidden, &normed);
+    let mut k = mv(w[1], kv_w, hidden, &normed);
+    let v = mv(w[2], kv_w, hidden, &normed);
+    for (x, heads) in [(&mut q, n_heads), (&mut k, n_kv_heads)] {
+        host_rope_rows(
+            x,
+            heads,
+            head_dim,
+            head_dim,
+            pos,
+            500000.0,
+            Some(ff),
+            false,
+            1.0,
+        );
+    }
+    let mut k_all = prefix_k.to_vec();
+    k_all.extend_from_slice(&k);
+    let mut v_all = prefix_v.to_vec();
+    v_all.extend_from_slice(&v);
+    let args = AttnArgs {
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        start_pos: pos,
+        window: None,
+        scale: (head_dim as f32).sqrt().recip(),
+        softcap: None,
+    };
+    let attn = host_causal_gqa(&q, &k_all, &v_all, 1, &args);
+    let o = mv(w[3], hidden, q_w, &attn);
+    let mut h: Vec<f32> = hidden_in.iter().zip(&o).map(|(a, b)| a + b).collect();
+    let normed2 = host_rms_norm_rows(&h, norms.1, hidden, eps);
+    let g = mv(w[4], ffn, hidden, &normed2);
+    let u = mv(w[5], ffn, hidden, &normed2);
+    let act: Vec<f32> = g
+        .iter()
+        .zip(&u)
+        .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+        .collect();
+    let d = mv(w[6], hidden, ffn, &act);
+    for (a, b) in h.iter_mut().zip(&d) {
+        *a += b;
+    }
+    (h, k, v)
+}
+
+/// Decode is the stack at one row. Token by token over a prefix, two
+/// layers, through each layer's device mirror: every token's hidden
+/// row and K/V rows must match the host twin, the mirror must agree
+/// with uploading the prefix every time (same kernels, different home
+/// for the history), and a mirror the host cache no longer matches
+/// must be rebuilt rather than trusted.
+#[test]
+#[ignore = "requires real CUDA hardware; not yet run"]
+fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
+    let (hidden, n_heads, n_kv_heads, head_dim, ffn) = (64usize, 2usize, 1usize, 32usize, 96usize);
+    let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
+    let w: [&'static [u8]; 7] = [
+        small_q8_0(q_w, hidden, 11),
+        small_q8_0(kv_w, hidden, 12),
+        small_q8_0(kv_w, hidden, 13),
+        small_q8_0(hidden, q_w, 14),
+        small_q8_0(ffn, hidden, 15),
+        small_q8_0(ffn, hidden, 16),
+        small_q8_0(hidden, ffn, 17),
+    ];
+    let norm = |seed| {
+        wave(hidden, seed)
+            .iter()
+            .map(|v| 1.0 + 0.1 * v)
+            .collect::<Vec<_>>()
+    };
+    let (an, fnw) = (norm(1.1), norm(1.3));
+    let ff: Vec<f32> = (0..head_dim / 2).map(|i| 1.0 + i as f32 * 0.1).collect();
+    let layer = PrefillDenseLayerCuda {
+        attn_norm_w: &an,
+        ffn_norm_w: &fnw,
+        q: q8_0_proj(w[0], q_w, hidden),
+        k: q8_0_proj(w[1], kv_w, hidden),
+        v: q8_0_proj(w[2], kv_w, hidden),
+        o: q8_0_proj(w[3], hidden, q_w),
+        gate: q8_0_proj(w[4], ffn, hidden),
+        up: q8_0_proj(w[5], ffn, hidden),
+        down: q8_0_proj(w[6], hidden, ffn),
+        post_attn_norm: None,
+        post_ffn_norm: None,
+        extras: AttnExtrasCuda::default(),
+        rope: Some(LayerRopeCuda {
+            theta: 500000.0,
+            freq_factors: Some(&ff),
+            rot_dim: head_dim,
+            layout: RopeLayoutCuda::Norm,
+            mscale: 1.0,
+        }),
+    };
+    let leak = |v: Vec<f32>| -> &'static [f32] { Box::leak(v.into_boxed_slice()) };
+    let params_at = |pos: usize, pk: &'static [f32], pv: &'static [f32]| PrefillParams {
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        rms_eps: 1e-5,
+        attn_scale: (head_dim as f32).sqrt().recip(),
+        attn_softcap: None,
+        window: None,
+        prefix_k: pk,
+        prefix_v: pv,
+        start_pos: pos,
+    };
+    // Two layers' host caches, seeded with a prefix of 70 rows (two
+    // decode-attention chunks once the token is added).
+    let start = 70;
+    let mut host_k = [wave(start * kv_w, 3.1), wave(start * kv_w, 3.7)];
+    let mut host_v = [wave(start * kv_w, 3.3), wave(start * kv_w, 3.9)];
+    let mut mirrors: [Option<CudaKvMirror>; 2] = [None, None];
+    let mut row = wave(hidden, 0.05);
+    let step = |row: &[f32],
+                pos: usize,
+                host_k: &[Vec<f32>; 2],
+                host_v: &[Vec<f32>; 2],
+                mirrors: &mut [Option<CudaKvMirror>; 2]| {
+        let p: Vec<PrefillParams<'static>> = (0..2)
+            .map(|l| params_at(pos, leak(host_k[l].clone()), leak(host_v[l].clone())))
+            .collect();
+        let launch = [(&layer, &p[0]), (&layer, &p[1])];
+        let [m0, m1] = mirrors;
+        let mut slots = [m0, m1];
+        let via_mirror =
+            launch_prefill_dense_stack(row, &launch, 1, StackKv::Mirrors(&mut slots)).unwrap();
+        let via_upload =
+            launch_prefill_dense_stack(row, &launch, 1, StackKv::UploadPrefix).unwrap();
+        (via_mirror, via_upload)
+    };
+    for pos in start..start + 4 {
+        let (via_mirror, via_upload) = step(&row, pos, &host_k, &host_v, &mut mirrors);
+        // Same kernels, same inputs: only where the history lives
+        // differs, so the two agree to the bit.
+        assert_eq!(
+            via_mirror.hidden, via_upload.hidden,
+            "pos {pos}: mirror vs upload"
+        );
+        assert_eq!(
+            via_mirror.kv_rows, via_upload.kv_rows,
+            "pos {pos}: K/V rows"
+        );
+        // And the host twin, layer by layer.
+        let mut h = row.clone();
+        for l in 0..2 {
+            let (h2, k, v) = host_llama_row(
+                &w,
+                (hidden, n_heads, n_kv_heads, head_dim, ffn),
+                (&an, &fnw),
+                &ff,
+                &h,
+                &host_k[l],
+                &host_v[l],
+                pos,
+            );
+            assert_close(
+                &via_mirror.kv_rows[l].0,
+                &k,
+                1e-3,
+                &format!("pos {pos} layer {l} K"),
+            );
+            assert_close(
+                &via_mirror.kv_rows[l].1,
+                &v,
+                1e-3,
+                &format!("pos {pos} layer {l} V"),
+            );
+            h = h2;
+        }
+        assert_close(&via_mirror.hidden, &h, 1e-3, &format!("pos {pos} hidden"));
+        for l in 0..2 {
+            host_k[l].extend_from_slice(&via_mirror.kv_rows[l].0);
+            host_v[l].extend_from_slice(&via_mirror.kv_rows[l].1);
+            assert_eq!(mirrors[l].as_ref().unwrap().rows(), pos + 1);
+        }
+        row = via_mirror.hidden;
+    }
+
+    // Truncate by one and grow back with a DIFFERENT row through a host
+    // path: same length, different history. The mirror must notice.
+    for k in host_k.iter_mut() {
+        let n = k.len();
+        k[n - 1] += 0.5;
+    }
+    let (via_mirror, via_upload) = step(&row, start + 4, &host_k, &host_v, &mut mirrors);
+    assert_eq!(
+        via_mirror.hidden, via_upload.hidden,
+        "a stale mirror was trusted"
+    );
 }

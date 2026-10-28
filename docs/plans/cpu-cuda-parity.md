@@ -442,6 +442,23 @@ end, so the first hardware step is per-kernel time (`nsys`), not tok/s.
 If matvec time is a minority of the token, the next lever is the ~3
 host round trips per layer, whatever this change measures.
 
+**Update, 2026-10-28 (stacked on the wide matvec, unverified on
+hardware).** Counted from the code, a dense Llama decode token made
+**141 host waits, 85 uploads and 141 downloads** (Llama-3.2-3B, 28
+layers): five synchronous round trips per layer (q/k/v, `wo`, the fused
+FFN) with both RMSNorms, RoPE, the KV push, the attention and both
+residual adds on the host between them, plus the lm_head. A decode token
+now runs the resident stack the batched prefill already had, at one row
+(`frink_cuda::prefill`, one body, ADR 0004): matvec projections, a
+split-key one-row attention kernel (`frink_cuda::decode_attn`, the shape
+of llama.cpp's `flash_attn_combine_results`) over a per-sequence device
+KV mirror (`KvCache::cuda_attn`), norm weights resident, and ONE
+download per run carrying the hidden row and every layer's K/V rows.
+Expected: **2 waits, 2 uploads, 2 downloads** per token (the stack and
+the lm_head). `FRINK_CUDA_COUNT=1` prints the real counts per token, and
+`FRINK_CUDA_DECODE=host` restores the per-op path for the A/B. The
+arithmetic and the commands to run are in the PR.
+
 **A dead API that should still go.** 
 `frink-cuda/src/gpu.rs` defines `DeviceAct` / `upload_act` /
 `matvec_into` / `download_act`, whose doc says they exist "so a

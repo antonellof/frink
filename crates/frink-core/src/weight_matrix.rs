@@ -1349,6 +1349,43 @@ impl WeightMatrix {
         })
     }
 
+    /// This matrix as a CUDA matvec launch takes it, or `None` for a
+    /// matrix that is not plain quantized bytes (an adapter or a fold:
+    /// arithmetic no raw-bytes launch does) or a kind with no CUDA
+    /// matvec. The ONE constructor of [`frink_cuda::gpu::MatvecLaunch`]
+    /// in this crate: `apply_gpu_multi` and `apply_gpu_dense_ffn_swiglu`
+    /// each used to spell this out, and the resident decode stack is a
+    /// third caller.
+    ///
+    /// `weights` borrows the mmap / owned storage, never a `to_vec()`
+    /// copy: `resident_cuda_weights` keys by pointer and length, and a
+    /// per-call clone would re-upload the matrix every token.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_matvec_launch(&self) -> Option<frink_cuda::gpu::MatvecLaunch<'_>> {
+        let WeightMatrix::Quantized {
+            data,
+            rows,
+            cols,
+            kind,
+        } = self
+        else {
+            return None;
+        };
+        // One table, in `frink-cuda`, exactly as the Metal arm asks
+        // `matvec_launch_meta`.
+        let (kernel_src, module_name, fn_name) = frink_cuda::gpu::matvec_launch_meta(kind.name())?;
+        let row_bytes = self.block_bytes_per_row(*kind, *cols);
+        Some(frink_cuda::gpu::MatvecLaunch {
+            kernel_src,
+            module_name,
+            fn_name,
+            weights: data.as_slice(),
+            rows: *rows,
+            row_bytes,
+            n_blocks_per_row: row_bytes / Self::block_bytes_for_kind(*kind),
+        })
+    }
+
     #[cfg(any(feature = "metal", feature = "cuda"))]
     pub fn prefers_gpu_batch(&self) -> bool {
         !matches!(
@@ -3361,38 +3398,12 @@ impl WeightMatrix {
             let mut launches = Vec::with_capacity(mats.len());
             for m in mats {
                 assert_eq!(m.cols(), mats[0].cols());
-                let WeightMatrix::Quantized {
-                    data,
-                    rows,
-                    cols,
-                    kind,
-                } = m
-                else {
-                    return None;
-                };
-                // One table, in `frink-cuda`, exactly as the Metal arm
-                // below asks `matvec_launch_meta`. This match was
-                // written out here and again in
-                // `apply_gpu_dense_ffn_swiglu`, three copies of one
-                // five-row list with nothing holding them together --
-                // and a kind added to the capability table but not to a
-                // copy loses its fused launch silently, which is the
-                // failure this file has paid for twice.
-                let (kernel_src, module_name, fn_name) =
-                    frink_cuda::gpu::matvec_launch_meta(kind.name())?;
-                let row_bytes = m.block_bytes_per_row(*kind, *cols);
-                let n_blocks_per_row = row_bytes / Self::block_bytes_for_kind(*kind);
-                launches.push(frink_cuda::gpu::MatvecLaunch {
-                    kernel_src,
-                    module_name,
-                    fn_name,
-                    // Borrow mmap/owned storage — never to_vec() (breaks
-                    // resident_cuda_weights pointer cache; re-uploads GB).
-                    weights: data.as_slice(),
-                    rows: *rows,
-                    row_bytes,
-                    n_blocks_per_row,
-                });
+                // `cuda_matvec_launch` is the one constructor; this
+                // used to be the first of three copies of it, and a
+                // kind added to the capability table but not to a copy
+                // loses its fused launch silently, which is the failure
+                // this file has paid for twice.
+                launches.push(m.cuda_matvec_launch()?);
             }
             match frink_cuda::gpu::launch_matvec_multi(x, &launches) {
                 Ok(outs) => return Some(outs),
@@ -3473,35 +3484,11 @@ impl WeightMatrix {
         #[cfg(feature = "cuda")]
         {
             if cuda_dense_enabled() {
-                fn cuda_launch(m: &WeightMatrix) -> Option<frink_cuda::gpu::MatvecLaunch<'_>> {
-                    let WeightMatrix::Quantized {
-                        data,
-                        rows,
-                        cols,
-                        kind,
-                    } = m
-                    else {
-                        return None;
-                    };
-                    // The second of the two copies this used to hold.
-                    // See the note in `apply_gpu_multi`.
-                    let (kernel_src, module_name, fn_name) =
-                        frink_cuda::gpu::matvec_launch_meta(kind.name())?;
-                    let row_bytes = m.block_bytes_per_row(*kind, *cols);
-                    let n_blocks_per_row = row_bytes / WeightMatrix::block_bytes_for_kind(*kind);
-                    Some(frink_cuda::gpu::MatvecLaunch {
-                        kernel_src,
-                        module_name,
-                        fn_name,
-                        weights: data.as_slice(),
-                        rows: *rows,
-                        row_bytes,
-                        n_blocks_per_row,
-                    })
-                }
-                if let (Some(g), Some(u), Some(d)) =
-                    (cuda_launch(gate), cuda_launch(up), cuda_launch(down))
-                {
+                if let (Some(g), Some(u), Some(d)) = (
+                    gate.cuda_matvec_launch(),
+                    up.cuda_matvec_launch(),
+                    down.cuda_matvec_launch(),
+                ) {
                     assert_eq!(gate.cols(), x.len());
                     assert_eq!(up.cols(), x.len());
                     assert_eq!(down.cols(), gate.rows());

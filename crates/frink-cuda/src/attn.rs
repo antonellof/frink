@@ -166,12 +166,8 @@ impl CudaKvBuffers {
         k_full.resize(self.capacity * row, 0.0);
         let mut v_full = self.v_host.clone();
         v_full.resize(self.capacity * row, 0.0);
-        self.k = dev
-            .htod_copy(k_full)
-            .map_err(|e| CudaError::Launch(format!("kv k refresh: {e:?}")))?;
-        self.v = dev
-            .htod_copy(v_full)
-            .map_err(|e| CudaError::Launch(format!("kv v refresh: {e:?}")))?;
+        self.k = crate::xfer::htod_owned(&dev, "kv k refresh", k_full)?;
+        self.v = crate::xfer::htod_owned(&dev, "kv v refresh", v_full)?;
         Ok(())
     }
 }
@@ -272,9 +268,7 @@ pub fn launch_gqa_decode_resident(
     let func = dev
         .get_func("frink_gqa_decode", "gqa_decode")
         .ok_or_else(|| CudaError::Launch("gqa_decode func missing after load".into()))?;
-    let d_q = dev
-        .htod_copy(q.to_vec())
-        .map_err(|e| CudaError::Launch(format!("gqa q upload: {e:?}")))?;
+    let d_q = crate::xfer::htod(&dev, "gqa q upload", q)?;
     let mut d_out = dev
         .alloc_zeros::<f32>(n_heads * head_dim)
         .map_err(|e| CudaError::Launch(format!("gqa out alloc: {e:?}")))?;
@@ -299,8 +293,7 @@ pub fn launch_gqa_decode_resident(
         )
         .map_err(|e| CudaError::Launch(format!("gqa_decode launch: {e:?}")))?;
     }
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("gqa download: {e:?}")))
+    crate::xfer::dtoh(&dev, "gqa download", &d_out)
 }
 
 /// Launches [`GQA_DECODE_KERNEL_SRC`]. Requires `head_dim <= 256`.
@@ -340,15 +333,9 @@ pub fn launch_gqa_decode(
     let func = dev
         .get_func("frink_gqa_decode", "gqa_decode")
         .ok_or_else(|| CudaError::Launch("gqa_decode func missing after load".into()))?;
-    let d_q = dev
-        .htod_copy(q.to_vec())
-        .map_err(|e| CudaError::Launch(format!("gqa q upload: {e:?}")))?;
-    let d_k = dev
-        .htod_copy(k_cache.to_vec())
-        .map_err(|e| CudaError::Launch(format!("gqa k upload: {e:?}")))?;
-    let d_v = dev
-        .htod_copy(v_cache.to_vec())
-        .map_err(|e| CudaError::Launch(format!("gqa v upload: {e:?}")))?;
+    let d_q = crate::xfer::htod(&dev, "gqa q upload", q)?;
+    let d_k = crate::xfer::htod(&dev, "gqa k upload", k_cache)?;
+    let d_v = crate::xfer::htod(&dev, "gqa v upload", v_cache)?;
     let mut d_out = dev
         .alloc_zeros::<f32>(n_heads * head_dim)
         .map_err(|e| CudaError::Launch(format!("gqa out alloc: {e:?}")))?;
@@ -374,8 +361,7 @@ pub fn launch_gqa_decode(
         )
         .map_err(|e| CudaError::Launch(format!("gqa_decode launch: {e:?}")))?;
     }
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("gqa download: {e:?}")))
+    crate::xfer::dtoh(&dev, "gqa download", &d_out)
 }
 
 #[cfg(test)]

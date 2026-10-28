@@ -107,3 +107,20 @@ static inline float __shfl_down_sync(unsigned /*mask*/, float v, unsigned delta)
     g_warp_bar[t / 32]->wait();
     return r;
 }
+
+// `__shfl_xor_sync` over a full warp, the butterfly the one-row
+// attention reduces with (`decode_attn`): each lane reads lane
+// `lane ^ mask` of its own warp. Same two-barrier protocol, and the
+// same per-warp barriers, as `__shfl_down_sync` above.
+static inline float __shfl_xor_sync(unsigned /*mask*/, float v, int lane_mask) {
+    const unsigned t = threadIdx.x;
+    const unsigned lane = t % 32;
+    g_shfl[t] = v;
+    g_warp_bar[t / 32]->wait();
+    const float r = g_shfl[(t - lane) + (lane ^ (unsigned)lane_mask)];
+    g_warp_bar[t / 32]->wait();
+    return r;
+}
+
+// CUDA's integer `max`, which device code has without a header.
+static inline int max(int a, int b) { return a > b ? a : b; }

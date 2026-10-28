@@ -35,7 +35,11 @@ impl Decoder {
         let Some(last) = hiddens.last() else {
             return Vec::new();
         };
-        self.logits_from_normed(last)
+        let logits = self.logits_from_normed(last);
+        // `FRINK_CUDA_COUNT=1`: this step's syncs and copies.
+        #[cfg(feature = "cuda")]
+        frink_cuda::counters::step_end(frink_cuda::counters::StepKind::Prefill);
+        logits
     }
 
     /// [`Self::forward_hidden_batch`] with one extra promise the public
@@ -213,13 +217,9 @@ impl Decoder {
             // layer (#259). Declines before touching any cache; the
             // host body below then runs the layer.
             #[cfg(feature = "cuda")]
-            if let Some((h_out, run_len)) = self.try_cuda_prefill_dense_stack(
-                l,
-                &hidden_batch,
-                start_pos,
-                batch_size,
-                kv_caches,
-            ) {
+            if let Some((h_out, run_len)) =
+                self.try_cuda_dense_stack(l, &hidden_batch, start_pos, batch_size, kv_caches)
+            {
                 hidden_batch = h_out;
                 l += run_len;
                 continue;

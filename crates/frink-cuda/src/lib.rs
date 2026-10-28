@@ -15,6 +15,11 @@
 
 pub mod capability;
 pub mod coalesced_twin;
+/// Syncs and copies per decode token / prefill step (`FRINK_CUDA_COUNT`).
+pub mod counters;
+/// One-row (decode) attention split across the keys: kernel text and
+/// its host twin, always compiled so the host check can run it.
+pub mod decode_attn;
 
 /// The per-kind CUDA matvec (decode) kernel table. Always compiled,
 /// for the same reason [`mul_mm`] is: it is kernel text plus three
@@ -51,5 +56,8 @@ pub mod prefill;
 /// Process-resident device copies of host weight buffers.
 #[cfg(feature = "cuda")]
 mod resident;
+/// The counted door every bus copy and host wait goes through.
+#[cfg(feature = "cuda")]
+mod xfer;
 
 pub use capability::{HardwareProfile, SimdCaps};
