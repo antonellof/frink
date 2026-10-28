@@ -2,8 +2,9 @@
 
 One file per decision that shapes the code and would be expensive to
 reverse. Each is short: the context that forced it, the decision, and
-what it costs. A decision is changed by a new ADR that supersedes the
-old one, never by editing the old one's Decision section.
+what it costs. A decision that is reversed gets a new ADR that
+supersedes the old one. A rule that only tightens a decision may be
+added to it, with the reason in its Context.
 
 Status is one of `Accepted`, `Proposed` or `Superseded by NNNN`.
 
@@ -17,6 +18,9 @@ Status is one of `Accepted`, `Proposed` or `Superseded by NNNN`.
 | [0006](0006-measurement.md) | Performance claims come from quiet, rented hardware | Accepted |
 | [0007](0007-issues-plans-adrs.md) | Issues track work, ADRs record decisions, plans are short-lived | Accepted |
 | [0008](0008-small-files-few-crates.md) | Small files, narrow modules, few crates | Accepted |
+| [0009](0009-numerics-follow-ggml.md) | Numerics follow ggml unless a deviation is written down | Accepted |
+| [0010](0010-coverage-before-speed.md) | Coverage before speed: every kind has a kernel, or says it has none | Accepted |
+| [0011](0011-the-oracle-runs-in-ci.md) | The oracle runs in CI, and the pin moves on a schedule | Accepted |
 
 ## Template
 
