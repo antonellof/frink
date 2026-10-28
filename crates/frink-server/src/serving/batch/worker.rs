@@ -13,11 +13,12 @@ use frink_models::MultiSeqKv;
 use crate::generate::{acquire_paged_caches, DecodeError, FinishReason, PagedKvConfig, Usage};
 use crate::stop::StopStep;
 
+use super::answer::Answer;
 use super::block_budget::BlockBudget;
 use super::cache_aware;
-use super::clock::RowClock;
 use super::config::{decode_log_interval_from_env, send_finished, BatcherConfig, DecodeFn};
 use super::counters::Counters;
+use super::preempt;
 use super::prefill::{Prefill, PrefillState};
 use super::queue::{AbortId, AbortInbox, QueueGate};
 use super::row::{Job, RowKv, Rows, Slot, Uid};
@@ -63,11 +64,12 @@ pub(super) fn admit(
     decoder: &Arc<Decoder>,
     waiting: &mut VecDeque<Job>,
     prefills: &mut VecDeque<Prefill>,
-    decoding: usize,
+    rows: &mut Rows,
     config: &BatcherConfig,
     queue: &QueueGate,
     budget: &BlockBudget,
     paged: Option<&PagedKvConfig>,
+    counters: &Counters,
 ) -> PrefillSnapshot {
     // Counted HERE, as each prompt is accepted, and not read back off
     // the live requests afterwards. By the time this tick's forward has
@@ -77,8 +79,16 @@ pub(super) fn admit(
     // whole prompt, which is the upstream test's planted-wrong-values
     // case exactly.
     let mut snapshot = PrefillSnapshot::default();
+    // Rows preempted this pass, newest first. Held aside until the loop
+    // is done, so none of them can be re-admitted into the room it was
+    // evicted to make.
+    let mut evicted: Vec<Job> = Vec::new();
     loop {
-        if waiting.is_empty() || decoding + prefills.len() >= config.max_seqs {
+        if waiting.is_empty() {
+            break;
+        }
+        let seated = rows.len() + prefills.len() < config.max_seqs;
+        if !seated && config.preempt_after_ticks.is_none() {
             break;
         }
         // Which of the waiting jobs goes next. Both slices are built
@@ -90,9 +100,22 @@ pub(super) fn admit(
         // job it chose: if that one does not fit, the line stops.
         // Trying the next one instead is the skip-on-size policy the
         // module note refuses, and the cache policy does not license
-        // it.
-        if !budget.try_reserve(blocks) {
-            break;
+        // it. What CAN happen is that room is made for that same job,
+        // by preempting decoding rows (`super::preempt`), and only for
+        // a job that has waited past the configured bound.
+        if !(seated && budget.try_reserve(blocks)) {
+            let made = preempt::make_room(rows, prefills.len(), &waiting[pick], budget, config);
+            if made.is_empty() {
+                break;
+            }
+            counters
+                .preempted
+                .fetch_add(made.len() as u64, Ordering::Relaxed);
+            evicted.extend(made);
+            if !budget.try_reserve(blocks) {
+                debug_assert!(false, "make_room returned without making room");
+                break;
+            }
         }
         // Everything the pick jumped is one skip older. This is what
         // makes the bound in `cache_aware` bite.
@@ -106,7 +129,7 @@ pub(super) fn admit(
         match accept(decoder, job, config.prefill_chunk, paged) {
             Some(prefill) => {
                 snapshot.new_seqs += 1;
-                snapshot.new_tokens += prefill.prompt_tokens;
+                snapshot.new_tokens += prefill.answer.prompt_tokens;
                 prefills.push_back(prefill);
             }
             // Rejected at validation (a token outside the vocabulary):
@@ -114,6 +137,17 @@ pub(super) fn admit(
             // its reservation back.
             None => budget.release(blocks),
         }
+    }
+    // Everything still waiting has waited one more pass. Counted after
+    // the loop, so a job evicted in this pass starts at zero.
+    for job in waiting.iter_mut() {
+        job.waited = job.waited.saturating_add(1);
+    }
+    // Newest first, so pushing each to the front leaves the OLDEST
+    // evicted row at the head: the order they were admitted in.
+    for job in evicted {
+        queue.requeue();
+        waiting.push_front(job);
     }
     snapshot
 }
@@ -191,15 +225,21 @@ pub(super) fn apply_aborts(
     while let Some(job) = waiting.pop_front() {
         if carried.remove(&job.abort) {
             queue.release();
-            send_finished(
-                &job.reply,
-                Ok((
-                    FinishReason::Cancelled,
-                    Vec::new(),
-                    String::new(),
-                    Usage::new(job.prompt_tokens.len(), 0),
-                )),
-            );
+            match job.answer {
+                // Preempted after producing output: that output is the
+                // partial answer, exactly as it would be had the cancel
+                // landed one tick earlier while the row was decoding.
+                Some(answer) => answer.reply(&job.reply, FinishReason::Cancelled, None),
+                None => send_finished(
+                    &job.reply,
+                    Ok((
+                        FinishReason::Cancelled,
+                        Vec::new(),
+                        String::new(),
+                        Usage::new(job.prompt_tokens.len(), 0),
+                    )),
+                ),
+            }
             stopped += 1;
         } else {
             still_waiting.push_back(job);
@@ -212,15 +252,12 @@ pub(super) fn apply_aborts(
     while let Some(prefill) = prefills.pop_front() {
         if carried.remove(&prefill.abort) {
             budget.release(prefill.blocks);
-            send_finished(
-                &prefill.reply,
-                Ok((
-                    FinishReason::Cancelled,
-                    Vec::new(),
-                    String::new(),
-                    Usage::new(prefill.prompt_tokens, 0),
-                )),
-            );
+            // Through the answer, because a re-admitted row being
+            // prefilled again already has output its client has seen.
+            // A fresh one has none, and replies with nothing.
+            prefill
+                .answer
+                .reply(&prefill.reply, FinishReason::Cancelled, None);
             stopped += 1;
         } else {
             still_prefilling.push_back(prefill);
@@ -327,11 +364,12 @@ pub(super) fn worker_loop(
             &decoder,
             &mut waiting,
             &mut prefills,
-            rows.len(),
+            &mut rows,
             &config,
             &queue,
             &budget,
             paged.as_ref(),
+            &counters,
         );
         if admitted.new_seqs > 0 {
             let status = batch_status(&rows, &prefills, &waiting, &budget);
@@ -408,14 +446,14 @@ pub(super) fn worker_loop(
             // feature, and the only visible symptom was the final
             // `validate_json_object_output` turning into a 400.
             let next = match crate::sample_step::sample_next(
-                &mut slot.sample,
+                &mut slot.answer.sample,
                 &slot.logits,
                 &slot.params,
                 // The row already keeps its prompt, for the radix
                 // publish. The penalties window is the tail of
                 // `prompt ++ generated`, so it needs the same slice.
                 &slot.prompt_ids,
-                &slot.generated_ids,
+                &slot.answer.generated_ids,
                 &slot.stop_tokens,
                 // Text, for the grammar and single-token stop
                 // decisions. Lossy per token, which is what those
@@ -454,13 +492,13 @@ pub(super) fn worker_loop(
             // EOS is not withdrawing its own fence, and the private
             // `generate` loop makes the same distinction.
             let model_eos = !slot.params.ignore_eos && slot.stop_tokens.contains(next);
-            if model_eos || slot.stops.is_stop_token(next) {
+            if model_eos || slot.answer.stops.is_stop_token(next) {
                 slot.finish = Some(FinishReason::Stop);
                 continue;
             }
-            slot.generated_ids.push(next);
-            slot.clock.token();
-            let piece = slot.utf8.push(&decode(&[next]));
+            slot.answer.generated_ids.push(next);
+            slot.answer.clock.token();
+            let piece = slot.answer.utf8.push(&decode(&[next]));
             // An empty piece means the token was the middle of a
             // character. Nothing to show, and nothing a stop string
             // could match yet.
@@ -478,7 +516,7 @@ pub(super) fn worker_loop(
             // the table changes shape between steps.
             let tokens: Vec<usize> = active
                 .iter()
-                .map(|&uid| *rows.get(uid).unwrap().generated_ids.last().unwrap())
+                .map(|&uid| *rows.get(uid).unwrap().answer.generated_ids.last().unwrap())
                 .collect();
             let positions: Vec<usize> = active
                 .iter()
@@ -496,6 +534,7 @@ pub(super) fn worker_loop(
                 let slot = rows.get_mut(uid).expect("active row exists");
                 let pos = slot.pos;
                 let token = *slot
+                    .answer
                     .generated_ids
                     .last()
                     .expect("an active row has a token");
@@ -562,7 +601,7 @@ pub(super) fn worker_loop(
                 }
                 slot.logits = logits_batch[j].clone();
                 slot.pos += 1;
-                if slot.generated_ids.len() >= slot.max_tokens {
+                if slot.answer.generated_ids.len() >= slot.max_tokens {
                     slot.finish = Some(FinishReason::Length);
                 }
             }
@@ -575,17 +614,17 @@ pub(super) fn worker_loop(
 /// Feeds `piece` through this row's stop matcher. Returns true when a
 /// stop matched and the row should leave the active batch.
 pub(super) fn apply_stop_buffer(slot: &mut Slot, piece: &str) -> bool {
-    match slot.stops.push(piece) {
+    match slot.answer.stops.push(piece) {
         StopStep::Emit(text) => {
             if !text.is_empty() {
-                slot.visible.push_str(&text);
+                slot.answer.visible.push_str(&text);
                 let _ = slot.reply.send(super::config::BatcherEvent::Chunk(text));
             }
             false
         }
         StopStep::Matched { text, stop } => {
             if !text.is_empty() {
-                slot.visible.push_str(&text);
+                slot.answer.visible.push_str(&text);
                 let _ = slot.reply.send(super::config::BatcherEvent::Chunk(text));
             }
             slot.finish = Some(FinishReason::StopSequence(stop));
@@ -617,54 +656,78 @@ pub(super) fn accept(
         return None;
     }
 
+    // ONE admission for a new request and for one coming back from a
+    // preemption. The only difference is what the prefill runs: a
+    // resumed request runs its prompt AS RUN followed by every token it
+    // had generated, which leaves its KV exactly where eviction found
+    // it, and its answer comes back with it.
+    let Job {
+        prompt_tokens,
+        params,
+        stop_tokens,
+        reply,
+        abort,
+        blocks,
+        // Admission bookkeeping; a job that is admitted has stopped
+        // waiting and stopped being skipped.
+        skips: _,
+        waited: _,
+        answer,
+    } = job;
+    let answer = answer.map(|a| *a);
+    let reported_prompt = answer
+        .as_ref()
+        .map_or(prompt_tokens.len(), |a| a.prompt_tokens);
+    let mut run = prompt_tokens;
+    if let Some(a) = answer.as_ref() {
+        run.extend_from_slice(&a.generated_ids);
+    }
+
     // Set beside the lease that decides it. Read HERE rather than when
     // the row finishes, because by then this row has published its own
-    // prefix and the lease would report that back as reuse.
+    // prefix and the lease would report that back as reuse. A resumed
+    // row keeps the figure from its first admission, for the same
+    // reason: what it adopts now is mostly what it published itself.
     let mut cached_tokens = None;
     let state = match paged {
         Some(config) => {
             // Worst case for this row: its prompt plus everything it
-            // may generate.
-            let max_seq_len = job.prompt_tokens.len() + job.params.max_tokens;
+            // may generate. The REPORTED prompt length, so a resumed
+            // row asks for exactly what it was first admitted with.
+            let max_seq_len = reported_prompt + params.max_tokens;
             match acquire_paged_caches(
                 decoder,
                 config,
-                &job.prompt_tokens,
+                &run,
                 max_seq_len,
-                crate::generate::PrefixIntent::sharing(job.params.cache_salt),
+                crate::generate::PrefixIntent::sharing(params.cache_salt),
             ) {
                 Ok(lease) => {
                     if config.radix.is_some() {
                         cached_tokens = Some(lease.adopted_positions(lease.block_size()));
                     }
-                    PrefillState::new_paged(
-                        Arc::clone(decoder),
-                        &job.prompt_tokens,
-                        chunk_size,
-                        lease,
-                    )
+                    PrefillState::new_paged(Arc::clone(decoder), &run, chunk_size, lease)
                 }
                 Err(_) => {
                     // The block budget said yes and the store said no.
                     // Refuse this row rather than admit one with no
                     // pages: the two counts are meant to agree, and the
                     // store is the one holding real memory.
-                    send_finished(&job.reply, Err(DecodeError::KvPoolExhausted));
+                    send_finished(&reply, Err(DecodeError::KvPoolExhausted));
                     return None;
                 }
             }
         }
-        None => PrefillState::new(Arc::clone(decoder), &job.prompt_tokens, chunk_size),
+        None => PrefillState::new(Arc::clone(decoder), &run, chunk_size),
     };
+    let answer = answer.unwrap_or_else(|| Answer::fresh(&params, reported_prompt, cached_tokens));
     Some(Prefill {
         state,
-        clock: RowClock::start(),
-        prompt_tokens: job.prompt_tokens.len(),
-        params: job.params,
-        stop_tokens: job.stop_tokens,
-        reply: job.reply,
-        abort: job.abort,
-        blocks: job.blocks,
-        cached_tokens,
+        params,
+        stop_tokens,
+        reply,
+        abort,
+        blocks,
+        answer,
     })
 }

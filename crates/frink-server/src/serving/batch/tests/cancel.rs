@@ -71,8 +71,8 @@ fn a_cancelled_row_leaves_through_the_one_exit_every_row_uses() {
     let (mut a, ra) = test_slot(9, 11);
     a.abort = AbortId(7);
     a.blocks = 2;
-    a.generated_ids.push(3);
-    a.visible.push_str("hi");
+    a.answer.generated_ids.push(3);
+    a.answer.visible.push_str("hi");
     let (b, rb) = test_slot(9, 22);
     let a_uid = rows.insert(a);
     let b_uid = rows.insert(b);
@@ -191,11 +191,12 @@ fn a_cancelled_prefill_is_abandoned_and_gives_its_blocks_back() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &config,
         &queue,
         &budget,
         None,
+        &Counters::default(),
     );
     assert_eq!(prefills.len(), 1);
     assert_eq!(budget.free(), 3, "the prefill holds its reservation");

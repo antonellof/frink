@@ -508,6 +508,15 @@ impl PagedLease {
         self.window.as_ref().is_some_and(|w| w.released > 0)
     }
 
+    /// Whether this lease runs a sliding window at all, slid yet or not.
+    ///
+    /// The batcher's preemption reads it: a windowed row's KV is shaped
+    /// by WHEN each slide ran and by the anchor state riding on this
+    /// lease, and a recompute from tokens reproduces neither.
+    pub fn slides(&self) -> bool {
+        self.window.is_some()
+    }
+
     /// Offer one sampled token to the anchor detector.
     ///
     /// Separate from [`Self::before_step`] because the two happen at

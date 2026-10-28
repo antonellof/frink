@@ -174,6 +174,7 @@ impl ContinuousBatcher {
             kv_rejected_context_length: self.budget.ceiling.refused(),
             kv_blocks_peak: self.counters.peak_blocks.load(Ordering::Relaxed),
             aborted: self.aborts.aborted(),
+            preempted: self.counters.preempted.load(Ordering::Relaxed),
             // `usize::MAX` is `BatcherConfig`'s "unlimited"; a gauge
             // reporting 18446744073709551615 would read as a number
             // somebody chose.
@@ -259,6 +260,8 @@ impl ContinuousBatcher {
                 abort,
                 blocks,
                 skips: 0,
+                waited: 0,
+                answer: None,
             })
             .is_err()
         {

@@ -404,6 +404,8 @@ fn a_head_job_that_does_not_fit_holds_the_line() {
         abort: AbortId(0),
         blocks: 3,
         skips: 0,
+        waited: 0,
+        answer: None,
     });
     waiting.push_back(Job {
         prompt_tokens: vec![1],
@@ -413,6 +415,8 @@ fn a_head_job_that_does_not_fit_holds_the_line() {
         abort: AbortId(1),
         blocks: 1,
         skips: 0,
+        waited: 0,
+        answer: None,
     });
     // The gate is counting both of them.
     queue.try_reserve().expect("cap 512");
@@ -423,11 +427,12 @@ fn a_head_job_that_does_not_fit_holds_the_line() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &config,
         &queue,
         &budget,
         None,
+        &Counters::default(),
     );
 
     assert!(
@@ -444,11 +449,12 @@ fn a_head_job_that_does_not_fit_holds_the_line() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &config,
         &queue,
         &budget,
         None,
+        &Counters::default(),
     );
     assert_eq!(prefills.len(), 2);
     assert!(waiting.is_empty());
@@ -488,6 +494,8 @@ fn the_sequence_cap_and_the_block_cap_compose() {
             abort: AbortId(i),
             blocks: 1,
             skips: 0,
+            waited: 0,
+            answer: None,
         });
         queue.try_reserve().expect("cap 512");
     }
@@ -496,11 +504,12 @@ fn the_sequence_cap_and_the_block_cap_compose() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &config,
         &queue,
         &budget,
         None,
+        &Counters::default(),
     );
     assert_eq!(prefills.len(), 1, "max_seqs still binds");
     assert_eq!(budget.free(), 7, "only the admitted job reserved");

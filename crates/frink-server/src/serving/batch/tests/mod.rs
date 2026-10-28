@@ -21,11 +21,12 @@ use frink_models::Decoder;
 use crate::budget::ContextCeiling;
 use crate::cancel::CancelToken;
 use crate::generate::{DecodeError, FinishReason, GenerationParams, PagedKvConfig};
-use crate::stop::StopMatcher;
 
+use super::answer::Answer;
 use super::batcher::ContinuousBatcher;
 use super::block_budget::BlockBudget;
 use super::config::{BatcherConfig, BatcherEvent, DecodeFn, JobResult, DEFAULT_KV_BLOCK_SIZE};
+use super::counters::Counters;
 use super::prefill::{Prefill, PrefillState};
 use super::queue::{AbortId, AbortInbox, QueueGate};
 use super::row::{Job, RowKv, Rows, Slot};
@@ -35,6 +36,7 @@ use super::worker::{admit, apply_aborts, batch_status};
 mod admission;
 mod batching;
 mod cancel;
+mod preempt;
 mod queue;
 mod radix;
 mod rows;
@@ -152,11 +154,7 @@ fn test_slot(max_tokens: usize, seed: u64) -> (Slot, mpsc::Receiver<BatcherEvent
             kv: RowKv::Contiguous(Vec::new()),
             pos: 0,
             logits: Vec::new(),
-            sample: crate::sample_step::SampleState::new(seed),
-            generated_ids: Vec::new(),
-            visible: String::new(),
-            stops: StopMatcher::new(&params.stop, &params.stop_token_ids),
-            prompt_tokens: 0,
+            answer: Answer::fresh(&params, 0, None),
             max_tokens,
             stop_tokens: StopTokens::default(),
             params,
@@ -165,9 +163,6 @@ fn test_slot(max_tokens: usize, seed: u64) -> (Slot, mpsc::Receiver<BatcherEvent
             blocks: 1,
             finish: None,
             error: None,
-            clock: super::clock::RowClock::start(),
-            cached_tokens: None,
-            utf8: Default::default(),
         },
         rx,
     )
@@ -200,6 +195,8 @@ fn abortable_job(abort: AbortId, prompt: Vec<usize>) -> (Job, mpsc::Receiver<Bat
             abort,
             blocks: 1,
             skips: 0,
+            waited: 0,
+            answer: None,
         },
         rx,
     )

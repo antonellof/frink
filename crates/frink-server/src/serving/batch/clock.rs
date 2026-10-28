@@ -59,10 +59,12 @@ impl RowClock {
         }
     }
 
-    /// Marks the end of prefill. Called once, on the handover from
-    /// `Prefill` to `Slot`.
+    /// Marks the end of prefill, on the handover from `Prefill` to
+    /// `Slot`. Only the first call moves the clock: a row preempted and
+    /// prefilled again goes through the same handover, and its prefill
+    /// rate is the one its client was served at the first time.
     pub(super) fn prefill_finished(&mut self) {
-        self.prefill_done = Some(Instant::now());
+        self.prefill_done.get_or_insert_with(Instant::now);
     }
 
     /// Records a generated token. Only the first one moves the clock;
