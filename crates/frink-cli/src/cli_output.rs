@@ -260,7 +260,7 @@ pub fn version_block() -> String {
 /// are a LICENCE OBLIGATION, and an installed binary that could only
 /// satisfy it when run from a checkout would not satisfy it at all.
 pub fn licenses_block() -> std::io::Result<String> {
-    Ok(include_str!("../../../docs/THIRD_PARTY_NOTICES.md").to_string())
+    Ok(include_str!("../THIRD_PARTY_NOTICES.md").to_string())
 }
 
 /// The block `llama cli` prints once a model is open.
