@@ -16,6 +16,7 @@ the roadmap missed it, put it in the roadmap.
 | `amd-strix-halo.md` | 14 items: x86 measurement, AVX-512, the backend seam, four Vulkan items | Theme D |
 | `serving-and-tiered-kv.md` | 1 item: time-debt prefill/decode interleaving | Theme C3 |
 | `one-binary-serve.md` | 1 item: the cross-target gate, half landed | Theme F |
+| `project-status-2026-09.md` | Not a plan: the September closure log, moved out of `../README.md` | The dated status in `../README.md` |
 | `completion-push.md` | A schedule, not a feature plan: file ownership and merge discipline | The rules at the end of `roadmap.md` and `README.md` |
 
 `completion-push.md` is worth reading before dispatching parallel work
