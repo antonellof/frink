@@ -604,7 +604,7 @@ impl InferArgs {
     ///
     /// One function rather than one copy per generation path. There were
     /// four identical literals here (the dense path, the engine path and
-    /// two chat paths), which is the shape `CLAUDE.md` names as this
+    /// two chat paths), which is the shape ADR 0004 names as this
     /// repo's most expensive failure: adding `--min-p` meant editing
     /// four places, and a sampler added to three of them would be
     /// silently absent from the fourth with every test still green.

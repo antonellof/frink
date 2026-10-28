@@ -1,6 +1,6 @@
 # llama.cpp LLM_ARCH_NAMES, pinned.
 #
-# Source: src/llama-arch.cpp at 604cc430 (the pin CLAUDE.md records;
+# Source: src/llama-arch.cpp at 604cc430 (the pin docs/plans/parity-audit-2026-10-28.md records;
 # moved from 5b59b83 on 2026-10-28: +13 names, none removed).
 # Regenerate with the #[ignore]d test in tests/arch_coverage.rs, which
 # re-derives this from a checkout and diffs it against this file.

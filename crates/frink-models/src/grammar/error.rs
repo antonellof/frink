@@ -5,7 +5,7 @@
 //! and returns `false` -- so a caller learns only "it failed". Two of its
 //! stack-machine invariants are `GGML_ABORT`, which kills the process.
 //!
-//! Per `CLAUDE.md` ("return `Result` and name what is missing"), every one
+//! Per ADR 0002 ("return `Result` and name what is missing"), every one
 //! of those becomes a typed variant carrying the byte offset and the
 //! remaining input, so a server can hand the message back to the client
 //! that sent the grammar.

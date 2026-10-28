@@ -409,7 +409,7 @@ mod tests {
 
     /// **Every field the wire accepts changes what the sampler does.**
     ///
-    /// This is the assertion for the defect `CLAUDE.md` names: a wire
+    /// This is the assertion for the defect ADR 0004 names: a wire
     /// struct and a sampler that silently disagree about which fields
     /// exist, six parameters accepted and ignored. Serde deserializing a
     /// field is not evidence that anything reads it.
