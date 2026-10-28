@@ -10,7 +10,7 @@ cargo build -p frink-cli --release --features "serve metal"
   --host 127.0.0.1 --port 8383
 ```
 
-**OpenAI-compatible base URL:** `http://127.0.0.1:8383/v1`
+The OpenAI-compatible base URL is `http://127.0.0.1:8383/v1`.
 
 | Client | Setting |
 |---|---|
@@ -61,16 +61,16 @@ FRINK_PAGED_KV_BLOCKS=4096 FRINK_PAGED_KV_BLOCK_SIZE=16 \
 ```
 
 `usage.cached_tokens` on each response says how much of that prompt was
-already computed. This used to be refused on a GPU backend, because a
-Metal prefill left K/V on the device and the paged prefill copied host
-placeholders into the page store. Fixed, and pinned on hardware by
-`paged_metal_parity`, so Metal is supported. CUDA has no equivalent
-hardware run behind it. See [CONFIG.md](CONFIG.md).
+already computed. Paged KV used to be refused on a GPU backend,
+because a Metal prefill left K/V on the device and the paged prefill
+copied host placeholders into the page store. That is fixed and pinned
+on hardware by `paged_metal_parity`, so Metal is supported. CUDA has no
+equivalent hardware run behind it. See [CONFIG.md](CONFIG.md).
 
-**Sharing pages is sharing, so say whose they are.** Two callers
-sending the same preamble get the same pages, which is the point and
-also a disclosure if they are different tenants. `cache_salt` on the
-request names a namespace: the contiguous prefix cache, the response
+Two callers sending the same preamble get the same pages. That saves
+memory, but if the callers are different tenants it is also a
+disclosure. `cache_salt` on the request names a namespace: the
+contiguous prefix cache, the response
 cache and the paged radix tree all key on it, so a salted caller can
 match only its own prefixes. Absent means the shared namespace, which
 is what every request got before the field existed.
@@ -86,7 +86,7 @@ curl     http://127.0.0.1:8383/is_sleeping     # {"is_sleeping": true}
 curl -X POST http://127.0.0.1:8383/wake_up
 ```
 
-`/sleep` is an unload that REMEMBERS: it frees the KV pool, the paged
+`/sleep` is an unload that remembers: it frees the KV pool, the paged
 store, the repack and expert caches and any device buffers, and keeps
 the checkpoint path, so the server can reload itself.
 `/admin/models/unload` leaves nothing behind. While asleep, routes that
