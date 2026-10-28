@@ -7,8 +7,9 @@ happens inside the matvec. Backends: CPU, Apple Metal, and CUDA.
 ## Models
 
 100 architectures run with a benchmark row, a pinned logit
-comparison against real `libllama`, or a fixture behind each. Four more
-stop with an error that names what is missing. `frink archs` prints the
+comparison against real `libllama`, or a fixture behind each. Eleven
+more on the same path have been read and stop with an error that names
+what is missing. `frink archs` prints the
 current list; [`MODELS.md`](MODELS.md) says what runs, what refuses and
 why; [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md) has the speed
 against llama.cpp on the same host and file.
@@ -25,7 +26,7 @@ The model shapes the decoder can express:
 |---|---|
 | Dense GQA, MoE | Llama 3.x, Qwen2.5/3, Gemma-2/3, Mistral, Phi-4-mini, SmolLM2, OLMoE, Mixtral |
 | MLA, with and without the absorption optimization | DeepSeek-V2/V3, Mistral-Large-3, PLM |
-| Dedicated engines | Gemma-4 (per-layer embeddings, shared KV), GLM-5.2, Kimi, DeepSeek-V4 |
+| Dedicated engines | Gemma-4 (per-layer embeddings, shared KV) |
 | Sliding-window attention: per layer, per-layer arrays, chunked | Gemma-2/3, gpt-oss, Llama 4, Mistral, Cohere2 |
 | Recurrent blocks at the attention site | Mamba-1 and Mamba-2 (Jamba, FalconMamba, Granite 4.0, Nemotron-H, Falcon-H1), short convolutions (LFM2), gated delta nets (Qwen3.5, Qwen3-Next), lightning attention (MiniMax-01), PLaMo-2 |
 | Position encodings other than NEOX RoPE | NORM RoPE, partial rotary, two rotary widths, per-layer RoPE gates, YaRN and LongRoPE, M-RoPE on text positions, learned absolute tables (GPT-2, StarCoder), ALiBi (BLOOM, MPT, Refact, Jais, Baichuan-13B), no rotation at all |
@@ -34,8 +35,12 @@ The model shapes the decoder can express:
 | FFN activations | SwiGLU and its clamped forms, GeGLU, ReGLU, ungated GELU and ReLU-squared, xIELU, per-layer activation parameters |
 | MoE routing | Softmax and sigmoid, router biases, expert-weight scales and norms, shared experts, a dense FFN summed with the routed output (Arctic, Grok-2), routing on the raw layer input (SmallThinker), the weight on the expert's input (Llama 4), interleaved experts |
 | Attention extras | Sinks, gates (sigmoid and softplus), per-position temperature, logit softcaps, split K/V head widths, MTP blocks skipped inside `block_count` |
-| Encoders | BERT, nomic-bert, jina-bert-v3 for `/v1/embeddings`; a cross-encoder rank head for `/v1/rerank` and `/v1/score` |
+| Encoders | BERT, nomic-bert, jina-bert-v2 (ALiBi), jina-bert-v3, NeoBERT and EuroBERT (pre-norm RMS) for `/v1/embeddings`; a cross-encoder rank head for `/v1/rerank` and `/v1/score` |
 | Quantization beyond llama.cpp's | PrismML `PTQ1_0` with a folded Hadamard rotation, verified on the real Ternary-Bonsai-2-27B checkpoint |
+
+GLM-5.2, Kimi and DeepSeek-V4 have loaders and primitives in the tree,
+and nothing has run end to end on a real checkpoint of any of them, so
+they are not in the table.
 
 Two backend limits affect model choice. gpt-oss and Llama 4 are CPU
 only (no Metal kernel for attention sinks; Llama 4's window is chunked
@@ -229,7 +234,8 @@ OpenAI-compatible HTTP API:
   `pooling_type` (NONE / MEAN / CLS / LAST; RANK refuses, it is a
   classification head rather than a pooling rule, and a rank-head
   checkpoint belongs on `/v1/rerank` instead). A decoder GGUF still
-  pools its hidden states (mean/last) as before, and
+  pools its hidden states (mean/last) as before, `llama-embed` (Llama's
+  graph with the output head skipped) is served the same way, and
   `FRINK_EMBEDDING_MODEL_PATH` runs an encoder side-by-side with a
   generative model in one process
 - Reranking. A `bert` checkpoint carrying a rank head (`cls`,
@@ -286,7 +292,11 @@ OpenAI-compatible HTTP API:
   distribution the sampler drew from. Candidates the chain removed
   are omitted, not reported as `null`. `prompt_logprobs` scores the
   prompt from the plain softmax, because a prompt token is supplied,
-  not drawn
+  not drawn. `return_tokens_as_token_ids` spells each reported token by
+  its id, since two ids can detokenize to the same text
+- `skip_special_tokens: false` keeps the end-of-generation token in the
+  returned text and in `usage`. It still ends the answer; a
+  `stop_token_ids` entry is excluded as a stop string is
 - Prompt controls. `echo` returns the prompt and the completion as
   one string with the logprobs arrays covering both;
   `truncate_prompt_tokens` keeps the last `k` tokens, applied before
@@ -332,7 +342,19 @@ OpenAI-compatible HTTP API:
   respect to the job it picked: if that one does not fit, the line
   stops instead of skipping ahead by size
 - Chunked prefill (same scheduler as continuous batching). `-b` /
-  `-ub` set the chunk on both decode paths from one number
+  `-ub` set the chunk on both decode paths from one number. Each worker
+  tick has one token budget shared by prefill and decode
+  (`FRINK_CB_MAX_BATCH_TOKENS`, default 256): the prefill chunk takes
+  what the decoding rows leave, with a floor of 16 prompt tokens, so a
+  growing batch shortens the chunk instead of delaying every row's next
+  token. The latency effect has not been measured yet
+- Speculative decoding on the server. A request whose sampling the
+  verifier can reproduce drafts tokens by prompt lookup (an n-gram match
+  over its own history, no second model) and verifies them in one
+  batched forward. A drafted token is kept only if it equals the
+  sampler's own draw, so the output does not change. Grammar-constrained
+  requests and the paged and recurrent stores do not speculate, and
+  `usage` reports the speculation fields only when it ran
 - Slot save/restore (llama.cpp's `POST /slots/{id}?action=save|restore`):
   a prompt prefix's KV written to `--slot-save-path` and restored into
   the prefix cache after a restart, so a long system prompt is prefilled
@@ -372,6 +394,10 @@ OpenAI-compatible HTTP API:
 - `frink serve-bench`: concurrency, TTFT, TPOT and queueing numbers
   for a live server, with the methodology (positional split, pooled
   nearest-rank percentiles, whole-run throughput) tested socket-free.
+  `--shared-prefix` puts one system message ahead of every request and
+  reports prefix-cache reuse from the server's own `cached_tokens`, as
+  a share of all prompt tokens in the run (`--cache-salt` gives the run
+  its own namespace).
   Host B receipts for Metal CB at 0.15.3:
   [`benchmarks/receipts/serving/`](../benchmarks/receipts/serving/)
 - Live serving telemetry (`GET /v1/stats`, `GET /v1/requests`) and an
@@ -381,6 +407,17 @@ OpenAI-compatible HTTP API:
   parked in a queue behind it
 - `reasoning_content`: a reasoning model's chain of thought is split
   out of `content`, streamed as it arrives rather than at the end
+- Reasoning budget: `reasoning_budget_tokens` / `thinking_budget_tokens`
+  (`thinking.budget_tokens` on `/v1/messages`, `--reasoning-budget N` as
+  the server default) forces the closing tag once N tokens of thought
+  are spent, so the answer still arrives with `finish_reason: "stop"`.
+  It matches llama.cpp token for token on DeepSeek-R1-Distill at
+  temperature 0
+- `continue_final_message` (llama.cpp's field and values): a trailing
+  assistant message is continued as a turn still being written, with its
+  thought re-opened in the family's own markers. It is on by default, as
+  in llama.cpp's server; `false` in the request or
+  `--no-prefill-assistant` on the server turns it off
 - Tool calls in eleven wire formats: the format the served
   checkpoint's family emits, then the prompt-engineered one, and every
   call in a response rather than the first. Five of the eleven stream
