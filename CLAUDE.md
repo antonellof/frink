@@ -18,6 +18,20 @@ more have dedicated engines, and everything else REFUSES. The "loads
 and is WRONG" class is closed: the generic path is opt-in, so an
 unaudited architecture stops instead of guessing.
 
+**The pin is `604cc430` (2026-10-28)**, moved from `5b59b83` across 913
+commits: 155 graphs became 169 and the name table gained thirteen.
+Seven are generic-path candidates, triaged the same day (`kolibri1`,
+`lfm3` one match arm; `flint`, `beam`, `maion-coder`, `k2-horizon`,
+`muse-spark` new code), so the triaged-refusal count went 4 to 11;
+two are dedicated (`deepseek41`, `glm5-next`) and four deferred. The
+finding that matters more is in the SERVED rows: `mellum` now reads
+`expert_weights_norm` (frink did not, and would have renormalised a
+file declaring `false`), Nemotron gained the `domyn-small`
+pre-tokenizer (frink would have fallen back to GPT-2's regex), and
+LFM2 gained a non-causal decision head. Each is fixed or refused by
+name; `docs/plans/parity-audit-2026-10-28.md` is the re-measurement,
+with every census re-run and its command beside its count.
+
 **The refusing count went UP on 2026-09-19, from 2 to 10, and that is
 what parity with a moving target looks like.** The pinned llama.cpp was
 six weeks and 792 commits old; moving it to `5b59b83` brought fifteen
@@ -1530,7 +1544,7 @@ hand-written file -- which is why it landed as a refusal with a fixture
 that actually carries the key rather than as a gate nobody could fire.
 `unaudited_triage` carries the verdict and the
 llama.cpp line that decides it. llama.cpp hand-writes 155
-per-architecture graphs (140 at the 2026-08-04 pin, 155 at `5b59b83`); `decoder.rs` is 6752 lines and that is why the
+per-architecture graphs (140 at the 2026-08-04 pin, 155 at `5b59b83`, 169 at `604cc430`); `decoder.rs` is 6752 lines and that is why the
 counts differ.
 
 **Ternary-Bonsai-2-27B ran on the real checkpoint on 2026-09-18**, the

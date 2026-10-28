@@ -411,6 +411,12 @@ pub enum TokenizerLoadError {
          the file for the same reason, because a character no piece covers is spelled in these"
     )]
     Plamo2ByteTokenMissing { byte: u8 },
+    #[error(
+        "tokenizer.ggml.pre = {pre:?} selects a pre-tokenizer frink does not implement: \
+         {reason}. Falling back to the GPT-2 pattern would tokenize this vocabulary fluently \
+         and wrongly"
+    )]
+    UnservedPreTokenizer { pre: String, reason: &'static str },
 }
 
 impl GgufBpeTokenizer {
@@ -438,6 +444,14 @@ impl GgufBpeTokenizer {
             .map(|(i, t)| (t.clone(), i as u32))
             .collect();
 
+        let pre = file.metadata_str("tokenizer.ggml.pre").unwrap_or("");
+        if let Some(reason) = pretokenize::unserved_pre(pre) {
+            return Err(TokenizerLoadError::UnservedPreTokenizer {
+                pre: pre.to_string(),
+                reason,
+            });
+        }
+
         let style = match file.metadata_str("tokenizer.ggml.model") {
             Some("gemma4") => BpeEncodingStyle::SpmWhitespace,
             _ => BpeEncodingStyle::Gpt2,
@@ -458,9 +472,7 @@ impl GgufBpeTokenizer {
         let pretokenize_pattern = match style {
             // Keyed on the checkpoint's own `tokenizer.ggml.pre`, which
             // was previously read only to decide BOS prepending.
-            BpeEncodingStyle::Gpt2 => {
-                pretokenize::regex_for(file.metadata_str("tokenizer.ggml.pre").unwrap_or(""))
-            }
+            BpeEncodingStyle::Gpt2 => pretokenize::regex_for(pre),
             BpeEncodingStyle::SpmWhitespace => pretokenize::newline_regex(),
         };
         let special_tokens = SpecialTokenTable::from_gguf(file, &id_to_token);
@@ -1260,6 +1272,32 @@ mod gguf_vocab_tests {
         );
         let file = frink_gguf::GgufFile::open(path).expect("real vocab fixture must open");
         GgufBpeTokenizer::from_gguf(&file).expect("real vocab fixture must parse as a tokenizer")
+    }
+
+    /// A `pre` llama.cpp gained at the `604cc430` pin with an arm this
+    /// engine lacks stops the load (`pretokenize::UNSERVED_PRE`) instead
+    /// of falling through to the GPT-2 pattern. `domyn-small` is the one
+    /// on an architecture frink serves (`nemotron`, upstream #23343).
+    ///
+    /// Sabotage to confirm: remove the `unserved_pre` check in
+    /// `from_gguf` and this loads.
+    #[test]
+    fn an_unserved_pre_tokenizer_is_refused_not_defaulted() {
+        use frink_gguf::GgufValue as V;
+        let file = |pre: &str| {
+            crate::test_source::StubSource::with_tensors(&[])
+                .with_key("tokenizer.ggml.model", V::String("gpt2".into()))
+                .with_key("tokenizer.ggml.pre", V::String(pre.into()))
+                .with_key(
+                    "tokenizer.ggml.tokens",
+                    V::Array(vec![V::String("a".into()), V::String("b".into())]),
+                )
+        };
+        assert!(matches!(
+            GgufBpeTokenizer::from_gguf(&file("domyn-small")),
+            Err(TokenizerLoadError::UnservedPreTokenizer { .. })
+        ));
+        assert!(GgufBpeTokenizer::from_gguf(&file("glm5")).is_ok());
     }
 
     #[test]

@@ -1755,6 +1755,27 @@ const NORM_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
     // (`crate::mla_arch`) and its FIRST libllama-golden fixture
     // (tests/plm_graphs.rs) with it. That row is not in
     // AUDITED_GENERIC_GQA because it never ran on the generic path.
+    //
+    // --- Landed upstream AFTER the 2026-09-19 pin, read on 2026-10-28
+    // when the pin moved from `5b59b83` to `604cc430` (913 commits, 14
+    // new graph files, 13 new names). See
+    // docs/plans/parity-audit-2026-10-28.md section 1.
+    (
+        "muse-spark",
+        TriageClass::NewCode,
+        "a NORM-PRESERVING residual and a latent MoE. `src/models/muse-spark.cpp:53-59` \
+         create per-channel `attn_resid_alpha` / `attn_resid_beta` (and the FFN pair) that \
+         scale the stream and the branch separately at every residual add, which no decoder \
+         body here has; `:66-74` run the routed experts in a `moe_latent_size` width between \
+         `ffn_latent_down` / `ffn_latent_up` (the latent MoE `nemotron-h` Super is refused \
+         for by name), with a weighted RMS norm on the latent input (`ffn_pre_exp_norm`) and \
+         the NEW `post_exp_norm` argument of `build_moe_ffn` (`llama-graph.cpp:2556-2560`, \
+         one caller of 169) on each expert's output before its router weight. The rest is \
+         served: a weightless embedding RMS (`:87`), the per-element sigmoid attention \
+         gate, RoPE on the sliding layers only, `logit_scale` with a final softcap, and the \
+         post-norm epsilon, which is now a KEY (`post_norm_epsilon`, `:5`) rather than \
+         `muse-glimmer`'s literal",
+    ),
 ];
 
 /// Shared by the three frink-only alias rows `mistral`, `mixtral` and
@@ -1811,6 +1832,84 @@ const NO_UPSTREAM_ARCH: &str =
 /// Triaged rows of the generic **NEOX**-RoPE group. Same rules as
 /// [`NORM_ROPE_TRIAGED`].
 const NEOX_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
+    // --- Landed upstream AFTER the 2026-09-19 pin (`5b59b83`), read on
+    // 2026-10-28 against `604cc430` (see the NORM group). Each row is
+    // a reading of the graph file AND of the generic builder it calls
+    // (`maple`'s lesson); none has a fixture yet.
+    (
+        "kolibri1",
+        TriageClass::OneMatchArm,
+        "no new op, only table rows (Kolibri-1, Aleph-Alpha, 78B-A3.5B). \
+         `src/models/kolibri1.cpp:98` rotates only the sliding layers (`RopeLayers::\
+         SlidingOnly`, `cohere2`'s rule, one `crate::rope_layers` row); `:17` reads the \
+         window ARRAY with `get_arr` (`crate::swa_layers` honours it); `:41-51` are \
+         Gemma-2's sandwich norms (`attn_post_norm` / `ffn_post_norm`, served for `glm4`); \
+         per-head QK RMS; sigmoid routing whose selection adds `exp_probs_b` while the \
+         weights take the unbiased sigmoid (`:133-154`, the DeepSeek-V3 rule `build_moe_ffn` \
+         already applies, precomputed here through `selected_experts_in`) beside one shared \
+         expert. Every name has to be added to each table and a libllama golden built",
+    ),
+    (
+        "lfm3",
+        TriageClass::OneMatchArm,
+        "LFM2's layers with three served seams that each need a row (LFM3-1.7B). \
+         `src/models/lfm3.cpp:77,132-138` is a per-HEAD sigmoid attention gate \
+         (`{n_embd, n_head}`, `crate::attn_gate`'s `step35` corner); `:13-18` read the \
+         window ARRAY, which `crate::swa_layers` honours (where `lfm2`'s scalar window stays \
+         refused because it windows the attention layers alone); `:79-82,113` give a llama3 \
+         `rope_freqs` to the FULL layers only, which is the rule frink serves for `step35` \
+         alone; `:50-55` optional sandwich post norms, both or neither. The non-causal d1 \
+         variant (`:22-25`, `LLAMA_NON_CAUSAL_TYPE_DENSE_ONLY`, no memory at \
+         `llama-model.cpp:2808`) is a scorer, not a generator, and stays refused on \
+         `decision.block_count` / `attention.causal`",
+    ),
+    (
+        "flint",
+        TriageClass::NewCode,
+        "the graph is served seams; the TOKENIZER is not. `src/models/flint.cpp` is GQA with \
+         per-head QK RMS, `attention.rope_pattern` (`:14`, `RopeLayers::FileMask`, the \
+         second reader of 169 after `granite_swa`), the window ARRAY (`:13`), REQUIRED \
+         sinks (`:41`), leading dense layers and a shared expert -- each one table row. \
+         Its `flint` pre-tokenizer is a SEQUENCE of two regexes (`src/llama-vocab.cpp:\
+         285-290`), which `tokenizer::pretokenize` cannot express (one `Regex` per `pre`), \
+         so a Flint file is refused at the tokenizer even before this verdict. The \
+         amax rescale `llama-graph.cpp:2532` adds for it is a power-of-two divide and \
+         multiply around `down_exps`, an identity in f32",
+    ),
+    (
+        "beam",
+        TriageClass::NewCode,
+        "a SCALED residual and a second attention-temperature form. \
+         `src/models/beam.cpp:109-113` adds every branch as `h / sqrt(i) + r * \
+         sqrt((i - 1) / i)` where `i` counts the residual adds so far, which no decoder body \
+         here has (`crate::normed_residual` is a different topology); `:37-51` set \
+         `attn_temp_pow`, the NEW power form `(1 + (pos + 1) / length) ^ scale` \
+         (`llama-graph.cpp:221-227`) on the NoPE full layers, beside the log form \
+         `crate::attn_temperature` serves. Also a per-head attention-gate BIAS (`:83,183`), \
+         sandwich norms and a sigmoid MoE",
+    ),
+    (
+        "maion-coder",
+        TriageClass::NewCode,
+        "a LATENT MoE (`src/models/maion-coder.cpp:7,54-58,122-134`): the router reads the \
+         normed input while the experts run in `moe_latent_size` between `ffn_latent_down` \
+         and `ffn_latent_up` -- the shape frink refuses by name for Nemotron-3 Super \
+         (`capability::unsupported_feature_keys`). The rest is served: RoPE on the sliding \
+         layers only (`:20,97`), the window ARRAY, sandwich norms, MoE every \
+         `interleave_moe_layer_step` layers, softmax routing with `norm_w = true`",
+    ),
+    (
+        "k2-horizon",
+        TriageClass::NewCode,
+        "a GROUPED RMS norm on every layer and value experts (K2 Horizon dense and MoVA). \
+         `src/models/k2-horizon.cpp:7-10,241` norm the layer input in \
+         `attention.layernorm_groups` groups, which `crate::norm` has no variant for; \
+         `:283-291` gate the attention output by a BASE-2 softplus (`softplus(x ln 2) / \
+         ln 2`), a third `GateAct`; and `:26-34,137-190` route each token's V projection to \
+         `value_expert_used_count` of `value_expert_count` experts (MoVA), an attention \
+         block frink does not have. It is also the fourth reader of \
+         `rope.scaling.yarn_beta_fast` (`:4-5`)",
+    ),
     // --- Landed upstream AFTER the 2026-08-04 pin (see the NORM group).
     // `maple` was HERE for one PR, ONE MATCH ARM on the per-layer RoPE
     // gate, and is audited now: `src/models/maple.cpp:88` rotates only
@@ -2900,6 +2999,26 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
              hyper-connection layout without the comb term), over a DSA cache. Every \
              decoder here carries ONE residual stream",
         ));
+        // Landed upstream after the 2026-09-19 pin (`5b59b83`), read on
+        // 2026-10-28 against `604cc430`. Both are `deepseek4`'s family
+        // or `glm-dsa`'s, so the generic decoder is not a candidate.
+        v.push(dedicated(
+            "deepseek41",
+            "DeepSeek-V4.1-Flash: `deepseek4`'s CSA/HCA compressed attention and mHC residual \
+             streams (refused above) plus per-layer KV and top-k SOURCE layers \
+             (src/models/deepseek41.cpp:31-66, `attention.kv_source_layers`) and an Engram \
+             n-gram hash memory (`:84-149`, qwen4exp's PLE hash with one constant set per \
+             layer). It also changes `build_moe_ffn` for itself alone \
+             (llama-graph.cpp:2353-2358, `weights / (sum + 1e-20)` in place of the F16 clamp)",
+        ));
+        v.push(dedicated(
+            "glm5-next",
+            "GLM-5.3-Flash: a KDA (linear attention) and nope-MLA hybrid with a k-pool DSA \
+             indexer and mHC residual streams (src/models/glm5-next.cpp:4-5,15-49). frink's \
+             DSA lives in the GLM-5.2 engine and has neither KDA nor k-pool compression nor \
+             several residual streams; `llama-graph.cpp:2023,2449` also send it to \
+             `ggml_swiglu_clamp` (the gate clamped before the SiLU)",
+        ));
         // Qwen3.5 dense (`qwen35`: 0.8B / 2B / 4B / 9B / 27B) left the
         // hybrid group on 2026-09-14: the gated delta net is a block
         // where attention would be (`crate::gdn`, `AttnShape::Gdn`,
@@ -3118,6 +3237,41 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
                 // frink's encoder path runs BERT's block, and this is
                 // Gemma-3's.
                 "bidirectional encoder (gemma-embedding.cpp:7 sets causal_attn = false),                  so it belongs on the embedding path -- but it runs GEMMA-3's block there,                  not BERT's, with symmetric SWA and two optional dense heads;                  deferred until the encoder path can carry that block",
+            ),
+            // Landed upstream after the 2026-09-19 pin, read on
+            // 2026-10-28. `gemma-embedding2.cpp:7` sets `causal_attn =
+            // false` exactly as its predecessor does.
+            (
+                "gemma-embedding2",
+                DeferredEncoderEmbedding,
+                "bidirectional encoder (src/models/gemma-embedding2.cpp:4-8: symmetric SWA at \
+                 a period of 6, causal_attn = false, per-layer embeddings) on Gemma-4's \
+                 block; deferred with `gemma-embedding`",
+            ),
+            // Two DECISION models: a qwen backbone whose head emits one
+            // score per token instead of logits (`n_embd_out_impl = 1`),
+            // read through `llama_batch_ext_set_decision_order`. Scoring
+            // models belong with the pooling scope, not the decoder.
+            (
+                "clef",
+                DeferredEncoderEmbedding,
+                "decision model (src/models/clef.cpp:8-24): `qwen35`'s layers under a \
+                 routing + joint decision head, one score per token and no LM head; deferred \
+                 with the pooling scope",
+            ),
+            (
+                "vllm-decision2",
+                DeferredEncoderEmbedding,
+                "decision model (src/models/vllm-decision2.cpp:7-15): `qwen3`'s layers under \
+                 an option/query decision head, one score per token and no LM head; deferred \
+                 with the pooling scope",
+            ),
+            (
+                "sensenova_u1",
+                DeferredMultimodal,
+                "vision-language (src/models/sensenova-u1.cpp:3-25 and tools/mtmd): its text \
+                 positions are [t, 0, 0, 0] across the M-RoPE sections, not the generic \
+                 [t, t, t, 0], so even a text-only prompt is not NEOX band for band; deferred",
             ),
             ("yi-vl", DeferredMultimodal, "Yi vision-language; deferred"),
             ("qwen2vl", DeferredMultimodal, "vision-language; deferred"),
@@ -3852,6 +4006,24 @@ pub fn unsupported_feature_keys(arch: &str) -> Vec<(String, &'static str)> {
          their sum is `ffn_latent_up`ed back), which the generic MoE bodies, which run \
          the experts at hidden_dim, do not have",
     ));
+    // `{arch}.decision.block_count` (`LLM_KV_DECISION_BLOCK_COUNT`, new at
+    // the `604cc430` pin): the file's LAST blocks are a decision head, not
+    // decoder layers. `lfm2.cpp` (an architecture frink serves) reads it
+    // at `load_arch_hparams`, requires `attention.causal = false` beside
+    // it, builds no memory (`llama-model.cpp:2808`) and runs the trunk
+    // bidirectionally into a biased-LayerNorm scorer that emits three
+    // scores per token and no logits; `conversion/lfm2.py:258` writes it
+    // for every LFM2-d1-omni export. The generic decoder would run those
+    // head blocks as causal layers and sample from an LM head the file
+    // does not have. `decision.type` ALONE is not refused: the
+    // `lfm2-d1` / `openjev` kinds read the ordinary LM logits of a
+    // causal model, which this path computes.
+    out.push((
+        key("decision.block_count"),
+        "a DECISION head (lfm2.cpp: `decision.block_count` trailing blocks run as a \
+         non-causal scorer that emits scores instead of logits, with no KV memory); frink \
+         serves the causal trunk only",
+    ));
     out
 }
 
@@ -4165,7 +4337,7 @@ mod audit_tests {
             }
         }
         assert!(
-            seen == 4,
+            seen == 11,
             "every unaudited generic architecture is triaged; found {seen}. \
              It was 47 until the triage found `minicpm3` was an MLA model on the \
              generic-GQA row and it moved to DedicatedOnly, 46 until five ONE MATCH ARM \
@@ -4306,7 +4478,15 @@ mod audit_tests {
              read, and the one thing neither reached is the residual topology \
              (`crate::normed_residual`: each sublayer's PRE-NORM output, scaled by a \
              REQUIRED `residual_scale`, REPLACES the stream its branch joins), which is ONE \
-             graph of the 155"
+             graph of the 155. THEN IT WENT UP AGAIN, 4 to 11, on 2026-10-28, when the pin \
+             moved from `5b59b83` to `604cc430` (913 commits, 155 graphs to 169, 13 new \
+             names): seven of the thirteen are generic-path candidates and are triaged \
+             here -- `kolibri1` and `lfm3` ONE MATCH ARM (table rows on served seams), \
+             `flint` NEW CODE on its tokenizer, `beam`, `maion-coder`, `k2-horizon` and \
+             `muse-spark` NEW CODE on a scaled residual, a latent MoE, a grouped RMS norm \
+             with value experts, and a norm-preserving residual -- two are `dedicated` \
+             (`deepseek41`, `glm5-next`) and four are deferred (`gemma-embedding2`, \
+             `clef`, `vllm-decision2`, `sensenova_u1`)"
         );
     }
 
@@ -4763,6 +4943,25 @@ mod tests {
             "the SWA pattern is implemented; refusing it makes the loader's read of the \
              key dead code: {keys:?}"
         );
+    }
+
+    /// An LFM2 decision export (`conversion/lfm2.py:258`,
+    /// `add_decision_block_count`, spelled `{arch}.decision.block_count`
+    /// in gguf-py's `Keys.Decision.BLOCK_COUNT`) must stop at the key:
+    /// its trailing blocks are a non-causal scorer, not decoder layers.
+    #[test]
+    fn an_lfm2_decision_head_is_refused_by_its_key() {
+        let keys: Vec<String> = unsupported_feature_keys("lfm2")
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert!(
+            keys.iter().any(|k| k == "lfm2.decision.block_count"),
+            "{keys:?}"
+        );
+        // `decision.type` alone is an ordinary causal LM read for its
+        // label logits, so it must not be on the list.
+        assert!(!keys.iter().any(|k| k.ends_with("decision.type")));
     }
 
     /// llama.cpp picks Gemma's `f_attention_scale` on the LAYER COUNT

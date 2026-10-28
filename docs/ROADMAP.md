@@ -87,7 +87,7 @@ rule that ranks them. The plan's order is:
 |---|---|
 | 1 | Fix what is wrong, and close the oracle's hole |
 | 2 | Model layer: audit, vocabulary, then split |
-| 3 | Close the 4 unaudited architectures, auditing outward |
+| 3 | Close the 11 unaudited architectures, auditing outward |
 | 4 | Out-of-core MoE, and one large real checkpoint |
 | 5 | CPU decode scaling |
 | 6 | Hardware reach: the backend seam, then Vulkan |
@@ -132,9 +132,13 @@ this is stale.
 
 - Vision: a projector plus generate. Nothing exists today
 - MiniMax-M3's sparse attention
-- The three remaining unaudited graphs: a second routing stage
-  (`graniteswitch`), a per-token adapter (`qwen4exp`), a second expert
-  bank (`grovemoe`)
+- The remaining unaudited graphs: a per-token adapter selection
+  (`graniteswitch`), a delta-net over a hybrid memory index
+  (`qwen4exp`), a second expert bank (`grovemoe`), and the seven the
+  2026-10-28 pin move brought in -- `kolibri1` and `lfm3` are table
+  rows away, `flint` a tokenizer away, `beam`, `maion-coder`,
+  `k2-horizon` and `muse-spark` new code
+  ([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md))
 - Real GLM-5.2, DeepSeek V4 and full Kimi, run end to end on a
   checkpoint rather than a fixture
 - MTP draft heads
