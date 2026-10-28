@@ -4,8 +4,9 @@
 //! # Why these ten functions live in their own file
 //!
 //! Every one of them is a wrapper of the same shape:
-//! [`frink_core::par::on_workers`] around a body that lives in
-//! `decoder.rs`. That shape is the fix for the cost measured in #27 and
+//! [`frink_core::par::on_workers`] around a body that lives elsewhere
+//! in the decoder module (`forward_token.rs`, `batch.rs`, `paged.rs`,
+//! `multi_seq.rs`). That shape is the fix for the cost measured in #27 and
 //! #128, and it is worth exactly one file so that the rule is visible
 //! rather than repeated across a six-thousand-line module: **a forward
 //! pass enters the pool once, at its outermost boundary.**
@@ -30,8 +31,8 @@
 //!
 //! # The invariant this file exists to hold
 //!
-//! `decoder.rs` declares no `pub fn forward_*` of its own; the bodies
-//! there are private and named `*_on_worker`, or are the `*_inner`
+//! No other file of the decoder module declares a `pub fn forward_*`
+//! of its own; the bodies there are private and named `*_on_worker`, or are the `*_inner`
 //! helpers those call. `a_public_forward_may_not_be_declared_outside_
 //! this_file` is the test that keeps it that way, because an entry point
 //! added next door would silently reintroduce the per-region cost while
