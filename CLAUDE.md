@@ -54,8 +54,8 @@ rule.
   before writing. When frink disagrees, assume frink is wrong.
 - **Refuse, never approximate** ([0002](docs/adr/0002-refuse-rather-than-approximate.md)).
   Return `Result` and name what is missing. A refusal is coverage.
-- **One file per architecture** ([0003](docs/adr/0003-one-file-per-architecture.md),
-  proposed). New architectures go in their own file mirroring
+- **One file per architecture** ([0003](docs/adr/0003-one-file-per-architecture.md)).
+  New architectures go in their own file mirroring
   `src/models/<arch>.cpp`.
 - **Parameterise, never copy a code path** ([0004](docs/adr/0004-one-path-per-layer.md)).
   Where two structures must agree, make disagreement fail to compile

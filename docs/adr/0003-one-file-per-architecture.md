@@ -1,6 +1,6 @@
 # 0003. One file per architecture, built from shared blocks
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-28
 
 ## Context

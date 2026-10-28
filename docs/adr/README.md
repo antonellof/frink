@@ -11,9 +11,9 @@ Status is one of `Accepted`, `Proposed` or `Superseded by NNNN`.
 |---|---|---|
 | [0001](0001-llama-cpp-is-the-reference.md) | llama.cpp is the reference and the oracle | Accepted |
 | [0002](0002-refuse-rather-than-approximate.md) | Refuse rather than approximate | Accepted |
-| [0003](0003-one-file-per-architecture.md) | One file per architecture, built from shared blocks | Proposed |
+| [0003](0003-one-file-per-architecture.md) | One file per architecture, built from shared blocks | Accepted |
 | [0004](0004-one-path-per-layer.md) | One code path per layer, parameterised, never copied | Accepted |
-| [0005](0005-same-commands-as-llama-cpp.md) | Same commands and flags as llama.cpp's tools | Proposed |
+| [0005](0005-same-commands-as-llama-cpp.md) | Same commands and flags as llama.cpp's tools | Accepted |
 | [0006](0006-measurement.md) | Performance claims come from quiet, rented hardware | Accepted |
 | [0007](0007-issues-plans-adrs.md) | Issues track work, ADRs record decisions, plans are short-lived | Accepted |
 | [0008](0008-small-files-few-crates.md) | Small files, narrow modules, few crates | Accepted |
