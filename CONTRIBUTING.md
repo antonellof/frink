@@ -23,13 +23,17 @@ scripts/check-cross-target.sh    # clippy for x86_64-apple-darwin, ~2s warm
 rustup target add x86_64-apple-darwin   # once, if it refuses
 ```
 
-To run it automatically, call it from your local pre-push hook. That
-directory is gitignored and may already hold a hook of its own, so add
-the line rather than replacing the file:
+To run it automatically, call it from a local pre-push hook under
+`.githooks/`. That directory is gitignored and may already hold a hook
+of your own, so add the line rather than replacing the file, make the
+hook executable, and point git at the directory once per clone:
 
 ```
+mkdir -p .githooks
 echo 'exec "$(git rev-parse --show-toplevel)/scripts/check-cross-target.sh"' \
   >> .githooks/pre-push
+chmod +x .githooks/pre-push
+git config core.hooksPath .githooks
 ```
 
 CI's Linux `clippy` job compiles the same fallbacks, so this is about
@@ -73,8 +77,35 @@ that touches `ui/src/lib/`.
 - Run-to-run spread on Apple Silicon is around 20%. A claim under that
   needs an interleaved A/B: alternate the two binaries round by round in
   one session and count rounds won. Two batches of runs will not do it.
-- Commit the negative results too. `.scratch/NOTES_LLAMA_*.md` records
-  what was tried and did not work, which is as useful as the wins.
+- Record the negative results too. What was tried and did not work is
+  as useful as the wins: put it in the plan under `docs/plans/` that
+  the work belongs to, or in the PR description. (`.scratch/` is
+  gitignored, so notes left there never reach the repository.)
+
+## Adding a model architecture
+
+A model this engine only partly implements must stop with an error that
+names what is missing, never compute something else. An architecture
+that is not on an audited list is refused, and each refusal says why
+(`capability::unaudited_triage`). To move a row from refused to served:
+
+1. Read llama.cpp's graph for it (`src/models/<arch>.cpp`), the tensor
+   loader, and any generic builder the graph calls, since those branch
+   on the architecture too. Before writing code, check how many other
+   graphs share the same cause, so the change lands as one table or
+   seam rather than a special case.
+2. Parameterise the existing code path; never copy one to vary it.
+   If a file would grow past about 1000 lines, split it first.
+3. Build a tiny fixture with a script under `scripts/` (for example
+   `scripts/make_phi2_fixture.py`), run it through llama.cpp's own
+   library to get golden logits, and add a test under
+   `crates/frink-models/tests/` that checks frink against them on the
+   prefill, decode and continuous-batching paths. Record the KL
+   divergence and the max logit delta in the test's header, as
+   `crates/frink-models/tests/phi2_graphs.rs` does.
+4. Sabotage the new code once and confirm the test goes red.
+5. On a real checkpoint, `frink parity -m <file>` compares frink's
+   tokenizer and logits against llama.cpp's library.
 
 ## Documentation
 
@@ -88,8 +119,10 @@ that touches `ui/src/lib/`.
 | `docs/AGENTS_COOKBOOK.md` | Pointing an IDE or agent at the server |
 | `benchmarks/RESULTS.md` | Speed vs llama.cpp (generated) |
 | `benchmarks/README.md` | How those numbers are measured |
-| `docs/ROADMAP.md` | Planned work |
+| `docs/ROADMAP.md` | Planned work, summarised |
+| `docs/plans/README.md` | Index of the plans, in priority order |
 
-Do not duplicate those. Plans belong in `ROADMAP.md`, and git holds the
-history. Keep counts that go stale fast (test totals and the like) out
+Do not duplicate those. Plans live in `docs/plans/`, one file each,
+listed in `docs/plans/README.md`; `ROADMAP.md` summarises them. Git
+holds the history. Keep counts that go stale fast (test totals and the like) out
 of prose.

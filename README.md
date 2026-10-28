@@ -221,7 +221,9 @@ published separately if you want one rather than the stack:
 [models](https://crates.io/crates/frink-models),
 [api](https://crates.io/crates/frink-api),
 [metal](https://crates.io/crates/frink-metal),
-[cuda](https://crates.io/crates/frink-cuda). All share one version.
+[cuda](https://crates.io/crates/frink-cuda),
+[vulkan](https://crates.io/crates/frink-vulkan) (an early Vulkan
+backend, one kernel wide). All share one version.
 
 ## AI full disclosure
 
