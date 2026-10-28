@@ -5,7 +5,7 @@
 //!
 //! **No kernel in this module has ever executed on a GPU.** There is no
 //! NVIDIA hardware in the environment it was written in, and this repo's
-//! standing rule (`docs/plans/roadmap.md`, "CUDA stays at *must
+//! standing rule (`docs/plans/archive/roadmap-2026-09.md`, "CUDA stays at *must
 //! compile*") is that a CUDA claim is worth nothing until someone
 //! measures it. Nothing here may be described as a measured capability
 //! in `docs/FEATURES.md` or `docs/MODELS.md` until

@@ -1,7 +1,14 @@
 # A recurrent layer that does not come back to the host
 
-Status: **the chunked rule landed for prefill, and then took the device
-with it.** `frink_core::gdn_chunk` is 2.1x on the step alone, and
+Status, 2026-10-28: Bonsai-2-27B decode on the M2 Pro is **11.17
+tok/s against the reference fork's 11.46 (97.5%)**, flat with context
+(11.17 / 11.19 / 11.16 at 32 / 300 / 600 tokens), at 20 waits a token
+with the attention on the device. Prefill is 43.1 against 66.8, and
+its host side is finished. The remaining decode gap is about 3% in the
+PTQ1_0 matvec's inner loop; "The limit" below prices it.
+
+The chunked rule landed for prefill, and then took the device with
+it. `frink_core::gdn_chunk` is 2.1x on the step alone, and
 `frink_metal::gdn_chunk` is 3.0x on top of THAT at prefill lengths, so
 a batch's recurrence now runs on the GPU after three attempts that lost.
 The row-at-a-time kernels in `frink-metal/src/gdn.rs` are still not

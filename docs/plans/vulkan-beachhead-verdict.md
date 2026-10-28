@@ -1,6 +1,6 @@
 # The Vulkan beachhead: GO
 
-`roadmap.md`'s `d-hardware-reach` asks for "`vulkan-beachhead` as a
+[`archive/roadmap-2026-09.md`](archive/roadmap-2026-09.md)'s `d-hardware-reach` asks for "`vulkan-beachhead` as a
 GO/NO-GO on the smallest honest slice (`ash` plus one SPIR-V kernel),
 not a full backend", and says a written verdict is the deliverable.
 This is that verdict. Dated 2026-09-01.
