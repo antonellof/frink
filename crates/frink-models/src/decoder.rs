@@ -416,26 +416,57 @@ impl MoeWeights {
     /// therefore the cache entry's pin) lives exactly as long as `f`'s
     /// borrow.
     pub fn with_expert<R>(&self, e: usize, f: impl FnOnce(&ExpertWeights) -> R) -> R {
+        self.with_experts(&[e], |ex| f(ex[0]))
+    }
+
+    /// Runs `f` with ALL of `eids` lent at once, `experts[i]` being
+    /// expert `eids[i]`, whichever backing holds them.
+    ///
+    /// This is what lets a host MoE body be ONE body for both backings.
+    /// Before it, the top-k kernels took `&[ExpertWeights]`, which only
+    /// a resident layer has, so a streamed layer was sent to a different
+    /// body with a different gate/up kernel (`apply_cpu_q8`'s repacked
+    /// GEMV where resident ran `dot_pair_cpu_q8`'s 2-row SDOT) and
+    /// answered differently in the last bits. The backing should decide
+    /// where the bytes come from and nothing else.
+    ///
+    /// A stored layer asks for the whole batch before touching any of
+    /// it, so a miss on the last expert cannot evict the first; each
+    /// materialised view clones its lease's `Arc` (`WeightBytes::Shared`)
+    /// and so pins its entry until `f` returns.
+    pub fn with_experts<R>(&self, eids: &[usize], f: impl FnOnce(&[&ExpertWeights]) -> R) -> R {
         match &self.experts {
-            ExpertBacking::Resident(v) => f(&v[e]),
+            ExpertBacking::Resident(v) => {
+                let refs: Vec<&ExpertWeights> = eids.iter().map(|&e| &v[e]).collect();
+                f(&refs)
+            }
             ExpertBacking::Stored {
                 store,
                 layouts,
                 layer,
             } => {
-                let lease = store
-                    .acquire(frink_core::expert_store::ExpertKey {
-                        layer: *layer,
-                        expert: e as u32,
+                let key = |e: usize| frink_core::expert_store::ExpertKey {
+                    layer: *layer,
+                    expert: e as u32,
+                };
+                if eids.len() > 1 {
+                    let keys: Vec<_> = eids.iter().map(|&e| key(e)).collect();
+                    store.prefetch(&keys);
+                }
+                let held: Vec<ExpertWeights> = eids
+                    .iter()
+                    .map(|&e| {
+                        let lease = store.acquire(key(e)).unwrap_or_else(|err| {
+                            panic!(
+                                "expert store read failed for layer {layer} expert {e}: {err} \
+                                 (checkpoint file unreadable mid-decode)"
+                            )
+                        });
+                        layouts[e].materialize(&lease)
                     })
-                    .unwrap_or_else(|err| {
-                        panic!(
-                            "expert store read failed for layer {layer} expert {e}: {err} \
-                             (checkpoint file unreadable mid-decode)"
-                        )
-                    });
-                let tmp = layouts[e].materialize(&lease);
-                f(&tmp)
+                    .collect();
+                let refs: Vec<&ExpertWeights> = held.iter().collect();
+                f(&refs)
             }
         }
     }
@@ -3508,8 +3539,11 @@ impl Decoder {
     /// SwiGLU, then per-slot down. Three regions, none nested, all
     /// through `frink_core::par` so they follow whichever scheduler
     /// `FRINK_CPU_POOL` selected.
+    ///
+    /// `experts[slot]` is the expert `decision.expert_ids[slot]`, lent by
+    /// `MoeWeights::with_experts` from either backing.
     fn cpu_moe_topk_parallel_slots(
-        experts: &[ExpertWeights],
+        experts: &[&ExpertWeights],
         normed2: &[f32],
         decision: &frink_moe::RoutingDecision,
         hidden_dim: usize,
@@ -3525,8 +3559,8 @@ impl Decoder {
         if n_slots == 0 {
             return Some(Vec::new());
         }
-        for &eid in &decision.expert_ids {
-            let ex = experts.get(eid)?;
+        assert_eq!(experts.len(), n_slots, "one lent expert per routed slot");
+        for ex in experts {
             if ex.gate.rows() == 0
                 || ex.up.rows() != ex.gate.rows()
                 || ex.down.rows() != hidden_dim
@@ -3552,20 +3586,19 @@ impl Decoder {
                 return None;
             }
         }
-        let ffn_rows = experts[decision.expert_ids[0]].gate.rows();
+        let ffn_rows = experts[0].gate.rows();
         // Even ffn_rows: par_chunks_mut(2) never crosses a slot boundary.
         if !ffn_rows.is_multiple_of(2) {
             return None;
         }
         let q8 = frink_quant::quantize_activations_q8(normed2);
-        let eids = &decision.expert_ids;
         let mut gate = vec![0f32; n_slots * ffn_rows];
         let mut up = vec![0f32; n_slots * ffn_rows];
         frink_core::par::chunks_mut2(&mut gate, &mut up, 2, 1, |p, gc, uc| {
             let row0 = p * 2;
             let slot = row0 / ffn_rows;
             let r = row0 % ffn_rows;
-            let ex = &experts[eids[slot]];
+            let ex = experts[slot];
             if let (Some((g0, g1)), Some((u0, u1))) = (
                 ex.gate.dot_pair_cpu_q8(r, &q8),
                 ex.up.dot_pair_cpu_q8(r, &q8),
@@ -3598,7 +3631,7 @@ impl Decoder {
             .map(|&w| (vec![0f32; hidden_dim], w))
             .collect();
         frink_core::par::items_mut(&mut outs, 1, |slot, (out, _)| {
-            let ex = &experts[eids[slot]];
+            let ex = experts[slot];
             let act_slot = &activated[slot * ffn_rows..(slot + 1) * ffn_rows];
             if act_slot.len().is_multiple_of(32) {
                 let down_q8 = frink_quant::quantize_activations_q8(act_slot);
@@ -3616,9 +3649,10 @@ impl Decoder {
     ///
     /// `weight_before_ffn` (`crate::routed_weight_site`): each slot
     /// reads its own scaled input and the shared activation is not
-    /// built.
+    /// built. `experts[slot]` is the expert `decision.expert_ids[slot]`,
+    /// as for `cpu_moe_topk_parallel_slots`.
     fn cpu_moe_serial_experts(
-        layer: &LayerWeights,
+        experts: &[&ExpertWeights],
         normed2: &[f32],
         decision: &frink_moe::RoutingDecision,
         plan: Option<&PlacementPlan>,
@@ -3647,24 +3681,22 @@ impl Decoder {
             .expert_ids
             .iter()
             .zip(decision.weights.iter())
-            .map(|(&eid, &w)| {
+            .zip(experts.iter())
+            .map(|((&eid, &w), ex)| {
                 let placement = plan
                     .map(|p| p.placement_for(eid))
                     .unwrap_or(ExpertPlacement::Cpu);
                 let (input, w) =
                     crate::routed_weight_site::routed_slot(normed2, w, weight_before_ffn);
-                let out = layer.moe.with_expert(eid, |ex| {
-                    if let Some(ref q8) = shared_act {
-                        if let (Some(gate), Some(up)) =
-                            (ex.gate.apply_cpu_q8(q8), ex.up.apply_cpu_q8(q8))
-                        {
-                            let activated = act.apply(&gate, &up);
-                            return ex.down.apply(&activated);
-                        }
+                if let Some(ref q8) = shared_act {
+                    if let (Some(gate), Some(up)) =
+                        (ex.gate.apply_cpu_q8(q8), ex.up.apply_cpu_q8(q8))
+                    {
+                        let activated = act.apply(&gate, &up);
+                        return (ex.down.apply(&activated), w);
                     }
-                    run_expert_placed(&input, ex, placement, act)
-                });
-                (out, w)
+                }
+                (run_expert_placed(&input, ex, placement, act), w)
             })
             .collect()
     }
@@ -3755,25 +3787,9 @@ impl Decoder {
         let acts = config.layer_ffn_acts(layer_idx);
         let act = acts.routed;
         layer.moe.record_activations(&decision.expert_ids);
-        // Best-effort warm of the routed experts for this layer into
-        // the store cache (SSD streaming overlap). Resident-backed
-        // layers skip this entirely.
-        if let ExpertBacking::Stored {
-            store,
-            layer: layer_id,
-            ..
-        } = &layer.moe.experts
-        {
-            let keys: Vec<frink_core::expert_store::ExpertKey> = decision
-                .expert_ids
-                .iter()
-                .map(|&eid| frink_core::expert_store::ExpertKey {
-                    layer: *layer_id,
-                    expert: eid as u32,
-                })
-                .collect();
-            store.prefetch(&keys);
-        }
+        // No prefetch here: the two consumers of a stored layer's top-k
+        // (`try_metal_moe_topk` and `MoeWeights::with_experts`) each ask
+        // for the whole batch before reading any of it.
 
         // Metal: fuse all top-k experts into one CB (one wait) when every
         // routed expert has Metal matvec launches. Shared experts (rare
@@ -3807,23 +3823,25 @@ impl Decoder {
             // slot; a model that weights the input per slot
             // (`crate::routed_weight_site`) takes the serial site.
             let before = config.moe.routed_weight_before_ffn;
-            if let (true, false, ExpertBacking::Resident(experts)) =
-                (all_cpu, before, &layer.moe.experts)
-            {
-                if let Some(outs) = Self::cpu_moe_topk_parallel_slots(
-                    experts,
-                    routed_input,
-                    &decision,
-                    hidden_dim,
-                    act,
-                ) {
-                    outs
-                } else {
-                    Self::cpu_moe_serial_experts(layer, routed_input, &decision, plan, act, before)
+            // ONE lend of all top-k for either backing, so a streamed
+            // layer runs exactly the kernels a resident one does
+            // (`MoeWeights::with_experts`). This used to match
+            // `ExpertBacking::Resident` here and send a streamed layer
+            // to the serial body unconditionally.
+            layer.moe.with_experts(&decision.expert_ids, |experts| {
+                if all_cpu && !before {
+                    if let Some(outs) = Self::cpu_moe_topk_parallel_slots(
+                        experts,
+                        routed_input,
+                        &decision,
+                        hidden_dim,
+                        act,
+                    ) {
+                        return outs;
+                    }
                 }
-            } else {
-                Self::cpu_moe_serial_experts(layer, routed_input, &decision, plan, act, before)
-            }
+                Self::cpu_moe_serial_experts(experts, routed_input, &decision, plan, act, before)
+            })
         };
         // Shared experts fire on every token regardless of routing, so
         // there's no offload decision to make for them the way there
@@ -4018,10 +4036,11 @@ impl Decoder {
         }
         let acts = config.layer_ffn_acts(layer_idx);
         let act = acts.routed;
-        let ExpertBacking::Resident(experts) = &layer.moe.experts else {
-            return None;
-        };
-        let n_experts = experts.len();
+        // Either backing: each bucket's expert is lent for its three
+        // GEMMs (`MoeWeights::with_expert`). This was resident-only, so
+        // a streamed prefill of 32+ tokens ran per-position matvecs
+        // instead and answered differently in the last bits.
+        let n_experts = layer.moe.n_experts();
         let all_cpu = plan
             .map(|p| (0..n_experts).all(|eid| matches!(p.placement_for(eid), ExpertPlacement::Cpu)))
             .unwrap_or(true);
@@ -4059,14 +4078,15 @@ impl Decoder {
                 gathered[i * hidden_dim..(i + 1) * hidden_dim].copy_from_slice(&input);
                 out_weights.push(w);
             }
-            let ex = &experts[eid];
-            let ffn_acts = ex.gate.quantize_batch_acts(&gathered, n);
-            let gate = ex
-                .gate
-                .apply_batch_with_acts(&gathered, n, ffn_acts.as_ref());
-            let up = ex.up.apply_batch_with_acts(&gathered, n, ffn_acts.as_ref());
-            let activated = act.apply(&gate, &up);
-            let down = ex.down.apply_batch(&activated, n);
+            let down = layer.moe.with_expert(eid, |ex| {
+                let ffn_acts = ex.gate.quantize_batch_acts(&gathered, n);
+                let gate = ex
+                    .gate
+                    .apply_batch_with_acts(&gathered, n, ffn_acts.as_ref());
+                let up = ex.up.apply_batch_with_acts(&gathered, n, ffn_acts.as_ref());
+                let activated = act.apply(&gate, &up);
+                ex.down.apply_batch(&activated, n)
+            });
             for (i, (&(tok, _), &w)) in toks.iter().zip(out_weights.iter()).enumerate() {
                 let out = &down[i * hidden_dim..(i + 1) * hidden_dim];
                 let row = &mut acc[tok * hidden_dim..(tok + 1) * hidden_dim];

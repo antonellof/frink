@@ -50,6 +50,38 @@ are the ones worth reading twice.
   to one answer across prefill, decode, multi-seq and paged, on a dense,
   a windowed, a short-convolution and a Mamba fixture.
 
+### Fixed
+
+- **A streamed MoE layer now runs the same kernels as a resident one.**
+  The expert backing picked the ARITHMETIC as well as where the bytes
+  came from. `combine_ffn_outputs_for_position` sent a resident layer
+  to the parallel top-k body (gate/up through `dot_pair_cpu_q8`, a
+  2-row SDOT) and a streamed one to the serial body (`apply_cpu_q8`, the
+  repacked x4 GEMV). `moe_ffn_batch` was resident-only, so a streamed
+  prefill of 32 or more tokens ran per-position matvecs. With
+  `FRINK_CPU_INT_DOT` on, which is the binaries' default, the two
+  backings disagreed in the last bits of the logits. `MoeWeights::
+  with_experts` now lends all of top-k from either backing, and both
+  bodies take that slice, so the backing decides where the bytes come
+  from and nothing else.
+
+  The fixture test could not see this. The library leaves int-dot OFF
+  so goldens stay reference-exact, so `store_backed_experts_produce_
+  bit_identical_logits_to_resident` had been comparing the f32
+  dequant-dot path, which has no repack and no top-k kernel split. The
+  same blind spot hid the original OLMoE garbage (" amongst amongst,
+  and of" for " Paris."), whose cause was the repack cache keying a
+  recycled expert-store buffer by address. That was fixed on
+  2026-08-28 and nothing had pinned it. `tests/streaming_int_dot.rs`
+  runs the one shared body (`common::assert_store_backed_matches_
+  resident`) with int-dot on, over a short prompt, a 40-token prompt
+  and decode, at a budget that caches everything and at a 1-byte one.
+  Three sabotages each turn it red while the int-dot-off arm stays
+  green: the old resident-only top-k routing, the old resident-only
+  batch gate, and an address-keyed repack of `Shared` bytes (the
+  original bug). On OLMoE-1B-7B Q4_0 (CPU), resident and streamed at
+  128 MiB both answer " Paris.\n\nParis is the capital of France."
+
 ## [0.49.0] - 2026-09-23
 
 ### Added
