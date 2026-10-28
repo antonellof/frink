@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/cohere2_nowindow_tiny.gguf
+config: REFUSED: architecture 'cohere2' requires unimplemented feature: `cohere2.attention.sliding_window` is absent or zero, and llama.cpp reads it as a REQUIRED key for this architecture (src/models/cohere2.cpp:13); every real export writes it, and a file without it does not load upstream

@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/lfm2_window_tiny.gguf
+config: REFUSED: architecture 'lfm2' requires unimplemented feature: `lfm2.attention.sliding_window` 4: lfm2.cpp:24-29 windows the attention layers and not the conv layers, which `swa_layers` cannot yet spell, and a window on a conv layer would evict the history its convolution reads (`crate::shortconv`); no published LFM2 export writes the key

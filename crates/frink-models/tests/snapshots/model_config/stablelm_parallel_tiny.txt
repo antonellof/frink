@@ -1,0 +1,140 @@
+fixture: crates/frink-models/tests/fixtures/stablelm_parallel_tiny.gguf
+config: ModelConfig {
+    name: "ferrox-stablelm-fixture",
+    kv_dtype: F32,
+    n_layers: 3,
+    n_mtp_blocks: 0,
+    hidden_dim: 32,
+    n_heads: 4,
+    n_kv_heads: 2,
+    head_dim: 8,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: LayerNormBias,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 32,
+        expert_ffn_dim: 48,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: None,
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: Some(
+        2,
+    ),
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Neox,
+    qk_norm_style: WholeVector,
+    swa_layers: All,
+    rope_layers: All,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: true,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: None,
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "head_dim (no attention.key_length key; derived as hidden_dim / n_heads)",
+    ],
+}
+cfg.layer[0].rope: Some(theta=10000.0 rot_dim=Some(2) freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(10000.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 48 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (2, 8, 8)
+cfg.layer[1].rope: Some(theta=10000.0 rot_dim=Some(2) freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(10000.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 48 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 8, 8)
+cfg.layer[2].rope: Some(theta=10000.0 rot_dim=Some(2) freq_factors=None)
+cfg.layer[2].rotates: true
+cfg.layer[2].rope_theta: Some(10000.0)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 48 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (2, 8, 8)
+decoder: LOADED
+dec.embedding: 48x32 F32 None
+dec.final_norm: LayerNormBias(weight len=32 sum=50.44749939441681 fnv=efc9532feba19e35, bias len=32 sum=16.759486220777035 fnv=7658afcd0ca9606a)
+dec.output_head: 48x32 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Neox, qk_norm: WholeVector, ffn_activation: Swiglu, memory: MemoryPlan { kind: KvGqa, swa_layers: All, sliding_window: None }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: None, attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 3
+dec.layer[0].attn.q_proj: 32x32 F32 None
+dec.layer[0].attn.k_proj: 16x32 F32 None
+dec.layer[0].attn.v_proj: 16x32 F32 None
+dec.layer[0].attn.o_proj: 32x32 F32 None
+dec.layer[0].attn.norm_weight: LayerNormBias(weight len=32 sum=52.166133403778076 fnv=54666828e6f995e3, bias len=32 sum=10.564079765230417 fnv=1eaf8e8ef6ab1396)
+dec.layer[0].attn.q_bias: len=32 sum=1.1176874116063118 fnv=071ce332c92c1b47
+dec.layer[0].attn.k_bias: len=16 sum=-0.31048798095434904 fnv=6cc8703cfbd92b7b
+dec.layer[0].attn.v_bias: len=16 sum=-0.23441918939352036 fnv=69bcd71c5295058b
+dec.layer[0].moe.router: 1x32 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 48x32 F32 None up 48x32 F32 None down 32x48 F32 None])
+dec.layer[0].moe.parallel: Some(SharedNorm)
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 32x32 F32 None
+dec.layer[1].attn.k_proj: 16x32 F32 None
+dec.layer[1].attn.v_proj: 16x32 F32 None
+dec.layer[1].attn.o_proj: 32x32 F32 None
+dec.layer[1].attn.norm_weight: LayerNormBias(weight len=32 sum=47.14461877942085 fnv=33679d116da56012, bias len=32 sum=13.864043103531003 fnv=251d271d975dfc02)
+dec.layer[1].attn.q_bias: len=32 sum=-0.5037526357918978 fnv=783194e8589ea600
+dec.layer[1].attn.k_bias: len=16 sum=0.39240060187876225 fnv=78f7ea25920fd4f1
+dec.layer[1].attn.v_bias: len=16 sum=1.3863226752728224 fnv=db84806aa7cacfa3
+dec.layer[1].moe.router: 1x32 F32 None
+dec.layer[1].moe.experts: Resident(n=1 [gate 48x32 F32 None up 48x32 F32 None down 32x48 F32 None])
+dec.layer[1].moe.parallel: Some(SharedNorm)
+dec.layer[1].moe.activation_counts: len=1
+dec.layer[2].attn.q_proj: 32x32 F32 None
+dec.layer[2].attn.k_proj: 16x32 F32 None
+dec.layer[2].attn.v_proj: 16x32 F32 None
+dec.layer[2].attn.o_proj: 32x32 F32 None
+dec.layer[2].attn.norm_weight: LayerNormBias(weight len=32 sum=46.94957223534584 fnv=278a3d5e9ba60342, bias len=32 sum=12.314884264022112 fnv=61d262f577c4b22b)
+dec.layer[2].attn.q_bias: len=32 sum=-0.7808891739696264 fnv=87e6f4d37139091c
+dec.layer[2].attn.k_bias: len=16 sum=1.1244944408535957 fnv=c67e2fe8b51e1c6b
+dec.layer[2].attn.v_bias: len=16 sum=-0.9067384650697932 fnv=5c51834061cf4620
+dec.layer[2].moe.router: 1x32 F32 None
+dec.layer[2].moe.experts: Resident(n=1 [gate 48x32 F32 None up 48x32 F32 None down 32x48 F32 None])
+dec.layer[2].moe.parallel: Some(SharedNorm)
+dec.layer[2].moe.activation_counts: len=1

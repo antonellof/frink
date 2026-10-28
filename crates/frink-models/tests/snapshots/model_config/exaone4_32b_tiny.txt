@@ -1,0 +1,1301 @@
+fixture: crates/frink-models/tests/fixtures/exaone4_32b_tiny.gguf
+config: ModelConfig {
+    name: "ferrox-exaone4-fixture",
+    kv_dtype: F32,
+    n_layers: 64,
+    n_mtp_blocks: 0,
+    hidden_dim: 16,
+    n_heads: 2,
+    n_kv_heads: 1,
+    head_dim: 8,
+    v_head_dim: None,
+    vocab_size: 32,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 16,
+        expert_ffn_dim: 16,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: Some(
+        3,
+    ),
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Neox,
+    qk_norm_style: WholeVector,
+    swa_layers: Period {
+        period: 4,
+        dense_first: false,
+    },
+    rope_layers: SlidingOnly,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: Some(
+        10000.0,
+    ),
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "none -- every field above was read directly from this file's own GGUF metadata",
+    ],
+}
+cfg.layer[0].sliding_window: Some(3)
+cfg.layer[0].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(10000.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (1, 8, 8)
+cfg.layer[1].sliding_window: Some(3)
+cfg.layer[1].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(10000.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (1, 8, 8)
+cfg.layer[2].sliding_window: Some(3)
+cfg.layer[2].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[2].rotates: true
+cfg.layer[2].rope_theta: Some(10000.0)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (1, 8, 8)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (1, 8, 8)
+cfg.layer[4].sliding_window: Some(3)
+cfg.layer[4].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[4].rotates: true
+cfg.layer[4].rope_theta: Some(10000.0)
+cfg.layer[4].attention_kind: Gqa
+cfg.layer[4].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[4].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[4].kv_dtype: F32
+cfg.layer[4].cache_geometry: (1, 8, 8)
+cfg.layer[5].sliding_window: Some(3)
+cfg.layer[5].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[5].rotates: true
+cfg.layer[5].rope_theta: Some(10000.0)
+cfg.layer[5].attention_kind: Gqa
+cfg.layer[5].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[5].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[5].kv_dtype: F32
+cfg.layer[5].cache_geometry: (1, 8, 8)
+cfg.layer[6].sliding_window: Some(3)
+cfg.layer[6].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[6].rotates: true
+cfg.layer[6].rope_theta: Some(10000.0)
+cfg.layer[6].attention_kind: Gqa
+cfg.layer[6].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[6].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[6].kv_dtype: F32
+cfg.layer[6].cache_geometry: (1, 8, 8)
+cfg.layer[7].attention_kind: Gqa
+cfg.layer[7].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[7].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[7].kv_dtype: F32
+cfg.layer[7].cache_geometry: (1, 8, 8)
+cfg.layer[8].sliding_window: Some(3)
+cfg.layer[8].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[8].rotates: true
+cfg.layer[8].rope_theta: Some(10000.0)
+cfg.layer[8].attention_kind: Gqa
+cfg.layer[8].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[8].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[8].kv_dtype: F32
+cfg.layer[8].cache_geometry: (1, 8, 8)
+cfg.layer[9].sliding_window: Some(3)
+cfg.layer[9].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[9].rotates: true
+cfg.layer[9].rope_theta: Some(10000.0)
+cfg.layer[9].attention_kind: Gqa
+cfg.layer[9].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[9].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[9].kv_dtype: F32
+cfg.layer[9].cache_geometry: (1, 8, 8)
+cfg.layer[10].sliding_window: Some(3)
+cfg.layer[10].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[10].rotates: true
+cfg.layer[10].rope_theta: Some(10000.0)
+cfg.layer[10].attention_kind: Gqa
+cfg.layer[10].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[10].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[10].kv_dtype: F32
+cfg.layer[10].cache_geometry: (1, 8, 8)
+cfg.layer[11].attention_kind: Gqa
+cfg.layer[11].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[11].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[11].kv_dtype: F32
+cfg.layer[11].cache_geometry: (1, 8, 8)
+cfg.layer[12].sliding_window: Some(3)
+cfg.layer[12].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[12].rotates: true
+cfg.layer[12].rope_theta: Some(10000.0)
+cfg.layer[12].attention_kind: Gqa
+cfg.layer[12].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[12].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[12].kv_dtype: F32
+cfg.layer[12].cache_geometry: (1, 8, 8)
+cfg.layer[13].sliding_window: Some(3)
+cfg.layer[13].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[13].rotates: true
+cfg.layer[13].rope_theta: Some(10000.0)
+cfg.layer[13].attention_kind: Gqa
+cfg.layer[13].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[13].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[13].kv_dtype: F32
+cfg.layer[13].cache_geometry: (1, 8, 8)
+cfg.layer[14].sliding_window: Some(3)
+cfg.layer[14].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[14].rotates: true
+cfg.layer[14].rope_theta: Some(10000.0)
+cfg.layer[14].attention_kind: Gqa
+cfg.layer[14].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[14].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[14].kv_dtype: F32
+cfg.layer[14].cache_geometry: (1, 8, 8)
+cfg.layer[15].attention_kind: Gqa
+cfg.layer[15].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[15].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[15].kv_dtype: F32
+cfg.layer[15].cache_geometry: (1, 8, 8)
+cfg.layer[16].sliding_window: Some(3)
+cfg.layer[16].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[16].rotates: true
+cfg.layer[16].rope_theta: Some(10000.0)
+cfg.layer[16].attention_kind: Gqa
+cfg.layer[16].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[16].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[16].kv_dtype: F32
+cfg.layer[16].cache_geometry: (1, 8, 8)
+cfg.layer[17].sliding_window: Some(3)
+cfg.layer[17].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[17].rotates: true
+cfg.layer[17].rope_theta: Some(10000.0)
+cfg.layer[17].attention_kind: Gqa
+cfg.layer[17].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[17].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[17].kv_dtype: F32
+cfg.layer[17].cache_geometry: (1, 8, 8)
+cfg.layer[18].sliding_window: Some(3)
+cfg.layer[18].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[18].rotates: true
+cfg.layer[18].rope_theta: Some(10000.0)
+cfg.layer[18].attention_kind: Gqa
+cfg.layer[18].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[18].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[18].kv_dtype: F32
+cfg.layer[18].cache_geometry: (1, 8, 8)
+cfg.layer[19].attention_kind: Gqa
+cfg.layer[19].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[19].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[19].kv_dtype: F32
+cfg.layer[19].cache_geometry: (1, 8, 8)
+cfg.layer[20].sliding_window: Some(3)
+cfg.layer[20].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[20].rotates: true
+cfg.layer[20].rope_theta: Some(10000.0)
+cfg.layer[20].attention_kind: Gqa
+cfg.layer[20].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[20].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[20].kv_dtype: F32
+cfg.layer[20].cache_geometry: (1, 8, 8)
+cfg.layer[21].sliding_window: Some(3)
+cfg.layer[21].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[21].rotates: true
+cfg.layer[21].rope_theta: Some(10000.0)
+cfg.layer[21].attention_kind: Gqa
+cfg.layer[21].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[21].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[21].kv_dtype: F32
+cfg.layer[21].cache_geometry: (1, 8, 8)
+cfg.layer[22].sliding_window: Some(3)
+cfg.layer[22].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[22].rotates: true
+cfg.layer[22].rope_theta: Some(10000.0)
+cfg.layer[22].attention_kind: Gqa
+cfg.layer[22].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[22].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[22].kv_dtype: F32
+cfg.layer[22].cache_geometry: (1, 8, 8)
+cfg.layer[23].attention_kind: Gqa
+cfg.layer[23].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[23].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[23].kv_dtype: F32
+cfg.layer[23].cache_geometry: (1, 8, 8)
+cfg.layer[24].sliding_window: Some(3)
+cfg.layer[24].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[24].rotates: true
+cfg.layer[24].rope_theta: Some(10000.0)
+cfg.layer[24].attention_kind: Gqa
+cfg.layer[24].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[24].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[24].kv_dtype: F32
+cfg.layer[24].cache_geometry: (1, 8, 8)
+cfg.layer[25].sliding_window: Some(3)
+cfg.layer[25].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[25].rotates: true
+cfg.layer[25].rope_theta: Some(10000.0)
+cfg.layer[25].attention_kind: Gqa
+cfg.layer[25].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[25].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[25].kv_dtype: F32
+cfg.layer[25].cache_geometry: (1, 8, 8)
+cfg.layer[26].sliding_window: Some(3)
+cfg.layer[26].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[26].rotates: true
+cfg.layer[26].rope_theta: Some(10000.0)
+cfg.layer[26].attention_kind: Gqa
+cfg.layer[26].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[26].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[26].kv_dtype: F32
+cfg.layer[26].cache_geometry: (1, 8, 8)
+cfg.layer[27].attention_kind: Gqa
+cfg.layer[27].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[27].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[27].kv_dtype: F32
+cfg.layer[27].cache_geometry: (1, 8, 8)
+cfg.layer[28].sliding_window: Some(3)
+cfg.layer[28].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[28].rotates: true
+cfg.layer[28].rope_theta: Some(10000.0)
+cfg.layer[28].attention_kind: Gqa
+cfg.layer[28].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[28].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[28].kv_dtype: F32
+cfg.layer[28].cache_geometry: (1, 8, 8)
+cfg.layer[29].sliding_window: Some(3)
+cfg.layer[29].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[29].rotates: true
+cfg.layer[29].rope_theta: Some(10000.0)
+cfg.layer[29].attention_kind: Gqa
+cfg.layer[29].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[29].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[29].kv_dtype: F32
+cfg.layer[29].cache_geometry: (1, 8, 8)
+cfg.layer[30].sliding_window: Some(3)
+cfg.layer[30].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[30].rotates: true
+cfg.layer[30].rope_theta: Some(10000.0)
+cfg.layer[30].attention_kind: Gqa
+cfg.layer[30].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[30].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[30].kv_dtype: F32
+cfg.layer[30].cache_geometry: (1, 8, 8)
+cfg.layer[31].attention_kind: Gqa
+cfg.layer[31].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[31].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[31].kv_dtype: F32
+cfg.layer[31].cache_geometry: (1, 8, 8)
+cfg.layer[32].sliding_window: Some(3)
+cfg.layer[32].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[32].rotates: true
+cfg.layer[32].rope_theta: Some(10000.0)
+cfg.layer[32].attention_kind: Gqa
+cfg.layer[32].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[32].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[32].kv_dtype: F32
+cfg.layer[32].cache_geometry: (1, 8, 8)
+cfg.layer[33].sliding_window: Some(3)
+cfg.layer[33].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[33].rotates: true
+cfg.layer[33].rope_theta: Some(10000.0)
+cfg.layer[33].attention_kind: Gqa
+cfg.layer[33].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[33].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[33].kv_dtype: F32
+cfg.layer[33].cache_geometry: (1, 8, 8)
+cfg.layer[34].sliding_window: Some(3)
+cfg.layer[34].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[34].rotates: true
+cfg.layer[34].rope_theta: Some(10000.0)
+cfg.layer[34].attention_kind: Gqa
+cfg.layer[34].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[34].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[34].kv_dtype: F32
+cfg.layer[34].cache_geometry: (1, 8, 8)
+cfg.layer[35].attention_kind: Gqa
+cfg.layer[35].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[35].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[35].kv_dtype: F32
+cfg.layer[35].cache_geometry: (1, 8, 8)
+cfg.layer[36].sliding_window: Some(3)
+cfg.layer[36].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[36].rotates: true
+cfg.layer[36].rope_theta: Some(10000.0)
+cfg.layer[36].attention_kind: Gqa
+cfg.layer[36].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[36].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[36].kv_dtype: F32
+cfg.layer[36].cache_geometry: (1, 8, 8)
+cfg.layer[37].sliding_window: Some(3)
+cfg.layer[37].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[37].rotates: true
+cfg.layer[37].rope_theta: Some(10000.0)
+cfg.layer[37].attention_kind: Gqa
+cfg.layer[37].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[37].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[37].kv_dtype: F32
+cfg.layer[37].cache_geometry: (1, 8, 8)
+cfg.layer[38].sliding_window: Some(3)
+cfg.layer[38].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[38].rotates: true
+cfg.layer[38].rope_theta: Some(10000.0)
+cfg.layer[38].attention_kind: Gqa
+cfg.layer[38].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[38].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[38].kv_dtype: F32
+cfg.layer[38].cache_geometry: (1, 8, 8)
+cfg.layer[39].attention_kind: Gqa
+cfg.layer[39].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[39].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[39].kv_dtype: F32
+cfg.layer[39].cache_geometry: (1, 8, 8)
+cfg.layer[40].sliding_window: Some(3)
+cfg.layer[40].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[40].rotates: true
+cfg.layer[40].rope_theta: Some(10000.0)
+cfg.layer[40].attention_kind: Gqa
+cfg.layer[40].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[40].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[40].kv_dtype: F32
+cfg.layer[40].cache_geometry: (1, 8, 8)
+cfg.layer[41].sliding_window: Some(3)
+cfg.layer[41].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[41].rotates: true
+cfg.layer[41].rope_theta: Some(10000.0)
+cfg.layer[41].attention_kind: Gqa
+cfg.layer[41].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[41].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[41].kv_dtype: F32
+cfg.layer[41].cache_geometry: (1, 8, 8)
+cfg.layer[42].sliding_window: Some(3)
+cfg.layer[42].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[42].rotates: true
+cfg.layer[42].rope_theta: Some(10000.0)
+cfg.layer[42].attention_kind: Gqa
+cfg.layer[42].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[42].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[42].kv_dtype: F32
+cfg.layer[42].cache_geometry: (1, 8, 8)
+cfg.layer[43].attention_kind: Gqa
+cfg.layer[43].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[43].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[43].kv_dtype: F32
+cfg.layer[43].cache_geometry: (1, 8, 8)
+cfg.layer[44].sliding_window: Some(3)
+cfg.layer[44].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[44].rotates: true
+cfg.layer[44].rope_theta: Some(10000.0)
+cfg.layer[44].attention_kind: Gqa
+cfg.layer[44].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[44].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[44].kv_dtype: F32
+cfg.layer[44].cache_geometry: (1, 8, 8)
+cfg.layer[45].sliding_window: Some(3)
+cfg.layer[45].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[45].rotates: true
+cfg.layer[45].rope_theta: Some(10000.0)
+cfg.layer[45].attention_kind: Gqa
+cfg.layer[45].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[45].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[45].kv_dtype: F32
+cfg.layer[45].cache_geometry: (1, 8, 8)
+cfg.layer[46].sliding_window: Some(3)
+cfg.layer[46].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[46].rotates: true
+cfg.layer[46].rope_theta: Some(10000.0)
+cfg.layer[46].attention_kind: Gqa
+cfg.layer[46].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[46].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[46].kv_dtype: F32
+cfg.layer[46].cache_geometry: (1, 8, 8)
+cfg.layer[47].attention_kind: Gqa
+cfg.layer[47].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[47].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[47].kv_dtype: F32
+cfg.layer[47].cache_geometry: (1, 8, 8)
+cfg.layer[48].sliding_window: Some(3)
+cfg.layer[48].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[48].rotates: true
+cfg.layer[48].rope_theta: Some(10000.0)
+cfg.layer[48].attention_kind: Gqa
+cfg.layer[48].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[48].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[48].kv_dtype: F32
+cfg.layer[48].cache_geometry: (1, 8, 8)
+cfg.layer[49].sliding_window: Some(3)
+cfg.layer[49].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[49].rotates: true
+cfg.layer[49].rope_theta: Some(10000.0)
+cfg.layer[49].attention_kind: Gqa
+cfg.layer[49].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[49].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[49].kv_dtype: F32
+cfg.layer[49].cache_geometry: (1, 8, 8)
+cfg.layer[50].sliding_window: Some(3)
+cfg.layer[50].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[50].rotates: true
+cfg.layer[50].rope_theta: Some(10000.0)
+cfg.layer[50].attention_kind: Gqa
+cfg.layer[50].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[50].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[50].kv_dtype: F32
+cfg.layer[50].cache_geometry: (1, 8, 8)
+cfg.layer[51].attention_kind: Gqa
+cfg.layer[51].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[51].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[51].kv_dtype: F32
+cfg.layer[51].cache_geometry: (1, 8, 8)
+cfg.layer[52].sliding_window: Some(3)
+cfg.layer[52].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[52].rotates: true
+cfg.layer[52].rope_theta: Some(10000.0)
+cfg.layer[52].attention_kind: Gqa
+cfg.layer[52].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[52].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[52].kv_dtype: F32
+cfg.layer[52].cache_geometry: (1, 8, 8)
+cfg.layer[53].sliding_window: Some(3)
+cfg.layer[53].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[53].rotates: true
+cfg.layer[53].rope_theta: Some(10000.0)
+cfg.layer[53].attention_kind: Gqa
+cfg.layer[53].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[53].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[53].kv_dtype: F32
+cfg.layer[53].cache_geometry: (1, 8, 8)
+cfg.layer[54].sliding_window: Some(3)
+cfg.layer[54].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[54].rotates: true
+cfg.layer[54].rope_theta: Some(10000.0)
+cfg.layer[54].attention_kind: Gqa
+cfg.layer[54].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[54].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[54].kv_dtype: F32
+cfg.layer[54].cache_geometry: (1, 8, 8)
+cfg.layer[55].attention_kind: Gqa
+cfg.layer[55].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[55].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[55].kv_dtype: F32
+cfg.layer[55].cache_geometry: (1, 8, 8)
+cfg.layer[56].sliding_window: Some(3)
+cfg.layer[56].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[56].rotates: true
+cfg.layer[56].rope_theta: Some(10000.0)
+cfg.layer[56].attention_kind: Gqa
+cfg.layer[56].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[56].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[56].kv_dtype: F32
+cfg.layer[56].cache_geometry: (1, 8, 8)
+cfg.layer[57].sliding_window: Some(3)
+cfg.layer[57].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[57].rotates: true
+cfg.layer[57].rope_theta: Some(10000.0)
+cfg.layer[57].attention_kind: Gqa
+cfg.layer[57].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[57].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[57].kv_dtype: F32
+cfg.layer[57].cache_geometry: (1, 8, 8)
+cfg.layer[58].sliding_window: Some(3)
+cfg.layer[58].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[58].rotates: true
+cfg.layer[58].rope_theta: Some(10000.0)
+cfg.layer[58].attention_kind: Gqa
+cfg.layer[58].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[58].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[58].kv_dtype: F32
+cfg.layer[58].cache_geometry: (1, 8, 8)
+cfg.layer[59].attention_kind: Gqa
+cfg.layer[59].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[59].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[59].kv_dtype: F32
+cfg.layer[59].cache_geometry: (1, 8, 8)
+cfg.layer[60].sliding_window: Some(3)
+cfg.layer[60].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[60].rotates: true
+cfg.layer[60].rope_theta: Some(10000.0)
+cfg.layer[60].attention_kind: Gqa
+cfg.layer[60].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[60].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[60].kv_dtype: F32
+cfg.layer[60].cache_geometry: (1, 8, 8)
+cfg.layer[61].sliding_window: Some(3)
+cfg.layer[61].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[61].rotates: true
+cfg.layer[61].rope_theta: Some(10000.0)
+cfg.layer[61].attention_kind: Gqa
+cfg.layer[61].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[61].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[61].kv_dtype: F32
+cfg.layer[61].cache_geometry: (1, 8, 8)
+cfg.layer[62].sliding_window: Some(3)
+cfg.layer[62].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[62].rotates: true
+cfg.layer[62].rope_theta: Some(10000.0)
+cfg.layer[62].attention_kind: Gqa
+cfg.layer[62].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[62].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[62].kv_dtype: F32
+cfg.layer[62].cache_geometry: (1, 8, 8)
+cfg.layer[63].attention_kind: Gqa
+cfg.layer[63].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 16 }
+cfg.layer[63].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[63].kv_dtype: F32
+cfg.layer[63].cache_geometry: (1, 8, 8)
+decoder: LOADED
+dec.embedding: 32x16 F32 None
+dec.final_norm: Rms(len=16 sum=-0.3003780283033848 fnv=2434cad41515ec55)
+dec.output_head: 32x16 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Neox, qk_norm: PerHead, ffn_activation: Swiglu, memory: MemoryPlan { kind: KvGqa, swa_layers: Period { period: 4, dense_first: false }, sliding_window: Some(3) }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: Some(10000.0), attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 64
+dec.layer[0].attn.q_proj: 16x16 F32 None
+dec.layer[0].attn.k_proj: 8x16 F32 None
+dec.layer[0].attn.v_proj: 8x16 F32 None
+dec.layer[0].attn.o_proj: 16x16 F32 None
+dec.layer[0].attn.q_norm: len=8 sum=12.87506651878357 fnv=895bfe24dab468a9
+dec.layer[0].attn.k_norm: len=8 sum=12.320897459983826 fnv=8d876ded0544a4c0
+dec.layer[0].attn.post_attn_norm: len=16 sum=15.185473322868347 fnv=59e48e590031063d
+dec.layer[0].attn.post_ffn_norm: len=16 sum=16.143083035945892 fnv=3ceedf6e3b93046a
+dec.layer[0].moe.router: 1x16 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 16x16 F32 None
+dec.layer[1].attn.k_proj: 8x16 F32 None
+dec.layer[1].attn.v_proj: 8x16 F32 None
+dec.layer[1].attn.o_proj: 16x16 F32 None
+dec.layer[1].attn.q_norm: len=8 sum=11.03435105085373 fnv=77ea5721813f408c
+dec.layer[1].attn.k_norm: len=8 sum=11.747042536735535 fnv=40a13869873a1d3b
+dec.layer[1].attn.post_attn_norm: len=16 sum=16.97505360841751 fnv=85adf7580a5386db
+dec.layer[1].attn.post_ffn_norm: len=16 sum=16.82944643497467 fnv=5e5261741450fd69
+dec.layer[1].moe.router: 1x16 F32 None
+dec.layer[1].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[1].moe.activation_counts: len=1
+dec.layer[2].attn.q_proj: 16x16 F32 None
+dec.layer[2].attn.k_proj: 8x16 F32 None
+dec.layer[2].attn.v_proj: 8x16 F32 None
+dec.layer[2].attn.o_proj: 16x16 F32 None
+dec.layer[2].attn.q_norm: len=8 sum=11.013511300086975 fnv=9bf12c6b059b146b
+dec.layer[2].attn.k_norm: len=8 sum=11.85359787940979 fnv=7def33469ea26197
+dec.layer[2].attn.post_attn_norm: len=16 sum=16.064046442508698 fnv=09a9b5dff8d40ca2
+dec.layer[2].attn.post_ffn_norm: len=16 sum=17.561343371868134 fnv=508d4f98b62058e6
+dec.layer[2].moe.router: 1x16 F32 None
+dec.layer[2].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[2].moe.activation_counts: len=1
+dec.layer[3].attn.q_proj: 16x16 F32 None
+dec.layer[3].attn.k_proj: 8x16 F32 None
+dec.layer[3].attn.v_proj: 8x16 F32 None
+dec.layer[3].attn.o_proj: 16x16 F32 None
+dec.layer[3].attn.q_norm: len=8 sum=11.586512207984924 fnv=b4e20096d8266b06
+dec.layer[3].attn.k_norm: len=8 sum=11.164207339286804 fnv=298840d4ea5294b2
+dec.layer[3].attn.post_attn_norm: len=16 sum=16.729230165481567 fnv=6e1c685c8ee1a6aa
+dec.layer[3].attn.post_ffn_norm: len=16 sum=14.810132801532745 fnv=b57d41a09004a063
+dec.layer[3].moe.router: 1x16 F32 None
+dec.layer[3].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[3].moe.activation_counts: len=1
+dec.layer[4].attn.q_proj: 16x16 F32 None
+dec.layer[4].attn.k_proj: 8x16 F32 None
+dec.layer[4].attn.v_proj: 8x16 F32 None
+dec.layer[4].attn.o_proj: 16x16 F32 None
+dec.layer[4].attn.q_norm: len=8 sum=10.796101331710815 fnv=79b2603a1e190a9a
+dec.layer[4].attn.k_norm: len=8 sum=12.064204096794128 fnv=56f8b4a912690a2e
+dec.layer[4].attn.post_attn_norm: len=16 sum=16.150941908359528 fnv=18e64fed0753b2cf
+dec.layer[4].attn.post_ffn_norm: len=16 sum=15.394792020320892 fnv=df468d0eefa2554a
+dec.layer[4].moe.router: 1x16 F32 None
+dec.layer[4].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[4].moe.activation_counts: len=1
+dec.layer[5].attn.q_proj: 16x16 F32 None
+dec.layer[5].attn.k_proj: 8x16 F32 None
+dec.layer[5].attn.v_proj: 8x16 F32 None
+dec.layer[5].attn.o_proj: 16x16 F32 None
+dec.layer[5].attn.q_norm: len=8 sum=12.633318305015564 fnv=398bb9b223ce0e5e
+dec.layer[5].attn.k_norm: len=8 sum=12.325948238372803 fnv=aaefc7fa520c7dc9
+dec.layer[5].attn.post_attn_norm: len=16 sum=15.43791776895523 fnv=eda8ff14bce5046c
+dec.layer[5].attn.post_ffn_norm: len=16 sum=16.325834929943085 fnv=4e42792eb7c2c789
+dec.layer[5].moe.router: 1x16 F32 None
+dec.layer[5].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[5].moe.activation_counts: len=1
+dec.layer[6].attn.q_proj: 16x16 F32 None
+dec.layer[6].attn.k_proj: 8x16 F32 None
+dec.layer[6].attn.v_proj: 8x16 F32 None
+dec.layer[6].attn.o_proj: 16x16 F32 None
+dec.layer[6].attn.q_norm: len=8 sum=11.27127468585968 fnv=beab57adcea34f83
+dec.layer[6].attn.k_norm: len=8 sum=11.651989102363586 fnv=86666d00c67e1e34
+dec.layer[6].attn.post_attn_norm: len=16 sum=17.705833911895752 fnv=265fac2705ef4f65
+dec.layer[6].attn.post_ffn_norm: len=16 sum=15.298220038414001 fnv=c3acb4e4960a1a5d
+dec.layer[6].moe.router: 1x16 F32 None
+dec.layer[6].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[6].moe.activation_counts: len=1
+dec.layer[7].attn.q_proj: 16x16 F32 None
+dec.layer[7].attn.k_proj: 8x16 F32 None
+dec.layer[7].attn.v_proj: 8x16 F32 None
+dec.layer[7].attn.o_proj: 16x16 F32 None
+dec.layer[7].attn.q_norm: len=8 sum=12.645010590553284 fnv=7d837a508fabd855
+dec.layer[7].attn.k_norm: len=8 sum=12.20679247379303 fnv=541dcf707088db06
+dec.layer[7].attn.post_attn_norm: len=16 sum=15.313369929790497 fnv=b83d295f81cc2176
+dec.layer[7].attn.post_ffn_norm: len=16 sum=17.716868221759796 fnv=bb4a51735789ba9f
+dec.layer[7].moe.router: 1x16 F32 None
+dec.layer[7].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[7].moe.activation_counts: len=1
+dec.layer[8].attn.q_proj: 16x16 F32 None
+dec.layer[8].attn.k_proj: 8x16 F32 None
+dec.layer[8].attn.v_proj: 8x16 F32 None
+dec.layer[8].attn.o_proj: 16x16 F32 None
+dec.layer[8].attn.q_norm: len=8 sum=11.15705668926239 fnv=c7374c04f76bb757
+dec.layer[8].attn.k_norm: len=8 sum=11.958691895008087 fnv=d0909ba45bf19905
+dec.layer[8].attn.post_attn_norm: len=16 sum=15.63393771648407 fnv=bab15bedffbc4095
+dec.layer[8].attn.post_ffn_norm: len=16 sum=14.949542045593262 fnv=4406260d5edb210b
+dec.layer[8].moe.router: 1x16 F32 None
+dec.layer[8].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[8].moe.activation_counts: len=1
+dec.layer[9].attn.q_proj: 16x16 F32 None
+dec.layer[9].attn.k_proj: 8x16 F32 None
+dec.layer[9].attn.v_proj: 8x16 F32 None
+dec.layer[9].attn.o_proj: 16x16 F32 None
+dec.layer[9].attn.q_norm: len=8 sum=11.986508131027222 fnv=624b3fec3eb26bd8
+dec.layer[9].attn.k_norm: len=8 sum=11.522311270236969 fnv=08c7e6c687b011f7
+dec.layer[9].attn.post_attn_norm: len=16 sum=16.021664083003998 fnv=7da1aa053fd07718
+dec.layer[9].attn.post_ffn_norm: len=16 sum=15.128108024597168 fnv=d2f31b766c7035a1
+dec.layer[9].moe.router: 1x16 F32 None
+dec.layer[9].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[9].moe.activation_counts: len=1
+dec.layer[10].attn.q_proj: 16x16 F32 None
+dec.layer[10].attn.k_proj: 8x16 F32 None
+dec.layer[10].attn.v_proj: 8x16 F32 None
+dec.layer[10].attn.o_proj: 16x16 F32 None
+dec.layer[10].attn.q_norm: len=8 sum=12.803826212882996 fnv=3ad086db97cd4f44
+dec.layer[10].attn.k_norm: len=8 sum=12.81056272983551 fnv=b3ea482581303722
+dec.layer[10].attn.post_attn_norm: len=16 sum=16.492975294589996 fnv=f2ffab8be76fdf04
+dec.layer[10].attn.post_ffn_norm: len=16 sum=13.991761147975922 fnv=740e9cf7f710ff60
+dec.layer[10].moe.router: 1x16 F32 None
+dec.layer[10].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[10].moe.activation_counts: len=1
+dec.layer[11].attn.q_proj: 16x16 F32 None
+dec.layer[11].attn.k_proj: 8x16 F32 None
+dec.layer[11].attn.v_proj: 8x16 F32 None
+dec.layer[11].attn.o_proj: 16x16 F32 None
+dec.layer[11].attn.q_norm: len=8 sum=12.11235511302948 fnv=5dc2d348525b87a5
+dec.layer[11].attn.k_norm: len=8 sum=11.769230246543884 fnv=d4dd345e42d8aaec
+dec.layer[11].attn.post_attn_norm: len=16 sum=15.304569005966187 fnv=6fd3a276dd050179
+dec.layer[11].attn.post_ffn_norm: len=16 sum=16.078299403190613 fnv=97f609db5c82a121
+dec.layer[11].moe.router: 1x16 F32 None
+dec.layer[11].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[11].moe.activation_counts: len=1
+dec.layer[12].attn.q_proj: 16x16 F32 None
+dec.layer[12].attn.k_proj: 8x16 F32 None
+dec.layer[12].attn.v_proj: 8x16 F32 None
+dec.layer[12].attn.o_proj: 16x16 F32 None
+dec.layer[12].attn.q_norm: len=8 sum=12.4132821559906 fnv=ec16acc481312518
+dec.layer[12].attn.k_norm: len=8 sum=11.844069004058838 fnv=748372e7458ea29d
+dec.layer[12].attn.post_attn_norm: len=16 sum=15.418891668319702 fnv=ee7f29c70da3e586
+dec.layer[12].attn.post_ffn_norm: len=16 sum=15.059324741363525 fnv=f1277fb02ee2d78f
+dec.layer[12].moe.router: 1x16 F32 None
+dec.layer[12].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[12].moe.activation_counts: len=1
+dec.layer[13].attn.q_proj: 16x16 F32 None
+dec.layer[13].attn.k_proj: 8x16 F32 None
+dec.layer[13].attn.v_proj: 8x16 F32 None
+dec.layer[13].attn.o_proj: 16x16 F32 None
+dec.layer[13].attn.q_norm: len=8 sum=12.447344422340393 fnv=b0819bd1e5c9a404
+dec.layer[13].attn.k_norm: len=8 sum=12.538824796676636 fnv=3a9c21985dbfaef6
+dec.layer[13].attn.post_attn_norm: len=16 sum=17.118841469287872 fnv=7dd98b49425bd90c
+dec.layer[13].attn.post_ffn_norm: len=16 sum=16.19445115327835 fnv=508d9e581137c32b
+dec.layer[13].moe.router: 1x16 F32 None
+dec.layer[13].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[13].moe.activation_counts: len=1
+dec.layer[14].attn.q_proj: 16x16 F32 None
+dec.layer[14].attn.k_proj: 8x16 F32 None
+dec.layer[14].attn.v_proj: 8x16 F32 None
+dec.layer[14].attn.o_proj: 16x16 F32 None
+dec.layer[14].attn.q_norm: len=8 sum=11.318866848945618 fnv=e834ea200024f790
+dec.layer[14].attn.k_norm: len=8 sum=11.226539969444275 fnv=3901a8f2cfff559b
+dec.layer[14].attn.post_attn_norm: len=16 sum=15.407751679420471 fnv=92202292808c5cb3
+dec.layer[14].attn.post_ffn_norm: len=16 sum=14.859098076820374 fnv=690522fbe0eb5ede
+dec.layer[14].moe.router: 1x16 F32 None
+dec.layer[14].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[14].moe.activation_counts: len=1
+dec.layer[15].attn.q_proj: 16x16 F32 None
+dec.layer[15].attn.k_proj: 8x16 F32 None
+dec.layer[15].attn.v_proj: 8x16 F32 None
+dec.layer[15].attn.o_proj: 16x16 F32 None
+dec.layer[15].attn.q_norm: len=8 sum=12.264581441879272 fnv=fb7525131553d4ab
+dec.layer[15].attn.k_norm: len=8 sum=11.171298623085022 fnv=cdbc05725b27ef9b
+dec.layer[15].attn.post_attn_norm: len=16 sum=15.37121856212616 fnv=05d52a4360baef4f
+dec.layer[15].attn.post_ffn_norm: len=16 sum=14.409796118736267 fnv=4d389bc04b5e6604
+dec.layer[15].moe.router: 1x16 F32 None
+dec.layer[15].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[15].moe.activation_counts: len=1
+dec.layer[16].attn.q_proj: 16x16 F32 None
+dec.layer[16].attn.k_proj: 8x16 F32 None
+dec.layer[16].attn.v_proj: 8x16 F32 None
+dec.layer[16].attn.o_proj: 16x16 F32 None
+dec.layer[16].attn.q_norm: len=8 sum=12.128133654594421 fnv=d5fadf45ee291256
+dec.layer[16].attn.k_norm: len=8 sum=11.322123348712921 fnv=143f7ac6cff42697
+dec.layer[16].attn.post_attn_norm: len=16 sum=15.367009937763214 fnv=b0186cf77c210c75
+dec.layer[16].attn.post_ffn_norm: len=16 sum=14.973424017429352 fnv=67a4a58ad87096e4
+dec.layer[16].moe.router: 1x16 F32 None
+dec.layer[16].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[16].moe.activation_counts: len=1
+dec.layer[17].attn.q_proj: 16x16 F32 None
+dec.layer[17].attn.k_proj: 8x16 F32 None
+dec.layer[17].attn.v_proj: 8x16 F32 None
+dec.layer[17].attn.o_proj: 16x16 F32 None
+dec.layer[17].attn.q_norm: len=8 sum=11.611291766166687 fnv=07ac59c40627120e
+dec.layer[17].attn.k_norm: len=8 sum=10.5934818983078 fnv=656981582d1977e3
+dec.layer[17].attn.post_attn_norm: len=16 sum=14.968739628791809 fnv=5a42ce83cf6e7adc
+dec.layer[17].attn.post_ffn_norm: len=16 sum=16.016983926296234 fnv=de819a3a1fbb172f
+dec.layer[17].moe.router: 1x16 F32 None
+dec.layer[17].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[17].moe.activation_counts: len=1
+dec.layer[18].attn.q_proj: 16x16 F32 None
+dec.layer[18].attn.k_proj: 8x16 F32 None
+dec.layer[18].attn.v_proj: 8x16 F32 None
+dec.layer[18].attn.o_proj: 16x16 F32 None
+dec.layer[18].attn.q_norm: len=8 sum=12.097106218338013 fnv=84664b6a7eab1e75
+dec.layer[18].attn.k_norm: len=8 sum=12.697343111038208 fnv=a750c001fd8d5d24
+dec.layer[18].attn.post_attn_norm: len=16 sum=15.769989490509033 fnv=406ac9aea7d3cf24
+dec.layer[18].attn.post_ffn_norm: len=16 sum=15.05678015947342 fnv=47bc48f4a5ff1a18
+dec.layer[18].moe.router: 1x16 F32 None
+dec.layer[18].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[18].moe.activation_counts: len=1
+dec.layer[19].attn.q_proj: 16x16 F32 None
+dec.layer[19].attn.k_proj: 8x16 F32 None
+dec.layer[19].attn.v_proj: 8x16 F32 None
+dec.layer[19].attn.o_proj: 16x16 F32 None
+dec.layer[19].attn.q_norm: len=8 sum=11.62133002281189 fnv=1fa31454e04e393e
+dec.layer[19].attn.k_norm: len=8 sum=12.921298503875732 fnv=1bd46a6b0644c231
+dec.layer[19].attn.post_attn_norm: len=16 sum=16.503709256649017 fnv=847ec713ec75bd8a
+dec.layer[19].attn.post_ffn_norm: len=16 sum=16.20876705646515 fnv=9dc977a6509e5845
+dec.layer[19].moe.router: 1x16 F32 None
+dec.layer[19].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[19].moe.activation_counts: len=1
+dec.layer[20].attn.q_proj: 16x16 F32 None
+dec.layer[20].attn.k_proj: 8x16 F32 None
+dec.layer[20].attn.v_proj: 8x16 F32 None
+dec.layer[20].attn.o_proj: 16x16 F32 None
+dec.layer[20].attn.q_norm: len=8 sum=12.30997908115387 fnv=61eb0da32b33201f
+dec.layer[20].attn.k_norm: len=8 sum=12.223451256752014 fnv=6edc7fe9404b7b14
+dec.layer[20].attn.post_attn_norm: len=16 sum=13.747421741485596 fnv=4852ffa857460e68
+dec.layer[20].attn.post_ffn_norm: len=16 sum=15.619789719581604 fnv=3e8907fc594aa32a
+dec.layer[20].moe.router: 1x16 F32 None
+dec.layer[20].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[20].moe.activation_counts: len=1
+dec.layer[21].attn.q_proj: 16x16 F32 None
+dec.layer[21].attn.k_proj: 8x16 F32 None
+dec.layer[21].attn.v_proj: 8x16 F32 None
+dec.layer[21].attn.o_proj: 16x16 F32 None
+dec.layer[21].attn.q_norm: len=8 sum=12.210784316062927 fnv=2e0ff29c87fd109d
+dec.layer[21].attn.k_norm: len=8 sum=10.722349286079407 fnv=b4b49d7010078239
+dec.layer[21].attn.post_attn_norm: len=16 sum=16.01130759716034 fnv=2ee5e23d51c84f08
+dec.layer[21].attn.post_ffn_norm: len=16 sum=18.167687714099884 fnv=fee963f75dd093a3
+dec.layer[21].moe.router: 1x16 F32 None
+dec.layer[21].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[21].moe.activation_counts: len=1
+dec.layer[22].attn.q_proj: 16x16 F32 None
+dec.layer[22].attn.k_proj: 8x16 F32 None
+dec.layer[22].attn.v_proj: 8x16 F32 None
+dec.layer[22].attn.o_proj: 16x16 F32 None
+dec.layer[22].attn.q_norm: len=8 sum=13.446884155273438 fnv=94bcf0e1c6157f36
+dec.layer[22].attn.k_norm: len=8 sum=12.640711545944214 fnv=bd6a32b725885c8d
+dec.layer[22].attn.post_attn_norm: len=16 sum=13.603559911251068 fnv=7417d84c1a3c34a9
+dec.layer[22].attn.post_ffn_norm: len=16 sum=14.240705847740173 fnv=3440633cac167f2d
+dec.layer[22].moe.router: 1x16 F32 None
+dec.layer[22].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[22].moe.activation_counts: len=1
+dec.layer[23].attn.q_proj: 16x16 F32 None
+dec.layer[23].attn.k_proj: 8x16 F32 None
+dec.layer[23].attn.v_proj: 8x16 F32 None
+dec.layer[23].attn.o_proj: 16x16 F32 None
+dec.layer[23].attn.q_norm: len=8 sum=10.753593802452087 fnv=0be251946c633ae7
+dec.layer[23].attn.k_norm: len=8 sum=12.605212688446045 fnv=e9e1b9467a385ea7
+dec.layer[23].attn.post_attn_norm: len=16 sum=15.411355316638947 fnv=1942b56d03f77f4a
+dec.layer[23].attn.post_ffn_norm: len=16 sum=14.571439623832703 fnv=88db890678beaacc
+dec.layer[23].moe.router: 1x16 F32 None
+dec.layer[23].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[23].moe.activation_counts: len=1
+dec.layer[24].attn.q_proj: 16x16 F32 None
+dec.layer[24].attn.k_proj: 8x16 F32 None
+dec.layer[24].attn.v_proj: 8x16 F32 None
+dec.layer[24].attn.o_proj: 16x16 F32 None
+dec.layer[24].attn.q_norm: len=8 sum=12.579192519187927 fnv=00bbc8b5e95ffd38
+dec.layer[24].attn.k_norm: len=8 sum=11.98198652267456 fnv=13684198753059b0
+dec.layer[24].attn.post_attn_norm: len=16 sum=16.91728138923645 fnv=f07c8415686241ef
+dec.layer[24].attn.post_ffn_norm: len=16 sum=16.10683971643448 fnv=277823109a3cf693
+dec.layer[24].moe.router: 1x16 F32 None
+dec.layer[24].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[24].moe.activation_counts: len=1
+dec.layer[25].attn.q_proj: 16x16 F32 None
+dec.layer[25].attn.k_proj: 8x16 F32 None
+dec.layer[25].attn.v_proj: 8x16 F32 None
+dec.layer[25].attn.o_proj: 16x16 F32 None
+dec.layer[25].attn.q_norm: len=8 sum=13.809408187866211 fnv=f100c916c155a252
+dec.layer[25].attn.k_norm: len=8 sum=11.07260262966156 fnv=4c716ad50b923a08
+dec.layer[25].attn.post_attn_norm: len=16 sum=16.831129550933838 fnv=e850f91ac919adc5
+dec.layer[25].attn.post_ffn_norm: len=16 sum=16.499874234199524 fnv=6d4580728867280e
+dec.layer[25].moe.router: 1x16 F32 None
+dec.layer[25].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[25].moe.activation_counts: len=1
+dec.layer[26].attn.q_proj: 16x16 F32 None
+dec.layer[26].attn.k_proj: 8x16 F32 None
+dec.layer[26].attn.v_proj: 8x16 F32 None
+dec.layer[26].attn.o_proj: 16x16 F32 None
+dec.layer[26].attn.q_norm: len=8 sum=11.774043917655945 fnv=2a95b2265156db53
+dec.layer[26].attn.k_norm: len=8 sum=11.004613757133484 fnv=b182544982de11b2
+dec.layer[26].attn.post_attn_norm: len=16 sum=15.950534164905548 fnv=1e5483905a07f3ba
+dec.layer[26].attn.post_ffn_norm: len=16 sum=17.026091992855072 fnv=953042cd1dfb59d6
+dec.layer[26].moe.router: 1x16 F32 None
+dec.layer[26].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[26].moe.activation_counts: len=1
+dec.layer[27].attn.q_proj: 16x16 F32 None
+dec.layer[27].attn.k_proj: 8x16 F32 None
+dec.layer[27].attn.v_proj: 8x16 F32 None
+dec.layer[27].attn.o_proj: 16x16 F32 None
+dec.layer[27].attn.q_norm: len=8 sum=11.852515816688538 fnv=33037aba05f3dc0c
+dec.layer[27].attn.k_norm: len=8 sum=12.532129406929016 fnv=59fc672e4963a7d3
+dec.layer[27].attn.post_attn_norm: len=16 sum=17.05432653427124 fnv=9865e324a757d739
+dec.layer[27].attn.post_ffn_norm: len=16 sum=16.402772843837738 fnv=8d374f50c740fcee
+dec.layer[27].moe.router: 1x16 F32 None
+dec.layer[27].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[27].moe.activation_counts: len=1
+dec.layer[28].attn.q_proj: 16x16 F32 None
+dec.layer[28].attn.k_proj: 8x16 F32 None
+dec.layer[28].attn.v_proj: 8x16 F32 None
+dec.layer[28].attn.o_proj: 16x16 F32 None
+dec.layer[28].attn.q_norm: len=8 sum=12.804912805557251 fnv=bbfd182b292b38da
+dec.layer[28].attn.k_norm: len=8 sum=11.20728611946106 fnv=0ef66d8c3bd3283a
+dec.layer[28].attn.post_attn_norm: len=16 sum=15.98981249332428 fnv=6a51ea5839b3d45e
+dec.layer[28].attn.post_ffn_norm: len=16 sum=13.715870082378387 fnv=62b3dc425ff5577e
+dec.layer[28].moe.router: 1x16 F32 None
+dec.layer[28].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[28].moe.activation_counts: len=1
+dec.layer[29].attn.q_proj: 16x16 F32 None
+dec.layer[29].attn.k_proj: 8x16 F32 None
+dec.layer[29].attn.v_proj: 8x16 F32 None
+dec.layer[29].attn.o_proj: 16x16 F32 None
+dec.layer[29].attn.q_norm: len=8 sum=11.57689344882965 fnv=cc2b19d30e7743a1
+dec.layer[29].attn.k_norm: len=8 sum=11.626738905906677 fnv=89b8451e69d3e5b9
+dec.layer[29].attn.post_attn_norm: len=16 sum=16.533675134181976 fnv=e6289e753141196b
+dec.layer[29].attn.post_ffn_norm: len=16 sum=16.20408296585083 fnv=a001331778416336
+dec.layer[29].moe.router: 1x16 F32 None
+dec.layer[29].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[29].moe.activation_counts: len=1
+dec.layer[30].attn.q_proj: 16x16 F32 None
+dec.layer[30].attn.k_proj: 8x16 F32 None
+dec.layer[30].attn.v_proj: 8x16 F32 None
+dec.layer[30].attn.o_proj: 16x16 F32 None
+dec.layer[30].attn.q_norm: len=8 sum=12.823723554611206 fnv=5a97c407448ee987
+dec.layer[30].attn.k_norm: len=8 sum=11.566812753677368 fnv=26858cd1912a1df4
+dec.layer[30].attn.post_attn_norm: len=16 sum=15.721804976463318 fnv=adc7bbd598f1f6ec
+dec.layer[30].attn.post_ffn_norm: len=16 sum=15.829959571361542 fnv=efcf2cf99ab70c62
+dec.layer[30].moe.router: 1x16 F32 None
+dec.layer[30].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[30].moe.activation_counts: len=1
+dec.layer[31].attn.q_proj: 16x16 F32 None
+dec.layer[31].attn.k_proj: 8x16 F32 None
+dec.layer[31].attn.v_proj: 8x16 F32 None
+dec.layer[31].attn.o_proj: 16x16 F32 None
+dec.layer[31].attn.q_norm: len=8 sum=12.640958666801453 fnv=56ba18955b018b7c
+dec.layer[31].attn.k_norm: len=8 sum=11.141417741775513 fnv=10756f1d41e49065
+dec.layer[31].attn.post_attn_norm: len=16 sum=16.19897723197937 fnv=3c8a2e31e12034e5
+dec.layer[31].attn.post_ffn_norm: len=16 sum=15.96329253911972 fnv=b305acf7d94c3786
+dec.layer[31].moe.router: 1x16 F32 None
+dec.layer[31].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[31].moe.activation_counts: len=1
+dec.layer[32].attn.q_proj: 16x16 F32 None
+dec.layer[32].attn.k_proj: 8x16 F32 None
+dec.layer[32].attn.v_proj: 8x16 F32 None
+dec.layer[32].attn.o_proj: 16x16 F32 None
+dec.layer[32].attn.q_norm: len=8 sum=13.045242309570313 fnv=e1d908546cc2f12c
+dec.layer[32].attn.k_norm: len=8 sum=11.62698209285736 fnv=433221027173110c
+dec.layer[32].attn.post_attn_norm: len=16 sum=14.169013917446136 fnv=b8ae53da448f0bb1
+dec.layer[32].attn.post_ffn_norm: len=16 sum=17.126433491706848 fnv=71a6590735268f9f
+dec.layer[32].moe.router: 1x16 F32 None
+dec.layer[32].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[32].moe.activation_counts: len=1
+dec.layer[33].attn.q_proj: 16x16 F32 None
+dec.layer[33].attn.k_proj: 8x16 F32 None
+dec.layer[33].attn.v_proj: 8x16 F32 None
+dec.layer[33].attn.o_proj: 16x16 F32 None
+dec.layer[33].attn.q_norm: len=8 sum=11.830322265625 fnv=85e5f80f332491f7
+dec.layer[33].attn.k_norm: len=8 sum=11.968735218048096 fnv=6970c215e6dfb00b
+dec.layer[33].attn.post_attn_norm: len=16 sum=14.324170708656311 fnv=4626c8f4e45f2177
+dec.layer[33].attn.post_ffn_norm: len=16 sum=15.213190913200378 fnv=a10b9354e7a4360b
+dec.layer[33].moe.router: 1x16 F32 None
+dec.layer[33].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[33].moe.activation_counts: len=1
+dec.layer[34].attn.q_proj: 16x16 F32 None
+dec.layer[34].attn.k_proj: 8x16 F32 None
+dec.layer[34].attn.v_proj: 8x16 F32 None
+dec.layer[34].attn.o_proj: 16x16 F32 None
+dec.layer[34].attn.q_norm: len=8 sum=11.536097884178162 fnv=7473054d95ec6d71
+dec.layer[34].attn.k_norm: len=8 sum=12.378435850143433 fnv=b287e224dd4a72d8
+dec.layer[34].attn.post_attn_norm: len=16 sum=15.330252885818481 fnv=3e77d94f8a27b5e0
+dec.layer[34].attn.post_ffn_norm: len=16 sum=17.326227605342865 fnv=5c237208976be11c
+dec.layer[34].moe.router: 1x16 F32 None
+dec.layer[34].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[34].moe.activation_counts: len=1
+dec.layer[35].attn.q_proj: 16x16 F32 None
+dec.layer[35].attn.k_proj: 8x16 F32 None
+dec.layer[35].attn.v_proj: 8x16 F32 None
+dec.layer[35].attn.o_proj: 16x16 F32 None
+dec.layer[35].attn.q_norm: len=8 sum=12.024020075798035 fnv=ccacc48207e13a67
+dec.layer[35].attn.k_norm: len=8 sum=11.537545800209045 fnv=d3d910f2ef12f399
+dec.layer[35].attn.post_attn_norm: len=16 sum=15.670040547847748 fnv=82fecf3e9554c6c5
+dec.layer[35].attn.post_ffn_norm: len=16 sum=15.195152938365936 fnv=eda2a91963a1a361
+dec.layer[35].moe.router: 1x16 F32 None
+dec.layer[35].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[35].moe.activation_counts: len=1
+dec.layer[36].attn.q_proj: 16x16 F32 None
+dec.layer[36].attn.k_proj: 8x16 F32 None
+dec.layer[36].attn.v_proj: 8x16 F32 None
+dec.layer[36].attn.o_proj: 16x16 F32 None
+dec.layer[36].attn.q_norm: len=8 sum=13.022500038146973 fnv=29958a743af6e1e4
+dec.layer[36].attn.k_norm: len=8 sum=12.48193097114563 fnv=1545ab07979b2ab8
+dec.layer[36].attn.post_attn_norm: len=16 sum=16.186749398708344 fnv=5c41d48be8ef6e30
+dec.layer[36].attn.post_ffn_norm: len=16 sum=16.520689070224762 fnv=3fafbd23718442ff
+dec.layer[36].moe.router: 1x16 F32 None
+dec.layer[36].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[36].moe.activation_counts: len=1
+dec.layer[37].attn.q_proj: 16x16 F32 None
+dec.layer[37].attn.k_proj: 8x16 F32 None
+dec.layer[37].attn.v_proj: 8x16 F32 None
+dec.layer[37].attn.o_proj: 16x16 F32 None
+dec.layer[37].attn.q_norm: len=8 sum=11.938497304916382 fnv=95094fd3d2a1245f
+dec.layer[37].attn.k_norm: len=8 sum=11.836878180503845 fnv=7cf5a9e045c96e3b
+dec.layer[37].attn.post_attn_norm: len=16 sum=15.931019127368927 fnv=6d0ac1758cd6d5d0
+dec.layer[37].attn.post_ffn_norm: len=16 sum=14.778563141822815 fnv=fc6d00551cf901ca
+dec.layer[37].moe.router: 1x16 F32 None
+dec.layer[37].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[37].moe.activation_counts: len=1
+dec.layer[38].attn.q_proj: 16x16 F32 None
+dec.layer[38].attn.k_proj: 8x16 F32 None
+dec.layer[38].attn.v_proj: 8x16 F32 None
+dec.layer[38].attn.o_proj: 16x16 F32 None
+dec.layer[38].attn.q_norm: len=8 sum=12.282637238502502 fnv=8769c01643c7aaad
+dec.layer[38].attn.k_norm: len=8 sum=12.182162761688232 fnv=b97ee3a1cc8fcab3
+dec.layer[38].attn.post_attn_norm: len=16 sum=16.747856438159943 fnv=0280baf678dd0509
+dec.layer[38].attn.post_ffn_norm: len=16 sum=17.10376513004303 fnv=c62ba9f216b2adf4
+dec.layer[38].moe.router: 1x16 F32 None
+dec.layer[38].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[38].moe.activation_counts: len=1
+dec.layer[39].attn.q_proj: 16x16 F32 None
+dec.layer[39].attn.k_proj: 8x16 F32 None
+dec.layer[39].attn.v_proj: 8x16 F32 None
+dec.layer[39].attn.o_proj: 16x16 F32 None
+dec.layer[39].attn.q_norm: len=8 sum=12.075779914855957 fnv=b4fc354713f3e6b9
+dec.layer[39].attn.k_norm: len=8 sum=11.51970887184143 fnv=136cdead63bb0e19
+dec.layer[39].attn.post_attn_norm: len=16 sum=16.570767402648926 fnv=eaa7b6001b7450d8
+dec.layer[39].attn.post_ffn_norm: len=16 sum=14.463654398918152 fnv=615131ff23a09b9e
+dec.layer[39].moe.router: 1x16 F32 None
+dec.layer[39].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[39].moe.activation_counts: len=1
+dec.layer[40].attn.q_proj: 16x16 F32 None
+dec.layer[40].attn.k_proj: 8x16 F32 None
+dec.layer[40].attn.v_proj: 8x16 F32 None
+dec.layer[40].attn.o_proj: 16x16 F32 None
+dec.layer[40].attn.q_norm: len=8 sum=12.871668577194214 fnv=6c07f9e58f6cc251
+dec.layer[40].attn.k_norm: len=8 sum=12.787093698978424 fnv=a6bd3256ad74ef5c
+dec.layer[40].attn.post_attn_norm: len=16 sum=15.18337470293045 fnv=5f237c656b80cc4f
+dec.layer[40].attn.post_ffn_norm: len=16 sum=16.586344063282013 fnv=8379634fdf50620b
+dec.layer[40].moe.router: 1x16 F32 None
+dec.layer[40].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[40].moe.activation_counts: len=1
+dec.layer[41].attn.q_proj: 16x16 F32 None
+dec.layer[41].attn.k_proj: 8x16 F32 None
+dec.layer[41].attn.v_proj: 8x16 F32 None
+dec.layer[41].attn.o_proj: 16x16 F32 None
+dec.layer[41].attn.q_norm: len=8 sum=11.711615562438965 fnv=d81d178544920aeb
+dec.layer[41].attn.k_norm: len=8 sum=11.953005909919739 fnv=ff43ddd735a2ade6
+dec.layer[41].attn.post_attn_norm: len=16 sum=14.158496081829071 fnv=2aa89b26c7be911d
+dec.layer[41].attn.post_ffn_norm: len=16 sum=16.24178647994995 fnv=daead82890c46d2d
+dec.layer[41].moe.router: 1x16 F32 None
+dec.layer[41].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[41].moe.activation_counts: len=1
+dec.layer[42].attn.q_proj: 16x16 F32 None
+dec.layer[42].attn.k_proj: 8x16 F32 None
+dec.layer[42].attn.v_proj: 8x16 F32 None
+dec.layer[42].attn.o_proj: 16x16 F32 None
+dec.layer[42].attn.q_norm: len=8 sum=12.057003498077393 fnv=d8fac07a818d3f03
+dec.layer[42].attn.k_norm: len=8 sum=12.478107690811157 fnv=45b240da9d3817b8
+dec.layer[42].attn.post_attn_norm: len=16 sum=17.31012099981308 fnv=a16f65d1254730e4
+dec.layer[42].attn.post_ffn_norm: len=16 sum=16.043494403362274 fnv=ee85f5800fd11d49
+dec.layer[42].moe.router: 1x16 F32 None
+dec.layer[42].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[42].moe.activation_counts: len=1
+dec.layer[43].attn.q_proj: 16x16 F32 None
+dec.layer[43].attn.k_proj: 8x16 F32 None
+dec.layer[43].attn.v_proj: 8x16 F32 None
+dec.layer[43].attn.o_proj: 16x16 F32 None
+dec.layer[43].attn.q_norm: len=8 sum=13.436015129089355 fnv=c1dcd8c8e8545779
+dec.layer[43].attn.k_norm: len=8 sum=11.23380970954895 fnv=2ed0d9606d1313ba
+dec.layer[43].attn.post_attn_norm: len=16 sum=16.266167759895325 fnv=06c2832210b8e2ed
+dec.layer[43].attn.post_ffn_norm: len=16 sum=16.306951880455017 fnv=a45e82b59f7a7ce9
+dec.layer[43].moe.router: 1x16 F32 None
+dec.layer[43].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[43].moe.activation_counts: len=1
+dec.layer[44].attn.q_proj: 16x16 F32 None
+dec.layer[44].attn.k_proj: 8x16 F32 None
+dec.layer[44].attn.v_proj: 8x16 F32 None
+dec.layer[44].attn.o_proj: 16x16 F32 None
+dec.layer[44].attn.q_norm: len=8 sum=11.599942803382874 fnv=29063f1a4a7821d3
+dec.layer[44].attn.k_norm: len=8 sum=12.154776811599731 fnv=10d7948234b3bfb9
+dec.layer[44].attn.post_attn_norm: len=16 sum=15.504140496253967 fnv=e5e36d1755475985
+dec.layer[44].attn.post_ffn_norm: len=16 sum=16.493992626667023 fnv=c4673cb171602d03
+dec.layer[44].moe.router: 1x16 F32 None
+dec.layer[44].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[44].moe.activation_counts: len=1
+dec.layer[45].attn.q_proj: 16x16 F32 None
+dec.layer[45].attn.k_proj: 8x16 F32 None
+dec.layer[45].attn.v_proj: 8x16 F32 None
+dec.layer[45].attn.o_proj: 16x16 F32 None
+dec.layer[45].attn.q_norm: len=8 sum=13.050700187683105 fnv=0c0211ab98cf4579
+dec.layer[45].attn.k_norm: len=8 sum=11.984577417373657 fnv=bda487454ad966ab
+dec.layer[45].attn.post_attn_norm: len=16 sum=16.238681316375732 fnv=c11f783f0028f98d
+dec.layer[45].attn.post_ffn_norm: len=16 sum=15.621122658252716 fnv=7de787ccdb39ded4
+dec.layer[45].moe.router: 1x16 F32 None
+dec.layer[45].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[45].moe.activation_counts: len=1
+dec.layer[46].attn.q_proj: 16x16 F32 None
+dec.layer[46].attn.k_proj: 8x16 F32 None
+dec.layer[46].attn.v_proj: 8x16 F32 None
+dec.layer[46].attn.o_proj: 16x16 F32 None
+dec.layer[46].attn.q_norm: len=8 sum=11.653411149978638 fnv=64db4368884d3ee9
+dec.layer[46].attn.k_norm: len=8 sum=11.691431283950806 fnv=073816ac6dcc8e09
+dec.layer[46].attn.post_attn_norm: len=16 sum=16.066101789474487 fnv=3f545bff30e7d87d
+dec.layer[46].attn.post_ffn_norm: len=16 sum=15.778322875499725 fnv=792b79ebcdfb09c3
+dec.layer[46].moe.router: 1x16 F32 None
+dec.layer[46].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[46].moe.activation_counts: len=1
+dec.layer[47].attn.q_proj: 16x16 F32 None
+dec.layer[47].attn.k_proj: 8x16 F32 None
+dec.layer[47].attn.v_proj: 8x16 F32 None
+dec.layer[47].attn.o_proj: 16x16 F32 None
+dec.layer[47].attn.q_norm: len=8 sum=11.039719760417938 fnv=7c8198eca82e4e12
+dec.layer[47].attn.k_norm: len=8 sum=12.805442929267883 fnv=0f2bfa7a18e93ff5
+dec.layer[47].attn.post_attn_norm: len=16 sum=15.372323095798492 fnv=224be0e78c35eb38
+dec.layer[47].attn.post_ffn_norm: len=16 sum=16.856880247592926 fnv=d66a896ad396aa2e
+dec.layer[47].moe.router: 1x16 F32 None
+dec.layer[47].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[47].moe.activation_counts: len=1
+dec.layer[48].attn.q_proj: 16x16 F32 None
+dec.layer[48].attn.k_proj: 8x16 F32 None
+dec.layer[48].attn.v_proj: 8x16 F32 None
+dec.layer[48].attn.o_proj: 16x16 F32 None
+dec.layer[48].attn.q_norm: len=8 sum=11.784058928489685 fnv=c1ed02ed6b127405
+dec.layer[48].attn.k_norm: len=8 sum=12.092864751815796 fnv=6b7624bc93af91a1
+dec.layer[48].attn.post_attn_norm: len=16 sum=14.521309494972229 fnv=8728a3e067e4769e
+dec.layer[48].attn.post_ffn_norm: len=16 sum=17.23800665140152 fnv=f08b282f467e2feb
+dec.layer[48].moe.router: 1x16 F32 None
+dec.layer[48].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[48].moe.activation_counts: len=1
+dec.layer[49].attn.q_proj: 16x16 F32 None
+dec.layer[49].attn.k_proj: 8x16 F32 None
+dec.layer[49].attn.v_proj: 8x16 F32 None
+dec.layer[49].attn.o_proj: 16x16 F32 None
+dec.layer[49].attn.q_norm: len=8 sum=11.034670948982239 fnv=9fa56de22bcc35f2
+dec.layer[49].attn.k_norm: len=8 sum=12.512912034988403 fnv=2df2886d4aa1c144
+dec.layer[49].attn.post_attn_norm: len=16 sum=16.122493088245392 fnv=910f3d23bb520f5e
+dec.layer[49].attn.post_ffn_norm: len=16 sum=16.066608130931854 fnv=27fcaebf217ca7d8
+dec.layer[49].moe.router: 1x16 F32 None
+dec.layer[49].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[49].moe.activation_counts: len=1
+dec.layer[50].attn.q_proj: 16x16 F32 None
+dec.layer[50].attn.k_proj: 8x16 F32 None
+dec.layer[50].attn.v_proj: 8x16 F32 None
+dec.layer[50].attn.o_proj: 16x16 F32 None
+dec.layer[50].attn.q_norm: len=8 sum=11.79272472858429 fnv=c876fb8e4c27bbe2
+dec.layer[50].attn.k_norm: len=8 sum=13.189788460731506 fnv=1bb22699785d83d2
+dec.layer[50].attn.post_attn_norm: len=16 sum=15.998635411262512 fnv=0aaf15727f9b5a33
+dec.layer[50].attn.post_ffn_norm: len=16 sum=16.8373242020607 fnv=48fe31a99089c8ee
+dec.layer[50].moe.router: 1x16 F32 None
+dec.layer[50].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[50].moe.activation_counts: len=1
+dec.layer[51].attn.q_proj: 16x16 F32 None
+dec.layer[51].attn.k_proj: 8x16 F32 None
+dec.layer[51].attn.v_proj: 8x16 F32 None
+dec.layer[51].attn.o_proj: 16x16 F32 None
+dec.layer[51].attn.q_norm: len=8 sum=12.308549642562866 fnv=2832dc0aac868490
+dec.layer[51].attn.k_norm: len=8 sum=12.32893717288971 fnv=2288dd02b38b99c5
+dec.layer[51].attn.post_attn_norm: len=16 sum=15.835034668445587 fnv=bcf8b16d6fc9e7db
+dec.layer[51].attn.post_ffn_norm: len=16 sum=15.971077859401703 fnv=9bd3aa7817a5b866
+dec.layer[51].moe.router: 1x16 F32 None
+dec.layer[51].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[51].moe.activation_counts: len=1
+dec.layer[52].attn.q_proj: 16x16 F32 None
+dec.layer[52].attn.k_proj: 8x16 F32 None
+dec.layer[52].attn.v_proj: 8x16 F32 None
+dec.layer[52].attn.o_proj: 16x16 F32 None
+dec.layer[52].attn.q_norm: len=8 sum=12.76578426361084 fnv=3b54ec04fe913222
+dec.layer[52].attn.k_norm: len=8 sum=12.04351258277893 fnv=8487c78efd3c61ab
+dec.layer[52].attn.post_attn_norm: len=16 sum=16.506259441375732 fnv=1dfab1117674e5e6
+dec.layer[52].attn.post_ffn_norm: len=16 sum=15.985787391662598 fnv=2cd2cc21f8f7f989
+dec.layer[52].moe.router: 1x16 F32 None
+dec.layer[52].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[52].moe.activation_counts: len=1
+dec.layer[53].attn.q_proj: 16x16 F32 None
+dec.layer[53].attn.k_proj: 8x16 F32 None
+dec.layer[53].attn.v_proj: 8x16 F32 None
+dec.layer[53].attn.o_proj: 16x16 F32 None
+dec.layer[53].attn.q_norm: len=8 sum=11.411078333854675 fnv=fdc9234841f571d2
+dec.layer[53].attn.k_norm: len=8 sum=11.478312969207764 fnv=096200806cf1fdae
+dec.layer[53].attn.post_attn_norm: len=16 sum=16.90512627363205 fnv=5efb837829e4e81a
+dec.layer[53].attn.post_ffn_norm: len=16 sum=16.449767649173737 fnv=d3ec17281ac2e983
+dec.layer[53].moe.router: 1x16 F32 None
+dec.layer[53].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[53].moe.activation_counts: len=1
+dec.layer[54].attn.q_proj: 16x16 F32 None
+dec.layer[54].attn.k_proj: 8x16 F32 None
+dec.layer[54].attn.v_proj: 8x16 F32 None
+dec.layer[54].attn.o_proj: 16x16 F32 None
+dec.layer[54].attn.q_norm: len=8 sum=12.362805604934692 fnv=6a97bfaa858a2fe8
+dec.layer[54].attn.k_norm: len=8 sum=12.55010986328125 fnv=170a4176b4350183
+dec.layer[54].attn.post_attn_norm: len=16 sum=15.101423978805542 fnv=f4eb93ac21dc88aa
+dec.layer[54].attn.post_ffn_norm: len=16 sum=15.682917654514313 fnv=1767d4547e87f3ab
+dec.layer[54].moe.router: 1x16 F32 None
+dec.layer[54].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[54].moe.activation_counts: len=1
+dec.layer[55].attn.q_proj: 16x16 F32 None
+dec.layer[55].attn.k_proj: 8x16 F32 None
+dec.layer[55].attn.v_proj: 8x16 F32 None
+dec.layer[55].attn.o_proj: 16x16 F32 None
+dec.layer[55].attn.q_norm: len=8 sum=10.950887680053711 fnv=3178ef241d0e3e69
+dec.layer[55].attn.k_norm: len=8 sum=13.084730625152588 fnv=ee83be3854f795df
+dec.layer[55].attn.post_attn_norm: len=16 sum=15.309827446937561 fnv=33e744e8d37890f6
+dec.layer[55].attn.post_ffn_norm: len=16 sum=16.230685651302338 fnv=145591b6df160571
+dec.layer[55].moe.router: 1x16 F32 None
+dec.layer[55].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[55].moe.activation_counts: len=1
+dec.layer[56].attn.q_proj: 16x16 F32 None
+dec.layer[56].attn.k_proj: 8x16 F32 None
+dec.layer[56].attn.v_proj: 8x16 F32 None
+dec.layer[56].attn.o_proj: 16x16 F32 None
+dec.layer[56].attn.q_norm: len=8 sum=12.061006307601929 fnv=f3822311f9627c32
+dec.layer[56].attn.k_norm: len=8 sum=10.818362712860107 fnv=668d25b8bced1874
+dec.layer[56].attn.post_attn_norm: len=16 sum=16.190898537635803 fnv=401c83a34c125a32
+dec.layer[56].attn.post_ffn_norm: len=16 sum=15.790773928165436 fnv=dbad4e8e3cc863f8
+dec.layer[56].moe.router: 1x16 F32 None
+dec.layer[56].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[56].moe.activation_counts: len=1
+dec.layer[57].attn.q_proj: 16x16 F32 None
+dec.layer[57].attn.k_proj: 8x16 F32 None
+dec.layer[57].attn.v_proj: 8x16 F32 None
+dec.layer[57].attn.o_proj: 16x16 F32 None
+dec.layer[57].attn.q_norm: len=8 sum=11.920025825500488 fnv=01cb7a9a36325e3d
+dec.layer[57].attn.k_norm: len=8 sum=11.432527303695679 fnv=b91aae088c636d53
+dec.layer[57].attn.post_attn_norm: len=16 sum=14.593875229358673 fnv=1b7d7ce66e505ffd
+dec.layer[57].attn.post_ffn_norm: len=16 sum=16.411802172660828 fnv=2e9fa32536c00284
+dec.layer[57].moe.router: 1x16 F32 None
+dec.layer[57].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[57].moe.activation_counts: len=1
+dec.layer[58].attn.q_proj: 16x16 F32 None
+dec.layer[58].attn.k_proj: 8x16 F32 None
+dec.layer[58].attn.v_proj: 8x16 F32 None
+dec.layer[58].attn.o_proj: 16x16 F32 None
+dec.layer[58].attn.q_norm: len=8 sum=12.342569470405579 fnv=bf4c3371c26eebe8
+dec.layer[58].attn.k_norm: len=8 sum=11.856949090957642 fnv=9206b8c24e835ec6
+dec.layer[58].attn.post_attn_norm: len=16 sum=16.21464091539383 fnv=bf6c47d9443d61aa
+dec.layer[58].attn.post_ffn_norm: len=16 sum=15.559117555618286 fnv=9a9eeb46de4b65ac
+dec.layer[58].moe.router: 1x16 F32 None
+dec.layer[58].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[58].moe.activation_counts: len=1
+dec.layer[59].attn.q_proj: 16x16 F32 None
+dec.layer[59].attn.k_proj: 8x16 F32 None
+dec.layer[59].attn.v_proj: 8x16 F32 None
+dec.layer[59].attn.o_proj: 16x16 F32 None
+dec.layer[59].attn.q_norm: len=8 sum=12.112588286399841 fnv=0faa9704eab8efb9
+dec.layer[59].attn.k_norm: len=8 sum=10.968515992164612 fnv=58a729bdba0f99ed
+dec.layer[59].attn.post_attn_norm: len=16 sum=14.694186329841614 fnv=5c20106e0bb81655
+dec.layer[59].attn.post_ffn_norm: len=16 sum=16.600167512893677 fnv=db77a3f4485133ca
+dec.layer[59].moe.router: 1x16 F32 None
+dec.layer[59].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[59].moe.activation_counts: len=1
+dec.layer[60].attn.q_proj: 16x16 F32 None
+dec.layer[60].attn.k_proj: 8x16 F32 None
+dec.layer[60].attn.v_proj: 8x16 F32 None
+dec.layer[60].attn.o_proj: 16x16 F32 None
+dec.layer[60].attn.q_norm: len=8 sum=12.349183201789856 fnv=d0c99e7bbd046d0e
+dec.layer[60].attn.k_norm: len=8 sum=10.743476629257202 fnv=410e83b6a29aa7c9
+dec.layer[60].attn.post_attn_norm: len=16 sum=18.02946674823761 fnv=3983189002dd0ed2
+dec.layer[60].attn.post_ffn_norm: len=16 sum=17.925521194934845 fnv=89144fb8da448a8c
+dec.layer[60].moe.router: 1x16 F32 None
+dec.layer[60].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[60].moe.activation_counts: len=1
+dec.layer[61].attn.q_proj: 16x16 F32 None
+dec.layer[61].attn.k_proj: 8x16 F32 None
+dec.layer[61].attn.v_proj: 8x16 F32 None
+dec.layer[61].attn.o_proj: 16x16 F32 None
+dec.layer[61].attn.q_norm: len=8 sum=12.058182120323181 fnv=862abd34eeab307a
+dec.layer[61].attn.k_norm: len=8 sum=10.733023524284363 fnv=064ff48fb1ac2bc8
+dec.layer[61].attn.post_attn_norm: len=16 sum=15.24955403804779 fnv=0e7385d758c75ed4
+dec.layer[61].attn.post_ffn_norm: len=16 sum=16.601093590259552 fnv=ec2460c1c8cd8620
+dec.layer[61].moe.router: 1x16 F32 None
+dec.layer[61].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[61].moe.activation_counts: len=1
+dec.layer[62].attn.q_proj: 16x16 F32 None
+dec.layer[62].attn.k_proj: 8x16 F32 None
+dec.layer[62].attn.v_proj: 8x16 F32 None
+dec.layer[62].attn.o_proj: 16x16 F32 None
+dec.layer[62].attn.q_norm: len=8 sum=11.389380931854248 fnv=5a830711d55eef37
+dec.layer[62].attn.k_norm: len=8 sum=13.480396628379822 fnv=ed526eef54892a76
+dec.layer[62].attn.post_attn_norm: len=16 sum=14.827512562274933 fnv=c8c973c43939ed83
+dec.layer[62].attn.post_ffn_norm: len=16 sum=12.60843014717102 fnv=2d8580d916c0a982
+dec.layer[62].moe.router: 1x16 F32 None
+dec.layer[62].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[62].moe.activation_counts: len=1
+dec.layer[63].attn.q_proj: 16x16 F32 None
+dec.layer[63].attn.k_proj: 8x16 F32 None
+dec.layer[63].attn.v_proj: 8x16 F32 None
+dec.layer[63].attn.o_proj: 16x16 F32 None
+dec.layer[63].attn.q_norm: len=8 sum=13.071741342544556 fnv=ba31f64658251e50
+dec.layer[63].attn.k_norm: len=8 sum=11.640788316726685 fnv=154b273f746cc110
+dec.layer[63].attn.post_attn_norm: len=16 sum=16.022947371006012 fnv=b1bcfb8d034f6fa3
+dec.layer[63].attn.post_ffn_norm: len=16 sum=16.615278363227844 fnv=c4ddf2c713221369
+dec.layer[63].moe.router: 1x16 F32 None
+dec.layer[63].moe.experts: Resident(n=1 [gate 16x16 F32 None up 16x16 F32 None down 16x16 F32 None])
+dec.layer[63].moe.activation_counts: len=1

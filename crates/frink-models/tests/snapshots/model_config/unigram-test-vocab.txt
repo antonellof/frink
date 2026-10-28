@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/unigram-test-vocab.gguf
+config: REFUSED: architecture 't5' cannot use the generic Decoder: T5 encoder-decoder engine not yet on the serve path
