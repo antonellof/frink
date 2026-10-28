@@ -48,5 +48,8 @@ pub mod mul_mm_launch;
 /// One dense prefill layer resident on the device (#259).
 #[cfg(feature = "cuda")]
 pub mod prefill;
+/// Process-resident device copies of host weight buffers.
+#[cfg(feature = "cuda")]
+mod resident;
 
 pub use capability::{HardwareProfile, SimdCaps};
