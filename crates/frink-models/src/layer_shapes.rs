@@ -153,6 +153,11 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
         "hybrid: n_head_kv(il) == 0 marks a recurrent layer (lfm2moe.cpp:13,63)",
     ),
     (
+        "lfm3",
+        "hybrid: n_head_kv(il) == 0 marks a recurrent layer (lfm3.cpp:8-10,61,165); the \
+         attention layers' per-layer widths at :105-107",
+    ),
+    (
         "nemotron_h",
         "generic. nemotron-h.cpp:9-11 (hparams), :53-98 (loader) and :146-153 (graph): \
          n_head_kv(i) == 0 && n_ff(i) == 0 marks a Mamba-2 layer, n_ff(i) == 0 alone an \
@@ -838,8 +843,15 @@ pub(crate) fn load_non_gqa_attention(
         // that shape (and `Decoder::recurrent_block` applies it). No
         // other recurrent graph creates one on a recurrent layer, and
         // the two attention-less shapes have no output to norm.
+        // `lfm3.cpp:178-181` does the same for its conv block
+        // (`shortconv::CONV_OUTPUT_POST_NORMED`); `lfm2.cpp` creates no
+        // such tensor, so its conv layers keep `None` whatever a file
+        // carries.
         post_attn_norm: match shape {
             AttnShape::Plamo2Ssm => NormSites::load_post_norm(norm_sites.post_attn, file, layer)?,
+            AttnShape::ShortConv if crate::shortconv::CONV_OUTPUT_POST_NORMED.contains(&arch) => {
+                NormSites::load_post_norm(norm_sites.post_attn, file, layer)?
+            }
             _ => None,
         },
         // The FFN's post-norm lives on this struct; a layer with no

@@ -11,7 +11,7 @@ speed. Read [`docs/plans/north-star.md`](docs/plans/north-star.md) for
 the ranking and [`docs/adr/`](docs/adr/README.md) for the decisions
 behind every rule below.
 
-Status: **100** architectures run with evidence
+Status: **101** architectures run with evidence
 (`capability::AUDITED_GENERIC_GQA`), 4 more have dedicated engines,
 and everything else refuses by name. Do not restate the counts
 elsewhere; `crates/frink-models/tests/documented_counts.rs` pins this

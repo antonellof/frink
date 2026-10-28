@@ -90,7 +90,6 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `glm4moe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `minimax-01` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `kolibri1` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
-| `lfm3` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `flint` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `beam` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `maion-coder` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
@@ -139,6 +138,7 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `plamo2` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `lfm2` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `lfm2moe` | TextGeneration | Hybrid | Hybrid | generic-gqa |
+| `lfm3` | TextGeneration | Hybrid | Hybrid | generic-gqa |
 | `mamba` | TextGeneration | Recurrent | Recurrent | generic-gqa |
 | `mamba2` | TextGeneration | Recurrent | Recurrent | generic-gqa |
 | `jamba` | TextGeneration | Hybrid | Hybrid | generic-gqa |

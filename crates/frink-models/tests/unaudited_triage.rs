@@ -67,7 +67,7 @@ fn every_unaudited_architecture_renders_a_detail_line() {
         assert!(detail.len() > 100, "`{}` renders {detail:?}", p.gguf_name);
     }
     assert_eq!(
-        n, 11,
+        n, 10,
         "the unaudited count moved. It was 47 until the triage itself found `minicpm3` was \
          an MLA model sitting on the generic-GQA row and it was reclassified to \
          DedicatedOnly, 46 until `deepseek`, `bailingmoe`, `seed_oss`, `maincoder` and \
@@ -188,7 +188,9 @@ fn every_unaudited_architecture_renders_a_detail_line() {
          when the pin moved again (`5b59b83` to `604cc430`, 913 commits, 155 graphs to \
          169): seven of its thirteen new names are generic-path candidates, read and \
          triaged the same day -- `kolibri1`, `lfm3`, `flint`, `beam`, `maion-coder`, \
-         `k2-horizon`, `muse-spark` (docs/plans/parity-audit-2026-10-28.md)"
+         `k2-horizon`, `muse-spark` (docs/plans/parity-audit-2026-10-28.md), and 11 to 10 \
+         the same day when `lfm3` closed on exactly the rows its verdict named \
+         (tests/lfm3_graphs.rs)"
     );
 }
 
@@ -440,8 +442,8 @@ fn the_remaining_work_is_counted() {
     // 2 before the 2026-09-19 pin move (`grovemoe`, `phi4`), plus the
     // eight upstream architectures it brought in (six closed since),
     // plus the seven generic-path candidates the 2026-10-28 move to
-    // `604cc430` brought in.
-    assert_eq!(triaged + TRIAGE_PENDING.len(), 11);
+    // `604cc430` brought in, less `lfm3`, which closed the same day.
+    assert_eq!(triaged + TRIAGE_PENDING.len(), 10);
 }
 
 /// `minicpm3` is refused as an MLA model, not as an unaudited one.
@@ -1211,9 +1213,14 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
     }
     assert_eq!(
         (fixture, arm, new_code, unknown),
-        (0, 2, 8, 1),
+        (0, 0, 9, 1),
         "the triage distribution moved; if a verdict changed on evidence that is correct, \
-         update this and docs/MODELS.md together. The 2026-10-28 pin move to `604cc430` \
+         update this and docs/MODELS.md together. It is (0, 0, 9, 1) since the same day \
+         the pin moved: `lfm3` closed on its table rows, and `kolibri1` moved to NEW CODE \
+         when wiring it showed its router ranks `logits + exp_probs_b` BEFORE the sigmoid \
+         (`src/models/kolibri1.cpp:138`), where every router here adds the bias after \
+         it -- a ONE MATCH ARM verdict read from the graph file that the generic builder \
+         contradicted. The 2026-10-28 pin move to `604cc430` \
          made it (0, 2, 8, 1) from (0, 0, 3, 1): ONE MATCH ARM gained `kolibri1` and \
          `lfm3` (table rows on served seams), NEW CODE gained `flint` (its pre-tokenizer \
          is a regex SEQUENCE), `beam` (a scaled residual), `maion-coder` (a latent MoE), \
@@ -1319,7 +1326,7 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
          single UNKNOWN left is `phi4`; `mistral`, `mixtral` and `yi` were the other \
          three and turned out not to be architectures at all"
     );
-    assert_eq!(fixture + arm + new_code + unknown, 11);
+    assert_eq!(fixture + arm + new_code + unknown, 10);
 }
 
 /// The per-layer activation-parameter seam closed two rows whose

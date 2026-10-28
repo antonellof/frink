@@ -90,6 +90,24 @@ impl ModelConfig {
                 }
             }
         }
+        // `{arch}.attention.causal = false`. llama.cpp reads it for EVERY
+        // architecture (`llama-model.cpp:1400`, optional, default true)
+        // and a graph built with it attends both ways; `lfm3.cpp:22-25,
+        // 92-96` is the case a converter really writes (the d1 decision
+        // checkpoints, `conversion/lfm3.py:167`), with no memory at all
+        // (`llama-model.cpp:2808`). Every body on this path masks
+        // causally, so such a file would compute a different graph.
+        if file.metadata_bool(&format!("{arch}.attention.causal")) == Some(false) {
+            return Err(LoadError::UnsupportedFeature(
+                arch.clone(),
+                format!(
+                    "`{arch}.attention.causal` is false: the file's graph attends to the whole \
+                     prompt both ways (llama-model.cpp:1400; for lfm3 the d1 decision graph, \
+                     lfm3.cpp:22-25,92-96, which keeps no memory, llama-model.cpp:2808), and \
+                     the generic decoder only masks causally"
+                ),
+            ));
+        }
         // Metadata-declared multipliers the generic decoder does not
         // apply. Unlike the tensor-consumption gate, nothing about these
         // is visible in the weights, so a Granite checkpoint would load
@@ -613,25 +631,21 @@ impl ModelConfig {
             ));
         }
 
-        // A window on a short-conv architecture: `lfm2.cpp:24-29`
-        // honours it on the ATTENTION layers alone (`is_swa_impl[il] =
-        // !is_recr_impl[il]`), a per-layer answer `crate::swa_layers`
-        // has no variant for, and one that would also arm eviction
-        // against the history the conv indexes by row
-        // (`crate::shortconv`). No published export writes the key.
-        if let (Some(w), true) = (
-            sliding_window,
-            crate::shortconv::is_shortconv_architecture(&arch),
-        ) {
-            return Err(LoadError::UnsupportedFeature(
-                arch.clone(),
-                format!(
-                    "`{arch}.attention.sliding_window` {w}: lfm2.cpp:24-29 windows the attention \
-                     layers and not the conv layers, which `swa_layers` cannot yet spell, and a \
-                     window on a conv layer would evict the history its convolution reads \
-                     (`crate::shortconv`); no published LFM2 export writes the key"
-                ),
-            ));
+        // A sliding-layer RoPE base llama.cpp REQUIRES
+        // (`crate::swa_geometry::swa_rope_base_required`): without it the
+        // file does not load upstream, and here the sliding layers would
+        // rotate at a fallback base.
+        if let Some(line) = crate::swa_geometry::swa_rope_base_required(&arch) {
+            if metadata_f32_any(file, &[key("rope.freq_base_swa")]).is_none() {
+                return Err(LoadError::UnsupportedFeature(
+                    arch.clone(),
+                    format!(
+                        "`{arch}.rope.freq_base_swa` is absent, and llama.cpp reads it as a \
+                         REQUIRED key for this architecture (src/models/{line}); a file without \
+                         it does not load upstream"
+                    ),
+                ));
+            }
         }
 
         // Three graphs rope their SLIDING layers with the scaling
@@ -709,6 +723,19 @@ impl ModelConfig {
                 swa_seed,
             )?,
         };
+        // A window on a short-conv architecture, read the way its
+        // generation's graph reads it (`crate::shortconv`'s module doc):
+        // lfm2's scalar is refused, lfm3's array is served unless it
+        // marks a conv layer or no layer at all.
+        if let Some(reason) = crate::shortconv::shortconv_window_refusal(
+            &arch,
+            sliding_window,
+            trunk.n_layers,
+            |il| swa_layers.slides(il),
+            &kv_heads_per_layer,
+        ) {
+            return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
+        }
 
         // The metadata-declared scalar multipliers, resolved once for
         // whichever subset this architecture's reference graph applies.
@@ -1168,9 +1195,16 @@ impl ModelConfig {
                         swa: Some(vec![1.0; swa_width / 2]),
                     });
                 }
+                // One width: the sliding layers take the file's own
+                // factors unscaled, or NONE where the graph passes them
+                // nothing (`lfm3.cpp:113`, the same table as above).
+                let drops = crate::swa_geometry::swa_layers_drop_rope_factors(&arch).is_some();
                 let swa = (sliding_window.is_some()
-                    && !crate::capability::swa_rope_scale_follows_model(&arch))
-                .then(|| rope_freqs_unscaled.unwrap_or_else(|| vec![1.0; full.len()]))
+                    && (drops || !crate::capability::swa_rope_scale_follows_model(&arch)))
+                .then(|| match rope_freqs_unscaled {
+                    Some(own) if !drops => own,
+                    _ => vec![1.0; full.len()],
+                })
                 .filter(|swa| *swa != full);
                 Ok(crate::config::RopeFreqs { full, swa })
             })

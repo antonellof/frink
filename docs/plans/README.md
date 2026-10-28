@@ -107,16 +107,19 @@ held 166 of 166 by `tests/arch_coverage.rs`).
 
 | Outcome | Count | Source |
 |---|---|---|
-| Runs on the generic path **with a libllama golden** | **100** | `capability::AUDITED_GENERIC_GQA` |
+| Runs on the generic path **with a libllama golden** | **101** | `capability::AUDITED_GENERIC_GQA` |
 | Dedicated engines | 4 | `Mla` and `Gemma4` have cross-engine evidence; `Glm52` and `Kimi` have none |
-| Text generation, refused as unaudited and triaged | 11 | `tests/unaudited_triage.rs`: 0 fixture-away, 2 one match arm (`kolibri1`, `lfm3`), 8 new code, 1 unknown |
+| Text generation, refused as unaudited and triaged | 10 | `tests/unaudited_triage.rs`: 0 fixture-away, 0 one match arm, 9 new code, 1 unknown |
 | Deferred scopes | 31 | `frink archs`: 13 encoder/embedding, 11 multimodal, 4 diffusion, 3 audio |
 | **Loads and is WRONG** | **closed** | the generic path is opt-in |
 
 The refusing count rose from 4 to 11 when the pin moved, because nine of
 the thirteen new upstream names are text generation
-([`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)). The two
-one-match-arm rows are the next cheapest work in the tree. The audit
+([`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)), and fell
+to 10 the same day: of the two one-match-arm rows, `lfm3` closed on a
+libllama golden and a 32-step greedy decode, and `kolibri1` turned out
+to need a router that adds its selection bias before the sigmoid
+(`kolibri1.cpp:138`), so it is new code now. The audit
 also found three served architectures whose upstream behaviour had
 changed (`mellum`, `nemotron`, `lfm2`), and all three are fixed or
 refused by name.
