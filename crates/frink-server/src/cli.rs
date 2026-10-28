@@ -14,12 +14,11 @@
 //! read. Every override here runs in `apply_cli_overrides`, *before*
 //! the runtime and the model loader read the environment.
 
-use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::str::FromStr;
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
+use frink_models::gpu_layers::GpuLayers;
 
 // `PartialEq` so frink-cli's serve tests can assert that both front
 // ends parse a command line into the SAME arguments, rather than
@@ -49,7 +48,7 @@ pub struct ServerArgs {
     /// not a git revision, and it matches without regard to case.
     #[arg(
         long = "hf-repo",
-        visible_alias = "hf",
+        visible_aliases = ["hf", "hfr"],
         value_name = "REPO[:QUANT]",
         conflicts_with = "model"
     )]
@@ -59,7 +58,12 @@ pub struct ServerArgs {
     ///
     /// For a repo whose quant labels do not disambiguate, or a file
     /// whose name carries no quant at all.
-    #[arg(long = "hf-file", value_name = "FILE", requires = "hf_repo")]
+    #[arg(
+        long = "hf-file",
+        visible_alias = "hff",
+        value_name = "FILE",
+        requires = "hf_repo"
+    )]
     hf_file: Option<String>,
 
     /// Context size, llama.cpp's `-c`. Sets `FRINK_CB_MAX_CONTEXT`.
@@ -83,8 +87,16 @@ pub struct ServerArgs {
     api_key_file: Option<std::path::PathBuf>,
 
     /// Name this model answers to in `/v1/models` and in responses,
-    /// llama.cpp's `--alias`. Sets `FRINK_MODEL_NAME`.
-    #[arg(long = "alias", visible_alias = "model-alias", value_name = "NAME")]
+    /// llama.cpp's `-a` / `--alias`. Sets `FRINK_MODEL_NAME`.
+    ///
+    /// ONE name: llama.cpp takes a comma-separated list, and a list is
+    /// refused here rather than served as one name with commas in it.
+    #[arg(
+        short = 'a',
+        long = "alias",
+        visible_alias = "model-alias",
+        value_name = "NAME"
+    )]
     alias: Option<String>,
 
     /// KV cache dtype, llama.cpp's `--cache-type-k`. Metal only; the
@@ -153,10 +165,14 @@ pub struct ServerArgs {
     #[arg(long = "list-devices", default_value_t = false)]
     pub(crate) list_devices: bool,
 
-    /// GPU layers: `0`, a positive number, `auto`, or `all`.
+    /// GPU layers: `0`, `auto`, `all`, or a count at or above the
+    /// model's layer count.
     ///
-    /// Partial placement is not implemented yet; any value above zero
-    /// currently enables all supported operations on the selected backend.
+    /// Partial placement is not implemented, so a PARTIAL count is
+    /// refused at startup against the model's own layer count, as
+    /// `frink run` refuses it. This used to say "any value above zero
+    /// enables all supported operations", which is `-ngl 10` silently
+    /// offloading every layer of a model the user was trying to fit.
     #[arg(
         long = "n-gpu-layers",
         visible_aliases = ["gpu-layers", "ngl"],
@@ -191,6 +207,7 @@ pub struct ServerArgs {
     /// (`FRINK_CONTINUOUS_BATCHING=0`).
     #[arg(
         long = "no-cont-batching",
+        visible_alias = "nocb",
         default_value_t = false,
         conflicts_with = "cont_batching"
     )]
@@ -295,7 +312,11 @@ impl ServerArgs {
     where
         I: IntoIterator<Item = String>,
     {
-        Self::parse_from(rewrite_llama_style_argv(argv.into_iter().collect()))
+        let mut cmd = Self::command();
+        cmd.build();
+        let argv = llama_style_argv(&cmd, argv.into_iter().collect(), |k| std::env::var(k).ok())
+            .unwrap_or_else(|e| cmd.error(clap::error::ErrorKind::UnknownArgument, e).exit());
+        Self::parse_from(argv)
     }
 }
 
@@ -306,44 +327,6 @@ enum OffloadDevice {
     Cpu,
     Metal,
     Cuda,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GpuLayers {
-    Auto,
-    All,
-    Count(u32),
-}
-
-impl GpuLayers {
-    fn offload_enabled(self) -> bool {
-        !matches!(self, Self::Count(0))
-    }
-}
-
-impl FromStr for GpuLayers {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "auto" => Ok(Self::Auto),
-            "all" => Ok(Self::All),
-            _ => value
-                .parse::<u32>()
-                .map(Self::Count)
-                .map_err(|_| "expected 0, a positive integer, 'auto', or 'all'".into()),
-        }
-    }
-}
-
-impl fmt::Display for GpuLayers {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Auto => f.write_str("auto"),
-            Self::All => f.write_str("all"),
-            Self::Count(value) => value.fmt(f),
-        }
-    }
 }
 
 /// Whether this build of the server has the Metal kernels compiled in.
@@ -360,24 +343,29 @@ pub const BUILT_WITH_METAL: bool = cfg!(feature = "metal");
 /// See [`BUILT_WITH_METAL`].
 pub const BUILT_WITH_CUDA: bool = cfg!(feature = "cuda");
 
-fn rewrite_llama_style_argv(args: Vec<String>) -> Vec<String> {
-    args.into_iter()
-        .map(|arg| match arg.as_str() {
-            "-ngl" => "--n-gpu-layers".into(),
-            "-dev" => "--device".into(),
-            "-cb" => "--cont-batching".into(),
-            "-np" => "--parallel".into(),
-            "-b" => "--batch-size".into(),
-            "-ub" => "--ubatch-size".into(),
-            // One token in llama.cpp's hand-written parser. clap sees
-            // `-h` followed by `f` and prints help, which is what
-            // `frink serve -hf repo:Q4_K_M` did: the flag looked
-            // absent rather than mis-spelled.
-            "-hf" => "--hf-repo".into(),
-            "-hff" => "--hf-file".into(),
-            _ => arg,
-        })
-        .collect()
+/// `argv` as clap should see it: llama.cpp's single-dash names
+/// rewritten from the command's own spellings ([`frink_core::argv`]),
+/// then every set `LLAMA_ARG_*` variable appended as its flag
+/// ([`crate::llama_env`]). `cmd` must be built.
+fn llama_style_argv(
+    cmd: &clap::Command,
+    argv: Vec<String>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<String>, String> {
+    let mut argv = argv.into_iter();
+    let program = argv.next().unwrap_or_else(|| "frink-server".to_string());
+    let tail = frink_core::argv::expand_single_dash_names(cmd, argv.collect())?;
+    let tail = crate::llama_env::append_llama_arg_env(cmd, tail, env)?;
+    Ok(std::iter::once(program).chain(tail).collect())
+}
+
+/// The layer count `-ngl` is checked against, read from the GGUF header
+/// alone. `None` for a checkpoint directory or an unreadable file.
+fn model_layer_count(path: &str) -> Option<usize> {
+    let file = frink_gguf::ShardedGguf::open(path).ok()?;
+    let arch = file.metadata_str("general.architecture")?;
+    file.metadata_u64(&format!("{arch}.block_count"))
+        .map(|n| n as usize)
 }
 
 fn cli_bind_addr(args: &ServerArgs, env_addr: Option<&str>) -> Option<String> {
@@ -482,6 +470,12 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         unsafe { std::env::set_var("FRINK_API_KEY", key) };
     }
     if let Some(alias) = &args.alias {
+        if alias.contains(',') {
+            anyhow::bail!(
+                "--alias {alias}: frink serves one model name, and llama.cpp's comma-separated \
+                 list of aliases is not implemented. Pass one name"
+            );
+        }
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_MODEL_NAME", alias) };
     }
@@ -527,6 +521,19 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(layers @ GpuLayers::Count(n)) = args.n_gpu_layers {
+        if n > 0 {
+            let path = std::env::var("FRINK_MODEL_PATH").ok();
+            let n_layers = path.as_deref().and_then(model_layer_count).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--n-gpu-layers {n}: the model's layer count could not be read, so whether \
+                     {n} is all of them cannot be checked, and a partial offload is not \
+                     implemented. Use `-ngl all` or `-ngl 0`"
+                )
+            })?;
+            layers.check_supported(n_layers)?;
+        }
+    }
     if args.device.is_none() && args.n_gpu_layers.is_none() {
         // device overrides skipped
     } else {
@@ -697,6 +704,14 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// The production rewrite with an EMPTY environment, so a
+    /// `LLAMA_ARG_*` variable on the test host cannot change a test.
+    fn rewrite(argv: Vec<String>) -> Vec<String> {
+        let mut cmd = ServerArgs::command();
+        cmd.build();
+        llama_style_argv(&cmd, argv, |_| None).unwrap()
+    }
+
     /// The server and `frink run` set the same `FRINK_CTK` variable, so
     /// they have to agree about which values exist. The server used to
     /// accept anything and pass it through, which meant
@@ -736,7 +751,7 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect();
-        let args = ServerArgs::try_parse_from(rewrite_llama_style_argv(argv)).unwrap();
+        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
 
         assert_eq!(args.model.as_deref(), Some("model.gguf"));
         assert_eq!(args.host, Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
@@ -760,7 +775,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let args = ServerArgs::try_parse_from(rewrite_llama_style_argv(argv)).unwrap();
+        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
         assert_eq!(args.port, Some(0));
         assert_eq!(
             cli_bind_addr(&args, Some("127.0.0.1:8383")).as_deref(),
@@ -774,7 +789,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let args = ServerArgs::try_parse_from(rewrite_llama_style_argv(argv)).unwrap();
+        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
         assert_eq!(args.parallel, Some(4));
     }
 
@@ -788,7 +803,7 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect();
-        let args = ServerArgs::try_parse_from(rewrite_llama_style_argv(argv)).unwrap();
+        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
         assert_eq!(args.batch_size, Some(2048));
         assert_eq!(args.ubatch_size, Some(512));
     }
@@ -881,6 +896,39 @@ mod tests {
             .map(String::from),
         )
         .is_err());
+    }
+
+    /// `-ngl 10` used to offload every layer here, the divergence
+    /// `frink run` had already been fixed for. A count that cannot be
+    /// checked against a layer count is refused as well, rather than
+    /// trusted.
+    #[test]
+    fn a_partial_or_uncheckable_gpu_layer_count_is_refused() {
+        let args = ServerArgs::try_parse_from(
+            // No `-m`: setting `FRINK_MODEL_PATH` here would leak into
+            // every other test in this process.
+            ["frink-server", "--n-gpu-layers", "10"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        let err = apply_cli_overrides(&args).unwrap_err().to_string();
+        assert!(err.contains("--n-gpu-layers 10"), "{err}");
+    }
+
+    /// llama.cpp's `--alias` is a comma-separated list; frink serves one
+    /// name and must not serve `a,b` as a name.
+    #[test]
+    fn a_list_of_aliases_is_refused() {
+        let args = ServerArgs::try_parse_from(rewrite(
+            ["frink-server", "-a", "one,two"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        ))
+        .unwrap();
+        let err = apply_cli_overrides(&args).unwrap_err().to_string();
+        assert!(err.contains("--alias one,two"), "{err}");
     }
 
     #[test]

@@ -20,6 +20,8 @@
 
 pub mod activation_tap;
 pub mod alibi;
+#[cfg(feature = "argv")]
+pub mod argv;
 pub mod attention;
 pub mod bench_profile;
 pub mod block_sparse;

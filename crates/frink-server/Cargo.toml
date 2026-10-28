@@ -24,7 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 frink-api = { workspace = true }
-frink-core = { workspace = true }
+frink-core = { workspace = true, features = ["argv"] }
 # For the deterministic receipt id in `policy::outbox`: a retried stop
 # must derive the same id, or it writes a second billing event for work
 # that happened once.

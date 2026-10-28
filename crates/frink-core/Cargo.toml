@@ -58,11 +58,18 @@ cudarc = { version = "=0.11.9", optional = true, default-features = false, featu
 # `statvfs` for kv_disk's free-space budget. Unix only; elsewhere the
 # probe reports "unknown" and the configured byte budget is the only
 # ceiling.
+# `argv`: llama.cpp's single-dash flag grammar over a clap `Command`,
+# for the two front ends (frink-cli, frink-server) that must read the
+# same command line the same way. Optional so the engine crates that
+# never parse a command line do not compile clap for it.
+clap = { workspace = true, optional = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [features]
 default = []
+argv = ["dep:clap"]
 # Propagates to frink-cuda's own `cuda` feature (real NVRTC-compiled
 # kernel dispatch, dynamic-loaded -- builds fine without a CUDA
 # toolkit/GPU present, see frink-cuda's Cargo.toml comment).
