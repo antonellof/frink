@@ -26,6 +26,23 @@
 // `tests/llama4_graphs.rs`). The whole prompt is still one batch.
 //
 // Prints one float per line, full precision, for the LAST position.
+//
+// `REF_DECODE_STEPS=N` switches to a GREEDY DECODE dump instead: the
+// prompt is still one batch, then the argmax is fed back N-1 times, each
+// as its OWN one-token `llama_decode`, so llama.cpp's single-token decode
+// graph is what answers every step after the first. The output is the
+// golden format `crates/frink-models/tests/decode_step_graphs.rs` reads,
+// verbatim:
+//
+//   # comment lines
+//   prompt <tok0> <tok1> ...
+//   tokens <g0> <g1> ... <g{N-1}>
+//   logits <n_vocab floats>        (N lines; line i is the distribution
+//                                   g_i is the argmax of)
+//
+// Why every step and not only the tokens: two engines can agree on an
+// argmax while one of them is wrong by a margin the argmax hides, and
+// on a 48-entry synthetic vocabulary the margin is all there is.
 
 #include "llama.h"
 
@@ -133,8 +150,57 @@ int main(int argc, char ** argv) {
     const int n_vocab = llama_vocab_n_tokens(vocab);
 
     const float * logits = llama_get_logits_ith(ctx, (int32_t) toks.size() - 1);
-    for (int i = 0; i < n_vocab; ++i) {
-        printf("%.9g\n", logits[i]);
+    const char * steps_env = getenv("REF_DECODE_STEPS");
+    if (steps_env) {
+        const int n_steps = atoi(steps_env);
+        if (n_steps < 1 || toks.size() + (size_t) n_steps > n_ctx) {
+            fprintf(stderr, "REF_DECODE_STEPS=%s does not fit n_ctx %u\n", steps_env, n_ctx);
+            return 2;
+        }
+        std::vector<std::vector<float>> rows;
+        std::vector<llama_token>        picked;
+        llama_batch one = llama_batch_init(1, 0, 1);
+        for (int step = 0; step < n_steps; ++step) {
+            rows.emplace_back(logits, logits + n_vocab);
+            llama_token best = 0;
+            for (int i = 1; i < n_vocab; ++i) {
+                if (logits[i] > logits[best]) {
+                    best = (llama_token) i;
+                }
+            }
+            picked.push_back(best);
+            if (step + 1 == n_steps) {
+                break;
+            }
+            one.n_tokens     = 1;
+            one.token[0]     = best;
+            one.pos[0]       = (llama_pos) (toks.size() + (size_t) step);
+            one.n_seq_id[0]  = 1;
+            one.seq_id[0][0] = 0;
+            one.logits[0]    = 1;
+            if (llama_decode(ctx, one) != 0) {
+                fprintf(stderr, "llama_decode failed at decode step %d\n", step + 1);
+                return 1;
+            }
+            logits = llama_get_logits_ith(ctx, 0);
+        }
+        llama_batch_free(one);
+        printf("# llama.cpp greedy decode: the prompt as one batch, then one-token batches\n");
+        printf("# scripts/gptoss_reference_logits.cpp with REF_DECODE_STEPS=%d\n", n_steps);
+        printf("prompt");
+        for (llama_token t : toks) printf(" %d", (int) t);
+        printf("\ntokens");
+        for (llama_token t : picked) printf(" %d", (int) t);
+        printf("\n");
+        for (const auto & row : rows) {
+            printf("logits");
+            for (float v : row) printf(" %.9g", v);
+            printf("\n");
+        }
+    } else {
+        for (int i = 0; i < n_vocab; ++i) {
+            printf("%.9g\n", logits[i]);
+        }
     }
 
     llama_batch_free(batch);
