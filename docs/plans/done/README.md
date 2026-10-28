@@ -27,6 +27,7 @@ them now.
 | archive/freetoken-parity | 63/73 |
 | archive/llama-cpp-parity-push | 30/46 |
 | archive/serving-and-tiered-kv | 17/18 |
+| archive/model-layer-reorg | 0/14 |
 | archive/one-binary-serve | 10/11 |
 | archive/completion-push | 1/9 |
 | archive/amd-strix-halo | 0/14 |

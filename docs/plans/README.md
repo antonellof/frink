@@ -16,11 +16,10 @@ become ADRs and the plan moves to `archive/`
 
 ## Design docs
 
-- **[`model-layer-reorg.md`](model-layer-reorg.md)**, making an
-  architecture a new file. The decoration audit and the shared
-  `attn_block` have landed, and `decoder.rs` (8050 lines) and
-  `loader.rs` (6024) were split into modules on 2026-10-28 (#390);
-  `LayerPlan` and the per-architecture trait are still open.
+- **[`arch-registry-migration.md`](arch-registry-migration.md)**, one
+  file per architecture (#403, ADR 0003): the flow of architecture
+  identity today, the target types, and 16 steps that each change no
+  behaviour. Supersedes `archive/model-layer-reorg.md`.
 - **[`out-of-core-moe.md`](out-of-core-moe.md)**, running a 155 GB model
   on a 32 GB machine. Streamed experts reach the fused Metal top-k
   decode now; nothing executes the residency policy yet.
@@ -150,7 +149,7 @@ fork's 11.46 tok/s (97.5%), flat with context; prefill 43.1 against
   at every step on four decode bodies, closing the hole that let Metal
   produce fluent nonsense while `frink parity` read MATCH.
 - **`decoder.rs` and `loader.rs` split**, so an architecture is added
-  in a small file ([`model-layer-reorg.md`](model-layer-reorg.md)).
+  in a small file ([`arch-registry-migration.md`](arch-registry-migration.md)).
 
 **Still open, in north-star order:** the CUDA gap
 ([#259](https://github.com/antonellof/frink/issues/259),
