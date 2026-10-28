@@ -1,0 +1,5 @@
+# What the fixture scripts and llama.cpp's gguf-py import. gguf itself is
+# NOT pinned here: it is read from the llama.cpp checkout under test, so
+# each run writes fixtures with that commit's writer.
+numpy==2.4.6
+PyYAML==6.0.3

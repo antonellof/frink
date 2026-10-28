@@ -634,7 +634,47 @@ PYTHONPATH=$LLAMA/gguf-py python3 scripts/dequantize_gguf.py model-Q8_0.gguf /tm
 
 `LLAMA_LOGITS_FLASH_ATTN=0` keeps the reference off its flash-attention
 path (llama.cpp itself aborts under the default on a real PLM file; the
-published numbers were measured with the default).
+published numbers were measured with the default). `FRINK_CTK=f32`
+runs an f32 K/V cache on BOTH sides: the dumper reads the same variable
+frink does, so the two cannot disagree about it.
+
+### The decode half, and token ids
+
+`--decode-steps N` adds a greedy decode of N steps: llama.cpp decodes
+the prompt as one batch and then feeds back its own argmax one token at
+a time, and frink is fed the same tokens, so every step compares two
+distributions over one context and a flip at step 7 does not turn steps
+8 onward into a comparison of different prefixes. The worst step is the
+verdict, on the same four rungs. The first-token half reads prefill
+only, and a decode defect can produce fluent nonsense while it stays
+`MATCH`.
+
+`--tokens 3,7,11` compares on those ids and skips the tokenizer half
+(said so in the report). It exists for the synthetic fixtures, whose
+vocabularies libllama's tokenizer cannot load.
+
+### The oracle over every fixture
+
+`scripts/oracle.sh` is what CI's `oracle` job runs, and the same
+command works on a laptop (CPU only, a few minutes once libllama is
+built):
+
+```bash
+scripts/oracle.sh                       # llama.cpp at tools/llama_cpp_pin
+scripts/oracle.sh --llama-ref master    # drift report; add --report-only to exit 0
+```
+
+It builds libllama at the pin under `target/oracle/<sha>/` (from a
+local `.scratch/llama.cpp*` clone when one holds the commit, else from
+GitHub, and refuses a source tree at any other commit), regenerates
+every fixture with that commit's `gguf-py` and every llama.cpp golden
+with `scripts/gptoss_reference_logits.cpp`, then runs `parity --tokens
+--decode-steps 32` on every fixture. It fails when a regenerated file
+differs from the committed one, or when a fixture's outcome is not the
+one `tools/oracle/fixtures.tsv` expects. `tools/oracle/goldens.tsv` says
+which dumper invocation answers each golden; a golden or fixture with no
+row fails `tests/oracle_manifest.rs`, so nothing is added outside the
+oracle's reach.
 
 ### The reference dumper
 

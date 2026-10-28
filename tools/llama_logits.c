@@ -51,6 +51,15 @@
 //       actually answered — see print_reference_identity below for why
 //       a verdict without it is only half an experiment.
 //
+//       With LLAMA_LOGITS_DECODE_STEPS=N (N >= 1) in the environment it
+//       is a GREEDY DECODE instead: the prompt as one batch, then the
+//       argmax fed back N-1 times, each as its own one-token
+//       llama_decode, and <out.bin> holds N rows of n_vocab f32. Row i
+//       is the distribution whose argmax (first maximum) is fed at step
+//       i+1. `frink parity --decode-steps` reads it: prefill parity
+//       alone cannot see a defect that only shows once decode starts.
+//       FRINK_CTK=f32 runs an f32 K/V cache, as frink then does too.
+//
 //   llama_logits --tokenize <model.gguf> <cases.bin> <out.bin>
 //       Reads an FXTK case file, writes an FXTK result file, and prints
 //       "tokenized <N> cases".
@@ -353,7 +362,15 @@ static int cmd_logits(const char * model_path, const char * out_path, int n_toke
     // Context and batch must both cover the whole prompt: this decodes it
     // in ONE call, because splitting it would change the batch shape and
     // therefore which kernels llama.cpp picks — the thing under test.
-    cparams.n_ctx    = (uint32_t) n_tokens + 8;
+    const char * steps_env = getenv("LLAMA_LOGITS_DECODE_STEPS");
+    const int n_steps = steps_env ? atoi(steps_env) : 1;
+    if (n_steps < 1) {
+        fprintf(stderr, "LLAMA_LOGITS_DECODE_STEPS=%s is not a positive count\n", steps_env);
+        free(tokens);
+        llama_model_free(model);
+        return 1;
+    }
+    cparams.n_ctx    = (uint32_t) (n_tokens + n_steps) + 8;
     cparams.n_batch  = (uint32_t) n_tokens;
     cparams.n_ubatch = (uint32_t) n_tokens;
     // LLAMA_LOGITS_FLASH_ATTN=0 keeps llama.cpp off its flash-attention
@@ -367,6 +384,23 @@ static int cmd_logits(const char * model_path, const char * out_path, int n_toke
     const char * fa = getenv("LLAMA_LOGITS_FLASH_ATTN");
     if (fa && strcmp(fa, "0") == 0) {
         cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    }
+
+    // FRINK_CTK is read by BOTH engines, so one variable decides the K/V
+    // element type on each side of the comparison and the two cannot
+    // disagree about it. Unset is f16, llama.cpp's default and frink's.
+    // f32 is what `tools/oracle` runs: on the synthetic fixtures an f16
+    // cache alone moves llama.cpp's own decode by KL 2.9e-2 (measured,
+    // `phimoe_tiny` step 3, against itself with an f32 cache).
+    const char * ctk = getenv("FRINK_CTK");
+    if (ctk && strcmp(ctk, "f32") == 0) {
+        cparams.type_k = GGML_TYPE_F32;
+        cparams.type_v = GGML_TYPE_F32;
+    } else if (ctk && strcmp(ctk, "f16") != 0) {
+        fprintf(stderr, "FRINK_CTK=%s: the reference dumper takes f16 or f32\n", ctk);
+        llama_model_free(model);
+        free(tokens);
+        return 1;
     }
 
     struct llama_context * ctx = llama_init_from_model(model, cparams);
@@ -421,6 +455,35 @@ static int cmd_logits(const char * model_path, const char * out_path, int n_toke
         return 1;
     }
     fwrite(logits, sizeof(float), (size_t) n_vocab, f);
+    for (int step = 1; step < n_steps; step++) {
+        llama_token next = 0;
+        for (int32_t v = 1; v < n_vocab; v++) {
+            if (logits[v] > logits[next]) {
+                next = v;
+            }
+        }
+        struct llama_batch one = llama_batch_get_one(&next, 1);
+        if (llama_decode(ctx, one) != 0) {
+            fprintf(stderr, "llama_decode failed at decode step %d\n", step);
+            fclose(f);
+            llama_batch_free(batch);
+            llama_free(ctx);
+            llama_model_free(model);
+            free(tokens);
+            return 1;
+        }
+        logits = llama_get_logits_ith(ctx, -1);
+        if (!logits) {
+            fprintf(stderr, "llama_get_logits_ith returned NULL at decode step %d\n", step);
+            fclose(f);
+            llama_batch_free(batch);
+            llama_free(ctx);
+            llama_model_free(model);
+            free(tokens);
+            return 1;
+        }
+        fwrite(logits, sizeof(float), (size_t) n_vocab, f);
+    }
     fclose(f);
 
     print_reference_identity();

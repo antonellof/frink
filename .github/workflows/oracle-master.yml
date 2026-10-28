@@ -1,0 +1,40 @@
+name: llama.cpp master drift
+
+# The oracle (scripts/oracle.sh) against llama.cpp `master` instead of the
+# pin, weekly. It never fails the build: its job summary is the master
+# SHA tested, the goldens that moved, the fixtures whose `frink parity`
+# outcome changed, and the frink tests that go red against the
+# regenerated goldens. Moving the pin (ADR 0011) starts from that list.
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  drift:
+    name: oracle against llama.cpp master
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tools/oracle/requirements.txt
+      - name: Resolve master
+        id: key
+        run: |
+          echo "sha=$(git ls-remote https://github.com/ggml-org/llama.cpp refs/heads/master | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target/oracle/${{ steps.key.outputs.sha }}/src
+            target/oracle/${{ steps.key.outputs.sha }}/build
+          key: libllama-${{ runner.os }}-${{ steps.key.outputs.cpu }}-${{ steps.key.outputs.sha }}-${{ hashFiles('tools/oracle/llama_build.sh') }}
+      - run: bash scripts/oracle.sh --llama-ref ${{ steps.key.outputs.sha }} --report-only

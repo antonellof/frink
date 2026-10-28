@@ -177,3 +177,42 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # The llama.cpp oracle (ADR 0001, ADR 0011): libllama at the pin, every
+  # fixture and every llama.cpp golden regenerated from it, and `frink
+  # parity` (first-token logits and a 32-step greedy decode) on every
+  # fixture. Fails when a golden is not libllama's current answer or a
+  # fixture's outcome is not the one tools/oracle/fixtures.tsv expects.
+  # The same script runs locally: `scripts/oracle.sh`.
+  #
+  # The libllama build is cached by commit AND by CPU model: it is built
+  # with GGML_NATIVE, whose answer differs from a portable build's by up
+  # to 3.9e-4 on these fixtures (tools/oracle/llama_build.sh), and a
+  # native build restored onto another CPU could use instructions that
+  # CPU lacks.
+  oracle:
+    name: llama.cpp oracle (frink parity at the pin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tools/oracle/requirements.txt
+      - name: Cache key
+        id: key
+        run: |
+          echo "pin=$(tr -d '[:space:]' < tools/llama_cpp_pin)" >> "$GITHUB_OUTPUT"
+          echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target/oracle/${{ steps.key.outputs.pin }}/src
+            target/oracle/${{ steps.key.outputs.pin }}/build
+          key: libllama-${{ runner.os }}-${{ steps.key.outputs.cpu }}-${{ steps.key.outputs.pin }}-${{ hashFiles('tools/oracle/llama_build.sh') }}
+      - run: bash scripts/oracle.sh
+      - name: What the oracle rewrote
+        if: failure()
+        run: git --no-pager diff -- crates/frink-models/tests ':!*.gguf' | head -400
