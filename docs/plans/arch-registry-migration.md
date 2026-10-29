@@ -182,6 +182,18 @@ eligibility test so a new field forces a Metal decision.
   both tables are in `behaviour_table_names`, and
   `the_registry_pattern_readers_are_pinned` holds the census. Divergence
   found and filed, not fixed: #464.
+- Step 8: the ALiBi graphs (`models/bloom.rs`, `refact.rs`,
+  `baichuan.rs`, `mpt.rs`, `jais.rs`) and the learned positions
+  (`gpt2.rs`, `starcoder.rs`; `mpt` has both). `ALIBI_ARCHITECTURES`,
+  `LEARNED_POSITION_CREATORS`, `EMBEDDING_NORM_ARCHITECTURES`,
+  `CLAMPED_QKV_ARCHITECTURES` and `WEIGHTED_LAYER_NORM` emptied and are
+  deleted; `TopologyFacts::learned_positions` gave way to
+  `TensorFacts::position_embd` (the bool was the same fact).
+  Each ALiBi file's rule is one `const ALIBI` that both the bias and its
+  `HparamRules::rope_layers` read (`alibi::alibi_rope_layers`), so the
+  two still cannot disagree about Baichuan's layer count. `jais`'s
+  `1 / head_dim` became its `attention_scale_override` rule, and that
+  public lookup answers through the registry like the others.
 
 What step 2 changed about the target design:
 

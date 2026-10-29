@@ -72,17 +72,13 @@ pub enum Presence {
 /// Generic-path graphs that create `blk.N.attn_output.bias`.
 pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("apertus", Presence::Optional),
-    ("bloom", Presence::Required),
     ("codeshell", Presence::Required),
     ("deci", Presence::Optional),
     ("ernie4_5", Presence::Optional),
-    ("gpt2", Presence::Required),
     // `granite-swa.cpp:79`, optional as every Granite row's is.
     ("granite_swa", Presence::Optional),
     ("granitehybrid", Presence::Optional),
     ("granite-hybrid", Presence::Optional),
-    ("jais", Presence::Required),
-    ("mpt", Presence::Optional),
     ("jais2", Presence::Required),
     ("minicpm", Presence::Optional),
     ("mistral3", Presence::Optional),
@@ -90,7 +86,6 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("nemotron_h", Presence::Optional),
     ("nemotron_h_moe", Presence::Optional),
     ("pangu-embedded", Presence::Required),
-    ("starcoder", Presence::Required),
     ("starcoder2", Presence::Required),
 ];
 
@@ -98,23 +93,18 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
 /// `blk.N.ffn_down.bias` (the same flag for both in every graph), and
 /// whether they also create `blk.N.ffn_gate.bias`.
 pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
-    ("bloom", Presence::Required, false),
     ("codeshell", Presence::Required, false),
     ("deci", Presence::Optional, true),
-    ("gpt2", Presence::Required, false),
     // `granite-swa.cpp:100-102`, the dense branch only (its MoE branch
     // creates no expert biases, as `granite.cpp`'s does not).
     ("granite_swa", Presence::Optional, true),
     ("granitehybrid", Presence::Optional, true),
     ("granite-hybrid", Presence::Optional, true),
-    ("jais", Presence::Required, true),
     ("jais2", Presence::Required, false),
     ("minicpm", Presence::Optional, true),
     ("mistral3", Presence::Optional, true),
-    ("mpt", Presence::Optional, false),
     ("nemotron", Presence::Optional, false),
     ("nemotron_h", Presence::Optional, false),
-    ("starcoder", Presence::Required, false),
     ("starcoder2", Presence::Required, false),
 ];
 

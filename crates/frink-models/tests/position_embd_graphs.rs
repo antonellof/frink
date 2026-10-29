@@ -44,9 +44,9 @@ use common::{
     assert_all_three_paths_match_within, assert_decoder_matches_on_all_three_paths, graph_caches,
     kl_vs_golden, load_graph_fixture, worst_vs, GRAPH_PROMPT,
 };
-use frink_models::capability::{resolve_architecture, ArchPath, BIASED_LAYER_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::norm::NormOp;
-use frink_models::position_embd::{learned_positions, LEARNED_POSITION_CREATORS};
+use frink_models::position_embd::learned_positions;
 use frink_models::proj_bias::Presence;
 use frink_models::rope_layers::RopeLayers;
 use frink_models::{Decoder, FfnActivation};
@@ -201,10 +201,13 @@ fn the_loaded_decoders_are_the_graph() {
             Some(ArchPath::GenericGqa { .. })
         ));
         assert!(learned_positions(name));
-        assert!(LEARNED_POSITION_CREATORS
-            .iter()
-            .any(|(n, p, _)| *n == name && *p == Presence::Required));
-        assert!(BIASED_LAYER_NORM.contains(&name));
+        assert!(matches!(
+            frink_models::models::ArchFacts::of(name)
+                .tensors
+                .position_embd,
+            Some((Presence::Required, _))
+        ));
+        assert!(frink_models::capability::uses_biased_layer_norm(name));
         let d = load_graph_fixture(name);
         let table = d.position_embd.as_ref().expect("REQUIRED");
         assert_eq!((table.rows(), table.cols()), (64, 32));

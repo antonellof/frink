@@ -44,7 +44,7 @@ use common::{
     assert_decoder_matches_on_all_three_paths, graph_caches, kl_vs_golden, load_graph_fixture,
     worst_vs, GRAPH_PROMPT, GRAPH_TOL,
 };
-use frink_models::alibi::{max_alibi_bias, ALIBI_ARCHITECTURES};
+use frink_models::alibi::max_alibi_bias;
 use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::norm::NormOp;
 use frink_models::rope_layers::RopeLayers;
@@ -424,7 +424,12 @@ fn report_kl_against_llama_cpp() {
 /// derived from it, no layer rotating; plus each graph's own things.
 #[test]
 fn the_loaded_decoders_are_the_graphs() {
-    for (arch, _, _) in ALIBI_ARCHITECTURES {
+    // The five rows live in `frink_models::models`.
+    for arch in ["bloom", "refact", "baichuan", "mpt", "jais"] {
+        assert!(frink_models::models::ArchFacts::of(arch)
+            .topology
+            .alibi
+            .is_some());
         assert!(matches!(
             resolve_architecture(arch),
             Some(ArchPath::GenericGqa { .. })

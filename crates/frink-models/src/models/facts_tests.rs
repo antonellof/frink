@@ -67,7 +67,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
         names.extend(ns::POST_NORMS_BOTH_OR_NEITHER.iter().map(|r| r.0));
         for table in [
             ns::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
-            ns::EMBEDDING_NORM_ARCHITECTURES,
             ns::WEIGHTLESS_EMBEDDING_NORM,
             ns::NO_OUTPUT_NORM,
             ns::OUTPUT_NORM_UNDER_EMBEDDING_NAME,
@@ -77,7 +76,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
         }
     }
     names.extend(crate::rope_finetuned::ROPE_GATED_ON_FINETUNED);
-    names.extend(crate::clamp_kqv::CLAMPED_QKV_ARCHITECTURES);
     names.extend(crate::loader::rope_scaling::YARN_BETA_READERS);
     names.extend(
         crate::parallel_dense_ffn::PARALLEL_DENSE_FFN_ARCHITECTURES
@@ -303,7 +301,8 @@ fn the_facts_agree_with_every_public_lookup() {
                 reads_rope_pattern: crate::rope_layers::reads_rope_pattern(name),
                 skip_stream: crate::skip_stream::has_skip_stream(name),
                 parallel_ssm: crate::mamba2::parallel_with_attention(name),
-                learned_positions: crate::position_embd::learned_positions(name),
+                // No legacy table: only a definition states it.
+                alibi: def.and_then(|f| f.topology.alibi),
                 rope_gated_on_finetuned: crate::rope_finetuned::unrotated(name, Some(false)),
                 parallel_residual: crate::parallel_residual::parallel_residual(name),
                 reads_nextn: crate::mtp_blocks::reads_nextn(name),
@@ -327,6 +326,8 @@ fn the_facts_agree_with_every_public_lookup() {
                 attn_out_bias: crate::proj_bias::attn_out_presence(name),
                 ffn_bias: crate::proj_bias::ffn_presence(name),
                 output_bias: crate::proj_bias::output_presence(name),
+                // No legacy table: only a definition states it.
+                position_embd: def.and_then(|f| f.tensors.position_embd),
                 qkv_tensors: crate::qkv_fused::qkv_tensors(name),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
                 attn_norm_2_feeds_attention: crate::norm_sites::attn_norm_2_feeds_attention(name),

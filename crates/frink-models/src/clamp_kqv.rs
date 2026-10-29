@@ -50,23 +50,6 @@
 //! (`olmo_clamped_tiny.gguf`, whose llama.cpp logits differ measurably
 //! from the unclamped file's) and `tests/dbrx_graphs.rs`.
 
-/// Architectures whose graph clamps Q, K and V by
-/// `{arch}.attention.clamp_kqv`.
-///
-/// `mpt` was deliberately absent while it was `DedicatedOnly`; it is
-/// audited since 2026-09-14 (`crate::alibi`, tests/alibi_graphs.rs, a
-/// fixture with `clamp_kqv = 4` that the unclamped body misses by 4.8)
-/// and `mpt.cpp:5` reads the key optional (`conversion/mpt.py:36`
-/// writes it from `clip_qkv`). The rule
-/// [`crate::rope_finetuned::ROPE_GATED_ON_FINETUNED`] follows for
-/// `granitehybrid` still applies: a row this list does not serve is
-/// not listed.
-///
-/// `olmo` and `dbrx` (whose key is REQUIRED, `dbrx.cpp:5`) state their
-/// rows in `crate::models` (#403 steps 3 and 6). Every row left here
-/// reads the key optional.
-pub const CLAMPED_QKV_ARCHITECTURES: &[&str] = &["mpt"];
-
 /// Why a file's clamp declaration cannot be honoured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClampError {
@@ -105,8 +88,9 @@ pub fn resolve_clamp(arch: &str, declared: Option<f32>) -> Result<Option<f32>, C
 /// The row: `None` where the graph reads no clamp, `Some(required)`
 /// where it does, from [`CLAMPED_QKV_ARCHITECTURES`] alone
 /// (`ArchFacts::from_tables`).
-pub(crate) fn clamp_row_from_table(arch: &str) -> Option<bool> {
-    CLAMPED_QKV_ARCHITECTURES.contains(&arch).then_some(false)
+pub(crate) fn clamp_row_from_table(_arch: &str) -> Option<bool> {
+    // No table: `olmo`, `dbrx` and `mpt` state theirs in `crate::models`.
+    None
 }
 
 /// [`resolve_clamp`] given the row (`ArchFacts`).
