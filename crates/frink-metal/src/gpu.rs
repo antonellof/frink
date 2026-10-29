@@ -2284,6 +2284,20 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 "// @FRINK_TERNARY_ENTRIES@",
                 crate::ternary::PTQ1_0_GEMM_ENTRIES_MSL,
                 1,
+            )
+            .replacen(
+                "// @FRINK_LOW_K_FUNCTORS@",
+                &[crate::q2_k::Q2_K_DEQUANT_MSL, crate::q3_k::Q3_K_DEQUANT_MSL].concat(),
+                1,
+            )
+            .replacen(
+                "// @FRINK_LOW_K_ENTRIES@",
+                &[
+                    crate::q2_k::Q2_K_GEMM_ENTRIES_MSL,
+                    crate::q3_k::Q3_K_GEMM_ENTRIES_MSL,
+                ]
+                .concat(),
+                1,
             );
         Box::leak(src.into_boxed_str())
     });
@@ -2293,6 +2307,8 @@ const K_QUANT_MUL_MM_SG_KERNEL_BODY: &str = r#"
 using namespace metal;
 
 // @FRINK_TERNARY_FUNCTOR@
+
+// @FRINK_LOW_K_FUNCTORS@
 
 // llama `get_scale_min_k4_just2`: Q4_K packs eight 6-bit scale/min pairs
 // into 12 bytes, the low four pairs plainly and the high four with their
@@ -3255,6 +3271,7 @@ MUL_MM_SG_ENTRY(q4_0_mul_mm_sg, Q4_0Dequant)
 MUL_MM_SG_ENTRY(q5_0_mul_mm_sg, Q5_0Dequant)
 MUL_MM_SG_ENTRY(iq4_xs_mul_mm_sg, IQ4XSDequant)
 // @FRINK_TERNARY_ENTRIES@
+// @FRINK_LOW_K_ENTRIES@
 MUL_MM_ID_ENTRY(q4_0_mul_mm_id, Q4_0Dequant)
 MUL_MM_ID_ENTRY(q4_k_mul_mm_id, Q4KDequant)
 MUL_MM_ID_ENTRY(q8_0_mul_mm_id, Q8_0Dequant)
@@ -3595,6 +3612,8 @@ pub fn mul_mm_sg_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "Q5_0" => Some(("q5_0_mul_mm_sg", 22, 32)),
         "IQ4_XS" => Some(("iq4_xs_mul_mm_sg", 136, 256)),
         "PTQ1_0" => Some(("ptq1_0_mul_mm_sg", 28, 128)),
+        "Q2_K" => Some(("q2_k_mul_mm_sg", 84, 256)),
+        "Q3_K" => Some(("q3_k_mul_mm_sg", 110, 256)),
         _ => None,
     }
 }
@@ -4137,6 +4156,10 @@ pub(crate) fn mul_mm_sg_aligned_fn(fn_name: &str) -> Option<&'static str> {
         "q4_0_mul_mm_sg_f16" => "q4_0_mul_mm_sg_f16_a",
         "q5_0_mul_mm_sg_f16" => "q5_0_mul_mm_sg_f16_a",
         "iq4_xs_mul_mm_sg_f16" => "iq4_xs_mul_mm_sg_f16_a",
+        "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_a",
+        "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_a",
+        "q2_k_mul_mm_sg_f16" => "q2_k_mul_mm_sg_f16_a",
+        "q3_k_mul_mm_sg_f16" => "q3_k_mul_mm_sg_f16_a",
         _ => return None,
     })
 }
@@ -4186,6 +4209,8 @@ pub(crate) fn encode_mul_mm_sg_f16(
         "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
         "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
         "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
+        "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
+        "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
         _ => return Err(MetalError::CommandFailed),
     };
     let (fn_pick, smem) = mul_mm_sg_variant(fn_f16, l.rows, batch_size);
@@ -5117,7 +5142,7 @@ pub fn launch_ptq1_0_matvec(
 /// and answered zeros for every row but the first group's. The test
 /// below holds the two together.
 pub const MATVEC_KINDS: &[&str] = &[
-    "F32", "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0",
+    "F32", "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
 ];
 
 pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usize, usize, usize)> {
@@ -5136,6 +5161,20 @@ pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usi
             28,
             128,
             4,
+        )),
+        "Q2_K" => Some((
+            crate::q2_k::q2_k_matvec_src(),
+            "q2_k_matvec",
+            84,
+            256,
+            crate::q2_k::ROWS_PER_TG,
+        )),
+        "Q3_K" => Some((
+            crate::q3_k::q3_k_matvec_src(),
+            "q3_k_matvec",
+            110,
+            256,
+            crate::q3_k::ROWS_PER_TG,
         )),
         _ => None,
     }
@@ -7551,6 +7590,8 @@ pub(crate) fn encode_matvec_with_offsets(
         // PTQ1_0: the fork's geometry, ONE simdgroup on NR=4 rows
         // (`N_SG_PTQ1_0 1`, `N_R0_PTQ1_0 4`), simd_sum only.
         "ptq1_0_matvec" => (32usize, 0usize), // NR rows per simdgroup
+        // Q2_K (NR=4) and Q3_K (NR=2): 2 simdgroups x 32 lanes, simd_sum only.
+        "q2_k_matvec" | "q3_k_matvec" => (64usize, 0usize),
         _ if rows_per_tg > 1 => (32usize, 256 * 4),
         _ => {
             let tg = n_blocks_per_row.next_power_of_two().clamp(32, 256);
@@ -7823,7 +7864,7 @@ mod tests {
         // through `metal_matvec_launch`); the cheap check here is that
         // the GEMM table's kinds all have a matvec.
         for kind in [
-            "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0",
+            "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
         ] {
             assert!(mul_mm_sg_meta(kind).is_some(), "{kind} has no GEMM row");
             assert!(
