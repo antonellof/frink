@@ -244,6 +244,10 @@ mod tests {
             "IQ4_NL" => frink_quant::dequant_iq4_nl,
             "IQ4_XS" => frink_quant::dequant_iq4_xs,
             "MXFP4" => frink_quant::dequant_mxfp4_gguf,
+            "Q4_1" => frink_quant::dequant_q4_1,
+            "Q5_1" => frink_quant::dequant_q5_1,
+            "TQ1_0" => |b| frink_quant::ternary::dequant_trits(b, frink_quant::ternary::TQ1_0),
+            "PTQ1_0" => |b| frink_quant::ternary::dequant_trits(b, frink_quant::ternary::PTQ1_0),
             other => panic!("{other}: no frink_quant dequant to hold the gather to"),
         }
     }

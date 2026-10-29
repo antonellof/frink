@@ -15,7 +15,7 @@
 
 use frink_cuda::coalesced_twin::twin_for;
 use frink_cuda::matvec_kinds::coalesced::{MatvecWidth, COALESCED, WARPS_PER_BLOCK};
-use frink_cuda::matvec_kinds::KINDS;
+use frink_cuda::matvec_kinds::{generated_kind, generic, KINDS};
 
 /// Rows not a multiple of the warps per block, so the tail warp of the
 /// last block returns early. Block counts below, at and above a wide
@@ -31,6 +31,9 @@ fn f16_fields(name: &str) -> &'static [usize] {
         "Q4_K" | "Q5_K" => &[0, 2],
         "Q6_K" => &[208],
         "Q8_0" => &[0],
+        "Q4_1" | "Q5_1" => &[0, 2],
+        "TQ1_0" => &[52],
+        "PTQ1_0" => &[26],
         other => panic!("{other}: no header layout for the host check"),
     }
 }
@@ -88,6 +91,58 @@ fn main() {
                     ck.entry
                 ));
             }
+        }
+    }
+    // The matvecs generated from a GEMM dequant (`matvec_kinds::generic`):
+    // block-per-row, so the manifest's warp count is 0 and `main.cpp`
+    // launches one 256-thread block per row. Scales finite, as above.
+    for mv in KINDS {
+        let Some(mm) = generated_kind(mv) else {
+            continue;
+        };
+        let unit = format!("{}_generic", mv.name);
+        std::fs::write(format!("{dir}/{unit}.cu"), mv.source()).unwrap();
+        // One block, a row shorter than the threads, and one long enough
+        // that every thread wraps (over 256 sub-blocks).
+        for n_blocks in [
+            1usize,
+            5,
+            (generic::THREADS * 16 * 2).div_ceil(mm.block_elems) + 3,
+        ] {
+            let row_bytes = n_blocks * mm.block_bytes;
+            let cols = n_blocks * mm.block_elems;
+            let mut state = 999u32 ^ (n_blocks as u32).wrapping_mul(2_654_435_761);
+            let mut weights: Vec<u8> = (0..ROWS * row_bytes)
+                .map(|_| {
+                    state = state.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                    (state >> 16) as u8
+                })
+                .collect();
+            for blk in 0..ROWS * n_blocks {
+                for at in f16_fields(mv.name) {
+                    weights[blk * mm.block_bytes + at + 1] &= 0x3F;
+                }
+            }
+            let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.019).cos()).collect();
+            let want: Vec<f32> = (0..ROWS)
+                .map(|r| {
+                    generic::matvec_twin(
+                        mm,
+                        &weights[r * row_bytes..(r + 1) * row_bytes],
+                        &x,
+                        n_blocks,
+                    )
+                })
+                .collect();
+            let tag = format!("{unit}_{n_blocks}");
+            let bytes = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+            std::fs::write(format!("{dir}/{tag}.w"), &weights).unwrap();
+            std::fs::write(format!("{dir}/{tag}.x"), bytes(&x)).unwrap();
+            std::fs::write(format!("{dir}/{tag}.want"), bytes(&want)).unwrap();
+            manifest.push_str(&format!(
+                "{unit} {} {tag} {ROWS} {row_bytes} {n_blocks} 0\n",
+                mv.fn_name
+            ));
         }
     }
     std::fs::write(format!("{dir}/manifest.txt"), manifest).unwrap();

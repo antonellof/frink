@@ -20,7 +20,9 @@
 pub mod codebook;
 pub mod kquant;
 pub mod legacy;
+pub mod ternary;
 
 pub use codebook::{IQ4_NL, IQ4_XS, MXFP4};
 pub use kquant::{Q2_K, Q3_K, Q4_K, Q5_K, Q6_K};
-pub use legacy::{Q4_0, Q5_0, Q8_0};
+pub use legacy::{Q4_0, Q4_1, Q5_0, Q5_1, Q8_0};
+pub use ternary::{PTQ1_0, TQ1_0};

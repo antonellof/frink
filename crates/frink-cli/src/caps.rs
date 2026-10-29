@@ -135,14 +135,14 @@ mod tests {
     use super::*;
     use frink_gguf::GgmlType;
 
-    /// A Q4_1 projection has no CUDA kernel: the plan must say it leaves
+    /// An IQ2_XXS projection has no CUDA kernel: the plan must say it leaves
     /// the GPU, by kind and op, and say nothing about the Q4_K one.
     #[test]
     fn a_kind_with_no_kernel_is_named_in_the_plan() {
         let tensors = [
             ("token_embd.weight", GgmlType::Q4K),
             ("output.weight", GgmlType::Q6K),
-            ("blk.0.attn_q.weight", GgmlType::Q4_1),
+            ("blk.0.attn_q.weight", GgmlType::IQ2XXS),
             ("blk.0.ffn_up.weight", GgmlType::Q4K),
             ("blk.0.attn_norm.weight", GgmlType::F32),
         ];
@@ -150,11 +150,11 @@ mod tests {
         let text = lines.join("\n");
         assert!(text.contains("4 quantized tensors"), "{text}");
         assert!(
-            text.contains("Q4_1     matvec   -> host (1 tensor)"),
+            text.contains("IQ2_XXS  matvec   -> host (1 tensor)"),
             "{text}"
         );
         assert!(
-            text.contains("Q4_1     gemm     -> host (1 tensor)"),
+            text.contains("IQ2_XXS  gemm     -> host (1 tensor)"),
             "{text}"
         );
         // CUDA gathers a Q4_K embedding on the device (#405).

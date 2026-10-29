@@ -45,8 +45,11 @@ int main(int argc, char** argv) {
     const float* want = (const float*)wantb.data();
     std::vector<float> out(rows, 0.0f);
 
-    const unsigned threads = warps * 32;
-    const unsigned grid = (rows + warps - 1) / warps;
+    // `warps == 0` is a block-per-row kernel (the matvecs generated from
+    // a GEMM dequant): 256 threads, one block per row.
+    const bool per_row = warps == 0;
+    const unsigned threads = per_row ? 256 : warps * 32;
+    const unsigned grid = per_row ? (unsigned)rows : (rows + warps - 1) / warps;
     blockDim = {threads, 1, 1};
     gridDim = {grid, 1, 1};
 
@@ -55,7 +58,7 @@ int main(int argc, char** argv) {
         g_bar = &bar;
         std::vector<std::unique_ptr<Barrier>> wb;
         std::vector<Barrier*> wbp;
-        for (unsigned i = 0; i < warps; i++) {
+        for (unsigned i = 0; i < threads / 32; i++) {
             wb.emplace_back(new Barrier(32));
             wbp.push_back(wb.back().get());
         }

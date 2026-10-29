@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Executes the coalesced matvec CUDA C, at both widths, on this host
-# and compares it bit for bit against the Rust scalar twins. No GPU
+# Executes the coalesced matvec CUDA C, at both widths, and the matvecs
+# generated from a GEMM dequant (`matvec_kinds::generic`), on this host
+# and compares them bit for bit against the Rust scalar twins. No GPU
 # involved; see ../mul_mm_host_check/shim.h for what this does and does
 # not establish.
 #
@@ -40,8 +41,8 @@ while read -r unit fn tag rows row_bytes n_blocks warps; do
 done < "$out/manifest.txt"
 
 if [ "$status" -eq 0 ]; then
-    echo "OK: every coalesced matvec kernel matches its scalar twin bit for bit at both widths"
+    echo "OK: every coalesced matvec (both widths) and every generated matvec matches its scalar twin bit for bit"
 else
-    echo "FAIL: the coalesced matvec CUDA C diverges from its scalar twin" >&2
+    echo "FAIL: a matvec's CUDA C diverges from its scalar twin" >&2
 fi
 exit "$status"
