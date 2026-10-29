@@ -24,7 +24,7 @@
 //! and both arms would run the same serial loop and agree by
 //! construction.
 //!
-//! So [`synthetic`] writes a 2-layer llama per run, 512 wide with a
+//! So [`synthetic_llama`] writes a 2-layer llama per run, 512 wide with a
 //! 1536 FFN, in Q8_0 and in Q4_K. Its narrowest projection (K/V, 256 x
 //! 512) is over that floor, so under `FRINK_CPU_POOL=spin` every weight
 //! matrix in the step goes through `frink_core::cpu_pool`. The real
@@ -39,12 +39,14 @@
 //! binary. Both children are spawned the same way, so neither arm gets
 //! the advantage of being the one that ran in-process.
 
-use std::collections::BTreeMap;
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use common::synthetic_llama;
 use frink_core::cache::KvCache;
-use frink_gguf::{GgmlType, GgufValue, GgufWriter, ShardedGguf, TensorPlan};
+use frink_gguf::{GgmlType, ShardedGguf};
 use frink_models::config::ModelConfig;
 use frink_models::decoder::Decoder;
 use frink_models::tokenizer::{GgufBpeTokenizer, SpecialTokens};
@@ -56,7 +58,7 @@ const MAX_NEW_TOKENS: usize = 12;
 const CHILD: &str = "FRINK_TEST_CPU_POOL_CHILD";
 /// The checkpoint a child should generate from.
 const CHILD_GGUF: &str = "FRINK_TEST_CPU_POOL_GGUF";
-/// Set on a child to feed it [`SYNTHETIC_PROMPT`] as raw token ids: a
+/// Set on a child to feed it [`synthetic_llama::PROMPT`] as raw token ids: a
 /// synthetic checkpoint carries no vocabulary to encode [`PROMPT`] with.
 const CHILD_RAW_PROMPT: &str = "FRINK_TEST_CPU_POOL_RAW_PROMPT";
 /// The line a child prints its token ids on.
@@ -90,183 +92,18 @@ fn real_checkpoints() -> Vec<PathBuf> {
     .collect()
 }
 
-/// Token ids a synthetic checkpoint is prompted with. Distinct, and not
-/// a run, so a wrong embedding row is a wrong prefill.
-const SYNTHETIC_PROMPT: [usize; 6] = [3, 141, 59, 265, 358, 97];
-
-/// The synthetic llama that makes this suite run everywhere.
-mod synthetic {
-    use super::*;
-
-    pub const N_EMBD: usize = 512;
-    pub const N_FF: usize = 1536;
-    pub const N_HEAD: usize = 8;
-    pub const N_HEAD_KV: usize = 4;
-    pub const HEAD_DIM: usize = N_EMBD / N_HEAD;
-    pub const N_LAYER: usize = 2;
-    pub const N_VOCAB: usize = 512;
-
-    /// A deterministic, sign-balanced fill. A 64-bit LCG is enough: the
-    /// weights only have to be fixed, not good.
-    fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
-        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-        (0..n)
-            .map(|_| {
-                x = x
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                let unit = ((x >> 40) as f32) / ((1u64 << 24) as f32);
-                (unit * 2.0 - 1.0) * scale
-            })
-            .collect()
-    }
-
-    fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for row in w.chunks(cols) {
-            let ok = match dtype {
-                GgmlType::Q8_0 => frink_quant::encode_row_q8_0(row, &mut out),
-                GgmlType::Q4K => frink_quant::encode_row_q4_k(row, None, &mut out),
-                other => panic!("the fixture does not encode {other:?}"),
-            };
-            ok.expect("every fixture row length is a whole number of blocks");
-        }
-        out
-    }
-
-    /// One tensor: its name, output rows, input columns, dtype, values.
-    /// GGUF's shape is `[cols, rows]`, fastest dimension first.
-    struct Tensor {
-        name: String,
-        rows: usize,
-        cols: usize,
-        dtype: GgmlType,
-        values: Vec<f32>,
-    }
-
-    fn metadata() -> BTreeMap<String, GgufValue> {
-        let u = |n: usize| GgufValue::U32(n as u32);
-        [
-            (
-                "general.architecture",
-                GgufValue::String("llama".to_string()),
-            ),
-            ("llama.block_count", u(N_LAYER)),
-            ("llama.embedding_length", u(N_EMBD)),
-            ("llama.feed_forward_length", u(N_FF)),
-            ("llama.attention.head_count", u(N_HEAD)),
-            ("llama.attention.head_count_kv", u(N_HEAD_KV)),
-            ("llama.attention.key_length", u(HEAD_DIM)),
-            ("llama.vocab_size", u(N_VOCAB)),
-            ("llama.rope.freq_base", GgufValue::F32(10_000.0)),
-            (
-                "llama.attention.layer_norm_rms_epsilon",
-                GgufValue::F32(1e-5),
-            ),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect()
-    }
-
-    fn tensors(dtype: GgmlType) -> Vec<Tensor> {
-        let mut seed = 0u64;
-        let mut matrix = |name: String, rows: usize, cols: usize, dtype: GgmlType| {
-            seed += 1;
-            let scale = 1.0 / (cols as f32).sqrt();
-            Tensor {
-                name,
-                rows,
-                cols,
-                dtype,
-                values: fill(seed, rows * cols, scale),
-            }
+/// The two kinds this suite writes, with `frink_quant`'s encoders.
+fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in w.chunks(cols) {
+        let ok = match dtype {
+            GgmlType::Q8_0 => frink_quant::encode_row_q8_0(row, &mut out),
+            GgmlType::Q4K => frink_quant::encode_row_q4_k(row, None, &mut out),
+            other => panic!("the fixture does not encode {other:?}"),
         };
-        let norm = |name: String, seed: u64| Tensor {
-            name,
-            rows: 1,
-            cols: N_EMBD,
-            dtype: GgmlType::F32,
-            values: fill(1000 + seed, N_EMBD, 0.2)
-                .into_iter()
-                .map(|v| 1.0 + v)
-                .collect(),
-        };
-
-        let kv = N_HEAD_KV * HEAD_DIM;
-        let mut out = vec![matrix(
-            "token_embd.weight".to_string(),
-            N_VOCAB,
-            N_EMBD,
-            GgmlType::F32,
-        )];
-        for l in 0..N_LAYER {
-            out.push(norm(format!("blk.{l}.attn_norm.weight"), 2 * l as u64));
-            for (name, rows, cols) in [
-                ("attn_q", N_EMBD, N_EMBD),
-                ("attn_k", kv, N_EMBD),
-                ("attn_v", kv, N_EMBD),
-                ("attn_output", N_EMBD, N_EMBD),
-            ] {
-                out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
-            }
-            out.push(norm(format!("blk.{l}.ffn_norm.weight"), 2 * l as u64 + 1));
-            for (name, rows, cols) in [
-                ("ffn_gate", N_FF, N_EMBD),
-                ("ffn_up", N_FF, N_EMBD),
-                ("ffn_down", N_EMBD, N_FF),
-            ] {
-                out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
-            }
-        }
-        out.push(norm("output_norm.weight".to_string(), 99));
-        out.push(matrix("output.weight".to_string(), N_VOCAB, N_EMBD, dtype));
-        out
+        ok.expect("every fixture row length is a whole number of blocks");
     }
-
-    /// Writes the checkpoint with every weight matrix in `dtype` and
-    /// returns its path.
-    pub fn write(dtype: GgmlType) -> PathBuf {
-        let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype)
-            .into_iter()
-            .map(|t| {
-                let shape = if t.rows == 1 {
-                    vec![t.cols as u64]
-                } else {
-                    vec![t.cols as u64, t.rows as u64]
-                };
-                let bytes = if t.dtype == GgmlType::F32 {
-                    t.values.iter().flat_map(|v| v.to_le_bytes()).collect()
-                } else {
-                    encode(t.dtype, t.cols, &t.values)
-                };
-                let plan = TensorPlan {
-                    name: t.name,
-                    shape,
-                    dtype: t.dtype,
-                    byte_len: bytes.len(),
-                };
-                (plan, bytes)
-            })
-            .collect();
-        let plan = encoded.iter().map(|(p, _)| p.clone()).collect();
-
-        // `target/`, so a leftover is swept by `cargo clean`; the pid
-        // keeps two concurrent runs apart.
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-        std::fs::create_dir_all(&dir).expect("create the fixture directory");
-        let path = dir.join(format!(
-            "cpu_pool_parity_{dtype:?}-{}.gguf",
-            std::process::id()
-        ));
-        let file = std::fs::File::create(&path).expect("create the fixture");
-        let mut w = GgufWriter::create(file, &metadata(), plan).expect("write the header");
-        for (p, bytes) in &encoded {
-            w.write_tensor(&p.name, bytes).expect("write a tensor");
-        }
-        w.finish().expect("finish the fixture");
-        path
-    }
+    out
 }
 
 fn argmax(logits: &[f32]) -> usize {
@@ -286,7 +123,7 @@ fn greedy_tokens(path: &Path, raw_prompt: bool) -> Vec<usize> {
     let decoder = Decoder::from_gguf(path, config.clone()).expect("load decoder");
 
     let prompt: Vec<usize> = if raw_prompt {
-        SYNTHETIC_PROMPT.to_vec()
+        synthetic_llama::PROMPT.to_vec()
     } else {
         GgufBpeTokenizer::from_gguf(&file)
             .expect("tokenizer")
@@ -402,7 +239,7 @@ fn assert_schedulers_agree(path: &Path, raw_prompt: bool) {
 #[test]
 fn the_two_cpu_schedulers_produce_token_identical_output() {
     for dtype in [GgmlType::Q8_0, GgmlType::Q4K] {
-        let path = synthetic::write(dtype);
+        let path = synthetic_llama::write("cpu_pool_parity", dtype, encode);
         assert_schedulers_agree(&path, true);
         std::fs::remove_file(&path).ok();
     }

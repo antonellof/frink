@@ -49,6 +49,18 @@ pub(crate) mod scratch_pool;
 /// PrismML's PTQ1_0 trit format on Metal (`ternary::PTQ1_0Dequant`).
 pub mod ternary;
 
+/// `Q2_K` on Metal: the matvec and the GEMM functor.
+#[cfg(feature = "metal")]
+pub mod q2_k;
+
+/// `Q3_K` on Metal: the matvec and the GEMM functor.
+#[cfg(feature = "metal")]
+pub mod q3_k;
+
+/// The kernel-vs-CPU-dequant check `q2_k` and `q3_k` share.
+#[cfg(all(test, feature = "metal"))]
+mod k_quant_check;
+
 #[cfg(feature = "metal")]
 pub mod attn;
 

@@ -1655,6 +1655,8 @@ impl MetalGraph {
                 "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
                 "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
                 "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
+                "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
+                "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
                 _ => continue,
             };
             warm_mul_mm_sg_pipeline(device, f16_static)?;

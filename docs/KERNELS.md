@@ -22,7 +22,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 |---|---|---|---|
 | cpu | 17 | 17 | 0 |
 | cuda | 12 | 12 | 23 |
-| metal | 15 | 15 | 21 |
+| metal | 13 | 13 | 21 |
 | vulkan | 22 | 23 | 23 |
 
 ## matvec (decode)
@@ -34,8 +34,8 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q4_K | kernel | kernel | kernel | HOST |
 | Q5_K | kernel | kernel | kernel | HOST |
 | Q6_K | kernel | kernel | kernel | HOST |
-| Q2_K | f32 | kernel | HOST | HOST |
-| Q3_K | f32 | kernel | HOST | HOST |
+| Q2_K | f32 | kernel | kernel | HOST |
+| Q3_K | f32 | kernel | kernel | HOST |
 | Q4_1 | f32 | HOST | HOST | HOST |
 | Q5_0 | f32 | kernel | kernel | HOST |
 | Q5_1 | f32 | HOST | HOST | HOST |
@@ -62,8 +62,8 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q4_K | kernel | kernel | kernel | HOST |
 | Q5_K | kernel | kernel | kernel | HOST |
 | Q6_K | kernel | kernel | kernel | HOST |
-| Q2_K | f32 | kernel | HOST | HOST |
-| Q3_K | f32 | kernel | HOST | HOST |
+| Q2_K | f32 | kernel | kernel | HOST |
+| Q3_K | f32 | kernel | kernel | HOST |
 | Q4_1 | f32 | HOST | HOST | HOST |
 | Q5_0 | f32 | kernel | kernel | HOST |
 | Q5_1 | f32 | HOST | HOST | HOST |

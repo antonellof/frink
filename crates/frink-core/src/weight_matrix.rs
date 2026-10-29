@@ -194,10 +194,10 @@ impl QuantKind {
             QuantKind::Q6K => Some("Q6_K"),
             QuantKind::IQ4XS => Some("IQ4_XS"),
             QuantKind::Ptq1_0 => Some("PTQ1_0"),
+            QuantKind::Q2K => Some("Q2_K"),
+            QuantKind::Q3K => Some("Q3_K"),
             // No Metal matvec kernel: scalar host paths only.
-            QuantKind::Q2K
-            | QuantKind::Q3K
-            | QuantKind::Q4_1
+            QuantKind::Q4_1
             | QuantKind::Q5_1
             | QuantKind::Q8_1
             | QuantKind::IQ4NL
@@ -1312,18 +1312,10 @@ impl WeightMatrix {
         else {
             return None;
         };
-        let kind_name = match kind {
-            QuantKind::Q8_0 => "Q8_0",
-            QuantKind::Q4_0 => "Q4_0",
-            QuantKind::Q5_0 => "Q5_0",
-            QuantKind::Q4K => "Q4_K",
-            QuantKind::Q5K => "Q5_K",
-            QuantKind::Q6K => "Q6_K",
-            QuantKind::IQ4XS => "IQ4_XS",
-            QuantKind::Ptq1_0 => "PTQ1_0",
-            _ => return None,
-        };
-        let (fn_name, block_bytes, block_elems) = frink_metal::gpu::mul_mm_sg_meta(kind_name)?;
+        // Keyed by the kind's own name, so `mul_mm_sg_meta` is the only
+        // list of which kinds have a GEMM. The same hand-written match in
+        // `apply_gpu_batch` once lacked Q5_0 and PTQ1_0.
+        let (fn_name, block_bytes, block_elems) = frink_metal::gpu::mul_mm_sg_meta(kind.name())?;
         Some(frink_metal::gpu::MulMmSgLaunch {
             weights: data.as_slice(),
             rows: *rows,
