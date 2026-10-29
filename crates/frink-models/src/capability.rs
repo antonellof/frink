@@ -1347,47 +1347,9 @@ pub fn uses_non_parametric_rms_norm(arch: &str) -> bool {
     NON_PARAMETRIC_RMS_NORM.contains(&arch)
 }
 
-/// Architectures that normalise with a **LayerNorm with a learned
-/// weight and no bias** -- `build_norm(x, w, NULL, LLM_NORM, il)` -- at
-/// every norm site.
-///
-/// `dbrx`: `src/models/dbrx.cpp:4` reads `LLM_KV_ATTENTION_LAYERNORM_EPS`
-/// (not the RMS one) and the graph passes `LLM_NORM` with a weight and
-/// a null bias at all three sites -- `:69-71` pre-attention, `:110-112`
-/// pre-FFN (on `attn_out_norm`, its pre-FFN tensor; see
-/// `crate::norm_sites`) and `:140-142` final. `dbrx.cpp:29,34,23`
-/// create the three weights and no bias tensor at all.
-///
-/// The variant is `crate::norm::NormOp::LayerNorm`. It was deliberately
-/// not written alongside the parameterless one, because every row that
-/// needed it refused for more than the norm; `dbrx` needed two more
-/// things and both were one implementation each (`crate::clamp_kqv`,
-/// `crate::norm_sites`), which is what made it worth landing.
-///
-/// **What this list does NOT close**, so nobody adds a name on the
-/// strength of "it is LayerNorm too": the `nemotron` / `orion` /
-/// `stablelm` / `codeshell` / `jais2` / `starcoder` / `starcoder2` /
-/// `phimoe` group all create `*_norm.bias` as REQUIRED and `build_norm`
-/// adds it after the multiply. That is the `LayerNorm(w, b)` variant,
-/// [`BIASED_LAYER_NORM`], which arrived on 2026-09-12 when `orion` and
-/// `nemotron` turned out to need nothing else; six of the group are on
-/// it now and `starcoder` / `phimoe` still refuse for something on top.
-///
-/// The second caller of THIS variant is `command-r` (Command-R 35B):
-/// `command-r.cpp:68,127` pass `attn_norm` / `output_norm` with a NULL
-/// bias to `LLM_NORM`, over the shared-norm parallel residual
-/// (`crate::parallel_residual`) with a `logit_scale` MULTIPLY
-/// (`crate::scalar_multipliers`); `tests/command_r_graphs.rs`. The
-/// third is `cohere2` (Command-R7B), the same graph with a window
-/// (`cohere2.cpp:78,147`); `tests/cohere2_graphs.rs`.
-///
-/// `dbrx`, `command-r`, `cohere2` and `cohere2moe` state their rows in
-/// `crate::models` (#403 steps 6 and 7b).
-pub const WEIGHTED_LAYER_NORM: &[&str] = &["mpt"];
-
 /// Does this architecture normalise with a weighted LayerNorm? Its
-/// norm-site row's function, which is [`WEIGHTED_LAYER_NORM`] or its
-/// `crate::models` definition.
+/// norm-site row's function: `dbrx`, `command-r`, `cohere2`,
+/// `cohere2moe` and `mpt` state it in `crate::models`.
 pub fn uses_weighted_layer_norm(arch: &str) -> bool {
     crate::models::ArchFacts::of(arch)
         .tensors
@@ -1447,12 +1409,9 @@ pub const BIASED_LAYER_NORM: &[&str] = &[
     "starcoder2",
     "codeshell",
     "jais2",
-    // `stablelm`, `gptneox`, `falcon` and `phi2` state theirs in
-    // `crate::models` (#403 step 7a).
-    "gpt2",
-    "starcoder",
-    "bloom",
-    "jais",
+    // `stablelm`, `gptneox`, `falcon`, `phi2`, `gpt2`, `starcoder`,
+    // `bloom` and `jais` state theirs in `crate::models` (#403 steps 7a
+    // and 8).
 ];
 
 /// See [`BIASED_LAYER_NORM`].
@@ -3597,13 +3556,10 @@ pub fn uses_gelu_ungated(arch: &str) -> bool {
     crate::models::ArchFacts::of(arch).ffn.gelu_ungated
 }
 
-/// [`uses_gelu_ungated`] from this list alone (`gptneox`, `falcon` and
-/// `phi2` are in `crate::models`).
+/// [`uses_gelu_ungated`] from this list alone (`gptneox`, `falcon`,
+/// `phi2`, `gpt2`, `starcoder`, `bloom` and `mpt` are in `crate::models`).
 pub(crate) fn uses_gelu_ungated_from_table(arch: &str) -> bool {
-    matches!(
-        arch,
-        "starcoder2" | "codeshell" | "gpt2" | "starcoder" | "bloom" | "mpt"
-    )
+    matches!(arch, "starcoder2" | "codeshell")
 }
 
 #[cfg(test)]
@@ -3872,6 +3828,21 @@ pub fn attention_scale_override(
     n_heads: usize,
     head_dim: usize,
 ) -> Option<f32> {
+    (crate::models::ArchFacts::of(arch)
+        .rules
+        .attention_scale_override)(arch, n_layers, hidden_dim, n_heads, head_dim)
+}
+
+/// [`attention_scale_override`] from this function's arms alone, for
+/// `HparamRules::LEGACY` (`jais`'s `1 / head_dim` is
+/// `crate::models::jais`'s rule).
+pub fn attention_scale_override_from_table(
+    arch: &str,
+    n_layers: usize,
+    hidden_dim: usize,
+    n_heads: usize,
+    head_dim: usize,
+) -> Option<f32> {
     // `case 62` / `case 46` in the `switch (hparams.n_layer())` that
     // picks `LLM_TYPE_27B`. Every other Gemma architecture
     // (`gemma-embedding`, `gemma3n`, `gemma4`) sets `f_attention_scale`
@@ -3883,9 +3854,6 @@ pub fn attention_scale_override(
     };
     if head_dim == 0 {
         return None;
-    }
-    if arch == "jais" {
-        return Some(1.0 / head_dim as f32);
     }
     if !is_27b || n_heads == 0 {
         return None;

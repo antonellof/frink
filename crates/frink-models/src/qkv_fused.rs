@@ -72,38 +72,14 @@ pub enum QkvTensors {
 /// not run them on this loader: `modern-bert`, `neo-bert`, `cogvlm`
 /// (deferred), `gemma4` (its own engine), `granite-switch`, `lfm2`'s
 /// decision head and the MLA graphs (refused or dedicated). `qwen`,
-/// `dbrx`, `falcon` and `gptneox` state theirs in `crate::models`.
+/// `dbrx`, `falcon`, `gptneox`, `bloom`, `gpt2`, `jais`, `mpt` and
+/// `starcoder` state theirs in `crate::models`.
 pub const QKV_TENSOR_CREATORS: &[(&str, QkvTensors, &str)] = &[
     ("bailingmoe2", QkvTensors::Fused(None), "bailingmoe2.cpp:46"),
     ("bitnet", QkvTensors::SplitUnbiased, "bitnet.cpp:26-28"),
-    (
-        "bloom",
-        QkvTensors::Fused(Some(Presence::Required)),
-        "bloom.cpp:44-45",
-    ),
-    (
-        "gpt2",
-        QkvTensors::Fused(Some(Presence::Required)),
-        "gpt2.cpp:37-38",
-    ),
-    (
-        "jais",
-        QkvTensors::Fused(Some(Presence::Required)),
-        "jais.cpp:31-32",
-    ),
-    (
-        "mpt",
-        QkvTensors::Fused(Some(Presence::Optional)),
-        "mpt.cpp:36-37",
-    ),
     ("openelm", QkvTensors::Fused(None), "openelm.cpp:34"),
     ("plamo2", QkvTensors::Fused(None), "plamo2.cpp:91"),
     ("plamo3", QkvTensors::Fused(None), "plamo3.cpp:45"),
-    (
-        "starcoder",
-        QkvTensors::Fused(Some(Presence::Required)),
-        "starcoder.cpp:39-40",
-    ),
 ];
 
 /// The [`QkvTensors`] the loader reads for `arch`, through the registry.
@@ -111,8 +87,8 @@ pub fn qkv_tensors(arch: &str) -> QkvTensors {
     crate::models::ArchFacts::of(arch).tensors.qkv_tensors
 }
 
-/// [`QkvTensors`] for `arch` from [`QKV_TENSOR_CREATORS`] alone (`qwen`,
-/// `dbrx`, `falcon` and `gptneox` are in `crate::models`).
+/// [`QkvTensors`] for `arch` from [`QKV_TENSOR_CREATORS`] alone (the rest
+/// are in `crate::models`).
 pub(crate) fn qkv_tensors_from_table(arch: &str) -> QkvTensors {
     QKV_TENSOR_CREATORS
         .iter()

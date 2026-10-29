@@ -176,8 +176,9 @@ pub struct TopologyFacts {
     pub skip_stream: bool,
     /// `mamba2::parallel_with_attention`.
     pub parallel_ssm: bool,
-    /// `position_embd::learned_positions`.
-    pub learned_positions: bool,
+    /// `alibi`: how the graph arrives at its ALiBi bias, which positions
+    /// the tokens in place of RoPE.
+    pub alibi: Option<crate::alibi::MaxAlibiBias>,
     /// `parallel_residual`: attention and FFN read the same layer input
     /// and are summed into one residual add.
     pub parallel_residual: Option<&'static crate::parallel_residual::ParallelResidual>,
@@ -222,6 +223,9 @@ pub struct TensorFacts {
     pub ffn_bias: Option<(Presence, bool)>,
     /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
     pub output_bias: Option<Presence>,
+    /// `position_embd`: a learned position table added to the
+    /// embeddings, whether it is REQUIRED, and the llama.cpp lines.
+    pub position_embd: Option<(Presence, &'static str)>,
     /// `qkv_fused::QKV_TENSOR_CREATORS`: which Q/K/V biases the graph
     /// creates, and how.
     pub qkv_tensors: crate::qkv_fused::QkvTensors,
@@ -265,7 +269,7 @@ impl HparamRules {
     /// Today's name-keyed functions.
     pub const LEGACY: Self = Self {
         swa_window_override: crate::capability::swa_window_override_from_table,
-        attention_scale_override: crate::capability::attention_scale_override,
+        attention_scale_override: crate::capability::attention_scale_override_from_table,
         rope_layers: crate::rope_layers::rope_layers_from_table,
         load_checks: no_load_checks,
         weightless_qk_norm: crate::weightless_qk_norm::no_weightless_qk_norm,
@@ -328,7 +332,7 @@ impl ArchFacts {
             reads_rope_pattern: false,
             skip_stream: false,
             parallel_ssm: false,
-            learned_positions: false,
+            alibi: None,
             parallel_residual: None,
             rope_gated_on_finetuned: false,
             reads_nextn: false,
@@ -347,6 +351,7 @@ impl ArchFacts {
             attn_out_bias: None,
             ffn_bias: None,
             output_bias: None,
+            position_embd: None,
             qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
             attn_norm_2_feeds_attention: false,
             parallel_dense: None,
@@ -436,7 +441,8 @@ impl ArchFacts {
                 reads_rope_pattern: crate::rope_layers::reads_rope_pattern(arch),
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
-                learned_positions: crate::position_embd::learned_positions(arch),
+                // No table: the five ALiBi graphs are in `crate::models`.
+                alibi: None,
                 // No table: all eight graphs are in `crate::models`.
                 parallel_residual: None,
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
@@ -464,6 +470,8 @@ impl ArchFacts {
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
+                // No table: `gpt2`, `starcoder` and `mpt` are in `crate::models`.
+                position_embd: None,
                 qkv_tensors: crate::qkv_fused::qkv_tensors_from_table(arch),
                 // No table: `falcon` was the only row.
                 attn_norm_2_feeds_attention: false,

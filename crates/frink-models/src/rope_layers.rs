@@ -267,6 +267,13 @@ pub fn default_no_rope_every(phase: NoRopePhase) -> RopeLayers {
     }
 }
 
+/// No layer rotates (`gpt2.cpp` and `starcoder.cpp` call no
+/// `ggml_rope`; a learned position table is added instead), as an
+/// `HparamRules::rope_layers` for the definitions that state it.
+pub fn never(_arch: &str, _n_layers: usize, _has_window: bool, _dense: usize) -> RopeLayers {
+    RopeLayers::Never
+}
+
 /// [`rope_layers`] from this table alone, for `HparamRules::LEGACY`.
 pub fn rope_layers_from_table(
     arch: &str,
@@ -299,10 +306,6 @@ pub fn rope_layers_from_table(
         // REQUIRED key, so the rule is unconditional here as it is for
         // `cohere2` and `maple`.
         "muse-glimmer" => RopeLayers::SlidingOnly,
-        // `gpt2.cpp` and `starcoder.cpp` call no `ggml_rope`: a learned
-        // position table is added to the embeddings instead
-        // (`crate::position_embd`).
-        "gpt2" | "starcoder" => RopeLayers::Never,
         // `nemotron-h.cpp:181-193` builds its attention with no
         // `ggml_rope_ext` at all: the Mamba-2 layers carry position.
         "nemotron_h" | "nemotron_h_moe" => RopeLayers::Never,
@@ -310,12 +313,6 @@ pub fn rope_layers_from_table(
         // attention at all. All three are `LLAMA_ROPE_TYPE_NONE`
         // (llama-model.cpp:2555-2557).
         "jamba" | "mamba" | "mamba2" => RopeLayers::Never,
-        // The ALiBi graphs (`crate::alibi`): `bloom`, `refact`, `mpt`,
-        // `jais`, and `baichuan` at 40 layers ONLY (`baichuan.cpp:11-14`;
-        // the 7B rotates). One table decides both the bias and the
-        // absence of rotation, so the two cannot disagree about the
-        // layer count.
-        _ if crate::alibi::positions_by_alibi(arch, n_layers) => RopeLayers::Never,
         // `smollm3.cpp:5` assigns the step unconditionally, so this is
         // every SmolLM3 file: 9 of a 36-layer SmolLM3-3B's layers get no
         // rotation.

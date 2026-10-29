@@ -44,19 +44,6 @@ pub enum MaxAlibiBias {
     Key,
 }
 
-/// The five generic-path graphs, with the lines.
-pub const ALIBI_ARCHITECTURES: &[(&str, MaxAlibiBias, &str)] = &[
-    ("bloom", MaxAlibiBias::Literal, "src/models/bloom.cpp:18"),
-    ("refact", MaxAlibiBias::Literal, "src/models/refact.cpp:12"),
-    (
-        "baichuan",
-        MaxAlibiBias::LiteralAtLayers(40),
-        "src/models/baichuan.cpp:11-14",
-    ),
-    ("mpt", MaxAlibiBias::Key, "src/models/mpt.cpp:6"),
-    ("jais", MaxAlibiBias::Key, "src/models/jais.cpp:5"),
-];
-
 /// The literal every no-key graph uses.
 pub const LLAMA_CPP_ALIBI_LITERAL: f32 = 8.0;
 
@@ -66,11 +53,26 @@ pub const LLAMA_CPP_ALIBI_LITERAL: f32 = 8.0;
 /// architecture not in the table, `baichuan` at any other depth, and an
 /// `mpt` / `jais` file whose key is absent or non-positive.
 pub fn max_alibi_bias(arch: &str, n_layers: usize, key: Option<f32>) -> Option<f32> {
-    let (_, rule, _) = ALIBI_ARCHITECTURES.iter().find(|(n, _, _)| *n == arch)?;
+    max_alibi_bias_for(
+        crate::models::ArchFacts::of(arch).topology.alibi,
+        n_layers,
+        key,
+    )
+}
+
+/// [`max_alibi_bias`] given the row (`ArchFacts`). The five ALiBi graphs
+/// (`bloom`, `refact`, `baichuan`, `mpt`, `jais`) state their rule in
+/// `crate::models`.
+pub fn max_alibi_bias_for(
+    rule: Option<MaxAlibiBias>,
+    n_layers: usize,
+    key: Option<f32>,
+) -> Option<f32> {
+    let rule = rule?;
     let bias = match rule {
         MaxAlibiBias::Literal => LLAMA_CPP_ALIBI_LITERAL,
         MaxAlibiBias::LiteralAtLayers(n) => {
-            if n_layers == *n {
+            if n_layers == n {
                 LLAMA_CPP_ALIBI_LITERAL
             } else {
                 return None;
@@ -85,9 +87,24 @@ pub fn max_alibi_bias(arch: &str, n_layers: usize, key: Option<f32>) -> Option<f
 /// rotates), at `n_layers`: the table's answer with the literal, for
 /// the rope-layers rule that has no key to consult.
 pub fn positions_by_alibi(arch: &str, n_layers: usize) -> bool {
-    ALIBI_ARCHITECTURES.iter().any(|(n, rule, _)| {
-        *n == arch && !matches!(rule, MaxAlibiBias::LiteralAtLayers(l) if *l != n_layers)
-    })
+    positions_by_alibi_for(crate::models::ArchFacts::of(arch).topology.alibi, n_layers)
+}
+
+/// [`positions_by_alibi`] given the row (`ArchFacts`).
+pub fn positions_by_alibi_for(rule: Option<MaxAlibiBias>, n_layers: usize) -> bool {
+    rule.is_some_and(|rule| !matches!(rule, MaxAlibiBias::LiteralAtLayers(l) if l != n_layers))
+}
+
+/// The per-layer RoPE rule an ALiBi graph's definition sets: no layer
+/// rotates where the bias positions the tokens, every layer where it
+/// does not (Baichuan-7B). One row decides both, so the bias and the
+/// absence of rotation cannot disagree about the layer count.
+pub fn alibi_rope_layers(rule: MaxAlibiBias, n_layers: usize) -> crate::rope_layers::RopeLayers {
+    if positions_by_alibi_for(Some(rule), n_layers) {
+        crate::rope_layers::RopeLayers::Never
+    } else {
+        crate::rope_layers::RopeLayers::All
+    }
 }
 
 #[cfg(test)]
@@ -97,7 +114,17 @@ mod tests {
     /// Every row is a registered architecture on the generic path.
     #[test]
     fn every_row_is_a_registered_generic_architecture() {
-        for (arch, _, lines) in ALIBI_ARCHITECTURES {
+        // Every row, over the catalog: they live in `crate::models`.
+        let mut rows: Vec<&str> = crate::capability::architecture_catalog()
+            .iter()
+            .map(|p| p.gguf_name)
+            .filter(|n| crate::models::ArchFacts::of(n).topology.alibi.is_some())
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, ["baichuan", "bloom", "jais", "mpt", "refact"]);
+        for arch in rows {
+            let lines = crate::models::find(arch).map_or("", |d| d.source);
+            assert!(positions_by_alibi(arch, 40), "`{arch}` ({lines})");
             assert!(
                 matches!(
                     crate::capability::resolve_architecture(arch),
