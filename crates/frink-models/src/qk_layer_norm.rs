@@ -46,7 +46,7 @@
 pub const PER_HEAD_LAYER_NORM_QK: &[(&str, bool, &str)] = &[
     // `stablelm` (optional) states its row in `crate::models::stablelm`
     // (#403 step 7a).
-    ("command-r", true, "src/models/command-r.cpp:28-31,80,87"),
+    // `command-r` (required) is in `crate::models::command_r`.
     ("chameleon", true, "src/models/chameleon.cpp:33-35,91-102"),
     // Not per head: `{n_embd}` with a bias, one LayerNorm over the whole
     // projection (`mpt.cpp:52-56,106-115`, optional; MPT-7B has none,

@@ -114,8 +114,6 @@ pub fn window_required(arch: &str) -> Option<&'static str> {
 /// `ArchFacts::from_tables`.
 pub(crate) fn window_required_from_table(arch: &str) -> Option<&'static str> {
     match arch {
-        "cohere2" => Some("cohere2.cpp:13"),
-        "cohere2moe" => Some("cohere2moe.cpp:13"),
         "exaone-moe" => Some("exaone-moe.cpp:13"),
         "lfm3" => Some("lfm3.cpp:18"),
         _ => None,

@@ -154,31 +154,32 @@ pub const PLAMO: ParallelResidual = ParallelResidual {
     lines: "src/models/plamo.cpp:59-64,97-98,111-112",
 };
 
-/// The graphs not yet in `crate::models`, with the lines; the census of
-/// all eight is [`parallel_residual_rows`].
-pub const PARALLEL_RESIDUAL_GRAPHS: &[ParallelResidual] = &[
-    ParallelResidual {
-        arch: "command-r",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::Always,
-        second_norm: None,
-        lines: "src/models/command-r.cpp:68,106-119",
-    },
-    ParallelResidual {
-        arch: "cohere2",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::Always,
-        second_norm: None,
-        lines: "src/models/cohere2.cpp:120-134",
-    },
-    ParallelResidual {
-        arch: "cohere2moe",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::Always,
-        second_norm: None,
-        lines: "src/models/cohere2moe.cpp:222-266",
-    },
-];
+/// `command-r`'s row, stated by `crate::models::command_r` (#403 step 7b).
+pub const COMMAND_R: ParallelResidual = ParallelResidual {
+    arch: "command-r",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::Always,
+    second_norm: None,
+    lines: "src/models/command-r.cpp:68,106-119",
+};
+
+/// `cohere2`'s row, stated by `crate::models::cohere2` (#403 step 7b).
+pub const COHERE2: ParallelResidual = ParallelResidual {
+    arch: "cohere2",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::Always,
+    second_norm: None,
+    lines: "src/models/cohere2.cpp:120-134",
+};
+
+/// `cohere2moe`'s row, stated by `crate::models::cohere2moe` (#403 step 7b).
+pub const COHERE2MOE: ParallelResidual = ParallelResidual {
+    arch: "cohere2moe",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::Always,
+    second_norm: None,
+    lines: "src/models/cohere2moe.cpp:222-266",
+};
 
 /// The row for an architecture, or `None` for a sequential graph.
 pub fn parallel_residual(arch: &str) -> Option<&'static ParallelResidual> {
@@ -187,19 +188,12 @@ pub fn parallel_residual(arch: &str) -> Option<&'static ParallelResidual> {
         .parallel_residual
 }
 
-/// [`parallel_residual`] from [`PARALLEL_RESIDUAL_GRAPHS`] alone, for
-/// `ArchFacts::from_tables`.
-pub(crate) fn parallel_residual_from_table(arch: &str) -> Option<&'static ParallelResidual> {
-    PARALLEL_RESIDUAL_GRAPHS.iter().find(|row| row.arch == arch)
-}
-
-/// Every row: the table's and the `crate::models` definitions'.
+/// Every row, from the `crate::models` definitions: all eight graphs
+/// have moved, so there is no legacy table.
 pub fn parallel_residual_rows() -> impl Iterator<Item = &'static ParallelResidual> {
-    PARALLEL_RESIDUAL_GRAPHS.iter().chain(
-        crate::models::REGISTRY
-            .iter()
-            .filter_map(|d| d.facts.topology.parallel_residual),
-    )
+    crate::models::REGISTRY
+        .iter()
+        .filter_map(|d| d.facts.topology.parallel_residual)
 }
 
 /// Whether layer `l` of `arch` in `file` is a parallel layer, by the

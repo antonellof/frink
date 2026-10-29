@@ -57,6 +57,7 @@ pub const FACTS: ArchFacts = ArchFacts {
         ..ArchFacts::DEFAULT.moe
     },
     swa: SwaFacts {
+        pattern_key_read: crate::swa_layers::PatternKeyRead::PerLayerBool,
         window_required: Some("kolibri1.cpp:10"),
         rope_base_follows_model: true,
         rope_scale_follows_model: true,

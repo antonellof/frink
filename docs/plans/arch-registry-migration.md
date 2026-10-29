@@ -171,6 +171,17 @@ eligibility test so a new field forces a Metal decision.
   `NormSites::for_layer` takes the row. Step 7b is the Cohere graphs
   (`command-r`, `cohere2`, `cohere2moe`), whose rows also span the SWA,
   multiplier, MoE and MTP tables.
+- Step 7b: `models/command_r.rs`, `cohere2.rs`, `cohere2moe.rs`. The
+  last three parallel-residual rows moved, so `PARALLEL_RESIDUAL_GRAPHS`
+  is deleted; so are `NORM_BY_RMS_EPS_KEY` and `SHARED_EXPERT_SUM_SCALE`
+  (cohere2moe only). `cohere2`'s and `cohere2moe`'s per-layer RoPE are
+  `HparamRules`. `SwaFacts::pattern_key_read` is new: #463 had added
+  `swa_layers`' two reader tables after `exaone4`, `gpt-oss`, `llama4`,
+  `olmo2` and `kolibri1` moved, and the guard did not list them, so
+  those five rows sat in a legacy table. They are in their files now,
+  both tables are in `behaviour_table_names`, and
+  `the_registry_pattern_readers_are_pinned` holds the census. Divergence
+  found and filed, not fixed: #464.
 
 What step 2 changed about the target design:
 

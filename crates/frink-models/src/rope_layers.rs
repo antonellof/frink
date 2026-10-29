@@ -272,7 +272,7 @@ pub fn rope_layers_from_table(
     arch: &str,
     n_layers: usize,
     has_sliding_window: bool,
-    n_dense_lead: usize,
+    _n_dense_lead: usize,
 ) -> RopeLayers {
     let no_rope_every = default_no_rope_every;
     match arch {
@@ -286,12 +286,6 @@ pub fn rope_layers_from_table(
         // the two rows are one rule (`exaone4`'s half is
         // `crate::models::exaone4`).
         "exaone-moe" => sliding_layers_rotate(has_sliding_window),
-        // `cohere2.cpp:4` pins `swa_type` to STANDARD and `:13` reads the
-        // window as a REQUIRED key (the loader refuses a file without
-        // it, `crate::swa_geometry::window_required`), so this is
-        // `exaone-moe`'s rule spelled `if (is_swa)` at `:91`: Command-R7B
-        // rotates its three sliding layers in four and not the fourth.
-        "cohere2" => RopeLayers::SlidingOnly,
         // `maple.cpp:88` is the same `if (hparams.is_swa(il))` around
         // both `ggml_rope_ext` calls, and `:5` reads the window as a
         // REQUIRED key, so a Maple file always has one and the rule is
@@ -305,11 +299,6 @@ pub fn rope_layers_from_table(
         // REQUIRED key, so the rule is unconditional here as it is for
         // `cohere2` and `maple`.
         "muse-glimmer" => RopeLayers::SlidingOnly,
-        // `cohere2moe.cpp:192` adds `|| il < n_layer_dense_lead`
-        // (`:177-179`: "dense-prefix full-attention layers use RoPE");
-        // `:13` reads the window REQUIRED as `cohere2` does, so
-        // `has_sliding_window` is always true here.
-        "cohere2moe" => RopeLayers::SlidingOrLeadingDense { n_dense_lead },
         // `gpt2.cpp` and `starcoder.cpp` call no `ggml_rope`: a learned
         // position table is added to the embeddings instead
         // (`crate::position_embd`).

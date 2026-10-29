@@ -7,6 +7,9 @@
 //! ([`facts::ArchFacts::from_tables`]) for every architecture that has
 //! not moved yet. One file per llama.cpp `src/models/<arch>.cpp`.
 
+pub mod cohere2;
+pub mod cohere2moe;
+pub mod command_r;
 pub mod dbrx;
 pub mod dots1;
 pub mod exaone4;
@@ -84,6 +87,9 @@ pub const REGISTRY: &[ModelDef] = &[
     phi2::DEF,
     falcon::DEF,
     plamo::DEF,
+    command_r::DEF,
+    cohere2::DEF,
+    cohere2moe::DEF,
 ];
 
 /// The registry entry naming `arch`.
