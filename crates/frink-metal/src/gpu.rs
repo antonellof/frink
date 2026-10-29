@@ -2270,7 +2270,8 @@ kernel void q4_k_mul_mm(
 /// The GEMM translation unit: the K-quant, legacy and IQ4_XS functors
 /// written here, plus PrismML's ternary functor spliced in from
 /// `crate::ternary` so the trit decode exists once (the matvec is
-/// built from the same text). Built on first use and leaked, because
+/// built from the same text), and the embedding gathers
+/// (`crate::embd::get_rows_msl`), one per functor. Built on first use and leaked, because
 /// `ensure_pipeline` keys its cache on a `&'static str`.
 pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
     std::sync::LazyLock::new(|| {
@@ -2308,7 +2309,8 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 "// @FRINK_CODEBOOK4_ENTRIES@",
                 crate::codebook4::CODEBOOK4_GEMM_ENTRIES_MSL,
                 1,
-            );
+            )
+            .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1);
         Box::leak(src.into_boxed_str())
     });
 
@@ -3297,6 +3299,7 @@ MUL_MM_SG_F16_ENTRY(q8_0_mul_mm_sg_f16, Q8_0Dequant)
 MUL_MM_SG_F16_ENTRY(q4_0_mul_mm_sg_f16, Q4_0Dequant)
 MUL_MM_SG_F16_ENTRY(q5_0_mul_mm_sg_f16, Q5_0Dequant)
 MUL_MM_SG_F16_ENTRY(iq4_xs_mul_mm_sg_f16, IQ4XSDequant)
+// @FRINK_GET_ROWS@
 "#;
 
 /// Launches the simdgroup Q4_K GEMM ([`K_QUANT_MUL_MM_SG_KERNEL_SRC`]).
