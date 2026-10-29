@@ -8,6 +8,7 @@ mod bench_client;
 mod bench_cmd;
 mod bench_contract;
 mod bench_guard;
+mod bench_llama;
 mod bench_model;
 mod bench_render;
 mod bench_suite;

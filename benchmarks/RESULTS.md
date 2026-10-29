@@ -11,17 +11,19 @@ Measured on **5 machines**, one section each. A gap only means something against
 
 ### At a glance
 
-| Machine | Backend | Measured at | Prefill | Decode |
-|---|---|---|---|---|
-| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | `0.21.0` ⚠️ | ⚪ **1.04×** to 🔴 **4.45×** | ⚪ **1.04×** to 🔴 **1.34×** |
-| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | `0.21.0` ⚠️ | 🔴 **25.53×** to 🔴 **43.29×** | 🔴 **2.75×** to 🔴 **9.25×** |
-| AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | `0.17.1` ⚠️ | 🔴 **6.26×** to 🔴 **10.14×** | 🔴 **1.06×** to 🔴 **1.92×** |
-| Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | `0.20.0` ⚠️ | ⚪ **0.99×** to 🔴 **1.09×** | 🟢 **0.60×** to ⚪ **0.96×** |
-| Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | `0.17.1` ⚠️ | 🔴 **22.55×** to 🔴 **33.79×** | 🔴 **2.18×** to 🔴 **5.04×** |
+| Machine | Backend | llama.cpp | Measured at | Prefill | Decode |
+|---|---|---|---|---|---|
+| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | unknown | `0.21.0` ⚠️ | ⚪ **1.04×** to 🔴 **4.45×** | ⚪ **1.04×** to 🔴 **1.34×** |
+| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | unknown | `0.21.0` ⚠️ | 🔴 **25.53×** to 🔴 **43.29×** | 🔴 **2.75×** to 🔴 **9.25×** |
+| AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | unknown | `0.17.1` ⚠️ | 🔴 **6.26×** to 🔴 **10.14×** | 🔴 **1.06×** to 🔴 **1.92×** |
+| Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | unknown | `0.20.0` ⚠️ | ⚪ **0.99×** to 🔴 **1.09×** | 🟢 **0.60×** to ⚪ **0.96×** |
+| Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | unknown | `0.17.1` ⚠️ | 🔴 **22.55×** to 🔴 **33.79×** | 🔴 **2.18×** to 🔴 **5.04×** |
 
-⚠️ marks rows measured on a build older than this one (**0.49.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
+⚠️ marks rows measured on a build older than this one (**0.50.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
 
 ### AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic
+
+Against llama.cpp build **unknown**: these receipts predate recording it, so the build behind their llama.cpp column is not known.
 
 #### CPU
 
@@ -44,6 +46,8 @@ Measured on **5 machines**, one section each. A gap only means something against
 
 ### AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090
 
+Against llama.cpp build **unknown**: these receipts predate recording it, so the build behind their llama.cpp column is not known.
+
 #### CUDA
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
@@ -63,6 +67,8 @@ Measured on **5 machines**, one section each. A gap only means something against
 
 ### AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic
 
+Against llama.cpp build **unknown**: these receipts predate recording it, so the build behind their llama.cpp column is not known.
+
 #### CPU
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
@@ -79,6 +85,8 @@ Measured on **5 machines**, one section each. A gap only means something against
 | TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **6.53×** | 🔴 **1.15×** | 112 | 734 | 43.6 | 50.0 |
 
 ### Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro
+
+Against llama.cpp build **unknown**: these receipts predate recording it, so the build behind their llama.cpp column is not known.
 
 #### Metal
 
@@ -102,6 +110,8 @@ Measured on **5 machines**, one section each. A gap only means something against
 | TinyLlama-1.1B-Chat-v1.0 Q8_0 | ⚪ **1.00×** | 🟢 **0.83×** | 2032 | 2034 | 132 | 110 |
 
 ### Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060
+
+Against llama.cpp build **unknown**: these receipts predate recording it, so the build behind their llama.cpp column is not known.
 
 #### CUDA
 

@@ -1441,7 +1441,7 @@ line up.
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
 | `-fa/--flash-attn` | `on` or `auto` (the default); `off` and sweeps are refused |
 | `--list-devices` | Print the devices this build can run on and exit |
-| `--compare` | Also run `llama-bench` on the same GGUF and print the gap |
+| `--compare` | Also run `llama-bench -o json` on the same GGUF, print the gap, and record the llama.cpp build it reports (see below) |
 | `--suite` | Run every [`benchmarks/suite.json`](../benchmarks/suite.json) entry in its own process, write a timing file per run, re-render [`RESULTS.md`](../benchmarks/RESULTS.md) |
 | `--render` | Re-render the RESULTS table from the timing files already on disk, measuring nothing |
 | `--id` / `--backend` | Restrict `--suite` to one entry / backend |
@@ -1451,6 +1451,18 @@ line up.
 | `--receipt` | Write a single run's raw timings to this path |
 | `--hidden` / `--ffn-dim` | Synthetic microbenchmark only (no `-m`): the weight matrix is `[ffn-dim x hidden]`. Defaults 4096 and 14336 |
 | `--iters` | Synthetic microbenchmark only: timed iterations per variant (default 20) |
+
+With `--compare --receipt`, the receipt records the llama.cpp build
+behind its `llama_tps` under `llama_cpp`: `build_commit`, `build_number`
+and `backends` as `llama-bench` reports them, plus `cpu_info`,
+`gpu_info` and the `llama-bench` command that ran. A receipt with a
+llama.cpp number whose `llama-bench` did not report a commit (a build
+outside git reports `unknown`) or its backends is refused at write
+time, naming the missing field. `--render` never puts rows measured
+against two llama.cpp builds in one table: each (machine, llama.cpp
+build) pair gets its own section, as machines already do. Receipts
+written before the field render under a llama.cpp reference marked
+**unknown**; no build is filled in for them.
 
 A run stops before the timer starts when the host is busy, thermally
 limited, or short enough on free memory that the weights would page to
