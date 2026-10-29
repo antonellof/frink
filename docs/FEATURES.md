@@ -119,23 +119,24 @@ the kernel tables:
 | Codebook | `IQ4_NL` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
 | Codebook, scalar CPU | GGUF-block `MXFP4` (gpt-oss's experts) | scalar | Metal matvec + GEMM, CUDA matvec + GEMM |
 | CPU-vectorized | `Q4_1`, `Q5_1`, `Q8_1`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none |
-| AVX2 only | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | none |
-| Scalar only | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M` | none | none |
+| Grid codebook, AVX2 CPU | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | Metal matvec + GEMM |
+| Grid codebook, scalar CPU | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M` | none | Metal matvec + GEMM |
 
-Metal's MoE indexed GEMM (`mul_mm_id`) is narrower still: `Q4_0`,
-`Q8_0` and `Q4_K` only. `IQ4_NL` and `MXFP4` experts have no indexed
-kernel (`mul_mv_id` or `mul_mm_id`); on Metal each expert product is
-its own matvec. The per-backend matrix is
+Metal's MoE id kernels (`mul_mv_id` for decode, `mul_mm_id` for
+prefill) cover every kind in the table above with a Metal kernel but
+two: `Q5_0` has `mul_mv_id` only, and `PTQ1_0` has neither, so its
+experts run one matvec each. The per-backend matrix is
 [`docs/KERNELS.md`](KERNELS.md).
 
 Before choosing a quant:
 
-- The bottom two tiers are correct and deliberately slow. They were
-  added for coverage: before them those tags could not be decoded at
-  all, which ruled out 5 of the 16 published Unsloth `UD-*` variants. A
-  vectorized path was left out because no golden vector existed that
-  could tell it apart from the scalar one.
-- On an Apple machine the "AVX2 only" row is the scalar row.
+- The two grid-codebook tiers are correct and deliberately slow on the
+  CPU; on Metal they have kernels in ggml's geometry (#405). The CPU
+  paths were added for coverage: before them those tags could not be
+  decoded at all, which ruled out 5 of the 16 published Unsloth `UD-*`
+  variants. A vectorized path was left out because no golden vector
+  existed that could tell it apart from the scalar one.
+- On an Apple machine's CPU the "AVX2 CPU" row is the scalar row.
   `IQ1_S`, `IQ2_XXS` and `IQ3_XXS` have x86 kernels and no NEON ones.
 - `I32`, `TQ2_0`, `NVFP4`, `Q1_0`, `Q2_0` and `PQ2_0` are recognized
   and sized, and nothing executes them. They parse, `frink inspect`

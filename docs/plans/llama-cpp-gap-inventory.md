@@ -314,7 +314,7 @@ CUDA `weight_matrix.rs:500-506` + `crates/frink-cuda/src/gpu.rs:140,208,306,403,
 | Q4_K | Y Y Y | Y | Y `cuda/gpu.rs:306` | Y / Y |
 | Q5_K | Y Y Y | Y | Y `cuda/gpu.rs:403` | Y / Y |
 | Q6_K | Y Y Y | Y | Y `cuda/gpu.rs:496` | Y / Y |
-| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | Y Y Y | Y (scalar or AVX2; no NEON) | N | **N / N** |
+| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | Y Y Y | Y (scalar or AVX2; no NEON) | N | Y / Y `metal/src/iq.rs` (#405) |
 | IQ4_NL | Y Y Y (+`mul_mv_ext` r1_2..5) | Y `quant/lib.rs:4898` | N | **N / N** |
 | IQ4_XS | Y Y Y | Y `quant/lib.rs:4962` | N | Y `gpu.rs:4820` / Y |
 | **MXFP4** | Y Y Y (`mmq.cuh:74`, `mmvq.cu:19`, `mul_mm_mxfp4_f32`) | Y `quant/lib.rs:5081` | N | **N / N** -- this is why gpt-oss decodes on CPU |
