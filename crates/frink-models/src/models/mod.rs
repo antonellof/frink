@@ -11,6 +11,7 @@ pub mod exaone4;
 pub mod facts;
 pub mod granite;
 pub mod granite_moe;
+pub mod kolibri1;
 pub mod llama;
 pub mod olmo;
 pub mod olmo2;
@@ -48,6 +49,7 @@ pub const REGISTRY: &[ModelDef] = &[
     olmo::DEF,
     olmo2::DEF,
     exaone4::DEF,
+    kolibri1::DEF,
 ];
 
 /// The registry entry naming `arch`.

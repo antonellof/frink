@@ -36,16 +36,17 @@
 //! ```
 //!
 //! Generated against `libllama.0.4.1` built from `.scratch/llama.cpp` at
-//! `5b59b83`, except `lfm3`, whose graph landed after that pin and was
-//! generated against a `libllama` built at `604cc430`; for every fixture
+//! `5b59b83`, except `lfm3` and `kolibri1`, whose graphs landed after
+//! that pin and were generated against a `libllama` built at `604cc430`
+//! (and are CI's answer since, `tools/oracle/goldens.tsv`); for every fixture
 //! below the non-decode output is byte-identical to the last-position
 //! golden already committed for it.
 //!
 //! # What is covered
 //!
-//! Seven fixtures, chosen for where decode can part from prefill: two
-//! plain dense GQA graphs (`mistral3`, `glm4`), two sliding windows of 3
-//! (`cohere2` dense, `smallthinker_swa2` MoE) so 32 steps cross the
+//! Eight fixtures, chosen for where decode can part from prefill: two
+//! plain dense GQA graphs (`mistral3`, `glm4`), three sliding windows of 3
+//! (`cohere2` dense, `smallthinker_swa2` and `kolibri1` MoE) so 32 steps cross the
 //! window ten times over, two hybrids whose recurrent state is a
 //! reduction over the whole prefix (`qwen35`'s gated delta net,
 //! `granitehybrid`'s Mamba-2), and one whose state is a window of its
@@ -109,6 +110,10 @@ const GOLDENS: &[(&str, f32)] = &[
     // hybrid with a window of 3 on two of its three attention layers,
     // so 32 steps cross both the conv history and the window.
     ("lfm3", GRAPH_TOL),
+    // `604cc430` too. A sliding window of 3 on three of four layers and
+    // the router that ranks `logits + exp_probs_b` before the sigmoid
+    // (`kolibri1.cpp:138`), so every step routes on the rule.
+    ("kolibri1", GRAPH_TOL),
 ];
 
 /// Paged block size. Does not divide the six-token prompt, so the

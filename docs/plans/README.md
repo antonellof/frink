@@ -119,7 +119,9 @@ the thirteen new upstream names are text generation
 to 10 the same day: of the two one-match-arm rows, `lfm3` closed on a
 libllama golden and a 32-step greedy decode, and `kolibri1` turned out
 to need a router that adds its selection bias before the sigmoid
-(`kolibri1.cpp:138`), so it is new code now. The audit
+(`kolibri1.cpp:138`), so it was new code until 2026-10-29, when it
+closed on that rule (`frink_moe::SelectionRule`) and the count fell to
+9. The audit
 also found three served architectures whose upstream behaviour had
 changed (`mellum`, `nemotron`, `lfm2`), and all three are fixed or
 refused by name.

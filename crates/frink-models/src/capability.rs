@@ -1195,6 +1195,12 @@ pub const AUDITED_GENERIC_GQA: &[&str] = &[
     // non-causal d1 decision graph (`attention.causal = false`, `:22-25,
     // 92-96`) is refused by name.
     "lfm3",
+    // tests/kolibri1_graphs.rs: `kolibri1` (Aleph-Alpha Kolibri-1,
+    // 78B-A3.5B), the first row in `crate::models` that was never in the
+    // legacy tables. Its router ranks `logits + exp_probs_b` BEFORE the
+    // sigmoid (`kolibri1.cpp:138`), `frink_moe::SelectionRule::
+    // BiasBeforeGating`; the rest is rows the file states.
+    "kolibri1",
     // tests/pangu_embedded_graphs.rs: `pangu-embedded` (openPangu-
     // Embedded-1B / 7B), a decoder LLM that had been filed as an
     // embedding model from its name. `pangu-embed.cpp` is `llama.cpp`'s
@@ -1808,34 +1814,10 @@ const NEOX_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
     // `lfm3` was ONE MATCH ARM here and closed on 2026-10-28
     // (`AUDITED_GENERIC_GQA`, tests/lfm3_graphs.rs).
     //
-    // `kolibri1` was ONE MATCH ARM until the same day, on a reading
-    // that called its routing "the DeepSeek-V3 rule `build_moe_ffn`
-    // already applies". Wiring it showed that is not so, and the line
-    // that decides it is `kolibri1.cpp:138`.
-    (
-        "kolibri1",
-        TriageClass::NewCode,
-        "a router whose SELECTION adds the bias to the RAW logits (Kolibri-1, Aleph-Alpha, \
-         78B-A3.5B). `src/models/kolibri1.cpp:138` is `selection = logits + exp_probs_b`, \
-         ranked by `ggml_argsort_top_k` at `:141` and handed to `build_moe_ffn` as \
-         `selected_experts_in` (`:155`) with `exp_probs_b = nullptr` (`:149`), so \
-         `llama-graph.cpp:2320-2324` skips its own selection and the weights are \
-         `gating(logits)` gathered at those ids (`:2336`). The DeepSeek-V3 rule \
-         `build_moe_ffn` applies when it is handed the bias, and the only one \
-         `frink_moe::route_top_k_grouped_biased` implements, adds it AFTER the gating \
-         (`selection_probs = probs + exp_probs_b`, `llama-graph.cpp:2276-2280`, the add at `:2279`). Under \
-         sigmoid gating `top_k(l + b)` and `top_k(sigmoid(l) + b)` pick different experts \
-         whenever the bias is not constant, so serving the row on today's router would \
-         route every token through a different expert set with no error. Needs a \
-         bias-before-gating selection in `frink_moe` (a second selection operand, not a \
-         table row). The rest IS table rows and was read for it: RoPE on the sliding \
-         layers only (`:98`, `RopeLayers::SlidingOnly`), the window ARRAY by `get_arr` \
-         (`:17`, `crate::swa_layers`), REQUIRED window (`:10`), Gemma-2 sandwich norms with \
-         `ffn_post_norm` over the routed PLUS shared sum (`:41-51,165-167`), per-head QK \
-         RMS, `expert_feed_forward_length` by `get_key_or_arr` (`:5`, `maple`'s reader), \
-         one shared expert (`:12` refuses any other count), gating and `norm_w` from the \
-         file (`:8-9`)",
-    ),
+    // `kolibri1` was ONE MATCH ARM until the same day, then NEW CODE on
+    // its router, which ranks `logits + exp_probs_b` BEFORE the sigmoid
+    // (`kolibri1.cpp:138`). It closed on 2026-10-29 on
+    // `frink_moe::SelectionRule` (`crate::models::kolibri1`).
     (
         "flint",
         TriageClass::NewCode,
@@ -2606,6 +2588,19 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
         // column exists to prevent.
         v.push(prof(
             "maple",
+            TextGeneration,
+            StandardGqa,
+            KvIswa,
+            Neox,
+            ArchPath::GenericGqa { rope: Neox },
+            PerHead,
+        ));
+        // `kolibri1` was NEW CODE in `NEOX_ROPE_TRIAGED` on its router
+        // and is audited now (`crate::models::kolibri1`). Per-head QK
+        // norm at `{head_dim}` (`kolibri1.cpp:47-48,85-86`), `iswa` KV
+        // (`:69`), NEOX (`llama-model.cpp:3667`).
+        v.push(prof(
+            "kolibri1",
             TextGeneration,
             StandardGqa,
             KvIswa,
@@ -3742,7 +3737,7 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
 /// `hparams.rope_freq_base_train_swa = hparams.rope_freq_base_train;`
 /// before letting `rope.freq_base_swa` override it. frink applied the
 /// Gemma default to everything, which rotates a gpt-oss SWA layer at
-/// theta 10000 instead of its real 150000.
+/// theta 10000 instead of its real 150000. Answers through the registry.
 pub fn swa_rope_base_follows_model(arch: &str) -> bool {
     crate::models::ArchFacts::of(arch)
         .swa
@@ -3793,6 +3788,7 @@ pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
 ///
 /// Every name here is a `hparams.rope_freq_scale_train_swa =
 /// hparams.rope_freq_scale_train;` in `src/models/`, at the line given.
+/// Answers through the registry.
 pub fn swa_rope_scale_follows_model(arch: &str) -> bool {
     crate::models::ArchFacts::of(arch)
         .swa
@@ -4158,7 +4154,7 @@ mod audit_tests {
             }
         }
         assert!(
-            seen == 10,
+            seen == 9,
             "every unaudited generic architecture is triaged; found {seen}. \
              It was 47 until the triage found `minicpm3` was an MLA model on the \
              generic-GQA row and it moved to DedicatedOnly, 46 until five ONE MATCH ARM \
@@ -4311,7 +4307,9 @@ mod audit_tests {
              closed on exactly the rows its verdict named (tests/lfm3_graphs.rs), and \
              `kolibri1` moved to NEW CODE when wiring it showed its router ranks \
              `logits + exp_probs_b` BEFORE the sigmoid (`kolibri1.cpp:138`), where every \
-             router here adds the bias after it"
+             router here adds the bias after it. And 9 on 2026-10-29, when that became \
+             `frink_moe::SelectionRule::BiasBeforeGating` and `kolibri1` closed on it \
+             (tests/kolibri1_graphs.rs)"
         );
     }
 

@@ -118,6 +118,21 @@ eligibility test so a new field forces a Metal decision.
   checked against, not a row the loader reads. Divergences found and
   filed, not fixed: #440, #441.
 
+- `kolibri1` (#414), outside the step order: the first architecture
+  ADDED in `crate::models` rather than moved there
+  (`models/kolibri1.rs`). It grew the facts by three fields:
+  `MoeFacts::selection` (`frink_moe::SelectionRule`, where
+  `exp_probs_b` enters the top-k), `SwaFacts::rope_base_key_unread` (a
+  graph that seeds the sliding base and reads no `rope.freq_base_swa`)
+  and `HparamRules::load_checks` (the throws in an architecture's own
+  `load_arch_hparams` / `load_arch_tensors` that no table states). The
+  lookups its rows touch answer through `ArchFacts::of` with
+  `_from_table` twins (`window_required`, both
+  `swa_rope_*_follows_model`, `NormSites::for_arch`,
+  `rope_layers::rope_layers`). Two of its rows stay in legacy tables
+  the facts do not carry yet: the sliding-window array read
+  (`swa_layers::PER_LAYER_ARRAY_READERS`) and the catalog row.
+
 What step 2 changed about the target design:
 
 - `ModelDef` is `{ names, source, facts, evidence }` for now. `profile`

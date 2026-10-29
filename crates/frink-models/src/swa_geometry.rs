@@ -104,8 +104,15 @@ pub fn full_layers_rotate_half(arch: &str) -> Option<&'static str> {
 /// (`crate::rope_layers::RopeLayers::SlidingOnly` with nothing sliding),
 /// which is a different graph from the one llama.cpp refuses to build.
 /// Measured: `grep -n "LLM_KV_ATTENTION_SLIDING_WINDOW," src/models/*.cpp`
-/// without a trailing `false` on the generic path.
+/// without a trailing `false` on the generic path. Answers through the
+/// registry (`kolibri1` lives in `crate::models`).
 pub fn window_required(arch: &str) -> Option<&'static str> {
+    crate::models::ArchFacts::of(arch).swa.window_required
+}
+
+/// The legacy table behind [`window_required`], for
+/// `ArchFacts::from_tables`.
+pub(crate) fn window_required_from_table(arch: &str) -> Option<&'static str> {
     match arch {
         "cohere2" => Some("cohere2.cpp:13"),
         "cohere2moe" => Some("cohere2moe.cpp:13"),
