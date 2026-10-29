@@ -67,23 +67,36 @@ eligibility test so a new field forces a Metal decision.
 ## Progress
 
 - Step 0: landed in #415 (`tests/model_config_snapshot.rs`).
-- Step 1a: `models/facts.rs` and `ArchFacts::from_tables`, built from
-  the raw name. `ModelConfig::from_gguf` reads 39 lookups through the
-  facts: 34 rows, the two refused-key lists derived from them, and 3
-  `HparamRules` (`swa_window_override`, `attention_scale_override`,
-  `rope_layers`). The two lists are derived in `models/refused_keys.rs`; the
-  `capability.rs` functions are wrappers. `models/facts_tests.rs`
-  holds every tabled name to its legacy answer, `DEFAULT` to an absent
-  name, and the loader source to no direct call of a routed lookup.
-- Step 1b, open: the 29 calls in `from_gguf` that still take the name
-  beside a hyperparameter or the file (`mtp_blocks::trunk_layers`,
+- Step 1a: landed in #428. `models/facts.rs` and `ArchFacts::from_tables`,
+  built from the raw name. `ModelConfig::from_gguf` reads 39 lookups
+  through the facts: 34 rows, the two refused-key lists derived from
+  them (`models/refused_keys.rs`), and 3 `HparamRules`
+  (`swa_window_override`, `attention_scale_override`, `rope_layers`).
+- Step 1b: `TensorFacts`. `Decoder::from_gguf` reads 12 lookups through
+  the facts: 10 tensor rows from the canonical name (the gpt-oss extra
+  tensors, the norm-site row, the per-head QK norm rows, the
+  interleaved Q gate, the post-norm pairing row, the shared-expert sum
+  scale, the weightless embedding norm, QK norm after RoPE) and
+  `family` / `memory` from the raw name. Three resolvers were split
+  into a row the facts carry and a shared `_for` / `sum_scale_on_layer`
+  step; `NormSites::GENERIC` is the one statement of the default row.
+- Guards (`models/facts_tests.rs`): every tabled name is held to its
+  legacy answer, `DEFAULT` to an absent name, and both loaders' source
+  to no direct call of a routed lookup, with the raw versus canonical
+  split pinned.
+- Still direct: in `ModelConfig::from_gguf`, 29 calls that take the
+  name beside a hyperparameter or the file (`mtp_blocks::trunk_layers`,
   `kv_head_dims`, `norm_function_for_file`, `moe_interleave`,
   `clamp_kqv`, `attn_temperature`, `swa_geometry::rotary_widths`,
-  `yarn_log_mul_for`, `post_norm_eps`, `weightless_qk_norm`, `alibi`,
-  ...), and `Decoder::from_gguf`'s tensor tables (canonical name) and
-  `family` / `memory` (raw name). Where a resolver is a row lookup
-  followed by arithmetic, 1b moves the row into the facts and keeps the
-  arithmetic shared; the file readers stay loader code.
+  `yarn_log_mul_for`, `post_norm_eps`, `weightless_qk_norm`, `alibi`
+  and others); in `Decoder::from_gguf`, 17 `load_*` / probe helpers
+  that read the file (`weight_scales`, `position_embd`,
+  `parallel_residual`, `NormSites::for_layer`, `sub_norms`, `attn_gate`,
+  `proj_bias`, `mamba2`, `layer_shapes::load_non_gqa_attention`,
+  `moe_interleave::dense_by_router_absence`, `parallel_dense_ffn`,
+  `skip_stream`, `unread_tensors`). Those move with their family, from
+  step 2 on: a resolver that is a row plus arithmetic splits as the
+  three above did, and a file reader stays loader code taking its row.
 
 ## Risks
 

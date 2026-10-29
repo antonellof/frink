@@ -12,20 +12,28 @@
 //! [`ArchFacts::DEFAULT`] is what a name absent from every table gets,
 //! and a test holds it to that.
 //!
+//! Two names reach the loaders (plan risk 1). `ModelConfig::from_gguf`
+//! and `Decoder::from_gguf`'s `family` / `memory` build the facts from
+//! the RAW `general.architecture`; the decoder's tensor rows
+//! ([`TensorFacts`]) come from the CANONICAL one
+//! (`capability::canonical_architecture`), so an alias reads the tables
+//! of the graph llama.cpp computes for it.
+//!
 //! What is NOT here yet (still keyed on the name at the call site):
 //! every resolver that reads the file or takes a hyperparameter beside
 //! the name (`mtp_blocks::trunk_layers`, `kv_head_dims`, `clamp_kqv`,
-//! `swa_geometry::rotary_widths`, ...), and the decoder's tensor tables.
+//! `swa_geometry::rotary_widths`, the decoder's `load_*` helpers, ...).
 
 use frink_moe::GatingFunction;
 
 use crate::capability::{ArchProfile, DecoderFamily, SwaPattern, SwaWindowOverride};
 use crate::layer_shapes::ZeroKvLayer;
+use crate::norm_sites::NormSites;
 use crate::rope_layers::RopeLayers;
 use crate::router_input::RouterInput;
 use crate::scalar_multipliers::MultiplierSupport;
 
-/// The per-architecture facts the config loader reads.
+/// The per-architecture facts the loaders read.
 #[derive(Debug, Clone, Copy)]
 pub struct ArchFacts {
     /// The catalog row (`capability::resolve_profile`). `None` is an
@@ -39,6 +47,7 @@ pub struct ArchFacts {
     pub norm: NormFacts,
     pub scaling: ScalingFacts,
     pub topology: TopologyFacts,
+    pub tensors: TensorFacts,
     pub rules: HparamRules,
 }
 
@@ -141,6 +150,34 @@ pub struct TopologyFacts {
     pub learned_positions: bool,
 }
 
+/// Decoder tensor-table rows (`Decoder::from_gguf`, canonical name).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TensorFacts {
+    /// gpt-oss's four extra per-layer tensors (`decoder::GptOssWeights`).
+    /// A name test, not a table: no other graph has them.
+    pub gpt_oss_layers: bool,
+    /// `norm_sites::NormSites::for_arch`: where each norm site is
+    /// stored. The loader replaces `function` with the one the file
+    /// decided (`ModelConfig::norm_function`).
+    pub norm_sites: NormSites,
+    /// `qk_layer_norm::per_head_layer_norm_lines`.
+    pub per_head_layer_norm_qk: Option<&'static str>,
+    /// `capability::uses_per_head_scalar_qk_gain`.
+    pub per_head_scalar_qk_gain: bool,
+    /// `capability::uses_per_head_distinct_qk_norm`.
+    pub per_head_distinct_qk_norm: bool,
+    /// `attn_gate::q_gate_interleaved`.
+    pub q_gate_interleaved: bool,
+    /// `norm_sites::post_norms_both_or_neither`.
+    pub post_norms_both_or_neither: Option<&'static str>,
+    /// `parallel_dense_ffn::shared_expert_sum_scale_row`.
+    pub shared_expert_sum_scale: Option<f32>,
+    /// `norm_sites::weightless_embedding_norm`.
+    pub weightless_embedding_norm: bool,
+    /// `QK_NORM_AFTER_ROPE_ARCHITECTURES`.
+    pub qk_norm_after_rope: bool,
+}
+
 /// The decisions that are code rather than rows: each takes a
 /// hyperparameter beside the architecture. `from_tables` points every
 /// one at today's name-keyed function; a `models/<arch>.rs` will point
@@ -216,14 +253,25 @@ impl ArchFacts {
             parallel_ssm: false,
             learned_positions: false,
         },
+        tensors: TensorFacts {
+            gpt_oss_layers: false,
+            norm_sites: NormSites::GENERIC,
+            per_head_layer_norm_qk: None,
+            per_head_scalar_qk_gain: false,
+            per_head_distinct_qk_norm: false,
+            q_gate_interleaved: false,
+            post_norms_both_or_neither: None,
+            shared_expert_sum_scale: None,
+            weightless_embedding_norm: false,
+            qk_norm_after_rope: false,
+        },
         rules: HparamRules::LEGACY,
     };
 
     /// The facts for `arch` as the legacy tables state them.
     ///
-    /// Keyed on the name exactly as given: the config loader passes the
-    /// RAW `general.architecture` (an alias such as `llama-embed` keeps
-    /// its own row), which is what every table was keyed on before.
+    /// Keyed on the name exactly as given; the callers decide raw or
+    /// canonical (module doc).
     pub fn from_tables(arch: &str) -> Self {
         use crate::loader::arch_tables as t;
         let profile = crate::capability::resolve_profile(arch);
@@ -283,6 +331,20 @@ impl ArchFacts {
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
                 learned_positions: crate::position_embd::learned_positions(arch),
+            },
+            tensors: TensorFacts {
+                gpt_oss_layers: arch == "gpt-oss",
+                norm_sites: NormSites::for_arch(arch),
+                per_head_layer_norm_qk: crate::qk_layer_norm::per_head_layer_norm_lines(arch),
+                per_head_scalar_qk_gain: crate::capability::uses_per_head_scalar_qk_gain(arch),
+                per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),
+                q_gate_interleaved: crate::attn_gate::q_gate_interleaved(arch),
+                post_norms_both_or_neither: crate::norm_sites::post_norms_both_or_neither(arch),
+                shared_expert_sum_scale: crate::parallel_dense_ffn::shared_expert_sum_scale_row(
+                    arch,
+                ),
+                weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(arch),
+                qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
             },
             rules: HparamRules::LEGACY,
         }

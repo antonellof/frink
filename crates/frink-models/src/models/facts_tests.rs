@@ -29,7 +29,41 @@ fn every_tabled_name() -> Vec<&'static str> {
     names.extend(crate::capability::AUDITED_GENERIC_GQA);
     names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
     names.extend(crate::act_layers::XIELU_ARCHITECTURES);
-    names.extend(["llama-embed", "granite-moe", ABSENT]);
+    names.extend(t::QK_NORM_AFTER_ROPE_ARCHITECTURES);
+    names.extend(
+        crate::qk_layer_norm::PER_HEAD_LAYER_NORM_QK
+            .iter()
+            .map(|r| r.0),
+    );
+    names.extend(crate::capability::PER_HEAD_SCALAR_QK_GAIN);
+    names.extend(crate::capability::PER_HEAD_DISTINCT_QK_NORM);
+    names.extend(
+        crate::attn_gate::Q_INTERLEAVED_GATE_ARCHS
+            .iter()
+            .map(|r| r.0),
+    );
+    names.extend(
+        crate::parallel_dense_ffn::SHARED_EXPERT_SUM_SCALE
+            .iter()
+            .map(|r| r.0),
+    );
+    {
+        use crate::norm_sites as ns;
+        names.extend(ns::POST_NORMS_BOTH_OR_NEITHER.iter().map(|r| r.0));
+        for table in [
+            ns::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
+            ns::PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM,
+            ns::POST_NORMS_UNDER_GROK_NAMES,
+            ns::EMBEDDING_NORM_ARCHITECTURES,
+            ns::WEIGHTLESS_EMBEDDING_NORM,
+            ns::NO_OUTPUT_NORM,
+            ns::OUTPUT_NORM_UNDER_EMBEDDING_NAME,
+            ns::ONE_NORM_PER_LAYER,
+        ] {
+            names.extend(table);
+        }
+    }
+    names.extend(["llama-embed", "granite-moe", "gpt-oss", ABSENT]);
     names.sort_unstable();
     names.dedup();
     names
@@ -86,6 +120,7 @@ fn assert_same(name: &str, got: ArchFacts, want: ArchFacts) {
         norm,
         scaling,
         topology,
+        tensors,
         rules,
     } = got;
     assert_eq!(
@@ -101,6 +136,7 @@ fn assert_same(name: &str, got: ArchFacts, want: ArchFacts) {
     assert_eq!(norm, want.norm, "{name}: norm");
     assert_eq!(scaling, want.scaling, "{name}: scaling");
     assert_eq!(topology, want.topology, "{name}: topology");
+    assert_eq!(tensors, want.tensors, "{name}: tensors");
     assert_rules_agree(name, rules, want.rules);
 }
 
@@ -174,6 +210,26 @@ fn from_tables_agrees_with_every_legacy_lookup() {
                 skip_stream: crate::skip_stream::has_skip_stream(name),
                 parallel_ssm: crate::mamba2::parallel_with_attention(name),
                 learned_positions: crate::position_embd::learned_positions(name),
+            },
+            tensors: TensorFacts {
+                gpt_oss_layers: name == "gpt-oss",
+                norm_sites: crate::norm_sites::NormSites::for_arch(name),
+                per_head_layer_norm_qk: crate::qk_layer_norm::PER_HEAD_LAYER_NORM_QK
+                    .iter()
+                    .find(|r| r.0 == name)
+                    .map(|r| r.2),
+                per_head_scalar_qk_gain: cap::uses_per_head_scalar_qk_gain(name),
+                per_head_distinct_qk_norm: cap::uses_per_head_distinct_qk_norm(name),
+                q_gate_interleaved: crate::attn_gate::q_gate_interleaved(name),
+                post_norms_both_or_neither: crate::norm_sites::POST_NORMS_BOTH_OR_NEITHER
+                    .iter()
+                    .find(|r| r.0 == name)
+                    .map(|r| r.1),
+                shared_expert_sum_scale: crate::parallel_dense_ffn::shared_expert_sum_scale(
+                    name, true,
+                ),
+                weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(name),
+                qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&name),
             },
             rules: HparamRules {
                 swa_window_override: cap::swa_window_override,
@@ -250,12 +306,7 @@ fn the_refused_key_lists_derive_from_the_facts() {
 /// supplies. The source is scanned rather than trusted.
 #[test]
 fn the_config_loader_reads_the_tables_only_through_the_facts() {
-    // Code only: the comments still name the tables they explain.
-    let src: String = include_str!("../loader/model_config.rs")
-        .lines()
-        .map(|l| l.split("//").next().unwrap_or(""))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let src = code_only(include_str!("../loader/model_config.rs"));
     // A table is used as `NAME.contains(..)` / `NAME.iter()`; the bare
     // name also appears inside the best-effort strings the snapshots pin.
     for direct in [
@@ -305,4 +356,50 @@ fn the_config_loader_reads_the_tables_only_through_the_facts() {
             "loader/model_config.rs calls `{direct}` directly; read it from `ArchFacts`"
         );
     }
+}
+
+/// Code only: the comments still name the tables they explain.
+fn code_only(src: &str) -> String {
+    src.lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The same for `Decoder::from_gguf`, which builds its tensor rows from
+/// the CANONICAL name and `family` / `memory` from the raw one.
+#[test]
+fn the_decoder_loader_reads_the_tables_only_through_the_facts() {
+    let src = code_only(include_str!("../loader/decoder_from_gguf.rs"));
+    for direct in [
+        "arch_tables",
+        "resolve_profile(",
+        "== \"gpt-oss\"",
+        "NormSites::with_function(",
+        "NormSites::for_arch(",
+        "per_head_layer_norm_refusal(",
+        "uses_per_head_scalar_qk_gain(",
+        "uses_per_head_distinct_qk_norm(",
+        "q_gate_interleaved(",
+        "post_norm_pairing_refusal(",
+        "shared_expert_sum_scale(",
+        "weightless_embedding_norm(",
+        "QK_NORM_AFTER_ROPE_ARCHITECTURES.",
+    ] {
+        assert!(
+            !src.contains(direct),
+            "loader/decoder_from_gguf.rs calls `{direct}` directly; read it from `ArchFacts`"
+        );
+    }
+    // Plan risk 1, in the order the loader reads them: the canonical
+    // facts first, from the name `canonical_architecture` returned; the
+    // raw facts from `general.architecture` itself.
+    let canonical = src
+        .find("ArchFacts::from_tables(&arch)")
+        .expect("tensor facts built from the canonical `arch`");
+    assert!(src[..canonical].contains("canonical_architecture("));
+    let raw = src
+        .find("ArchFacts::from_tables(\n            file.metadata_str(\"general.architecture\")")
+        .expect("family / memory facts built from the raw name");
+    assert!(raw > canonical);
 }

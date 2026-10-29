@@ -16,7 +16,6 @@ use crate::config::ModelConfig;
 use crate::decoder::{AttnWeights, Decoder, ExpertBacking, LayerWeights, MoeWeights};
 use crate::norm::NormOp;
 
-use super::arch_tables::QK_NORM_AFTER_ROPE_ARCHITECTURES;
 use super::expert_source::{stored_expert_specs, GgufExpertSource, StoredExpertLayout};
 use super::layer_parts::{load_attn_sinks, load_dense_expert, load_gpt_oss_layer};
 use super::model_config::metadata_u64_any;
@@ -84,7 +83,11 @@ impl Decoder {
                 .unwrap_or_default(),
         )
         .to_string();
-        let is_gpt_oss = arch == "gpt-oss";
+        // The tensor-table rows, from the CANONICAL name above
+        // (`crate::models::facts`); `family` / `memory` below still come
+        // from the raw one.
+        let facts = crate::models::ArchFacts::from_tables(&arch);
+        let is_gpt_oss = facts.tensors.gpt_oss_layers;
         // A `<projection>.scale` companion is a multiply llama.cpp
         // applies and frink does not; refused by name here, before
         // the unread-tensor gate can be talked past
@@ -102,7 +105,10 @@ impl Decoder {
         // uses for a different site (`gpt-oss` / `seed_oss`, `dbrx`,
         // `grok`). `crate::norm_sites` is the one table for all of it;
         // this loader used to restate the decision at every site.
-        let norm_sites = crate::norm_sites::NormSites::with_function(&arch, config.norm_function);
+        let norm_sites = crate::norm_sites::NormSites {
+            function: config.norm_function,
+            ..facts.tensors.norm_sites
+        };
         let mut gpt_oss_layers: Vec<crate::decoder::GptOssLayer> = Vec::new();
 
         // One store for the whole model (keys are (layer, expert)),
@@ -179,8 +185,8 @@ impl Decoder {
                     // The per-head LAYERNORM (`crate::qk_layer_norm`), whose
                     // weight is `n_heads * head_dim` long and would pass
                     // the length rule below as `WholeVector`.
-                    if let Some(reason) = crate::qk_layer_norm::per_head_layer_norm_refusal(
-                        &arch,
+                    if let Some(reason) = crate::qk_layer_norm::per_head_layer_norm_refusal_for(
+                        facts.tensors.per_head_layer_norm_qk,
                         l,
                         q_norm.is_some() || k_norm.is_some(),
                     ) {
@@ -195,7 +201,7 @@ impl Decoder {
                     // `n_heads`, which a length test alone could confuse with
                     // `head_dim`.
                     if let Some(ref w) = q_norm {
-                        if crate::capability::uses_per_head_scalar_qk_gain(&arch) {
+                        if facts.tensors.per_head_scalar_qk_gain {
                             if w.len() != n_heads {
                                 return Err(LoadError::UnsupportedFeature(
                                     config.name.to_string(),
@@ -208,7 +214,7 @@ impl Decoder {
                                 ));
                             }
                             refined_qk_norm = crate::capability::QkNormStyle::PerHeadScalar;
-                        } else if crate::capability::uses_per_head_distinct_qk_norm(&arch) {
+                        } else if facts.tensors.per_head_distinct_qk_norm {
                             // `plamo2.cpp:92-93`: `{head_dim, n_head}`, one
                             // row per head, RMS per head. The same length as
                             // a whole-vector weight, so the architecture
@@ -313,7 +319,7 @@ impl Decoder {
                         } else {
                             None
                         },
-                        q_gate_interleaved: crate::attn_gate::q_gate_interleaved(&arch),
+                        q_gate_interleaved: facts.tensors.q_gate_interleaved,
                     };
                     crate::layer_shapes::check_gqa_projection_widths(
                         l,
@@ -334,8 +340,9 @@ impl Decoder {
                     &config,
                 )?,
             };
-            if let Some(reason) = crate::norm_sites::post_norm_pairing_refusal(
+            if let Some(reason) = crate::norm_sites::post_norm_pairing_refusal_for(
                 &arch,
+                facts.tensors.post_norms_both_or_neither,
                 l,
                 attn.post_attn_norm.is_some(),
                 attn.post_ffn_norm.is_some(),
@@ -537,8 +544,8 @@ impl Decoder {
                         });
                         row.sum_scale
                     }
-                    None => crate::parallel_dense_ffn::shared_expert_sum_scale(
-                        &arch,
+                    None => crate::parallel_dense_ffn::sum_scale_on_layer(
+                        facts.tensors.shared_expert_sum_scale,
                         !shared_experts.is_empty(),
                     ),
                 }
@@ -735,7 +742,7 @@ impl Decoder {
         // a weightless one (`muse-glimmer.cpp:69`), and the tables that
         // decide them are disjoint by construction
         // (`norm_sites::WEIGHTLESS_EMBEDDING_NORM`).
-        let embedding_norm = if crate::norm_sites::weightless_embedding_norm(&arch) {
+        let embedding_norm = if facts.tensors.weightless_embedding_norm {
             crate::norm::NormOp::RmsNoParams
         } else {
             norm_sites.load_pre_norm(norm_sites.embedding, &file, None)?
@@ -802,16 +809,18 @@ impl Decoder {
 
         config.qk_norm_style = refined_qk_norm;
 
-        let family = crate::capability::resolve_profile(
+        // The RAW name (an alias keeps its own catalog row), and "llama"
+        // for a file with none, as before.
+        let raw_facts = crate::models::ArchFacts::from_tables(
             file.metadata_str("general.architecture").unwrap_or("llama"),
-        )
-        .map(|p| p.family)
-        .unwrap_or(crate::capability::DecoderFamily::StandardGqa);
-        let memory_kind = crate::capability::resolve_profile(
-            file.metadata_str("general.architecture").unwrap_or("llama"),
-        )
-        .map(|p| p.memory)
-        .unwrap_or(crate::capability::MemoryKind::KvGqa);
+        );
+        let family = raw_facts
+            .family()
+            .unwrap_or(crate::capability::DecoderFamily::StandardGqa);
+        let memory_kind = raw_facts
+            .profile
+            .map(|p| p.memory)
+            .unwrap_or(crate::capability::MemoryKind::KvGqa);
         let execution_plan = crate::execution_plan::ExecutionPlan::from_config(
             &config,
             family,
@@ -842,7 +851,7 @@ impl Decoder {
             } else {
                 None
             },
-            qk_norm_after_rope: QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch.as_str()),
+            qk_norm_after_rope: facts.tensors.qk_norm_after_rope,
             #[cfg(feature = "metal")]
             metal_attn_kv: std::sync::Mutex::new(None),
             execution_plan,
