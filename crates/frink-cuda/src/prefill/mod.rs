@@ -164,6 +164,52 @@ pub struct PrefillLayerOut {
     pub v_rows: Vec<f32>,
 }
 
+/// What the first layer of a stack reads.
+#[derive(Clone, Copy)]
+pub enum StackInput<'a> {
+    /// The hidden rows, `batch * hidden_dim`, computed on the host and
+    /// uploaded once.
+    Hidden(&'a [f32]),
+    /// The rows `ids` of an embedding table, gathered on the device
+    /// ([`crate::get_rows`]) instead of dequantized on the host and
+    /// uploaded: one id per batch row. Only for a model whose embedding
+    /// row IS the first hidden state (no scale, norm or position
+    /// table); that is the caller's to decide.
+    Gather {
+        table: MulMmWeights<'a>,
+        ids: &'a [u32],
+    },
+}
+
+impl StackInput<'_> {
+    /// The shape agreement with the first layer, before any device work.
+    fn check(&self, batch: usize, hidden_dim: usize) -> Result<(), CudaError> {
+        let rows = match self {
+            StackInput::Hidden(h) if h.len() == batch * hidden_dim => batch,
+            StackInput::Gather { table, ids } if table.cols == hidden_dim => {
+                crate::get_rows::validate(
+                    table.kind,
+                    table.data.len(),
+                    table.rows,
+                    ids,
+                    table.cols,
+                    table.row_bytes,
+                )
+                .map_err(|e| CudaError::Unsupported(e.to_string()))?;
+                ids.len()
+            }
+            _ => usize::MAX,
+        };
+        if batch == 0 || rows != batch {
+            return Err(CudaError::Unsupported(
+                "prefill dense stack: the input does not match the first layer's width and batch"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Where each layer's attention reads its history from.
 pub enum StackKv<'m, 'c> {
     /// Upload each layer's host prefix ([`PrefillParams::prefix_k`])
@@ -209,8 +255,12 @@ pub fn launch_prefill_dense_layer(
     params: &PrefillParams<'_>,
     batch: usize,
 ) -> Result<PrefillLayerOut, CudaError> {
-    let mut out =
-        launch_prefill_dense_stack(hidden, &[(layer, params)], batch, StackKv::UploadPrefix)?;
+    let mut out = launch_prefill_dense_stack(
+        StackInput::Hidden(hidden),
+        &[(layer, params)],
+        batch,
+        StackKv::UploadPrefix,
+    )?;
     let (k_rows, v_rows) = out.kv_rows.pop().expect("one layer in, one layer out");
     Ok(PrefillLayerOut {
         hidden: out.hidden,
@@ -236,7 +286,7 @@ pub struct PrefillStackOut {
 /// (a mirror rebuilt from the host before a later failure holds the
 /// host's rows, which is a valid state).
 pub fn launch_prefill_dense_stack(
-    hidden: &[f32],
+    input: StackInput<'_>,
     layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
     batch: usize,
     mut kv: StackKv<'_, '_>,
@@ -247,11 +297,7 @@ pub fn launch_prefill_dense_stack(
         ));
     };
     let hidden_dim = first.attn_norm_w.len();
-    if batch == 0 || hidden.len() != batch * hidden_dim {
-        return Err(CudaError::Unsupported(
-            "prefill dense stack: hidden batch does not match the first layer's width".to_string(),
-        ));
-    }
+    input.check(batch, hidden_dim)?;
     for (layer, params) in layers {
         check_layer_shapes(layer, params, batch, hidden_dim)?;
         if params.start_pos != first_params.start_pos {
@@ -305,8 +351,23 @@ pub fn launch_prefill_dense_stack(
         .alloc_zeros::<f32>(staged_len)
         .map_err(|e| CudaError::Launch(format!("stack staging alloc: {e:?}")))?;
 
-    let mut h = xfer::htod(&dev, "hidden upload", hidden)?;
     let mut held = Held::default();
+    let mut h = match input {
+        StackInput::Hidden(hidden) => xfer::htod(&dev, "hidden upload", hidden)?,
+        StackInput::Gather { table, ids } => {
+            let d_ids = xfer::htod(&dev, "gather ids upload", ids)?;
+            let (h, w) = crate::get_rows_launch::enqueue_get_rows(
+                &dev,
+                table.kind,
+                table.data,
+                &d_ids,
+                table.cols,
+                table.row_bytes,
+            )?;
+            held.weights.push(w);
+            h
+        }
+    };
     for (i, (layer, params)) in layers.iter().enumerate() {
         let mirror = match &mut kv {
             StackKv::UploadPrefix => None,
@@ -709,5 +770,7 @@ fn run_layer_resident(
     Ok(())
 }
 
+#[cfg(test)]
+mod gather_tests;
 #[cfg(test)]
 mod tests;

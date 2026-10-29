@@ -157,11 +157,8 @@ mod tests {
             text.contains("Q4_1     gemm     -> host (1 tensor)"),
             "{text}"
         );
-        // CUDA has no gather: the embedding row is a host dequant.
-        assert!(
-            text.contains("Q4_K     get_rows -> host (1 tensor)"),
-            "{text}"
-        );
+        // CUDA gathers a Q4_K embedding on the device (#405).
+        assert!(!text.contains("get_rows"), "{text}");
         assert!(!text.contains("Q4_K     matvec"), "{text}");
         assert!(!text.contains("Q6_K"), "{text}");
     }

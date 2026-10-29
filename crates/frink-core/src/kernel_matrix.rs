@@ -21,9 +21,10 @@
 //!   `the_cpu_int_dot_table_is_the_dispatch` below runs both CPU entry
 //!   points for every kind and fails when they disagree.
 //! - **Metal `get_rows`** is `frink_metal::embd_kinds`, the set the
-//!   decode path's embedding gather looks itself up in. No other
-//!   backend has a gather kernel; their embedding row is
-//!   [`WeightMatrix::dequant_row`] on the host.
+//!   decode path's embedding gather looks itself up in, and **CUDA
+//!   `get_rows`** is `frink_cuda::get_rows::kind_by_name`, the set the
+//!   resident stack's gather is built for. Vulkan has no gather; its
+//!   embedding row is [`WeightMatrix::dequant_row`] on the host.
 //!
 //! `docs/KERNELS.md` is [`KernelMatrix::markdown`], checked in, and a
 //! test fails when the two differ. Another test pins the host-fallback
@@ -234,9 +235,9 @@ impl KernelMatrix {
         );
         s.push_str("## Reading the get_rows column\n\n");
         s.push_str(
-            "Metal's gather runs inside the fused decode stack, for a model with no\n\
-             embedding scale or norm. Everywhere else the embedding row is\n\
-             `WeightMatrix::dequant_row` on the host, one row per token.\n",
+            "Metal's and CUDA's gathers run inside the resident decode stack, for a\n\
+             model with no embedding scale or norm. Everywhere else the embedding\n\
+             row is `WeightMatrix::dequant_row` on the host, one row per token.\n",
         );
         s
     }
@@ -291,7 +292,11 @@ fn get_rows_cell(backend: Backend, kind: QuantKind) -> Cell {
             Some(_) => Cell::Kernel,
             None => Cell::Host(HOST_GET_ROWS),
         },
-        Backend::Cuda | Backend::Vulkan => Cell::Host(HOST_GET_ROWS),
+        Backend::Cuda => match frink_cuda::get_rows::kind_by_name(kind.name()) {
+            Some(_) => Cell::Kernel,
+            None => Cell::Host(HOST_GET_ROWS),
+        },
+        Backend::Vulkan => Cell::Host(HOST_GET_ROWS),
     }
 }
 

@@ -216,9 +216,13 @@ impl Decoder {
             // layer (#259). Declines before touching any cache; the
             // host body below then runs the layer.
             #[cfg(feature = "cuda")]
-            if let Some((h_out, run_len)) =
-                self.try_cuda_dense_stack(l, &hidden_batch, start_pos, batch_size, kv_caches)
-            {
+            if let Some((h_out, run_len)) = self.try_cuda_dense_stack(
+                l,
+                frink_cuda::prefill::StackInput::Hidden(&hidden_batch),
+                start_pos,
+                batch_size,
+                kv_caches,
+            ) {
                 hidden_batch = h_out;
                 l += run_len;
                 continue;

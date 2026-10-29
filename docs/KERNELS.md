@@ -26,7 +26,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | backend | matvec (decode) | gemm (prefill) | get_rows (embedding) |
 |---|---|---|---|
 | cpu | 17 | 17 | 0 |
-| cuda | 11 | 11 | 22 |
+| cuda | 11 | 11 | 11 |
 | metal | 0 | 0 | 0 |
 | vulkan | 21 | 22 | 22 |
 
@@ -90,19 +90,19 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 
 | kind | cpu | cuda | metal | vulkan |
 |---|---|---|---|---|
-| Q8_0 | kernel | HOST | kernel | HOST |
-| Q4_0 | kernel | HOST | kernel | HOST |
-| Q4_K | kernel | HOST | kernel | HOST |
-| Q5_K | kernel | HOST | kernel | HOST |
-| Q6_K | kernel | HOST | kernel | HOST |
-| Q2_K | kernel | HOST | kernel | HOST |
-| Q3_K | kernel | HOST | kernel | HOST |
+| Q8_0 | kernel | kernel | kernel | HOST |
+| Q4_0 | kernel | kernel | kernel | HOST |
+| Q4_K | kernel | kernel | kernel | HOST |
+| Q5_K | kernel | kernel | kernel | HOST |
+| Q6_K | kernel | kernel | kernel | HOST |
+| Q2_K | kernel | kernel | kernel | HOST |
+| Q3_K | kernel | kernel | kernel | HOST |
 | Q4_1 | kernel | HOST | kernel | HOST |
-| Q5_0 | kernel | HOST | kernel | HOST |
+| Q5_0 | kernel | kernel | kernel | HOST |
 | Q5_1 | kernel | HOST | kernel | HOST |
 | Q8_1 | kernel | n/a | n/a | n/a |
-| IQ4_NL | kernel | HOST | kernel | HOST |
-| IQ4_XS | kernel | HOST | kernel | HOST |
+| IQ4_NL | kernel | kernel | kernel | HOST |
+| IQ4_XS | kernel | kernel | kernel | HOST |
 | IQ1_S | kernel | HOST | kernel | HOST |
 | IQ2_XXS | kernel | HOST | kernel | HOST |
 | IQ3_XXS | kernel | HOST | kernel | HOST |
@@ -110,7 +110,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | IQ2_S | kernel | HOST | kernel | HOST |
 | IQ3_S | kernel | HOST | kernel | HOST |
 | IQ1_M | kernel | HOST | kernel | HOST |
-| MXFP4 | kernel | HOST | kernel | HOST |
+| MXFP4 | kernel | kernel | kernel | HOST |
 | TQ1_0 | kernel | HOST | kernel | HOST |
 | PTQ1_0 | kernel | HOST | kernel | HOST |
 
@@ -123,6 +123,6 @@ a `kernel` cell is the best path the build has for that kind.
 
 ## Reading the get_rows column
 
-Metal's gather runs inside the fused decode stack, for a model with no
-embedding scale or norm. Everywhere else the embedding row is
-`WeightMatrix::dequant_row` on the host, one row per token.
+Metal's and CUDA's gathers run inside the resident decode stack, for a
+model with no embedding scale or norm. Everywhere else the embedding
+row is `WeightMatrix::dequant_row` on the host, one row per token.
