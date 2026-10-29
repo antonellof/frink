@@ -222,12 +222,13 @@ const fn step(n: usize) -> NonZeroUsize {
 /// upstream treats it: `llama-model.cpp:1314` fills the array with 1
 /// before any per-architecture loader runs, and only these graphs read
 /// it back.
-pub const ROPE_PATTERN_READERS: &[(&str, &str)] =
-    &[("granite_swa", "src/models/granite-swa.cpp:43")];
-
-/// Does `arch`'s graph read the per-layer rotate array?
+///
+/// `granite_swa` (`granite-swa.cpp:43`), the one such graph, states it
+/// in `crate::models::granite_swa` (#403 step 9a).
 pub fn reads_rope_pattern(arch: &str) -> bool {
-    ROPE_PATTERN_READERS.iter().any(|(a, _)| *a == arch)
+    crate::models::ArchFacts::of(arch)
+        .topology
+        .reads_rope_pattern
 }
 
 /// Which layers of `arch` rotate, through the registry: the rule a
@@ -293,13 +294,6 @@ pub fn rope_layers_from_table(
         // the two rows are one rule (`exaone4`'s half is
         // `crate::models::exaone4`).
         "exaone-moe" => sliding_layers_rotate(has_sliding_window),
-        // `maple.cpp:88` is the same `if (hparams.is_swa(il))` around
-        // both `ggml_rope_ext` calls, and `:5` reads the window as a
-        // REQUIRED key, so a Maple file always has one and the rule is
-        // unconditional here as it is for `cohere2`. Landed upstream
-        // after the 2026-08-04 pin; `tests/no_rope_layer_graphs.rs`
-        // carries the fixture, whose layer 2 is the unrotated one.
-        "maple" => RopeLayers::SlidingOnly,
         // `muse-glimmer.cpp:88` is `const bool use_rope =
         // hparams.is_swa(il)` with the comment "RoPE runs on the SWA
         // layers, NoPE on full ones", and `:19` reads the window as a

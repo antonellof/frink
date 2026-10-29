@@ -79,7 +79,6 @@ pub const QKV_TENSOR_CREATORS: &[(&str, QkvTensors, &str)] = &[
     ("bitnet", QkvTensors::SplitUnbiased, "bitnet.cpp:26-28"),
     ("openelm", QkvTensors::Fused(None), "openelm.cpp:34"),
     ("plamo2", QkvTensors::Fused(None), "plamo2.cpp:91"),
-    ("plamo3", QkvTensors::Fused(None), "plamo3.cpp:45"),
 ];
 
 /// The [`QkvTensors`] the loader reads for `arch`, through the registry.

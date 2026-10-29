@@ -3505,17 +3505,10 @@ pub fn uses_geglu(arch: &str) -> bool {
     crate::models::ArchFacts::of(arch).ffn.geglu
 }
 
-/// [`uses_geglu`] from this list alone (`grok` is in
-/// `crate::models::grok`).
-pub(crate) fn uses_geglu_from_table(arch: &str) -> bool {
-    // `spark2_5` joined on 2026-09-19 with the pin move:
-    // `src/models/spark2-5.cpp:124` passes `LLM_FFN_GELU` under
-    // `LLM_FFN_PAR` to `build_ffn`, i.e. a GATED GELU, and the row is
-    // `StandardGqa` like `grok` -- so the family rule would have given
-    // it SwiGLU and a different FFN on every layer. Its golden
-    // (`tests/gated_attention_graphs.rs`) holds at the same GeGLU
-    // tolerance llama.cpp's f16 GELU table forces.
-    matches!(arch, "spark2_5")
+/// [`uses_geglu`] from the legacy tables: none left (`grok` and
+/// `spark2_5` are in `crate::models`).
+pub(crate) fn uses_geglu_from_table(_arch: &str) -> bool {
+    false
 }
 
 /// Architectures whose FFN is the UNGATED ReLU-squared MLP:
@@ -3626,10 +3619,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         })
     };
     match arch {
-        // src/models/gemma2.cpp:6
-        "gemma2" => last_dense(2),
-        // src/models/gemma3.cpp:7
-        "gemma3" => last_dense(6),
         // src/models/gemma3n.cpp:4 says 5, NOT 6. This was transcribed
         // as 6 alongside gemma3 and is simply wrong. Inert only because
         // `gemma3n` refuses for other reasons today.
@@ -3648,8 +3637,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // sees only a window instead. That is a different model, and it
         // fails silently.
         //
-        // src/models/mellum.cpp:11
-        "mellum" => last_dense(4),
         // src/models/exaone-moe.cpp:6. SWA is unconditional there
         // with n_swa = 128, so without this every layer ran with a
         // 128-token history.
@@ -3658,11 +3645,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // fixture's window is narrower than the prompt
         // (`tests/gated_attention_graphs.rs`).
         "afmoe" => last_dense(4),
-        // src/models/plamo3.cpp:9. LIVE: `plamo3` is audited, and its
-        // fixture drives a period of 2 from the file with a window
-        // narrower than the prompt, so both the period override and
-        // this phase are exercised end to end against libllama.
-        "plamo3" => last_dense(8),
         // --- dense_first = true -----------------------------------
         //
         // These four put the full-attention layer at `il % p == 0`, not
@@ -3708,14 +3690,7 @@ pub fn swa_rope_base_follows_model(arch: &str) -> bool {
 pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
-        "afmoe"
-            | "dflash"
-            | "exaone-moe"
-            | "gemma2"
-            | "laguna"
-            | "maple"
-            | "mellum"
-            | "smallthinker"
+        "afmoe" | "dflash" | "exaone-moe" | "laguna" | "smallthinker"
     )
 }
 
@@ -3759,9 +3734,6 @@ pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
         "afmoe"          // afmoe.cpp:22
             | "dflash"      // dflash.cpp:59, :71
             | "exaone-moe"  // exaone-moe.cpp:10
-            | "gemma2"      // gemma2.cpp:11
-            | "maple"       // maple.cpp:13
-            | "mellum"      // mellum.cpp:20
             | "smallthinker" // smallthinker.cpp:14
     )
 }
@@ -3837,25 +3809,32 @@ pub fn attention_scale_override(
 /// `HparamRules::LEGACY` (`jais`'s `1 / head_dim` is
 /// `crate::models::jais`'s rule).
 pub fn attention_scale_override_from_table(
-    arch: &str,
-    n_layers: usize,
-    hidden_dim: usize,
-    n_heads: usize,
-    head_dim: usize,
+    _arch: &str,
+    _n_layers: usize,
+    _hidden_dim: usize,
+    _n_heads: usize,
+    _head_dim: usize,
 ) -> Option<f32> {
     // `case 62` / `case 46` in the `switch (hparams.n_layer())` that
     // picks `LLM_TYPE_27B`. Every other Gemma architecture
     // (`gemma-embedding`, `gemma3n`, `gemma4`) sets `f_attention_scale`
     // unconditionally and has no 27B branch at all.
-    let is_27b = match arch {
-        "gemma2" => n_layers == 46,
-        "gemma3" => n_layers == 62,
-        _ => false,
-    };
-    if head_dim == 0 {
-        return None;
-    }
-    if !is_27b || n_heads == 0 {
+    // Every row is in `crate::models` now (`gemma2`, `gemma3`, `jais`).
+    None
+}
+
+/// Gemma-2 / Gemma-3 at 27B: `1 / sqrt(n_embd / n_head)` where it
+/// differs from the kernels' `1 / sqrt(head_dim)`. `layers_27b` is the
+/// `case` that picks `LLM_TYPE_27B` in the graph's `load_arch_hparams`
+/// (`gemma2.cpp` 46, `gemma3.cpp` 62); every other size takes none.
+pub fn gemma_27b_attention_scale(
+    layers_27b: usize,
+    n_layers: usize,
+    hidden_dim: usize,
+    n_heads: usize,
+    head_dim: usize,
+) -> Option<f32> {
+    if head_dim == 0 || n_layers != layers_27b || n_heads == 0 {
         return None;
     }
     let scale = 1.0 / ((hidden_dim / n_heads) as f32).sqrt();

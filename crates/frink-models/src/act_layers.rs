@@ -190,7 +190,7 @@ pub struct SwigluClamps {
 /// serves it; a row that needed the two sites to disagree would need a
 /// second field and this comment says so.
 pub const CLAMP_BEFORE_SILU: &[(&str, &str)] = &[
-    ("maple", "src/llama-graph.cpp:2228 (routed only)"),
+    // `maple` (routed only, `:2228`) is in `crate::models::maple`.
     ("deepseek4", "src/llama-graph.cpp:1834,2228 (own engine)"),
     ("hy_v4", "src/llama-graph.cpp:2228 (refused: dedicated)"),
     (
@@ -201,11 +201,16 @@ pub const CLAMP_BEFORE_SILU: &[(&str, &str)] = &[
 
 /// Which form `arch`'s clamped SwiGLU takes. See [`CLAMP_BEFORE_SILU`].
 pub fn clamp_form(arch: &str) -> ClampForm {
-    if CLAMP_BEFORE_SILU.iter().any(|(a, _)| *a == arch) {
+    if crate::models::ArchFacts::of(arch).ffn.clamp_before_silu {
         ClampForm::BeforeSilu
     } else {
         ClampForm::AfterSilu
     }
+}
+
+/// Whether [`CLAMP_BEFORE_SILU`] names `arch`, for `ArchFacts::from_tables`.
+pub(crate) fn clamp_before_silu_from_table(arch: &str) -> bool {
+    CLAMP_BEFORE_SILU.iter().any(|(a, _)| *a == arch)
 }
 
 /// llama-graph.cpp:1753 / :2148: `constexpr float eps = 1e-6f; if
@@ -270,10 +275,16 @@ impl SwigluClamps {
 /// architecture the
 /// arrays stay zero-filled upstream whatever the file says, so the
 /// keys are dead metadata there and frink ignores them the same way.
-pub const SWIGLU_CLAMP_READERS: &[&str] = &["step35", "maple"];
+pub const SWIGLU_CLAMP_READERS: &[&str] = &["step35"];
 
 /// Does this architecture's graph read `swiglu_clamp_exp` / `_shexp`?
 pub fn reads_swiglu_clamps(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch).ffn.reads_swiglu_clamps
+}
+
+/// [`reads_swiglu_clamps`] from [`SWIGLU_CLAMP_READERS`] alone (`maple`
+/// is in `crate::models::maple`).
+pub(crate) fn reads_swiglu_clamps_from_table(arch: &str) -> bool {
     SWIGLU_CLAMP_READERS.contains(&arch)
 }
 

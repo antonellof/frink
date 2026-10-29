@@ -194,6 +194,20 @@ eligibility test so a new field forces a Metal decision.
   two still cannot disagree about Baichuan's layer count. `jais`'s
   `1 / head_dim` became its `attention_scale_override` rule, and that
   public lookup answers through the registry like the others.
+- Step 9a: the first SWA batch, `models/gemma2.rs`, `gemma3.rs`,
+  `mellum.rs`, `plamo3.rs`, `maple.rs`, `spark2_5.rs`, `granite_swa.rs`.
+  New facts: `TensorFacts::attn_gate`, `FfnFacts::clamp_before_silu`,
+  `TopologyFacts::per_layer_shapes` (the `attn_gate`, `act_layers` and
+  `layer_shapes` tables, each with a census that spans table and
+  registry). The Gemma-2/3 27B attention scale is
+  `capability::gemma_27b_attention_scale`, each file's rule calling it with
+  its own `case`. A family-derived fact is a row like any other: the
+  Gemma definitions state `embeddings_scaled_by_sqrt_n_embd`, which the
+  legacy path computed from the catalog family. `ROPE_PATTERN_READERS`
+  (granite_swa only) is deleted. Divergences found and filed: #470.
+  9b is `afmoe`, `exaone-moe`, `laguna`, `smallthinker`, `muse-glimmer`;
+  9c `step35`, `mimo2`, `lfm3`. `gemma3n`, `gemma-embedding` and
+  `dflash` stay in the legacy tables until audited (risk 3).
 
 What step 2 changed about the target design:
 

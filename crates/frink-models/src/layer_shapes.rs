@@ -60,6 +60,26 @@ use frink_core::{Tensor, WeightMatrix};
 use frink_gguf::{GgufValue, TensorSource};
 use frink_moe::ExpertWeights;
 
+/// `plamo3`'s reach note, stated by `crate::models::plamo3` (#403 step 9a).
+pub const PLAMO3_SHAPES: &str =
+    "generic. plamo3.cpp:39-44 (loader) and :110-111 (graph); no published PLaMo-3 \
+         export writes an array (conversion/plamo.py:27-30 writes scalars), so the seam is \
+         latent there";
+
+/// `spark2_5`'s reach note, stated by `crate::models::spark2_5` (#403 step 9a).
+pub const SPARK2_5_SHAPES: &str =
+    "generic. spark2-5.cpp:33-37 (loader) and :76-77 (graph) read n_head(i) and \
+         n_head_kv(i) per layer, sizing the per-head attention gate (:41) by each layer's \
+         own count. Landed upstream after the 2026-08-04 pin and closed on 2026-09-19 with \
+         one `crate::attn_gate` row";
+
+/// `maple`'s reach note, stated by `crate::models::maple` (#403 step 9a).
+pub const MAPLE_SHAPES: &str =
+    "generic. maple.cpp:6 reads `expert_feed_forward_length` as an ARRAY at \
+         n_layer_all length; the tensors are sized from n_ff_exp() (layer 0) at :27, so \
+         the array must LOAD even where every entry agrees. Landed upstream after the \
+         2026-08-04 pin and closed on 2026-09-19 with one `crate::rope_layers` row";
+
 /// Architectures whose llama.cpp tensor loader AND graph both index the
 /// per-layer arrays, with the lines. Anything else gets layer 0 from
 /// `LLAMA_LOAD_LOCALS` upstream, so a file whose layers disagree cannot
@@ -83,12 +103,6 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
          one fused wqkv per layer",
     ),
     (
-        "plamo3",
-        "generic. plamo3.cpp:39-44 (loader) and :110-111 (graph); no published PLaMo-3 \
-         export writes an array (conversion/plamo.py:27-30 writes scalars), so the seam is \
-         latent there",
-    ),
-    (
         "laguna",
         "generic. laguna.cpp:87-88 (loader) and :176-177 (graph) read n_head(i) per layer; \
          KV heads uniform (:86). Closed with the gated attention (`crate::attn_gate`); the \
@@ -110,20 +124,6 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
          arrays at :28-29) and the two-valued rotary width (`crate::swa_geometry`, :9); the \
          gate at :96 is `crate::attn_gate`, the is_swa array at :26 `crate::swa_layers`, \
          the NEXTN blocks its tensor loader creates at :170 `crate::mtp_blocks`",
-    ),
-    (
-        "spark2_5",
-        "generic. spark2-5.cpp:33-37 (loader) and :76-77 (graph) read n_head(i) and \
-         n_head_kv(i) per layer, sizing the per-head attention gate (:41) by each layer's \
-         own count. Landed upstream after the 2026-08-04 pin and closed on 2026-09-19 with \
-         one `crate::attn_gate` row",
-    ),
-    (
-        "maple",
-        "generic. maple.cpp:6 reads `expert_feed_forward_length` as an ARRAY at \
-         n_layer_all length; the tensors are sized from n_ff_exp() (layer 0) at :27, so \
-         the array must LOAD even where every entry agrees. Landed upstream after the \
-         2026-08-04 pin and closed on 2026-09-19 with one `crate::rope_layers` row",
     ),
     (
         "nanbeige",
@@ -190,7 +190,33 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
 
 /// True when llama.cpp itself honours a per-layer shape for `arch`.
 pub fn per_layer_shapes_read_by_llama_cpp(arch: &str) -> bool {
-    PER_LAYER_SHAPE_ARCHS.iter().any(|(a, _)| *a == arch)
+    crate::models::ArchFacts::of(arch)
+        .topology
+        .per_layer_shapes
+        .is_some()
+}
+
+/// [`PER_LAYER_SHAPE_ARCHS`]' note for `arch` alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn per_layer_shapes_from_table(arch: &str) -> Option<&'static str> {
+    PER_LAYER_SHAPE_ARCHS
+        .iter()
+        .find(|(a, _)| *a == arch)
+        .map(|(_, note)| *note)
+}
+
+/// Every row: the table's and the `crate::models` definitions'.
+pub fn per_layer_shape_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
+    PER_LAYER_SHAPE_ARCHS
+        .iter()
+        .copied()
+        .chain(crate::models::REGISTRY.iter().flat_map(|d| {
+            d.facts
+                .topology
+                .per_layer_shapes
+                .into_iter()
+                .flat_map(|note| d.names.iter().map(move |n| (*n, note)))
+        }))
 }
 
 /// What one layer's attention block is.
@@ -1354,30 +1380,29 @@ mod tests {
     /// five that this seam serves are the ones on the generic path.
     #[test]
     fn the_reach_table_cites_its_lines_and_names_what_each_row_still_needs() {
-        for (arch, note) in PER_LAYER_SHAPE_ARCHS {
+        for (arch, note) in per_layer_shape_rows() {
             assert!(note.contains(".cpp:"), "`{arch}` cites no line: {note}");
         }
-        let generic: Vec<&str> = PER_LAYER_SHAPE_ARCHS
-            .iter()
+        let mut generic: Vec<&str> = per_layer_shape_rows()
             .filter(|(_, n)| n.starts_with("generic"))
-            .map(|(a, _)| *a)
+            .map(|(a, _)| a)
             .collect();
-        assert_eq!(
-            generic,
-            [
-                "deci",
-                "openelm",
-                "plamo3",
-                "laguna",
-                "step35",
-                "spark2_5",
-                "maple",
-                "jamba",
-                "nemotron_h",
-                "granitehybrid",
-                "granite-hybrid"
-            ]
-        );
+        generic.sort_unstable();
+        let mut want = [
+            "deci",
+            "openelm",
+            "plamo3",
+            "laguna",
+            "step35",
+            "spark2_5",
+            "maple",
+            "jamba",
+            "nemotron_h",
+            "granitehybrid",
+            "granite-hybrid",
+        ];
+        want.sort_unstable();
+        assert_eq!(generic, want);
         assert!(per_layer_shapes_read_by_llama_cpp("deci"));
         assert!(!per_layer_shapes_read_by_llama_cpp("granite"));
     }

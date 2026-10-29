@@ -535,11 +535,7 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     // `:113,145-147,175` apply them at the same four sites.
     ("granitehybrid", MultiplierSupport::GRANITE),
     ("granite-hybrid", MultiplierSupport::GRANITE),
-    // `granite-swa.cpp:7-10` reads the same four -- logit REQUIRED, the
-    // other three optional -- and `:170-171,192,231,247-249,308-310`
-    // apply them at the same four sites. Landed upstream after the
-    // 2026-08-04 pin.
-    ("granite_swa", MultiplierSupport::GRANITE),
+    // `granite_swa` is in `crate::models::granite_swa`.
     ("minicpm", MultiplierSupport::MINICPM),
     ("talkie", MultiplierSupport::TALKIE),
     ("minimax-01", MultiplierSupport::MINIMAX_01),

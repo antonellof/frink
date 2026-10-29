@@ -131,8 +131,7 @@ pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "exaone-moe",
     "glm4moe",
     "laguna",
-    // `mellum.cpp:8-11` since the `604cc430` pin (seeded `true`).
-    "mellum",
+    // `mellum` is in `crate::models::mellum`.
     // `nemotron-h.cpp:18` (`norm_topk_prob`).
     "nemotron_h_moe",
     "step35",

@@ -99,6 +99,10 @@ fn the_registry_pattern_readers_are_pinned() {
         "cohere2",    // cohere2.cpp:5
         "cohere2moe", // cohere2moe.cpp:28
         "exaone4",    // exaone4.cpp:7
+        "gemma2",     // gemma2.cpp:6
+        "gemma3",     // gemma3.cpp:7
+        "mellum",     // mellum.cpp:16
+        "plamo3",     // plamo3.cpp:9
         "gpt-oss",    // openai-moe.cpp:9
         "llama4",     // llama4.cpp:19
         "olmo2",      // olmo2.cpp:9
@@ -106,8 +110,9 @@ fn the_registry_pattern_readers_are_pinned() {
     for name in registry_names() {
         let want = if callers.contains(&name) {
             PatternKeyRead::ArrayThenScalar
-        } else if name == "kolibri1" {
-            // kolibri1.cpp:17, `get_arr` with no scalar attempt.
+        } else if ["kolibri1", "maple", "spark2_5", "granite_swa"].contains(&name) {
+            // `get_arr` with no scalar attempt: kolibri1.cpp:17,
+            // maple.cpp:10, spark2-5.cpp:8, granite-swa.cpp:17.
             PatternKeyRead::PerLayerBool
         } else {
             PatternKeyRead::Unread

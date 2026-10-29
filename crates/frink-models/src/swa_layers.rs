@@ -174,9 +174,6 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("mimo2", "src/models/mimo2.cpp:12"),
     // Landed upstream after the 2026-08-04 pin; `ml.get_arr` with no
     // scalar attempt, like the four above.
-    ("spark2_5", "src/models/spark2-5.cpp:8"),
-    ("maple", "src/models/maple.cpp:10"),
-    ("granite_swa", "src/models/granite-swa.cpp:17"),
     // Landed upstream after the 2026-09-19 pin.
     ("lfm3", "src/models/lfm3.cpp:13"),
 ];
@@ -193,14 +190,10 @@ pub const LOAD_SWA_PATTERN_CALLERS: &[(&str, &str)] = &[
     ("exaone-moe", "src/models/exaone-moe.cpp:6"),
     ("gemma-embedding", "src/models/gemma-embedding.cpp:5"),
     ("gemma-embedding2", "src/models/gemma-embedding2.cpp:5"),
-    ("gemma2", "src/models/gemma2.cpp:6"),
-    ("gemma3", "src/models/gemma3.cpp:7"),
     ("gemma3n", "src/models/gemma3n.cpp:5"),
     ("laguna", "src/models/laguna.cpp:42"),
-    ("mellum", "src/models/mellum.cpp:16"),
     ("modern-bert", "src/models/modern-bert.cpp:11"),
     ("muse-glimmer", "src/models/muse-glimmer.cpp:13"),
-    ("plamo3", "src/models/plamo3.cpp:9"),
     ("smallthinker", "src/models/smallthinker.cpp:9"),
 ];
 

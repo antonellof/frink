@@ -35,7 +35,13 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(t::LEADING_DENSE_KEY_IS_INERT);
     names.extend(crate::router_input::ROUTER_INPUT_TABLE.iter().map(|r| r.0));
     names.extend(crate::layer_shapes::PURE_RECURRENT.iter().map(|r| r.0));
-    names.extend(crate::rope_layers::ROPE_PATTERN_READERS.iter().map(|r| r.0));
+    names.extend(crate::attn_gate::ATTN_GATE_ARCHS.iter().map(|r| r.0));
+    names.extend(crate::act_layers::CLAMP_BEFORE_SILU.iter().map(|r| r.0));
+    names.extend(
+        crate::layer_shapes::PER_LAYER_SHAPE_ARCHS
+            .iter()
+            .map(|r| r.0),
+    );
     names.extend(
         crate::swa_layers::PER_LAYER_ARRAY_READERS
             .iter()
@@ -269,6 +275,8 @@ fn the_facts_agree_with_every_public_lookup() {
                 reglu: cap::uses_reglu(name),
                 xielu: crate::act_layers::uses_xielu(name),
                 reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(name),
+                clamp_before_silu: crate::act_layers::clamp_form(name)
+                    == frink_moe::ClampForm::BeforeSilu,
             },
             norm: NormFacts {
                 // No legacy table: only a definition states it.
@@ -305,6 +313,13 @@ fn the_facts_agree_with_every_public_lookup() {
                 alibi: def.and_then(|f| f.topology.alibi),
                 rope_gated_on_finetuned: crate::rope_finetuned::unrotated(name, Some(false)),
                 parallel_residual: crate::parallel_residual::parallel_residual(name),
+                per_layer_shapes: def.map_or(
+                    crate::layer_shapes::PER_LAYER_SHAPE_ARCHS
+                        .iter()
+                        .find(|r| r.0 == name)
+                        .map(|r| r.1),
+                    |f| f.topology.per_layer_shapes,
+                ),
                 reads_nextn: crate::mtp_blocks::reads_nextn(name),
             },
             tensors: TensorFacts {
@@ -328,6 +343,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 output_bias: crate::proj_bias::output_presence(name),
                 // No legacy table: only a definition states it.
                 position_embd: def.and_then(|f| f.tensors.position_embd),
+                attn_gate: crate::attn_gate::attn_gate_spec(name),
                 qkv_tensors: crate::qkv_fused::qkv_tensors(name),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
                 attn_norm_2_feeds_attention: crate::norm_sites::attn_norm_2_feeds_attention(name),

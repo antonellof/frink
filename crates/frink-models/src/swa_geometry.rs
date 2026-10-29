@@ -79,7 +79,6 @@ pub fn swa_layers_unscaled_rope(arch: &str) -> Option<&'static str> {
 /// `crate::models::olmo2`).
 pub(crate) fn swa_layers_unscaled_rope_from_table(arch: &str) -> Option<&'static str> {
     match arch {
-        "mellum" => Some("mellum.cpp:128-142"),
         "laguna" => Some("laguna.cpp:48,181-193"),
         _ => None,
     }

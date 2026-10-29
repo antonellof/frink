@@ -76,7 +76,6 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("deci", Presence::Optional),
     ("ernie4_5", Presence::Optional),
     // `granite-swa.cpp:79`, optional as every Granite row's is.
-    ("granite_swa", Presence::Optional),
     ("granitehybrid", Presence::Optional),
     ("granite-hybrid", Presence::Optional),
     ("jais2", Presence::Required),
@@ -97,7 +96,6 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
     ("deci", Presence::Optional, true),
     // `granite-swa.cpp:100-102`, the dense branch only (its MoE branch
     // creates no expert biases, as `granite.cpp`'s does not).
-    ("granite_swa", Presence::Optional, true),
     ("granitehybrid", Presence::Optional, true),
     ("granite-hybrid", Presence::Optional, true),
     ("jais2", Presence::Required, false),
