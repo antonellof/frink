@@ -5,9 +5,9 @@
 //! `_impl`: slot `tgpig.z` reads its expert id, offsets the weights to
 //! that expert, the activation to its token and the output to its slot,
 //! and runs the same body. The Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K,
-//! IQ4_XS and the seven IQ1/IQ2/IQ3 matvecs are written as such an
-//! `_impl` (`crate::q2_k`, `crate::q3_k`, `crate::codebook4`,
-//! `crate::k_quant_mv`, `crate::iq`), so their id kernels are generated
+//! IQ4_XS, IQ1/IQ2/IQ3, Q4_1, Q5_1 and TQ1_0 matvecs are written as
+//! such an `_impl` (`crate::q2_k`, `crate::q3_k`, `crate::codebook4`,
+//! `crate::k_quant_mv`, `crate::iq`, `crate::dq_mv`), so their id kernels are generated
 //! here from that one function: the dequant and the dot exist once per kind, and
 //! the decode matvec's own kernel-vs-CPU tests cover the body the id
 //! kernel runs.
@@ -96,15 +96,15 @@ fn kind_entry(kind: &str) -> Option<(&'static str, &'static str)> {
         "Q5_K" => Some((crate::k_quant_mv::q5_k_matvec_src(), "q5_k")),
         "Q6_K" => Some((crate::k_quant_mv::q6_k_matvec_src(), "q6_k")),
         "IQ4_XS" => Some((crate::k_quant_mv::iq4_xs_matvec_src(), "iq4_xs")),
-        _ => crate::iq::by_name(kind).map(|k| (crate::iq::iq_matvec_src(), k.prefix)),
+        _ => crate::gen_kinds::by_name(kind).map(|k| (crate::gen_kinds::matvec_src(k), k.prefix)),
     }
 }
 
 /// The kinds [`dispatch`] answers for.
 #[cfg(test)]
-pub(crate) const KINDS: [&str; 14] = [
+pub(crate) const KINDS: [&str; 17] = [
     "Q2_K", "Q3_K", "IQ4_NL", "MXFP4", "Q5_K", "Q6_K", "IQ4_XS", "IQ2_XXS", "IQ2_XS", "IQ2_S",
-    "IQ3_XXS", "IQ3_S", "IQ1_S", "IQ1_M",
+    "IQ3_XXS", "IQ3_S", "IQ1_S", "IQ1_M", "Q4_1", "Q5_1", "TQ1_0",
 ];
 
 /// One generated id kernel's launch: source, entry point, rows per
@@ -129,7 +129,7 @@ pub(crate) fn dispatch(kind: &str, down: bool) -> Option<crate::gpu::MoeMatvecId
         ("iq4_xs", false) => "iq4_xs_moe_matvec_id",
         ("iq4_xs", true) => "iq4_xs_moe_down_id",
         _ => {
-            let k = crate::iq::by_name(kind)?;
+            let k = crate::gen_kinds::by_name(kind)?;
             if down {
                 k.moe_down_id
             } else {

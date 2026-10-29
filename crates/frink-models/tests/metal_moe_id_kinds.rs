@@ -1,5 +1,5 @@
-//! A MoE model with Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K, IQ4_XS or
-//! IQ1/IQ2/IQ3 experts runs its experts through Metal's fused id
+//! A MoE model with Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K, IQ4_XS,
+//! IQ1/IQ2/IQ3, Q4_1, Q5_1 or TQ1_0 experts runs its experts through Metal's fused id
 //! kernels, and
 //! answers as the CPU does (#405, #448). A pack in a kind with no id
 //! kernel falls back to one matvec per expert instead of failing.
@@ -53,7 +53,7 @@ const CHILD: &str = "FRINK_MOE_ID_KINDS_CHILD";
 
 /// The kinds under test.
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
-const KINDS: [GgmlType; 14] = [
+const KINDS: [GgmlType; 17] = [
     GgmlType::Q2K,
     GgmlType::Q3K,
     GgmlType::IQ4NL,
@@ -68,6 +68,9 @@ const KINDS: [GgmlType; 14] = [
     GgmlType::IQ3S,
     GgmlType::IQ1S,
     GgmlType::IQ1M,
+    GgmlType::Q4_1,
+    GgmlType::Q5_1,
+    GgmlType::TQ1_0,
 ];
 
 /// The IQ4_NL, IQ4_XS and MXFP4 fixture encoders pack the weights
@@ -144,7 +147,7 @@ fn moe_experts_of_each_kind_run_the_id_kernels_and_match_cpu() {
 }
 
 /// A layer packed in a kind with no id kernel (#448). No loader builds
-/// one, so the Q8_0 fixture's planes are relabelled Q4_1, which has no
+/// one, so the Q8_0 fixture's planes are relabelled Q8_1, which has no
 /// Metal kernel of any kind. The fused decode stack used to encode it
 /// and fail with `CommandFailed`; it must fence it out as the prefill
 /// does, so the run is the one-matvec-per-expert run, dispatch for
@@ -307,9 +310,9 @@ mod metal {
 
         let mut relabelled = load(&path);
         for layer in &mut relabelled.layers {
-            layer.moe.packed_q4 = layer.moe.packed_q4.take().map(|p| p.relabelled("Q4_1"));
+            layer.moe.packed_q4 = layer.moe.packed_q4.take().map(|p| p.relabelled("Q8_1"));
         }
-        assert_packed(&relabelled, "Q4_1");
+        assert_packed(&relabelled, "Q8_1");
         let ((prefill, decode), gpu) = counted(&relabelled, &tokens);
 
         let mut unpacked = load(&path);
@@ -324,7 +327,7 @@ mod metal {
             let delta = common::worst_vs(g, c);
             assert!(
                 delta <= TOL,
-                "relabelled Q4_1 step {step}: max |metal - cpu| = {delta} > {TOL}"
+                "relabelled Q8_1 step {step}: max |metal - cpu| = {delta} > {TOL}"
             );
             worst = worst.max(delta);
         }

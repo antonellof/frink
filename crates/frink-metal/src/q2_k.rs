@@ -221,6 +221,7 @@ mod tests {
     const Q2K: CheckKind = CheckKind {
         name: KIND,
         block_bytes: frink_quant::Q2_K_BLOCK_BYTES,
+        block_elems: 256,
         dequant: frink_quant::dequant_q2_k,
         blocks,
         matvec: launch_q2_k_matvec,

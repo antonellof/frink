@@ -30,7 +30,7 @@ fn every_dispatch_names_an_entry_its_source_generates() {
             assert!(src.contains("#define MOE_MV_ID_ENTRIES"), "{kind}");
         }
     }
-    assert!(dispatch("Q4_1", false).is_none());
+    assert!(dispatch("Q8_1", false).is_none());
 }
 
 /// Each kind has both id paths, so a pack of it never falls
@@ -59,8 +59,8 @@ fn the_decode_stack_refuses_exactly_the_packs_with_no_id_kernel() {
     for kind in KINDS {
         assert_eq!(missing(kind, kind, kind), None, "{kind}");
     }
-    assert_eq!(missing("Q4_1", "Q4_0", "Q4_0"), Some("Q4_1"));
-    assert_eq!(missing("Q4_0", "Q4_1", "Q4_0"), Some("Q4_1"));
+    assert_eq!(missing("Q8_1", "Q4_0", "Q4_0"), Some("Q8_1"));
+    assert_eq!(missing("Q4_0", "Q8_1", "Q4_0"), Some("Q8_1"));
     assert_eq!(missing("Q4_0", "Q4_0", "PTQ1_0"), Some("PTQ1_0"));
 }
 
@@ -87,6 +87,11 @@ fn kind(name: &str) -> Kind {
         "IQ3_S" => (110, 256, frink_quant::dequant_iq3_s),
         "IQ1_S" => (50, 256, frink_quant::dequant_iq1_s),
         "IQ1_M" => (56, 256, frink_quant::dequant_iq1_m),
+        "Q4_1" => (20, 32, frink_quant::dequant_q4_1),
+        "Q5_1" => (24, 32, frink_quant::dequant_q5_1),
+        "TQ1_0" => (54, 256, |b| {
+            frink_quant::ternary::dequant_trits(b, frink_quant::ternary::TQ1_0)
+        }),
         other => panic!("{other}"),
     }
 }
@@ -94,8 +99,8 @@ fn kind(name: &str) -> Kind {
 /// `n_blocks` blocks of pseudo-random bytes with each format's scale
 /// fields forced to realistic magnitudes.
 fn blocks(name: &str, n_blocks: usize, seed: u32) -> Vec<u8> {
-    if crate::iq::by_name(name).is_some() {
-        return crate::iq::test_blocks(name, seed, n_blocks);
+    if crate::gen_kinds::by_name(name).is_some() {
+        return crate::gen_kinds::test_blocks(name, seed, n_blocks);
     }
     let (bb, _, _) = kind(name);
     let mut w = crate::k_quant_check::pseudo_bytes(seed, n_blocks * bb);

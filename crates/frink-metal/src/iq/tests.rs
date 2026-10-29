@@ -14,7 +14,8 @@ macro_rules! iq_check {
             }
             CheckKind {
                 name: $kind,
-                block_bytes: by_name($kind).unwrap().block_bytes,
+                block_bytes: crate::gen_kinds::by_name($kind).unwrap().block_bytes,
+                block_elems: 256,
                 dequant: $dequant,
                 blocks,
                 matvec: $mv,
@@ -89,49 +90,30 @@ iq_check!(
 );
 
 /// The table's block sizes are `frink_quant`'s and the source's: each
-/// MSL struct declares the `BLOCK_BYTES` its row names. Runs without a
-/// device.
+/// IQ `group` struct declares the `BLOCK_BYTES` its row names. Runs
+/// without a device.
 #[test]
 fn every_kind_declares_its_block_size_in_its_functor() {
-    for k in &KINDS {
+    for (k, group) in kinds() {
         let decl = format!(
-            "struct {} {{\n    static constexpr constant short BLOCK_BYTES = {};",
-            k.functor, k.block_bytes
+            "struct {group} {{\n    static constexpr constant short BLOCK_BYTES = {};",
+            k.block_bytes
         );
         assert!(IQ_FUNCTORS_MSL.contains(&decl), "{}: {decl}", k.name);
+        assert!(
+            gemm_functors_msl().contains(&format!("typedef IqDequant<{group}> {};", k.dequant)),
+            "{}",
+            k.name
+        );
     }
+    assert_eq!(kinds().count(), 7);
 }
 
-/// Every entry point the table names is generated in the unit the
-/// launch reads it from, once. Runs without a device.
+/// The grid tables are in each unit that reads them once: one copy of
+/// the text. Runs without a device.
 #[test]
-fn every_entry_point_is_generated_once_in_its_unit() {
-    let mv = iq_matvec_src();
-    let mm = *crate::gpu::K_QUANT_MUL_MM_SG_KERNEL_SRC;
-    let once = |src: &str, line: String| {
-        assert_eq!(src.matches(&line).count(), 1, "{line}");
-    };
-    for k in &KINDS {
-        once(mv, format!("IQ_MATVEC_ENTRY({}, {})", k.matvec, k.functor));
-        once(
-            mv,
-            format!(
-                "MOE_MV_ID_ENTRIES({}, iq_matvec_impl<{}>)",
-                k.prefix, k.functor
-            ),
-        );
-        let dq = dequant_typedef(k.functor);
-        once(mm, format!("MUL_MM_SG_ENTRY({}, {dq})", k.mm_sg));
-        once(mm, format!("MUL_MM_SG_F16_ENTRY({}, {dq})", k.mm_sg_f16));
-        once(mm, format!("MUL_MM_ID_ENTRY({}, {dq})", k.mm_id));
-        once(mm, format!("MUL_MM_ID_F16_ENTRY({}, {dq})", k.mm_id_f16));
-        assert_eq!(aligned_fn(k.mm_sg), Some(k.mm_sg_a));
-        assert_eq!(aligned_fn(k.mm_sg_f16), Some(k.mm_sg_f16_a));
-        assert_eq!(f16_fn(k.mm_sg), Some(k.mm_sg_f16));
-        assert_eq!(f16_fn(k.mm_id), Some(k.mm_id_f16));
-    }
-    // The grid tables are in each unit once: one copy of the text.
-    for src in [mv, mm] {
+fn the_grid_tables_are_in_each_unit_once() {
+    for src in [iq_matvec_src(), *crate::gpu::K_QUANT_MUL_MM_SG_KERNEL_SRC] {
         assert_eq!(src.matches("constant ulong IQ2XXS_GRID[256]").count(), 1);
     }
 }
