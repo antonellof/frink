@@ -149,11 +149,17 @@ impl Decoder {
             // Whether THIS layer's FFN reads the layer input rather
             // than the post-attention residual, and under which norm
             // (`crate::parallel_residual`).
-            let parallel = crate::parallel_residual::layer_parallel_norm(&file, &arch, l);
+            let parallel = crate::parallel_residual::layer_parallel_norm_for(
+                &file,
+                &arch,
+                facts.topology.parallel_residual,
+                l,
+            );
             // THIS layer's norm slots: the architecture's row, with
             // Falcon-40B's `attn_norm_2` crossing the two pre-norm names
             // on the layers that carry it (`crate::norm_sites`).
-            let layer_sites = norm_sites.for_layer(&arch, &file, l);
+            let layer_sites =
+                norm_sites.for_layer(facts.tensors.attn_norm_2_feeds_attention, &file, l);
             // BitNet's two inner norms, REQUIRED when the architecture
             // has them and untouched otherwise (`crate::sub_norms`).
             let sub_norms = crate::sub_norms::load_sub_norms(

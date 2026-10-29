@@ -72,13 +72,7 @@ pub const QKV_BIAS_CREATORS: &[(&str, QkvBias, &str)] = &[
     ("bailingmoe2", QkvBias::NotCreated, "bailingmoe2.cpp:46"),
     ("bitnet", QkvBias::NotCreated, "bitnet.cpp:26-28"),
     ("bloom", QkvBias::Fused(Presence::Required), "bloom.cpp:45"),
-    ("falcon", QkvBias::NotCreated, "falcon.cpp:38"),
     ("gpt2", QkvBias::Fused(Presence::Required), "gpt2.cpp:38"),
-    (
-        "gptneox",
-        QkvBias::Fused(Presence::Required),
-        "gptneox.cpp:67",
-    ),
     ("jais", QkvBias::Fused(Presence::Required), "jais.cpp:32"),
     ("mpt", QkvBias::Fused(Presence::Optional), "mpt.cpp:37"),
     ("openelm", QkvBias::NotCreated, "openelm.cpp:34"),
@@ -96,8 +90,8 @@ pub fn qkv_bias(arch: &str) -> QkvBias {
     crate::models::ArchFacts::of(arch).tensors.qkv_bias
 }
 
-/// [`QkvBias`] for `arch` from [`QKV_BIAS_CREATORS`] alone (`qwen` and
-/// `dbrx` are in `crate::models`).
+/// [`QkvBias`] for `arch` from [`QKV_BIAS_CREATORS`] alone (`qwen`,
+/// `dbrx`, `falcon` and `gptneox` are in `crate::models`).
 pub(crate) fn qkv_bias_from_table(arch: &str) -> QkvBias {
     QKV_BIAS_CREATORS
         .iter()

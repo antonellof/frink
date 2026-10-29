@@ -45,10 +45,9 @@ use common::{
     assert_all_three_paths_match_within, assert_decoder_matches_on_all_three_paths, graph_caches,
     kl_vs_golden, load_graph_fixture, worst_vs, GRAPH_PROMPT,
 };
-use frink_models::capability::{resolve_architecture, ArchPath, BIASED_LAYER_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::config::RopeLayout;
 use frink_models::norm::NormOp;
-use frink_models::norm_sites::ATTN_NORM_2_FEEDS_ATTENTION;
 use frink_models::parallel_residual::ParallelNorm;
 use frink_models::{Decoder, FfnActivation};
 
@@ -206,8 +205,14 @@ fn the_loaded_layers_are_the_two_shapes() {
             rope: RopeLayout::Neox
         })
     ));
-    assert!(BIASED_LAYER_NORM.contains(&FALCON));
-    assert_eq!(ATTN_NORM_2_FEEDS_ATTENTION, &[FALCON]);
+    assert!(frink_models::capability::uses_biased_layer_norm(FALCON));
+    // Over the catalog: the row lives in `frink_models::models::falcon`.
+    let crossed: Vec<&str> = frink_models::capability::architecture_catalog()
+        .iter()
+        .map(|p| p.gguf_name)
+        .filter(|n| frink_models::norm_sites::attn_norm_2_feeds_attention(n))
+        .collect();
+    assert_eq!(crossed, [FALCON]);
 
     let d = load_graph_fixture(FALCON);
     assert!(d.config.parallel_residual);

@@ -322,7 +322,13 @@ fn the_fused_qkv_bias_entry_is_backed_by_real_code() {
 /// with a bias that is the file's.
 #[test]
 fn the_layer_norm_bias_entry_is_backed_by_real_code() {
-    for arch in frink_models::capability::BIASED_LAYER_NORM {
+    // Over the catalog: some rows live in `frink_models::models`.
+    let biased: Vec<&str> = frink_models::capability::architecture_catalog()
+        .iter()
+        .map(|p| p.gguf_name)
+        .filter(|n| frink_models::capability::uses_biased_layer_norm(n))
+        .collect();
+    for arch in biased {
         let path = format!(
             "{}/tests/fixtures/{arch}_tiny.gguf",
             env!("CARGO_MANIFEST_DIR")
@@ -479,7 +485,7 @@ fn the_bias_transcription_is_complete_enough_to_be_worth_pinning() {
 #[test]
 fn every_required_fused_qkv_bias_is_required_by_the_loader() {
     use frink_models::proj_bias::Presence;
-    use frink_models::qkv_fused::{QkvBias, QKV_BIAS_CREATORS};
+    use frink_models::qkv_fused::QkvBias;
     let required = |arch: &str| {
         frink_models::models::ArchFacts::of(arch).tensors.qkv_bias
             == QkvBias::Fused(Presence::Required)
@@ -494,10 +500,15 @@ fn every_required_fused_qkv_bias_is_required_by_the_loader() {
         // the pin (`create_tensor_qkv` creates them optional).
         assert!(!biases.contains(&"attn_q.bias"), "{arch}");
     }
-    for (arch, rule, _) in QKV_BIAS_CREATORS {
-        if *rule == QkvBias::Fused(Presence::Required) {
+    // Over the catalog: the rows live in the legacy table and in
+    // `frink_models::models`.
+    for arch in frink_models::capability::architecture_catalog()
+        .iter()
+        .map(|p| p.gguf_name)
+    {
+        if required(arch) {
             assert!(
-                LLAMA_REQUIRED_BIASES.iter().any(|(a, ..)| a == arch),
+                LLAMA_REQUIRED_BIASES.iter().any(|(a, ..)| *a == arch),
                 "{arch} is required by the loader but not transcribed"
             );
         }

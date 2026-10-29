@@ -160,6 +160,17 @@ eligibility test so a new field forces a Metal decision.
   deleted; each now takes its row from `ArchFacts` (`*_for`), and
   `weightless_qk_norm` and `llama4`'s per-layer RoPE are
   `HparamRules`. Divergence found and filed, not fixed: #458.
+- Step 7a: `models/stablelm.rs`, `gptneox.rs`, `phi2.rs`, `falcon.rs`,
+  `plamo.rs`. Their parallel-residual rows are named constants in
+  `parallel_residual` that the files reference
+  (`parallel_residual_rows()` is the census over table and registry),
+  and the resolvers take the row (`*_for`). Rows also left
+  `BIASED_LAYER_NORM`, `uses_gelu_ungated`, `proj_bias`,
+  `QKV_BIAS_CREATORS` and `PER_HEAD_LAYER_NORM_QK`;
+  `ATTN_NORM_2_FEEDS_ATTENTION` (falcon only) is deleted and
+  `NormSites::for_layer` takes the row. Step 7b is the Cohere graphs
+  (`command-r`, `cohere2`, `cohere2moe`), whose rows also span the SWA,
+  multiplier, MoE and MTP tables.
 
 What step 2 changed about the target design:
 

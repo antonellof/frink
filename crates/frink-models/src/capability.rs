@@ -1446,10 +1446,8 @@ pub const BIASED_LAYER_NORM: &[&str] = &[
     "starcoder2",
     "codeshell",
     "jais2",
-    "stablelm",
-    "gptneox",
-    "falcon",
-    "phi2",
+    // `stablelm`, `gptneox`, `falcon` and `phi2` state theirs in
+    // `crate::models` (#403 step 7a).
     "gpt2",
     "starcoder",
     "bloom",
@@ -1458,7 +1456,11 @@ pub const BIASED_LAYER_NORM: &[&str] = &[
 
 /// See [`BIASED_LAYER_NORM`].
 pub fn uses_biased_layer_norm(arch: &str) -> bool {
-    BIASED_LAYER_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::LayerNormBias
 }
 
 /// Does this architecture normalise with an RMSNorm with a learned
@@ -3591,17 +3593,15 @@ pub fn uses_relu_sqr(arch: &str) -> bool {
 /// the parallel residual was served (`crate::parallel_residual`). The
 /// five here map to `FfnActivation::GeluUngated`.
 pub fn uses_gelu_ungated(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch).ffn.gelu_ungated
+}
+
+/// [`uses_gelu_ungated`] from this list alone (`gptneox`, `falcon` and
+/// `phi2` are in `crate::models`).
+pub(crate) fn uses_gelu_ungated_from_table(arch: &str) -> bool {
     matches!(
         arch,
-        "starcoder2"
-            | "codeshell"
-            | "gptneox"
-            | "falcon"
-            | "phi2"
-            | "gpt2"
-            | "starcoder"
-            | "bloom"
-            | "mpt"
+        "starcoder2" | "codeshell" | "gpt2" | "starcoder" | "bloom" | "mpt"
     )
 }
 

@@ -1300,8 +1300,11 @@ impl ModelConfig {
             },
             router_input: facts.moe.router_input,
             block_sub_norms: facts.norm.block_sub_norms,
-            parallel_residual: crate::parallel_residual::model_has_parallel_layer(
-                file, &arch, n_layers,
+            parallel_residual: crate::parallel_residual::model_has_parallel_layer_for(
+                file,
+                &arch,
+                facts.topology.parallel_residual,
+                n_layers,
             ),
             learned_positions: facts.topology.learned_positions,
             attn_value_scale: crate::attn_value_scale::resolve_attn_value_scale(
