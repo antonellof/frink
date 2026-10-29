@@ -11,7 +11,7 @@ speed. Read [`docs/plans/north-star.md`](docs/plans/north-star.md) for
 the ranking and [`docs/adr/`](docs/adr/README.md) for the decisions
 behind every rule below.
 
-Status: **101** architectures run with evidence
+Status: **102** architectures run with evidence
 (`capability::AUDITED_GENERIC_GQA`), 4 more have dedicated engines,
 and everything else refuses by name. Do not restate the counts
 elsewhere; `crates/frink-models/tests/documented_counts.rs` pins this
@@ -34,6 +34,7 @@ cargo test -p frink-metal --features metal -- --ignored    # needs Metal
 ./target/debug/frink -m model.gguf -p "Hi" -n 64 -ngl 99   # Metal
 ./target/debug/frink parity -m model.gguf \
     --dumper target/llama_logits --dumper target/llama_logits_scratch
+scripts/oracle.sh     # CI's oracle: libllama at the pin, goldens regenerated, parity on every fixture
 ./target/debug/frink archs | caps | inspect <gguf>
 FRINK_MODEL_PATH=model.gguf ./target/debug/frink-server
 
@@ -41,8 +42,8 @@ FRINK_MODEL_PATH=model.gguf ./target/debug/frink-server
 ./target/release/frink bench --suite --fit-host --skip-missing
 ```
 
-The llama.cpp reference is a source build at the pinned commit in
-`.scratch/llama.cpp`; `tools/build_llama_logits.sh` builds the parity
+The llama.cpp reference is a source build at the commit in
+`tools/llama_cpp_pin`; `tools/build_llama_logits.sh` builds the parity
 dumper against it. Build it twice (see the script): with one reference,
 `frink parity` cannot call a K-quant result wrong.
 

@@ -64,6 +64,109 @@ eligibility test so a new field forces a Metal decision.
 | 14 | Metal eligibility derived from the plan | ignored Metal tests on hardware |
 | 15 | Fold `ExecutionPlan` into `ModelPlan` | `documented_capabilities.rs:160` |
 
+## Progress
+
+- Step 0: landed in #415 (`tests/model_config_snapshot.rs`).
+- Step 1a: landed in #428. `models/facts.rs` and `ArchFacts::from_tables`,
+  built from the raw name. `ModelConfig::from_gguf` reads 39 lookups
+  through the facts: 34 rows, the two refused-key lists derived from
+  them (`models/refused_keys.rs`), and 3 `HparamRules`
+  (`swa_window_override`, `attention_scale_override`, `rope_layers`).
+- Step 1b: `TensorFacts`. `Decoder::from_gguf` reads 12 lookups through
+  the facts: 10 tensor rows from the canonical name (the gpt-oss extra
+  tensors, the norm-site row, the per-head QK norm rows, the
+  interleaved Q gate, the post-norm pairing row, the shared-expert sum
+  scale, the weightless embedding norm, QK norm after RoPE) and
+  `family` / `memory` from the raw name. Three resolvers were split
+  into a row the facts carry and a shared `_for` / `sum_scale_on_layer`
+  step; `NormSites::GENERIC` is the one statement of the default row.
+- Guards (`models/facts_tests.rs`): every tabled name is held to its
+  legacy answer, `DEFAULT` to an absent name, and both loaders' source
+  to no direct call of a routed lookup, with the raw versus canonical
+  split pinned.
+- Still direct: in `ModelConfig::from_gguf`, 29 calls that take the
+  name beside a hyperparameter or the file (`mtp_blocks::trunk_layers`,
+  `kv_head_dims`, `norm_function_for_file`, `moe_interleave`,
+  `clamp_kqv`, `attn_temperature`, `swa_geometry::rotary_widths`,
+  `yarn_log_mul_for`, `post_norm_eps`, `weightless_qk_norm`, `alibi`
+  and others); in `Decoder::from_gguf`, 17 `load_*` / probe helpers
+  that read the file (`weight_scales`, `position_embd`,
+  `parallel_residual`, `NormSites::for_layer`, `sub_norms`, `attn_gate`,
+  `proj_bias`, `mamba2`, `layer_shapes::load_non_gqa_attention`,
+  `moe_interleave::dense_by_router_absence`, `parallel_dense_ffn`,
+  `skip_stream`, `unread_tensors`). Those move with their family, from
+  step 2 on: a resolver that is a row plus arithmetic splits as the
+  three above did, and a file reader stays loader code taking its row.
+
+- Step 2: `models/llama.rs`, `models/granite.rs`, `models/granite_moe.rs`
+  (`granitemoe` and the `granite-moe` alias) and `models::REGISTRY`.
+  Their rows left `scalar_multipliers::MULTIPLIER_ARCHITECTURES`,
+  `rope_finetuned::ROPE_GATED_ON_FINETUNED` and both `proj_bias`
+  creator tables. `models/tests.rs` holds the three registry guards
+  (each name resolves once, audited if and only if it has evidence, no
+  registry name in a behaviour table) and keeps the catalog fields to
+  the catalog.
+- Step 3: `models/olmo.rs`, `models/olmo2.rs`, `models/exaone4.rs`.
+  Their rows left `capability.rs` (`POST_NORM_ONLY_ARCHITECTURES` and
+  `NON_PARAMETRIC_LAYER_NORM`, now empty and deleted; the two
+  predicates derive from the norm-site row), `default_swa_layout`, the
+  two SWA RoPE follow lists, `swa_window_override`, `rope_layers`,
+  `swa_geometry`, `clamp_kqv` and `mtp_blocks::NEXTN_READERS`.
+  `exaone4`'s two code-shaped rules are functions in its file
+  (`HparamRules`). `rope_layers::PER_LAYER_ROPE_GATES` keeps its
+  `exaone4` row: it is a census of llama.cpp's graphs that the rule is
+  checked against, not a row the loader reads. Divergences found and
+  filed, not fixed: #440, #441.
+- Step 4: `models/qwen.rs`, `qwen2.rs`, `qwen2moe.rs`, `qwen3.rs`,
+  `qwen3moe.rs`. Their rows left `NO_TOPK_RENORMALIZE_ARCHITECTURES`,
+  `proj_bias::OUTPUT_BIAS_CREATORS` and `FFN_LENGTH_COUNTS_GATE_AND_UP`
+  (emptied and deleted). `qwen3` and `qwen3moe` had no row in any table:
+  their facts are `ArchFacts::DEFAULT`. No snapshot fixture reaches the
+  `qwen2` and `qwen2moe` rows, so `models/tests.rs` pins them. Divergence
+  found and filed, not fixed: #447.
+
+- `kolibri1` (#414), outside the step order: the first architecture
+  ADDED in `crate::models` rather than moved there
+  (`models/kolibri1.rs`). It grew the facts by three fields:
+  `MoeFacts::selection` (`frink_moe::SelectionRule`, where
+  `exp_probs_b` enters the top-k), `SwaFacts::rope_base_key_unread` (a
+  graph that seeds the sliding base and reads no `rope.freq_base_swa`)
+  and `HparamRules::load_checks` (the throws in an architecture's own
+  `load_arch_hparams` / `load_arch_tensors` that no table states). The
+  lookups its rows touch answer through `ArchFacts::of` with
+  `_from_table` twins (`window_required`, both
+  `swa_rope_*_follows_model`, `NormSites::for_arch`,
+  `rope_layers::rope_layers`). Two of its rows stay in legacy tables
+  the facts do not carry yet: the sliding-window array read
+  (`swa_layers::PER_LAYER_ARRAY_READERS`) and the catalog row.
+
+What step 2 changed about the target design:
+
+- `ModelDef` is `{ names, source, facts, evidence }` for now. `profile`
+  needs the catalog to be `const` (step 11), and `plan` waits for
+  `layer_plan` (step 13); `ArchFacts::of` fills `profile` and `audited`
+  from `capability.rs` until then.
+- Reading the facts in the loaders is not enough. A public name-keyed
+  lookup whose row moves (`multiplier_support`, `attn_out_presence`,
+  `ffn_presence`, `rope_finetuned::unrotated`) has other readers
+  (`rope_scaling`'s YaRN default, tests, `capability.rs`), so it now
+  answers through `ArchFacts::of`, and `from_tables` reads a
+  `_from_table` twin so the two cannot recurse. Every later step does
+  this for each table it empties.
+- A family's rows are not all in the routed tables. Two of granite's
+  three sat behind step 1's "still direct" resolvers and were split
+  here (`unrotated_for`, the `proj_bias` loaders taking their row);
+  later families will split the resolvers their rows touch.
+- `llama-embed` stays outside the registry: it keeps its catalog row on
+  the config side and reaches `llama`'s definition on the decoder side
+  through `canonical_architecture`, so `ModelDef.names` holds raw names
+  only.
+- Found while reading `granite-moe.cpp`: its hparam loader does not read
+  `rope.scaling.finetuned`, so llama.cpp rotates a `granitemoe` file
+  declaring `false` and frink does not. No converter writes the key for
+  it. Kept unchanged here (this step is a refactor) and recorded in
+  `models/granite_moe.rs`.
+
 ## Risks
 
 1. Raw versus canonical names must be reproduced exactly by

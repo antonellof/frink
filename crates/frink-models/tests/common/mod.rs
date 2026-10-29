@@ -13,6 +13,13 @@
 
 #![allow(dead_code)]
 
+mod backend;
+pub mod iq_encode;
+pub mod quant_encode;
+pub mod synthetic_llama;
+#[allow(unused_imports)]
+pub use backend::{backend, pin_backend, tolerance, Backend, METAL_GOLDEN_TOL};
+
 use frink_core::cache::KvCache;
 use frink_models::{Decoder, ModelConfig};
 use std::path::{Path, PathBuf};
@@ -24,16 +31,27 @@ use std::path::{Path, PathBuf};
 /// almost never at index 0, and reporting the first divergence hides
 /// how bad it gets. The sample of both sides is what turns "0.03 > 0.01"
 /// into a diagnosis.
+///
+/// `tol` is the CPU line. The comparison runs on this process's pinned
+/// [`backend`], which fails here if a decoder was built on a backend
+/// nobody pinned; on Metal the line is never tighter than
+/// [`METAL_GOLDEN_TOL`], and every comparison prints its worst so the
+/// spread can be re-measured with `--nocapture`.
 pub fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
+    let on = backend();
+    let tol = tolerance(tol);
     assert_eq!(got.len(), want.len(), "{what}: logit count");
     let worst = got
         .iter()
         .zip(want.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0f32, f32::max);
+    if on == Backend::Metal {
+        eprintln!("metal-golden {worst:.3e} {what}");
+    }
     assert!(
         worst <= tol,
-        "{what}: max |frink - llama.cpp| = {worst} > {tol}\n  frink: {:?}\n  llama:  {:?}",
+        "{what} on {on:?}: max |frink - llama.cpp| = {worst} > {tol}\n  frink: {:?}\n  llama:  {:?}",
         &got[..8.min(got.len())],
         &want[..8.min(want.len())]
     );
@@ -177,10 +195,39 @@ pub fn graph_fixture_path(name: &str) -> String {
 }
 
 pub fn load_graph_fixture(name: &str) -> Decoder {
+    try_load_graph_fixture(name).unwrap_or_else(|e| panic!("{name}: fixture loads: {e}"))
+}
+
+/// Every `<name>_tiny.gguf` graph fixture, by name, sorted.
+pub fn graph_fixture_names() -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("tests/fixtures is readable")
+        .filter_map(|e| {
+            let file = e.ok()?.file_name().into_string().ok()?;
+            file.strip_suffix("_tiny.gguf").map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// [`load_graph_fixture`] for a sweep over every fixture, some of which
+/// are refusals: the loader's error, as text, instead of a panic.
+pub fn try_load_graph_fixture(name: &str) -> Result<Decoder, String> {
     let path = graph_fixture_path(name);
-    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
-    let config = ModelConfig::from_gguf(&file).expect("fixture config parses");
-    Decoder::from_gguf(&path, config).expect("fixture loads")
+    let file = frink_gguf::GgufFile::open(&path).map_err(|e| e.to_string())?;
+    let config = ModelConfig::from_gguf(&file).map_err(|e| e.to_string())?;
+    backend();
+    Decoder::from_gguf(&path, config).map_err(|e| e.to_string())
+}
+
+/// The one way a golden suite builds a decoder: on the backend this
+/// process is pinned to ([`backend`]), so `--features metal` cannot
+/// route a host golden to the GPU without saying so.
+pub fn load_decoder(path: impl AsRef<Path>, config: ModelConfig) -> Decoder {
+    backend();
+    Decoder::from_gguf(path, config).expect("fixture loads")
 }
 
 pub fn graph_caches(decoder: &Decoder) -> Vec<KvCache> {
@@ -388,6 +435,9 @@ pub fn prompt_tokens(file: &frink_gguf::ShardedGguf, prompt: &str, want: usize) 
 /// the repacked kernels and the repack cache). Only the second can see
 /// a repack-cache defect, because the first never repacks anything.
 pub fn assert_store_backed_matches_resident(fixture: &str, cfg: fn() -> ModelConfig) {
+    // A host property: on Metal the resident experts take the fused MoE
+    // kernels and the streamed ones the host, which is two engines.
+    pin_backend(Backend::Cpu);
     const DECODE: [usize; 4] = [6, 8, 10, 4];
     let short: Vec<usize> = vec![2, 5, 9, 1, 7, 3];
     // Past `moe_ffn_batch`'s 32-row floor, every token id in range.

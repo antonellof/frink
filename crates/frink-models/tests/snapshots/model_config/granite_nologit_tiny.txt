@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/granite_nologit_tiny.gguf
+config: REFUSED: architecture 'granite' requires unimplemented feature: `granite.logit_scale` is REQUIRED for this architecture (src/models/granite.cpp:7 reads it with no default) and the file does not declare it; llama.cpp refuses the same file

@@ -257,14 +257,14 @@ const PROJECTION_BIASES: &[&str] = &[
 ];
 
 fn creates_projection_bias(arch: &str, bias: &str) -> bool {
-    use frink_models::proj_bias::{
-        ATTN_OUT_BIAS_CREATORS, FFN_BIAS_CREATORS, OUTPUT_BIAS_CREATORS,
-    };
+    // The lookups, not the tables: `llama` and the Granite rows live in
+    // `frink_models::models` now.
+    use frink_models::proj_bias::{attn_out_presence, ffn_presence, output_presence};
     match bias {
-        "output.bias" => OUTPUT_BIAS_CREATORS.iter().any(|(n, _)| *n == arch),
-        "attn_output.bias" => ATTN_OUT_BIAS_CREATORS.iter().any(|(n, _)| *n == arch),
-        "ffn_up.bias" | "ffn_down.bias" => FFN_BIAS_CREATORS.iter().any(|(n, _, _)| *n == arch),
-        "ffn_gate.bias" => FFN_BIAS_CREATORS.iter().any(|(n, _, g)| *n == arch && *g),
+        "output.bias" => output_presence(arch).is_some(),
+        "attn_output.bias" => attn_out_presence(arch).is_some(),
+        "ffn_up.bias" | "ffn_down.bias" => ffn_presence(arch).is_some(),
+        "ffn_gate.bias" => ffn_presence(arch).is_some_and(|(_, gate)| gate),
         _ => false,
     }
 }

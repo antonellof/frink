@@ -1,0 +1,182 @@
+fixture: crates/frink-models/tests/fixtures/kolibri1_softmax_tiny.gguf
+config: ModelConfig {
+    name: "frink-kolibri1-fixture",
+    kv_dtype: F32,
+    n_layers: 4,
+    n_mtp_blocks: 0,
+    hidden_dim: 32,
+    n_heads: 4,
+    n_kv_heads: 2,
+    head_dim: 8,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 50.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 8,
+        n_experts_active: 2,
+        n_shared_experts: 1,
+        hidden_dim: 32,
+        expert_ffn_dim: 16,
+        gating: Softmax,
+        norm_topk_prob: false,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        selection: BiasBeforeGating,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: Some(
+        3,
+    ),
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Neox,
+    qk_norm_style: PerHead,
+    swa_layers: PerLayer(
+        [
+            true,
+            true,
+            false,
+            true,
+        ],
+    ),
+    rope_layers: SlidingOnly,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: Some(
+        50.0,
+    ),
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "none -- every field above was read directly from this file's own GGUF metadata",
+    ],
+}
+cfg.layer[0].sliding_window: Some(3)
+cfg.layer[0].rope: Some(theta=50.0 rot_dim=None freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(50.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 16 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (2, 8, 8)
+cfg.layer[1].sliding_window: Some(3)
+cfg.layer[1].rope: Some(theta=50.0 rot_dim=None freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(50.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 16 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 8, 8)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 16 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (2, 8, 8)
+cfg.layer[3].sliding_window: Some(3)
+cfg.layer[3].rope: Some(theta=50.0 rot_dim=None freq_factors=None)
+cfg.layer[3].rotates: true
+cfg.layer[3].rope_theta: Some(50.0)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 16 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (2, 8, 8)
+decoder: LOADED
+dec.embedding: 48x32 F32 None
+dec.final_norm: Rms(len=32 sum=32.972474455833435 fnv=3b57bb887f91d5ce)
+dec.output_head: 48x32 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Neox, qk_norm: PerHead, ffn_activation: Swiglu, memory: MemoryPlan { kind: KvIswa, swa_layers: PerLayer([true, true, false, true]), sliding_window: Some(3) }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: Some(50.0), attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 4
+dec.layer[0].attn.q_proj: 32x32 F32 None
+dec.layer[0].attn.k_proj: 16x32 F32 None
+dec.layer[0].attn.v_proj: 16x32 F32 None
+dec.layer[0].attn.o_proj: 32x32 F32 None
+dec.layer[0].attn.norm_weight: Rms(len=32 sum=31.684120774269104 fnv=3fdca0cd0cf16704)
+dec.layer[0].attn.q_norm: len=8 sum=12.61100161075592 fnv=023820852a0bb4b0
+dec.layer[0].attn.k_norm: len=8 sum=12.02313482761383 fnv=f97aece5ddc5b0dd
+dec.layer[0].attn.post_attn_norm: len=32 sum=30.223780930042267 fnv=b810dd039e4e77af
+dec.layer[0].attn.post_ffn_norm: len=32 sum=34.37884438037872 fnv=28fb170526e02168
+dec.layer[0].moe.router: 8x32 F32 None
+dec.layer[0].moe.experts: Resident(n=8 [gate 16x32 F32 None up 16x32 F32 None down 32x16 F32 None])
+dec.layer[0].moe.shared_experts[0]: gate 12x32 F32 None up 12x32 F32 None down 32x12 F32 None
+dec.layer[0].moe.norm_weight: Rms(len=32 sum=31.952709138393402 fnv=e858863360f92827)
+dec.layer[0].moe.exp_probs_bias: len=8 sum=-3.2669864743947983 fnv=687b0ba8ca1f63e2
+dec.layer[0].moe.activation_counts: len=8
+dec.layer[1].attn.q_proj: 32x32 F32 None
+dec.layer[1].attn.k_proj: 16x32 F32 None
+dec.layer[1].attn.v_proj: 16x32 F32 None
+dec.layer[1].attn.o_proj: 32x32 F32 None
+dec.layer[1].attn.norm_weight: Rms(len=32 sum=31.00413876771927 fnv=56bea2c96051571c)
+dec.layer[1].attn.q_norm: len=8 sum=11.061211228370667 fnv=74eb62f87914e0f8
+dec.layer[1].attn.k_norm: len=8 sum=11.028548240661621 fnv=6a8edbfe8ae6d6c1
+dec.layer[1].attn.post_attn_norm: len=32 sum=33.009898245334625 fnv=45bf620790d1d1d1
+dec.layer[1].attn.post_ffn_norm: len=32 sum=33.91195613145828 fnv=082826d006df73b8
+dec.layer[1].moe.router: 8x32 F32 None
+dec.layer[1].moe.experts: Resident(n=8 [gate 16x32 F32 None up 16x32 F32 None down 32x16 F32 None])
+dec.layer[1].moe.shared_experts[0]: gate 12x32 F32 None up 12x32 F32 None down 32x12 F32 None
+dec.layer[1].moe.norm_weight: Rms(len=32 sum=31.739134967327118 fnv=3c0320c4ebf494f1)
+dec.layer[1].moe.exp_probs_bias: len=8 sum=1.7792598903179169 fnv=80f8ca3b7d76e31f
+dec.layer[1].moe.activation_counts: len=8
+dec.layer[2].attn.q_proj: 32x32 F32 None
+dec.layer[2].attn.k_proj: 16x32 F32 None
+dec.layer[2].attn.v_proj: 16x32 F32 None
+dec.layer[2].attn.o_proj: 32x32 F32 None
+dec.layer[2].attn.norm_weight: Rms(len=32 sum=31.594668447971344 fnv=710795b06f48af6d)
+dec.layer[2].attn.q_norm: len=8 sum=11.834142684936523 fnv=316d763a0342a5ea
+dec.layer[2].attn.k_norm: len=8 sum=13.084916472434998 fnv=0a22926a4266f0b6
+dec.layer[2].attn.post_attn_norm: len=32 sum=32.1343395113945 fnv=16ddb67ef570a14f
+dec.layer[2].attn.post_ffn_norm: len=32 sum=33.22081834077835 fnv=16b2f6fbe07a71fa
+dec.layer[2].moe.router: 8x32 F32 None
+dec.layer[2].moe.experts: Resident(n=8 [gate 16x32 F32 None up 16x32 F32 None down 32x16 F32 None])
+dec.layer[2].moe.shared_experts[0]: gate 12x32 F32 None up 12x32 F32 None down 32x12 F32 None
+dec.layer[2].moe.norm_weight: Rms(len=32 sum=33.10981833934784 fnv=ddde117294420afc)
+dec.layer[2].moe.exp_probs_bias: len=8 sum=-7.083714693784714 fnv=718dc0734de61a7f
+dec.layer[2].moe.activation_counts: len=8
+dec.layer[3].attn.q_proj: 32x32 F32 None
+dec.layer[3].attn.k_proj: 16x32 F32 None
+dec.layer[3].attn.v_proj: 16x32 F32 None
+dec.layer[3].attn.o_proj: 32x32 F32 None
+dec.layer[3].attn.norm_weight: Rms(len=32 sum=32.58855092525482 fnv=ad63290a5778888f)
+dec.layer[3].attn.q_norm: len=8 sum=11.993373036384583 fnv=90eed3351ae6d000
+dec.layer[3].attn.k_norm: len=8 sum=12.048102974891663 fnv=3bbdefc6870f62c7
+dec.layer[3].attn.post_attn_norm: len=32 sum=34.13260304927826 fnv=16e4ed9f3f9a6d26
+dec.layer[3].attn.post_ffn_norm: len=32 sum=29.285868883132935 fnv=94ff0952dc1b17af
+dec.layer[3].moe.router: 8x32 F32 None
+dec.layer[3].moe.experts: Resident(n=8 [gate 16x32 F32 None up 16x32 F32 None down 32x16 F32 None])
+dec.layer[3].moe.shared_experts[0]: gate 12x32 F32 None up 12x32 F32 None down 32x12 F32 None
+dec.layer[3].moe.norm_weight: Rms(len=32 sum=33.19723105430603 fnv=b587f9bac4fe4632)
+dec.layer[3].moe.exp_probs_bias: len=8 sum=1.8374371379613876 fnv=3ba9ca79a6e6c38e
+dec.layer[3].moe.activation_counts: len=8

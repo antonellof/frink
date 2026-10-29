@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/jina_bert_v2_tiny.gguf
+config: REFUSED: architecture 'jina-bert-v2' requires unimplemented feature: architecture deferred from Frink text-generation scope: encoder; no output head, so never a decoder -- served by frink_models::EmbeddingModel on /v1/embeddings

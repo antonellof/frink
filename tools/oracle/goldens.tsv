@@ -1,0 +1,172 @@
+alibi_graphs.rs:REFACT_GOLDEN logits $F/refact_tiny.gguf @GRAPH
+alibi_graphs.rs:BLOOM_GOLDEN logits $F/bloom_tiny.gguf @GRAPH
+alibi_graphs.rs:MPT_GOLDEN logits $F/mpt_tiny.gguf @GRAPH
+alibi_graphs.rs:MPT_POSEMBD_GOLDEN logits $F/mpt_posembd_tiny.gguf @GRAPH
+alibi_graphs.rs:JAIS_GOLDEN logits $F/jais_tiny.gguf @GRAPH
+alibi_graphs.rs:BAICHUAN13B_GOLDEN logits $F/baichuan13b_tiny.gguf @GRAPH
+attn_temperature_graphs.rs:MISTRAL3_GOLDEN logits $F/mistral3_tiny.gguf @GRAPH
+attn_temperature_graphs.rs:MISTRAL3_TEMP_GOLDEN logits $F/mistral3_temp_tiny.gguf @GRAPH
+attn_temperature_graphs.rs:MISTRAL3_TEMP_CTX_GOLDEN logits $F/mistral3_temp_ctx_tiny.gguf @GRAPH
+attn_temperature_graphs.rs:MISTRAL3_YARN_GOLDEN logits $F/mistral3_yarn_tiny.gguf @GRAPH
+attn_temperature_graphs.rs:MISTRAL3_YARN_LOGMUL_GOLDEN logits $F/mistral3_yarn_logmul_tiny.gguf @GRAPH
+bert_family_graphs.rs:NOMIC_GOLDEN embed $F/nomic_bert_tiny.gguf "hello world"
+bert_family_graphs.rs:JINA_V3_GOLDEN embed $F/jina_bert_v3_tiny.gguf "hello world"
+bert_family_graphs.rs:JINA_V2_GOLDEN embed $F/jina_bert_v2_tiny.gguf "hello world"
+bert_family_graphs.rs:NEO_BERT_GOLDEN embed $F/neo_bert_tiny.gguf "hello world"
+bert_family_graphs.rs:EUROBERT_GOLDEN embed $F/eurobert_tiny.gguf "hello world"
+biased_layer_norm_graphs.rs:ORION_GOLDEN logits $F/orion_tiny.gguf @GRAPH
+biased_layer_norm_graphs.rs:NEMOTRON_GOLDEN logits $F/nemotron_tiny.gguf @GRAPH
+biased_layer_norm_graphs.rs:NEMOTRON_BIASES_GOLDEN logits $F/nemotron_biases_tiny.gguf @GRAPH
+clamped_swiglu_graphs.rs:STEP35_GOLDEN logits $F/step35_tiny.gguf @GRAPH
+clamped_swiglu_graphs.rs:STEP35_NOCLAMP_GOLDEN logits $F/step35_noclamp_tiny.gguf @GRAPH
+cohere2_graphs.rs:COHERE2_GOLDEN logits $F/cohere2_tiny.gguf @GRAPH
+cohere2_graphs.rs:COHERE2_PATTERN_GOLDEN logits $F/cohere2_pattern_tiny.gguf @GRAPH
+cohere2moe_graphs.rs:C2M_GOLDEN logits $F/cohere2moe_tiny.gguf @GRAPH
+cohere2moe_graphs.rs:C2M_RMS_GOLDEN logits $F/cohere2moe_rms_tiny.gguf @GRAPH
+cohere2moe_graphs.rs:C2M_NORMW_GOLDEN logits $F/cohere2moe_normw_tiny.gguf @GRAPH
+command_r_graphs.rs:COMMAND_R_GOLDEN logits $F/command_r_tiny.gguf @GRAPH
+command_r_graphs.rs:COMMAND_R_NOSCALE_GOLDEN logits $F/command_r_noscale_tiny.gguf @GRAPH
+common/mod.rs:EXAONE_MOE_GOLDEN logits $F/exaone_moe_tiny.gguf @GRAPH
+dbrx_graphs.rs:DBRX_GOLDEN logits $F/dbrx_tiny.gguf @GRAPH
+deepseek2_graphs.rs:DEEPSEEK2_GOLDEN logits $F/deepseek2_tiny.gguf @GRAPH
+deepseek2_graphs.rs:DEEPSEEK2_LEGACY_GOLDEN logits $F/deepseek2_legacy_tiny.gguf @GRAPH
+deepseek2_graphs.rs:DEEPSEEK2_YARN_V2_GOLDEN logits $F/deepseek2_yarn_v2_tiny.gguf @GRAPH
+deepseek2_graphs.rs:DEEPSEEK2_YARN_V3_GOLDEN logits $F/deepseek2_yarn_v3_tiny.gguf @GRAPH
+deepseek2_graphs.rs:DEEPSEEK2_YARN_LEGACY_GOLDEN logits $F/deepseek2_yarn_legacy_tiny.gguf @GRAPH
+falcon_graphs.rs:FALCON_GOLDEN logits $F/falcon_tiny.gguf @GRAPH
+falcon_graphs.rs:FALCON_40B_GOLDEN logits $F/falcon_40b_tiny.gguf @GRAPH
+falcon_h1_graphs.rs:FH1_GOLDEN logits $F/falcon_h1_tiny.gguf @GRAPH
+falcon_h1_graphs.rs:FH1_NOSSMNORM_GOLDEN logits $F/falcon_h1_nossmnorm_tiny.gguf @GRAPH
+falcon_h1_graphs.rs:FH1_OUTPUT_GOLDEN logits $F/falcon_h1_output_tiny.gguf @GRAPH
+fixture_away_graphs.rs:INTERNLM2_GOLDEN logits $F/internlm2_tiny.gguf @GRAPH
+fixture_away_graphs.rs:XVERSE_GOLDEN logits $F/xverse_tiny.gguf @GRAPH
+fixture_away_graphs.rs:ERNIE4_5_GOLDEN logits $F/ernie4_5_tiny.gguf @GRAPH
+fixture_away_graphs.rs:BAICHUAN_GOLDEN logits $F/baichuan_tiny.gguf @GRAPH
+fixture_away_graphs.rs:EXAONE_GOLDEN logits $F/exaone_tiny.gguf @GRAPH
+fixture_away_graphs.rs:GEMMA_GOLDEN logits $F/gemma_tiny.gguf @GRAPH
+fixture_away_graphs.rs:BAILINGMOE2_GOLDEN logits $F/bailingmoe2_tiny.gguf @GRAPH
+fixture_away_graphs.rs:PLAMO3_GOLDEN logits $F/plamo3_tiny.gguf @GRAPH
+gated_attention_graphs.rs:AFMOE_GOLDEN logits $F/afmoe_tiny.gguf @GRAPH
+gated_attention_graphs.rs:LAGUNA_GOLDEN logits $F/laguna_tiny.gguf @GRAPH
+gated_attention_graphs.rs:LAGUNA_SWA_GOLDEN logits $F/laguna_swa_tiny.gguf @GRAPH
+gated_attention_graphs.rs:SPARK25_GOLDEN logits $F/spark25_tiny.gguf @GRAPH
+gated_attention_graphs.rs:LAGUNA_SWA_ROT_GOLDEN logits $F/laguna_swa_rot_tiny.gguf @GRAPH
+gguf_roundtrip.rs:GOLDEN_LOGITS numpy an independent NumPy reference (ADR 0011 leaves these alone)
+gguf_roundtrip.rs:GOLDEN_MOE_LOGITS numpy an independent NumPy reference (ADR 0011 leaves these alone)
+gguf_roundtrip.rs:GOLDEN_MIXED_LOGITS numpy an independent NumPy reference (ADR 0011 leaves these alone)
+glm4_graphs.rs:GLM4_GOLDEN logits $F/glm4_tiny.gguf @GRAPH
+glm4moe_graphs.rs:GLM4MOE_GOLDEN logits $F/glm4moe_tiny.gguf @GRAPH
+glm4moe_graphs.rs:GLM4MOE_AIR_GOLDEN logits $F/glm4moe_air_tiny.gguf @GRAPH
+gptoss_graph.rs:GOLDEN_LOGITS logits $F/gptoss_tiny.gguf @GRAPH
+granite_family_graphs.rs:GRANITE_GOLDEN logits $F/granite_tiny.gguf @GRAPH
+granite_family_graphs.rs:GRANITEMOE_GOLDEN logits $F/granitemoe_tiny.gguf @GRAPH
+granite_family_graphs.rs:GRANITE_NOROPE_GOLDEN logits $F/granite_norope_tiny.gguf @GRAPH
+granite_hybrid_graphs.rs:GH_GOLDEN logits $F/granitehybrid_tiny.gguf @GRAPH
+granite_hybrid_graphs.rs:GH_ROPE_GOLDEN logits $F/granitehybrid_rope_tiny.gguf @GRAPH
+granite_hybrid_graphs.rs:GH_MOE_GOLDEN logits $F/granitehybrid_moe_tiny.gguf @GRAPH
+granite_swa_graphs.rs:GRANITE_SWA_GOLDEN logits $F/granite_swa_tiny.gguf @GRAPH
+grok_graphs.rs:GROK_GOLDEN logits $F/grok_tiny.gguf @GRAPH
+grok_graphs.rs:GROK_DECLARED_GOLDEN logits $F/grok_declared_tiny.gguf @GRAPH
+hrm_text_graphs.rs:HRM_GOLDEN logits $F/hrm_text_tiny.gguf @GRAPH
+hrm_text_graphs.rs:HRM_DEEP_GOLDEN logits $F/hrm_text_deep_tiny.gguf @GRAPH
+layer_loop_graphs.rs:NANBEIGE_GOLDEN logits $F/nanbeige_tiny.gguf @GRAPH
+layer_loop_graphs.rs:NANBEIGE_SKIPNORM_GOLDEN logits $F/nanbeige_skipnorm_tiny.gguf @GRAPH
+layer_loop_graphs.rs:NANBEIGE_LOOP1_GOLDEN logits $F/nanbeige_loop1_tiny.gguf @GRAPH
+lfm2_graphs.rs:LFM2_GOLDEN logits $F/lfm2_tiny.gguf @GRAPH
+lfm2_graphs.rs:LFM2_OUTPUT_GOLDEN logits $F/lfm2_output_tiny.gguf @GRAPH
+lfm2_graphs.rs:LFM2MOE_GOLDEN logits $F/lfm2moe_tiny.gguf @GRAPH
+llama4_graphs.rs:L4_GOLDEN logits $F/llama4_tiny.gguf @GRAPH
+llama4_graphs.rs:L4_128E_GOLDEN logits $F/llama4_128e_tiny.gguf @GRAPH
+llama4_graphs.rs:L4_LONG_GOLDEN logits REF_N_CTX=8256 $F/llama4_tiny.gguf @LLAMA4_LONG
+lora_graphs.rs:BASE_GOLDEN logits $F/lora_base_tiny.gguf @GRAPH
+lora_graphs.rs:A_GOLDEN logits --lora $F/lora_a_tiny.gguf $F/lora_base_tiny.gguf @GRAPH
+lora_graphs.rs:A_HALF_GOLDEN logits --lora $F/lora_a_tiny.gguf:0.5 $F/lora_base_tiny.gguf @GRAPH
+lora_graphs.rs:AB_GOLDEN logits --lora $F/lora_a_tiny.gguf:1 --lora $F/lora_b_tiny.gguf:0.75 $F/lora_base_tiny.gguf @GRAPH
+lora_graphs.rs:B_GOLDEN logits --lora $F/lora_b_tiny.gguf $F/lora_base_tiny.gguf @GRAPH
+mamba_graphs.rs:JAMBA_GOLDEN logits $F/jamba_tiny.gguf @GRAPH
+mamba_graphs.rs:MAMBA_GOLDEN logits $F/mamba_tiny.gguf @GRAPH
+mamba_graphs.rs:MAMBA_DTBCRMS_GOLDEN logits $F/mamba_dtbcrms_tiny.gguf @GRAPH
+mamba_graphs.rs:MAMBA2_GOLDEN logits $F/mamba2_tiny.gguf @GRAPH
+minicpm_graphs.rs:MINICPM_DEFAULTS_GOLDEN logits $F/minicpm_tiny.gguf @GRAPH
+minicpm_graphs.rs:MINICPM_DECLARED_GOLDEN logits $F/minicpm_declared_tiny.gguf @GRAPH
+minimax_01_graphs.rs:MINIMAX_01_GOLDEN logits $F/minimax_01_tiny.gguf @GRAPH
+minimax_01_graphs.rs:MINIMAX_01_FUSED_QKV_GOLDEN logits $F/minimax_01_fused_qkv_tiny.gguf @GRAPH
+minimax_01_graphs.rs:MINIMAX_01_OUTPUT_GOLDEN logits $F/minimax_01_output_tiny.gguf @GRAPH
+minimax_01_graphs.rs:MINIMAX_01_UNIT_SCALE_GOLDEN logits $F/minimax_01_unit_scale_tiny.gguf @GRAPH
+minimax_m2_graphs.rs:MINIMAX_M2_GOLDEN logits $F/minimax_m2_tiny.gguf @GRAPH
+moe_routing_bias.rs:GOLDEN_LOGITS logits $F/dots1_tiny.gguf @GRAPH
+muse_glimmer_graphs.rs:MUSE_GOLDEN logits $F/muse_glimmer_tiny.gguf @GRAPH
+nemotron_h_graphs.rs:NH_GOLDEN logits $F/nemotron_h_tiny.gguf @GRAPH
+nemotron_h_graphs.rs:NH_BIASES_GOLDEN logits $F/nemotron_h_biases_tiny.gguf @GRAPH
+nemotron_h_graphs.rs:NH_OUTPUT_GOLDEN logits $F/nemotron_h_output_tiny.gguf @GRAPH
+nemotron_h_graphs.rs:NH_MOE_GOLDEN logits $F/nemotron_h_moe_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:EXAONE4_32B_GOLDEN logits $F/exaone4_32b_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:SMOLLM3_GOLDEN logits $F/smollm3_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:MAPLE_GOLDEN logits $F/maple_tiny.gguf @GRAPH
+olmo_graphs.rs:OLMO_GOLDEN logits $F/olmo_tiny.gguf @GRAPH
+olmo_graphs.rs:OLMO_CLAMPED_GOLDEN logits $F/olmo_clamped_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:DEEPSEEK_GOLDEN logits $F/deepseek_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:BAILINGMOE_GOLDEN logits $F/bailingmoe_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:SEED_OSS_GOLDEN logits $F/seed_oss_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:MAINCODER_GOLDEN logits $F/maincoder_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:HUNYUAN_MOE_GOLDEN logits $F/hunyuan_moe_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:HUNYUAN_DENSE_GOLDEN logits $F/hunyuan_dense_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:ERNIE4_5_MOE_GOLDEN logits $F/ernie4_5_moe_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:CHATGLM_GOLDEN logits $F/chatglm_tiny.gguf @GRAPH
+one_match_arm_graphs.rs:QWEN_GOLDEN logits $F/qwen_tiny.gguf @GRAPH
+pangu_embedded_graphs.rs:PANGU_GOLDEN logits $F/pangu_embedded_tiny.gguf @GRAPH
+pangu_embedded_graphs.rs:PANGU_OUTPUT_GOLDEN logits $F/pangu_embedded_output_tiny.gguf @GRAPH
+parallel_dense_ffn_graphs.rs:ARCTIC_GOLDEN logits $F/arctic_tiny.gguf @GRAPH
+parallel_dense_ffn_graphs.rs:GROK2_GOLDEN logits $F/grok_dense_ffn_tiny.gguf @GRAPH
+parallel_residual_graphs.rs:GPTNEOX_GOLDEN logits $F/gptneox_tiny.gguf @GRAPH
+parallel_residual_graphs.rs:GPTNEOX_SEQUENTIAL_GOLDEN logits $F/gptneox_sequential_tiny.gguf @GRAPH
+parallel_residual_graphs.rs:PLAMO_GOLDEN logits $F/plamo_tiny.gguf @GRAPH
+per_layer_activation_graphs.rs:APERTUS_GOLDEN logits $F/apertus_tiny.gguf @GRAPH
+per_layer_activation_graphs.rs:APERTUS_SCALAR_GOLDEN logits $F/apertus_scalar_tiny.gguf @GRAPH
+per_layer_shape_graphs.rs:DECI_GOLDEN logits $F/deci_tiny.gguf @GRAPH
+per_layer_shape_graphs.rs:DECI_KV_ONLY_GOLDEN logits $F/deci_kv_only_tiny.gguf @GRAPH
+per_layer_shape_graphs.rs:OPENELM_GOLDEN logits $F/openelm_tiny.gguf @GRAPH
+phi2_graphs.rs:PHI2_GOLDEN logits $F/phi2_tiny.gguf @GRAPH
+phimoe_graphs.rs:PHIMOE_GOLDEN logits $F/phimoe_tiny.gguf @GRAPH
+phimoe_graphs.rs:PHIMOE_PLAIN_GOLDEN logits $F/phimoe_plain_tiny.gguf @GRAPH
+plamo2_graphs.rs:P2_GOLDEN logits $F/plamo2_scalar_heads_tiny.gguf @GRAPH
+plm_graphs.rs:PLM_GOLDEN logits $F/plm_tiny.gguf @GRAPH
+position_embd_graphs.rs:GPT2_GOLDEN logits $F/gpt2_tiny.gguf @GRAPH
+position_embd_graphs.rs:STARCODER_GOLDEN logits $F/starcoder_tiny.gguf @GRAPH
+post_norm_only_graphs.rs:OLMO2_GOLDEN logits $F/olmo2_tiny.gguf @GRAPH
+post_norm_only_graphs.rs:EXAONE4_GOLDEN logits $F/exaone4_tiny.gguf @GRAPH
+proj_bias_graphs.rs:STARCODER2_GOLDEN logits $F/starcoder2_tiny.gguf @GRAPH
+proj_bias_graphs.rs:CODESHELL_GOLDEN logits $F/codeshell_tiny.gguf @GRAPH
+proj_bias_graphs.rs:JAIS2_GOLDEN logits $F/jais2_tiny.gguf @GRAPH
+proj_bias_graphs.rs:LLAMA_BIASES_GOLDEN logits $F/llama_biases_tiny.gguf @GRAPH
+qwen35_graphs.rs:Q35_GOLDEN logits $F/qwen35_tiny.gguf @GRAPH
+qwen35_graphs.rs:Q35_OUTPUT_GOLDEN logits $F/qwen35_output_tiny.gguf @GRAPH
+qwen35_graphs.rs:Q35MOE_GOLDEN logits $F/qwen35moe_tiny.gguf @GRAPH
+qwen35_graphs.rs:Q3NEXT_GOLDEN logits $F/qwen3next_tiny.gguf @GRAPH
+qwen3moe_graph.rs:GOLDEN_LOGITS logits $F/qwen3moe_tiny.gguf @GRAPH
+router_input_graphs.rs:SMALLTHINKER_GOLDEN logits $F/smallthinker_tiny.gguf @GRAPH
+router_input_graphs.rs:SMALLTHINKER_NOWINDOW_GOLDEN logits $F/smallthinker_nowindow_tiny.gguf @GRAPH
+router_input_graphs.rs:SMALLTHINKER_SWA2_GOLDEN logits $F/smallthinker_swa2_tiny.gguf @GRAPH
+skip_stream_graphs.rs:TALKIE_GOLDEN logits $F/talkie_tiny.gguf @GRAPH
+skip_stream_graphs.rs:TALKIE_NOGAINS_GOLDEN logits $F/talkie_nogains_tiny.gguf @GRAPH
+split_kv_head_dim_graphs.rs:MIMO2_GOLDEN logits $F/mimo2_tiny.gguf @GRAPH
+split_kv_head_dim_graphs.rs:MIMO2_NOVSCALE_GOLDEN logits $F/mimo2_novscale_tiny.gguf @GRAPH
+stablelm_graphs.rs:STABLELM_GOLDEN logits $F/stablelm_tiny.gguf @GRAPH
+stablelm_graphs.rs:STABLELM_PARALLEL_GOLDEN logits $F/stablelm_parallel_tiny.gguf @GRAPH
+sub_norm_graphs.rs:BITNET_GOLDEN logits $F/bitnet_tiny.gguf @GRAPH
+sub_norm_graphs.rs:BITNET_SCALES_GOLDEN_HEAD logits $F/bitnet_scales_tiny.gguf @GRAPH
+ungated_ffn_graphs.rs:ARCEE_GOLDEN logits $F/arcee_tiny.gguf @GRAPH
+window_array_graphs.rs:EXAONE_MOE_MTP_GOLDEN logits $F/exaone_moe_mtp_tiny.gguf @GRAPH
+window_array_graphs.rs:MELLUM_GOLDEN logits $F/mellum_tiny.gguf @GRAPH
+fixtures/decode_steps/cohere2.txt decode REF_DECODE_STEPS=32 $F/cohere2_tiny.gguf @GRAPH
+fixtures/decode_steps/glm4.txt decode REF_DECODE_STEPS=32 $F/glm4_tiny.gguf @GRAPH
+fixtures/decode_steps/granitehybrid.txt decode REF_DECODE_STEPS=32 $F/granitehybrid_tiny.gguf @GRAPH
+fixtures/decode_steps/mistral3.txt decode REF_DECODE_STEPS=32 $F/mistral3_tiny.gguf @GRAPH
+fixtures/decode_steps/qwen35.txt decode REF_DECODE_STEPS=32 $F/qwen35_tiny.gguf @GRAPH
+fixtures/decode_steps/smallthinker_swa2.txt decode REF_DECODE_STEPS=32 $F/smallthinker_swa2_tiny.gguf @GRAPH
+lfm3_graphs.rs:LFM3_GOLDEN logits $F/lfm3_tiny.gguf @GRAPH
+lfm3_graphs.rs:LFM3_NO_POST_NORM_GOLDEN logits $F/lfm3_no_post_norm_tiny.gguf @GRAPH
+fixtures/decode_steps/lfm3.txt decode REF_DECODE_STEPS=32 $F/lfm3_tiny.gguf @GRAPH
+kolibri1_graphs.rs:KOLIBRI1_GOLDEN logits $F/kolibri1_tiny.gguf @GRAPH
+kolibri1_graphs.rs:KOLIBRI1_SOFTMAX_GOLDEN logits $F/kolibri1_softmax_tiny.gguf @GRAPH
+fixtures/decode_steps/kolibri1.txt decode REF_DECODE_STEPS=32 $F/kolibri1_tiny.gguf @GRAPH

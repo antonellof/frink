@@ -25,7 +25,6 @@ core.
   records the llama.cpp commit and build flags behind `llama_tps`, and
   rows compared against different builds are not rendered together.
   Two llama.cpp builds have been measured apart on the same file.
-  (Receipts do not record this yet.)
 - Compare builds interleaved (`main, branch, main, branch`) and report
   the raw sequence. Sample utilisation repeatedly, during the run.
 - Before optimising, convert the measurement into the limiting resource

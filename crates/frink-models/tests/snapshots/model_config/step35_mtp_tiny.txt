@@ -1,0 +1,230 @@
+fixture: crates/frink-models/tests/fixtures/step35_mtp_tiny.gguf
+config: ModelConfig {
+    name: "frink-step35-fixture-mtp",
+    kv_dtype: F32,
+    n_layers: 4,
+    n_mtp_blocks: 1,
+    hidden_dim: 24,
+    n_heads: 4,
+    n_kv_heads: 2,
+    head_dim: 8,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 4,
+        n_experts_active: 2,
+        n_shared_experts: 1,
+        hidden_dim: 24,
+        expert_ffn_dim: 16,
+        gating: Sigmoid,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        selection: BiasAfterGating,
+        expert_weights_scale: 2.5,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: Some(
+        3,
+    ),
+    n_dense_leading_layers: 1,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: Some(
+        4,
+    ),
+    rope_dim_swa: Some(
+        8,
+    ),
+    rope_attn_factor: 1.0,
+    rope_layout: Neox,
+    qk_norm_style: WholeVector,
+    swa_layers: PerLayer(
+        [
+            false,
+            true,
+            false,
+            true,
+        ],
+    ),
+    rope_layers: All,
+    layer_shapes: PerLayer(
+        [
+            LayerShape {
+                attention: Gqa {
+                    n_heads: 2,
+                    n_kv_heads: 1,
+                },
+                ffn_dim: 40,
+            },
+            LayerShape {
+                attention: Gqa {
+                    n_heads: 4,
+                    n_kv_heads: 2,
+                },
+                ffn_dim: 40,
+            },
+            LayerShape {
+                attention: Gqa {
+                    n_heads: 2,
+                    n_kv_heads: 1,
+                },
+                ffn_dim: 40,
+            },
+            LayerShape {
+                attention: Gqa {
+                    n_heads: 4,
+                    n_kv_heads: 2,
+                },
+                ffn_dim: 40,
+            },
+        ],
+    ),
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: Some(
+        5000.0,
+    ),
+    ffn_activation: SwigluClamped(
+        SwigluClamps {
+            routed: [
+                0.0,
+                1.5,
+                0.0,
+                2.5,
+            ],
+            dense: [
+                2.0,
+                3.0,
+                1.0,
+                0.0,
+            ],
+            form: AfterSilu,
+        },
+    ),
+    best_effort_fields: [
+        "moe.n_shared_experts (no expert_shared_count; inferred 1 from the first MoE layer's ffn_gate_shexp.weight)",
+    ],
+}
+cfg.layer[0].rope: Some(theta=10000.0 rot_dim=Some(4) freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(10000.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].is_dense: true
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 40 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: SwigluClamped { limit: 2.0, form: AfterSilu } }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (1, 8, 8)
+cfg.layer[1].sliding_window: Some(3)
+cfg.layer[1].rope: Some(theta=5000.0 rot_dim=None freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(5000.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: SwigluClamped { limit: 1.5, form: AfterSilu }, dense: SwigluClamped { limit: 3.0, form: AfterSilu } }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 8, 8)
+cfg.layer[2].rope: Some(theta=10000.0 rot_dim=Some(4) freq_factors=None)
+cfg.layer[2].rotates: true
+cfg.layer[2].rope_theta: Some(10000.0)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, ffn_dim: 40 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: SwigluClamped { limit: 1.0, form: AfterSilu } }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (1, 8, 8)
+cfg.layer[3].sliding_window: Some(3)
+cfg.layer[3].rope: Some(theta=5000.0 rot_dim=None freq_factors=None)
+cfg.layer[3].rotates: true
+cfg.layer[3].rope_theta: Some(5000.0)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: SwigluClamped { limit: 2.5, form: AfterSilu }, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (2, 8, 8)
+decoder: LOADED
+dec.embedding: 48x24 F32 None
+dec.final_norm: Rms(len=24 sum=25.338952004909515 fnv=1889fb071c4ab699)
+dec.output_head: 48x24 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Neox, qk_norm: PerHead, ffn_activation: SwigluClamped(SwigluClamps { routed: [0.0, 1.5, 0.0, 2.5], dense: [2.0, 3.0, 1.0, 0.0], form: AfterSilu }), memory: MemoryPlan { kind: KvGqa, swa_layers: PerLayer([false, true, false, true]), sliding_window: Some(3) }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: Some(5000.0), attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 4
+dec.layer[0].attn.q_proj: 16x24 F32 None
+dec.layer[0].attn.k_proj: 8x24 F32 None
+dec.layer[0].attn.v_proj: 8x24 F32 None
+dec.layer[0].attn.o_proj: 24x16 F32 None
+dec.layer[0].attn.norm_weight: Rms(len=24 sum=25.224181354045868 fnv=bafef2623bf5074e)
+dec.layer[0].attn.q_norm: len=8 sum=12.77690076828003 fnv=a488518a16fb562c
+dec.layer[0].attn.k_norm: len=8 sum=11.499207854270935 fnv=b8460896db357bd9
+dec.layer[0].attn.output_gate: Some(AttnGate { proj: 2x24, act: Sigmoid, width: PerHead })
+dec.layer[0].moe.router: 1x24 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[0].moe.norm_weight: Rms(len=24 sum=24.427131175994873 fnv=1bb813257d1d0d3b)
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 32x24 F32 None
+dec.layer[1].attn.k_proj: 16x24 F32 None
+dec.layer[1].attn.v_proj: 16x24 F32 None
+dec.layer[1].attn.o_proj: 24x32 F32 None
+dec.layer[1].attn.norm_weight: Rms(len=24 sum=22.58243292570114 fnv=171270fdc5fdf274)
+dec.layer[1].attn.q_norm: len=8 sum=12.199682712554932 fnv=a885557e58ec0abf
+dec.layer[1].attn.k_norm: len=8 sum=13.07012951374054 fnv=0e110cf6f4df6edf
+dec.layer[1].attn.output_gate: Some(AttnGate { proj: 4x24, act: Sigmoid, width: PerHead })
+dec.layer[1].moe.router: 4x24 F32 None
+dec.layer[1].moe.experts: Resident(n=4 [gate 16x24 F32 None up 16x24 F32 None down 24x16 F32 None])
+dec.layer[1].moe.shared_experts[0]: gate 24x24 F32 None up 24x24 F32 None down 24x24 F32 None
+dec.layer[1].moe.norm_weight: Rms(len=24 sum=24.11252850294113 fnv=4ff86209138d4421)
+dec.layer[1].moe.exp_probs_bias: len=4 sum=-1.6680024052038789 fnv=6b7459dab65df55e
+dec.layer[1].moe.activation_counts: len=4
+dec.layer[2].attn.q_proj: 16x24 F32 None
+dec.layer[2].attn.k_proj: 8x24 F32 None
+dec.layer[2].attn.v_proj: 8x24 F32 None
+dec.layer[2].attn.o_proj: 24x16 F32 None
+dec.layer[2].attn.norm_weight: Rms(len=24 sum=24.556318640708923 fnv=5372aa0ab5d02a1f)
+dec.layer[2].attn.q_norm: len=8 sum=13.236150026321411 fnv=ca7310b6fa4cd53c
+dec.layer[2].attn.k_norm: len=8 sum=11.827255725860596 fnv=b9ea0c8401f2808a
+dec.layer[2].attn.output_gate: Some(AttnGate { proj: 2x24, act: Sigmoid, width: PerHead })
+dec.layer[2].moe.router: 4x24 F32 None
+dec.layer[2].moe.experts: Resident(n=4 [gate 16x24 F32 None up 16x24 F32 None down 24x16 F32 None])
+dec.layer[2].moe.shared_experts[0]: gate 24x24 F32 None up 24x24 F32 None down 24x24 F32 None
+dec.layer[2].moe.norm_weight: Rms(len=24 sum=26.353519022464752 fnv=d5034b24c7a2ee10)
+dec.layer[2].moe.exp_probs_bias: len=4 sum=0.8407301567494869 fnv=1c3f6b1e1626dd3e
+dec.layer[2].moe.activation_counts: len=4
+dec.layer[3].attn.q_proj: 32x24 F32 None
+dec.layer[3].attn.k_proj: 16x24 F32 None
+dec.layer[3].attn.v_proj: 16x24 F32 None
+dec.layer[3].attn.o_proj: 24x32 F32 None
+dec.layer[3].attn.norm_weight: Rms(len=24 sum=23.209492444992065 fnv=f9dd28449f8acf2d)
+dec.layer[3].attn.q_norm: len=8 sum=11.82218062877655 fnv=150842111b8b882b
+dec.layer[3].attn.k_norm: len=8 sum=13.238012671470642 fnv=94022995a2759614
+dec.layer[3].attn.output_gate: Some(AttnGate { proj: 4x24, act: Sigmoid, width: PerHead })
+dec.layer[3].moe.router: 4x24 F32 None
+dec.layer[3].moe.experts: Resident(n=4 [gate 16x24 F32 None up 16x24 F32 None down 24x16 F32 None])
+dec.layer[3].moe.shared_experts[0]: gate 24x24 F32 None up 24x24 F32 None down 24x24 F32 None
+dec.layer[3].moe.norm_weight: Rms(len=24 sum=23.586742639541626 fnv=86e7dda6e34fc369)
+dec.layer[3].moe.exp_probs_bias: len=4 sum=0.17911356687545776 fnv=c5c2acf450bb44b8
+dec.layer[3].moe.activation_counts: len=4

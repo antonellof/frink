@@ -51,8 +51,7 @@ impl Decoder {
 
         #[cfg(feature = "metal")]
         let metal_embd_kind = {
-            let metal_path = frink_core::metal_dense_enabled()
-                && frink_metal::attn::metal_attn_enabled()
+            let metal_path = crate::decoder::metal_eligibility::metal_attn_switched_on()
                 && self
                     .layers
                     .iter()
@@ -108,8 +107,7 @@ impl Decoder {
         }
 
         #[cfg(feature = "metal")]
-        let use_metal_attn = frink_core::metal_dense_enabled()
-            && frink_metal::attn::metal_attn_enabled()
+        let use_metal_attn = crate::decoder::metal_eligibility::metal_attn_switched_on()
             && self
                 .layers
                 .iter()
@@ -240,7 +238,7 @@ impl Decoder {
                                 ok = false;
                                 break;
                             };
-                            let Some(packed) = Self::moe_packed_q4(&layer.moe) else {
+                            let Some(packed) = Self::moe_packed_id(&layer.moe) else {
                                 ok = false;
                                 break;
                             };
@@ -834,7 +832,7 @@ impl Decoder {
                                                 let fused_ok = match &layer.moe.experts {
                                                     ExpertBacking::Resident(_) => {
                                                         if let Some(packed) =
-                                                            Self::moe_packed_q4(&layer.moe)
+                                                            Self::moe_packed_id(&layer.moe)
                                                         {
                                                             match frink_metal::attn::launch_moe_decode_layer_fused(
                                                                 attn_norm_w,

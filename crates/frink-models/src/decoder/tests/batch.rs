@@ -38,7 +38,7 @@ fn batched_matches_contiguous_with(config: ModelConfig, prepare: impl Fn(&mut De
     let vocab = 10;
     let tokens = [3usize, 5, 7, 2, 9, 1];
 
-    let mut seq_decoder = Decoder::new_random_small(config.clone(), n_layers, vocab);
+    let mut seq_decoder = host_decoder(config.clone(), n_layers, vocab);
     prepare(&mut seq_decoder);
     let mut seq_caches: Vec<KvCache> = seq_decoder.config.new_kv_caches();
     let sequential: Vec<Vec<f32>> = tokens
@@ -49,7 +49,7 @@ fn batched_matches_contiguous_with(config: ModelConfig, prepare: impl Fn(&mut De
 
     // Same seed -> identical weights before `prepare`, and `prepare`
     // is deterministic, so this is a like-for-like comparison.
-    let mut batch_decoder = Decoder::new_random_small(config, n_layers, vocab);
+    let mut batch_decoder = host_decoder(config, n_layers, vocab);
     prepare(&mut batch_decoder);
     let mut batch_caches: Vec<KvCache> = batch_decoder.config.new_kv_caches();
     let batched = batch_decoder.forward_batch(&tokens, 0, &mut batch_caches);
@@ -90,7 +90,7 @@ fn forward_batch_matches_sequential_forward_token_to_one_ulp() {
     let vocab = 8;
     let tokens = [1usize, 3, 5, 2, 7];
 
-    let decoder_a = Decoder::new_random_small(cfg.clone(), 2, vocab);
+    let decoder_a = host_decoder(cfg.clone(), 2, vocab);
     let mut caches_a: Vec<KvCache> = decoder_a.config.new_kv_caches();
     let sequential: Vec<Vec<f32>> = tokens
         .iter()
@@ -102,7 +102,7 @@ fn forward_batch_matches_sequential_forward_token_to_one_ulp() {
     // weights (Decoder::new_random_small is deterministic), so
     // this is a fair like-for-like comparison against a fresh
     // cache rather than reusing decoder_a's now-mutated cache.
-    let decoder_b = Decoder::new_random_small(cfg, 2, vocab);
+    let decoder_b = host_decoder(cfg, 2, vocab);
     let mut caches_b: Vec<KvCache> = decoder_b.config.new_kv_caches();
     let batched = decoder_b.forward_batch(&tokens, 0, &mut caches_b);
 
@@ -130,11 +130,11 @@ fn forward_batch_last_matches_the_final_row_of_forward_batch() {
     let vocab = 16;
     let tokens = vec![1usize, 4, 7, 2, 9];
 
-    let decoder_a = Decoder::new_random_small(cfg.clone(), 2, vocab);
+    let decoder_a = host_decoder(cfg.clone(), 2, vocab);
     let mut caches_a: Vec<KvCache> = decoder_a.config.new_kv_caches();
     let all_rows = decoder_a.forward_batch(&tokens, 0, &mut caches_a);
 
-    let decoder_b = Decoder::new_random_small(cfg, 2, vocab);
+    let decoder_b = host_decoder(cfg, 2, vocab);
     let mut caches_b: Vec<KvCache> = decoder_b.config.new_kv_caches();
     let last = decoder_b.forward_batch_last(&tokens, 0, &mut caches_b);
 
@@ -177,7 +177,7 @@ fn the_batched_path_applies_attention_scale_like_the_contiguous_one() {
 
     // Same seed -> identical weights, so the only difference between
     // these three decoders is the config field under test.
-    let seq_decoder = Decoder::new_random_small(scaled(), 2, vocab);
+    let seq_decoder = host_decoder(scaled(), 2, vocab);
     let mut seq_caches = fresh_caches(&seq_decoder);
     let sequential: Vec<Vec<f32>> = tokens
         .iter()
@@ -185,11 +185,11 @@ fn the_batched_path_applies_attention_scale_like_the_contiguous_one() {
         .map(|(pos, &t)| seq_decoder.forward_token(t, pos, &mut seq_caches))
         .collect();
 
-    let batch_decoder = Decoder::new_random_small(scaled(), 2, vocab);
+    let batch_decoder = host_decoder(scaled(), 2, vocab);
     let mut batch_caches = fresh_caches(&batch_decoder);
     let batched = batch_decoder.forward_batch(&tokens, 0, &mut batch_caches);
 
-    let plain_decoder = Decoder::new_random_small(tiny_test_config(), 2, vocab);
+    let plain_decoder = host_decoder(tiny_test_config(), 2, vocab);
     let mut plain_caches = fresh_caches(&plain_decoder);
     let unscaled = plain_decoder.forward_batch(&tokens, 0, &mut plain_caches);
     assert!(
@@ -228,7 +228,7 @@ fn forward_batch_matches_forward_token_with_qk_norm_present() {
     let q_width = cfg.n_heads * cfg.head_dim;
     let kv_width = cfg.n_kv_heads * cfg.head_dim;
 
-    let mut decoder_a = Decoder::new_random_small(cfg.clone(), 2, vocab);
+    let mut decoder_a = host_decoder(cfg.clone(), 2, vocab);
     for layer in &mut decoder_a.layers {
         layer.attn.q_norm = Some((0..q_width).map(|i| 1.0 + i as f32 * 0.1).collect());
         layer.attn.k_norm = Some((0..kv_width).map(|i| 0.5 + i as f32 * 0.05).collect());
@@ -240,7 +240,7 @@ fn forward_batch_matches_forward_token_with_qk_norm_present() {
         .map(|(pos, &t)| decoder_a.forward_token(t, pos, &mut caches_a))
         .collect();
 
-    let mut decoder_b = Decoder::new_random_small(cfg, 2, vocab);
+    let mut decoder_b = host_decoder(cfg, 2, vocab);
     for layer in &mut decoder_b.layers {
         layer.attn.q_norm = Some((0..q_width).map(|i| 1.0 + i as f32 * 0.1).collect());
         layer.attn.k_norm = Some((0..kv_width).map(|i| 0.5 + i as f32 * 0.05).collect());
@@ -276,8 +276,8 @@ fn qk_norm_present_changes_output_versus_absent() {
     let kv_width = cfg.n_kv_heads * cfg.head_dim;
     let tokens = [3usize, 5];
 
-    let without_norm = Decoder::new_random_small(cfg.clone(), 1, vocab);
-    let mut with_norm = Decoder::new_random_small(cfg, 1, vocab);
+    let without_norm = host_decoder(cfg.clone(), 1, vocab);
+    let mut with_norm = host_decoder(cfg, 1, vocab);
     for layer in &mut with_norm.layers {
         layer.attn.q_norm = Some(vec![2.0; q_width]);
         layer.attn.k_norm = Some(vec![2.0; kv_width]);
@@ -326,7 +326,7 @@ fn forward_batch_matches_forward_token_with_qkv_bias_present() {
     let q_width = cfg.n_heads * cfg.head_dim;
     let kv_width = cfg.n_kv_heads * cfg.head_dim;
 
-    let mut decoder_a = Decoder::new_random_small(cfg.clone(), 2, vocab);
+    let mut decoder_a = host_decoder(cfg.clone(), 2, vocab);
     for layer in &mut decoder_a.layers {
         layer.attn.q_bias = Some((0..q_width).map(|i| 0.3 + i as f32 * 0.02).collect());
         layer.attn.k_bias = Some((0..kv_width).map(|i| -0.2 + i as f32 * 0.03).collect());
@@ -339,7 +339,7 @@ fn forward_batch_matches_forward_token_with_qkv_bias_present() {
         .map(|(pos, &t)| decoder_a.forward_token(t, pos, &mut caches_a))
         .collect();
 
-    let mut decoder_b = Decoder::new_random_small(cfg, 2, vocab);
+    let mut decoder_b = host_decoder(cfg, 2, vocab);
     for layer in &mut decoder_b.layers {
         layer.attn.q_bias = Some((0..q_width).map(|i| 0.3 + i as f32 * 0.02).collect());
         layer.attn.k_bias = Some((0..kv_width).map(|i| -0.2 + i as f32 * 0.03).collect());
@@ -367,8 +367,8 @@ fn qkv_bias_present_changes_output_versus_absent() {
     let kv_width = cfg.n_kv_heads * cfg.head_dim;
     let tokens = [3usize, 5];
 
-    let without_bias = Decoder::new_random_small(cfg.clone(), 1, vocab);
-    let mut with_bias = Decoder::new_random_small(cfg, 1, vocab);
+    let without_bias = host_decoder(cfg.clone(), 1, vocab);
+    let mut with_bias = host_decoder(cfg, 1, vocab);
     for layer in &mut with_bias.layers {
         layer.attn.q_bias = Some(vec![0.5; q_width]);
         layer.attn.k_bias = Some(vec![0.5; kv_width]);
@@ -400,13 +400,13 @@ fn forward_batch_and_forward_token_leave_kv_caches_in_the_same_state() {
     let cfg = tiny_test_config();
     let tokens = [2usize, 4, 6];
 
-    let decoder_a = Decoder::new_random_small(cfg.clone(), 2, 8);
+    let decoder_a = host_decoder(cfg.clone(), 2, 8);
     let mut caches_a: Vec<KvCache> = decoder_a.config.new_kv_caches();
     for (pos, &t) in tokens.iter().enumerate() {
         decoder_a.forward_token(t, pos, &mut caches_a);
     }
 
-    let decoder_b = Decoder::new_random_small(cfg, 2, 8);
+    let decoder_b = host_decoder(cfg, 2, 8);
     let mut caches_b: Vec<KvCache> = decoder_b.config.new_kv_caches();
     decoder_b.forward_batch(&tokens, 0, &mut caches_b);
 
@@ -425,7 +425,7 @@ fn dense_layer_forward_batch_matches_sequential_forward_token_to_one_ulp() {
     let vocab = 8;
     let tokens = [1usize, 3, 5, 2, 7];
 
-    let decoder_a = Decoder::new_random_small(cfg.clone(), 2, vocab);
+    let decoder_a = host_decoder(cfg.clone(), 2, vocab);
     let mut caches_a: Vec<KvCache> = decoder_a.config.new_kv_caches();
     let sequential: Vec<Vec<f32>> = tokens
         .iter()
@@ -433,7 +433,7 @@ fn dense_layer_forward_batch_matches_sequential_forward_token_to_one_ulp() {
         .map(|(pos, &t)| decoder_a.forward_token(t, pos, &mut caches_a))
         .collect();
 
-    let decoder_b = Decoder::new_random_small(cfg, 2, vocab);
+    let decoder_b = host_decoder(cfg, 2, vocab);
     let mut caches_b: Vec<KvCache> = decoder_b.config.new_kv_caches();
     let batched = decoder_b.forward_batch(&tokens, 0, &mut caches_b);
 
@@ -450,7 +450,7 @@ fn dense_layer_forward_batch_matches_sequential_forward_token_to_one_ulp() {
 
 #[test]
 fn forward_batch_with_empty_tokens_returns_empty() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, 8);
+    let decoder = host_decoder(tiny_test_config(), 2, 8);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
     let out = decoder.forward_batch(&[], 0, &mut caches);
     assert!(out.is_empty());
@@ -465,13 +465,13 @@ fn forward_batch_continues_correctly_after_prior_forward_token_calls() {
     // wherever the cache left off, not from zero.
     let cfg = tiny_test_config();
 
-    let decoder_a = Decoder::new_random_small(cfg.clone(), 2, 8);
+    let decoder_a = host_decoder(cfg.clone(), 2, 8);
     let mut caches_a: Vec<KvCache> = decoder_a.config.new_kv_caches();
     decoder_a.forward_token(1, 0, &mut caches_a);
     decoder_a.forward_token(3, 1, &mut caches_a);
     let seq_next = decoder_a.forward_token(5, 2, &mut caches_a);
 
-    let decoder_b = Decoder::new_random_small(cfg, 2, 8);
+    let decoder_b = host_decoder(cfg, 2, 8);
     let mut caches_b: Vec<KvCache> = decoder_b.config.new_kv_caches();
     decoder_b.forward_token(1, 0, &mut caches_b);
     let batch_next = decoder_b.forward_batch(&[3, 5], 1, &mut caches_b);

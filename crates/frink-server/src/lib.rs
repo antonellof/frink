@@ -9951,6 +9951,7 @@ pub(crate) mod tests {
                 norm_topk_prob: true,
                 expert_group_count: None,
                 expert_group_used_count: None,
+                selection: frink_moe::SelectionRule::BiasAfterGating,
             },
             // Layer 0 is the sole dense leading layer, using KDA
             // attention (real Kimi K3's own layer-0 shape) -- the

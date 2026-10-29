@@ -48,11 +48,15 @@ to name a real flag of its tool.
 | server | `-np` | The cap on concurrent sequences under continuous batching; implies `-cb`. `-1` (auto) is refused, omit it | frink has no fixed slots; sequences share one batched worker |
 | server | `-b` | `-b` and `-ub` resolve to ONE prefill chunk (the smaller named) | frink has no logical/physical batch split |
 | server | `-a` | One name. A comma-separated list is refused | `/v1/models` serves one model name |
-| server | `--jinja` | Always on; `--no-jinja` is refused | frink always renders the GGUF's own template and has no template-free mode |
-| server | `-fa` | `on` / `auto` accepted, `off` refused | Fused attention is a backend property here; `FRINK_METAL_ATTN=0` or `--device cpu` |
+| cli, server | `--jinja` | Always on; `--no-jinja` is refused | frink always renders the GGUF's own template and has no template-free mode |
+| cli, server | `-fa` | `on` / `auto` accepted, `off` refused. A bare `-fa` means `auto` | Fused attention is a backend property here; `FRINK_METAL_ATTN=0` or `--device cpu` |
 | bench | `-p` | One value per run; llama-bench's lists and ranges are refused by the parser | Run the command once per value |
 | bench | `-n` | One value per run, as `-p` | Same |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
+| bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and llama-bench's comma-separated sweep refused | Fused attention is a backend property here, and one run measures one configuration |
+| cli | `-co` | Colours the prompt echo and the timing lines on stderr; generated text on stdout is never coloured. A bare `-co` means `on` | frink's stdout is the answer and stays plain so it pipes; `NO_COLOR` still wins under `auto` |
+| server | `--metrics` | Accepted and changes nothing: `/metrics` is always served | frink has no switch to turn the endpoint off |
+| server | `--cors-origins` | Exact origins only. llama.cpp's default `*` and its special value `localhost` are refused | frink has no wildcard by design; without the flag CORS is off |
 
 ## Completion (`run`)
 
@@ -110,8 +114,14 @@ These have llama.cpp's meaning (differences above): `-m` / `--model`,
 `--ctk` / `--cache-type-k`, `-md` / `-d` / `--model-draft` /
 `--spec-draft-model`, `--draft-max` / `--draft` / `--draft-n`,
 `--draft-p-min` / `--spec-draft-p-min`, `--lora`, `--lora-scaled`,
-`-sys` / `--system` / `--system-prompt`, `-st` / `--single-turn`,
-`-e` / `--escape`, `--no-escape`, `--ignore-eos`, `--verbose-prompt`.
+`-sys` / `--system` / `--system-prompt`, `-sysf` /
+`--system-prompt-file` (one trailing newline dropped, as upstream),
+`-jf` / `--json-schema-file`, `-hft` / `--hf-token` (sets `HF_TOKEN`),
+`--warmup` / `--no-warmup`, `--show-timings` / `--no-show-timings`,
+`-co` / `--color`, `--jinja`, `-fa` / `--flash-attn`, `-st` /
+`--single-turn`, `-e` / `--escape`, `--no-escape`, `--ignore-eos`,
+`--verbose-prompt`, and `--usage` (llama.cpp's third spelling of
+help) and `--version` on every subcommand.
 
 frink's own:
 
@@ -129,7 +139,11 @@ llama.cpp warns and drops it. `-st` keeps the chat template: it is not
 `--no-cnv`. The dedicated engines (MLA, Gemma-4, GLM-5.2) refuse
 `--lora`, `--model-draft` and a partial `-ngl` by name.
 
-Stderr prints load and throughput timings. Generated text goes to stdout.
+Stderr prints load and throughput timings (`--no-show-timings` drops
+the timing lines, the speculative summary included). Generated text
+goes to stdout. `--no-warmup` skips the throwaway forward pass before
+the timed prompt on every engine path, so the prompt rate then includes
+first-dispatch cost.
 
 **Structured output.** `--grammar`, `--grammar-file` and `-j` all end
 at the same stack machine, which masks every token that cannot continue
@@ -383,6 +397,7 @@ llama.cpp does at load, and the same prompt reads about 143 t/s.
 # Always reports the largest context that fits and the arithmetic:
 ./target/release/frink inspect-plan model.gguf --backend metal --ctk f16
 ./target/release/frink caps
+./target/release/frink caps --kernels      # kernel coverage per kind and backend
 ./target/release/frink archs
 ./target/release/frink presets
 ./target/release/frink smoke glm-5.2
@@ -396,6 +411,14 @@ llama.cpp does at load, and the same prompt reads about 143 t/s.
   `--concurrency N` (default 1) budgets that many caches.
 - `inspect-plan --expert-cache-bytes N` streams routed experts through
   a bounded cache of `N` bytes instead of counting them fully resident.
+- `inspect-plan` ends with the kernel coverage of the file's quantized
+  tensors on `--backend`: one line per kind and op that falls back to
+  the host (or, on CPU, has no integer `vec_dot`).
+- `caps --kernels` prints the kernel coverage matrix: for every quant
+  kind, backend and op, whether a kernel runs it or it falls back to
+  the host. It reads the dispatch tables, not this host, so it is the
+  same on every machine. `caps --kernels --write PATH` writes it to
+  `PATH`; it is how `docs/KERNELS.md` is regenerated.
 - `archs --write PATH` writes the manifest to `PATH` instead of
   printing it; it is how `docs/manifests/architecture_manifest.md` is
   regenerated.
@@ -620,7 +643,58 @@ PYTHONPATH=$LLAMA/gguf-py python3 scripts/dequantize_gguf.py model-Q8_0.gguf /tm
 
 `LLAMA_LOGITS_FLASH_ATTN=0` keeps the reference off its flash-attention
 path (llama.cpp itself aborts under the default on a real PLM file; the
-published numbers were measured with the default).
+published numbers were measured with the default). `FRINK_CTK=f32`
+runs an f32 K/V cache on BOTH sides: the dumper reads the same variable
+frink does, so the two cannot disagree about it.
+
+### The decode half, and token ids
+
+`--decode-steps N` adds a greedy decode of N steps: llama.cpp decodes
+the prompt as one batch and then feeds back its own argmax one token at
+a time, and frink is fed the same tokens, so every step compares two
+distributions over one context and a flip at step 7 does not turn steps
+8 onward into a comparison of different prefixes. The worst step is the
+verdict, on the same four rungs. The first-token half reads prefill
+only, and a decode defect can produce fluent nonsense while it stays
+`MATCH`.
+
+`--tokens 3,7,11` compares on those ids and skips the tokenizer half
+(said so in the report). It exists for the synthetic fixtures, whose
+vocabularies libllama's tokenizer cannot load.
+
+### The oracle over every fixture
+
+`scripts/oracle.sh` is what CI's `oracle` job runs, and the same
+command works on a laptop (CPU only, a few minutes once libllama is
+built):
+
+```bash
+scripts/oracle.sh                       # llama.cpp at tools/llama_cpp_pin
+scripts/oracle.sh --llama-ref master    # drift report; add --report-only to exit 0
+scripts/oracle.sh --golden-tol 1e-3     # on a laptop: ignore the ISA spread
+```
+
+It builds libllama at the pin under `target/oracle/<sha>/` (from a
+local `.scratch/llama.cpp*` clone when one holds the commit, else from
+GitHub, and refuses a source tree at any other commit), regenerates
+every fixture with that commit's `gguf-py` and every llama.cpp golden
+with `scripts/gptoss_reference_logits.cpp`, then runs `parity --tokens
+--decode-steps 32` on every fixture. It fails when a regenerated file
+differs from the committed one, or when a fixture's outcome is not the
+one `tools/oracle/fixtures.tsv` expects. `tools/oracle/goldens.tsv` says
+which dumper invocation answers each golden; a golden or fixture with no
+row fails `tests/oracle_manifest.rs`, so nothing is added outside the
+oracle's reach.
+
+The committed goldens are CI's answer. libllama is built with
+`GGML_NATIVE=OFF` at a fixed instruction set (on x86-64 the AVX2, FMA
+and F16C baseline, AVX-512 off), so every GitHub runner gives the same
+answer. Any other host's build differs from it in the last bits, up to
+about 4e-4 on these fixtures, so a local run reports goldens it would
+rewrite that are only that host's arithmetic. Locally, run
+`scripts/oracle.sh --golden-tol 1e-3` to see only moves bigger than that spread; when CI's
+`oracle` job rewrites goldens, commit the files from its
+`oracle-rewritten-goldens` artifact, never a laptop's rewrite.
 
 ### The reference dumper
 
@@ -1245,7 +1319,13 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `-ub` / `--ubatch-size`, `--slot-save-path DIR`, `--lora`,
 `--lora-scaled`, `--lora-init-without-apply`, `--reasoning-budget N`,
 `--prefill-assistant` / `--no-prefill-assistant`, `--jinja`,
-`--no-warmup` (there is no warm-up pass), `-fa` / `--flash-attn`.
+`--no-warmup` (there is no warm-up pass), `-fa` / `--flash-attn`,
+`-hft` / `--hf-token` (sets `HF_TOKEN` before `-hf` downloads),
+`--ssl-key-file` / `--ssl-cert-file` (set `FRINK_TLS_KEY` /
+`FRINK_TLS_CERT`; one without the other is refused rather than serving
+plain HTTP), `--cors-origins` (sets `FRINK_CORS_ORIGINS`),
+`--threads-http N` (sets `FRINK_TOKIO_WORKERS`; below 1 keeps the
+default, as upstream), `--metrics`, `--usage` and `--version`.
 
 Notes that are frink's own:
 
@@ -1368,7 +1448,9 @@ line up.
 | `-r/--repetitions` | Timed reps (default 3), plus one discarded warmup |
 | `-t/--threads` | CPU threads (`0` = performance-core default) |
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
-| `--compare` | Also run `llama-bench` on the same GGUF and print the gap |
+| `-fa/--flash-attn` | `on` or `auto` (the default); `off` and sweeps are refused |
+| `--list-devices` | Print the devices this build can run on and exit |
+| `--compare` | Also run `llama-bench -o json` on the same GGUF, print the gap, and record the llama.cpp build it reports (see below) |
 | `--suite` | Run every [`benchmarks/suite.json`](../benchmarks/suite.json) entry in its own process, write a timing file per run, re-render [`RESULTS.md`](../benchmarks/RESULTS.md) |
 | `--render` | Re-render the RESULTS table from the timing files already on disk, measuring nothing |
 | `--id` / `--backend` | Restrict `--suite` to one entry / backend |
@@ -1378,6 +1460,18 @@ line up.
 | `--receipt` | Write a single run's raw timings to this path |
 | `--hidden` / `--ffn-dim` | Synthetic microbenchmark only (no `-m`): the weight matrix is `[ffn-dim x hidden]`. Defaults 4096 and 14336 |
 | `--iters` | Synthetic microbenchmark only: timed iterations per variant (default 20) |
+
+With `--compare --receipt`, the receipt records the llama.cpp build
+behind its `llama_tps` under `llama_cpp`: `build_commit`, `build_number`
+and `backends` as `llama-bench` reports them, plus `cpu_info`,
+`gpu_info` and the `llama-bench` command that ran. A receipt with a
+llama.cpp number whose `llama-bench` did not report a commit (a build
+outside git reports `unknown`) or its backends is refused at write
+time, naming the missing field. `--render` never puts rows measured
+against two llama.cpp builds in one table: each (machine, llama.cpp
+build) pair gets its own section, as machines already do. Receipts
+written before the field render under a llama.cpp reference marked
+**unknown**; no build is filled in for them.
 
 A run stops before the timer starts when the host is busy, thermally
 limited, or short enough on free memory that the weights would page to

@@ -311,3 +311,149 @@ fn parses_llama_gpu_layer_values() {
     assert!(GpuLayers::from_str("-1").is_err());
     assert!(GpuLayers::from_str("some").is_err());
 }
+
+/// A file under the system temp directory, unique to this test process
+/// and `tag`, holding `text`.
+/// [`args`] with `-m x.gguf` in front, which every parse needs.
+fn with_model(argv: &[&str]) -> InferArgs {
+    let mut full = vec!["-m", "x.gguf"];
+    full.extend_from_slice(argv);
+    args(&full)
+}
+
+fn temp_file(tag: &str, text: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("frink-run-{}-{tag}", std::process::id()));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// `-jf FILE` is `-j "$(cat FILE)"`: the same grammar, from the same
+/// converter, and exclusive with the other three grammar flags.
+///
+/// Sabotage: drop the `json_schema_file` branch from `grammar_source`;
+/// the first assertion goes red (no grammar at all).
+#[test]
+fn json_schema_file_is_the_json_schema_flag_read_from_a_file() {
+    let schema = r#"{"type": "object", "properties": {"n": {"type": "integer"}}}"#;
+    let path = temp_file("schema.json", schema);
+    let p = path.to_str().unwrap();
+    let from_file = with_model(&["--json-schema-file", p]);
+    let inline = with_model(&["--json-schema", schema]);
+    let got = from_file.grammar_source().unwrap();
+    assert!(got.is_some(), "-jf produced no grammar");
+    assert_eq!(got, inline.grammar_source().unwrap());
+    let both = with_model(&["--json-schema-file", p, "--grammar", "root ::= \"a\""]);
+    let err = both.grammar_source().unwrap_err().to_string();
+    assert!(err.contains("mutually exclusive"), "{err}");
+    std::fs::remove_file(path).ok();
+}
+
+/// `-sysf` drops exactly one trailing newline, as llama.cpp's
+/// `read_file` + `pop_back` does, and is exclusive with `--system`.
+///
+/// Sabotage: replace the `pop` with nothing; the first assertion goes
+/// red with a trailing newline.
+#[test]
+fn system_prompt_file_drops_one_trailing_newline_like_llama_cpp() {
+    for (text, want) in [
+        ("be terse\n", "be terse"),
+        ("two\n\n", "two\n"),
+        ("none", "none"),
+    ] {
+        let path = temp_file("sys.txt", text);
+        let mut a = with_model(&["--system-prompt-file", path.to_str().unwrap()]);
+        a.read_system_prompt_file().unwrap();
+        assert_eq!(a.system.as_deref(), Some(want), "{text:?}");
+        std::fs::remove_file(path).ok();
+    }
+    let clash = Cli::try_parse_from([
+        "frink",
+        "-m",
+        "x.gguf",
+        "--system",
+        "a",
+        "--system-prompt-file",
+        "b",
+    ]);
+    assert!(
+        clash.is_err(),
+        "--system and --system-prompt-file both accepted"
+    );
+    let mut missing = with_model(&["--system-prompt-file", "/nonexistent/frink-sysf"]);
+    let err = missing.read_system_prompt_file().unwrap_err().to_string();
+    assert!(err.contains("--system-prompt-file"), "{err}");
+}
+
+/// `--no-jinja` asks for a template mode frink does not have, so it is
+/// refused; `--jinja` is what already happens, so it is accepted.
+/// `-fa off` is refused, and `-fa` with no value is `auto`.
+///
+/// Sabotage: delete the `no_jinja` bail; the first assertion goes red.
+#[test]
+fn jinja_and_flash_attn_refuse_what_frink_cannot_do() {
+    let err = with_model(&["--no-jinja"])
+        .apply_llama_flags()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--no-jinja"), "{err}");
+    with_model(&["--jinja"]).apply_llama_flags().unwrap();
+    for off in ["off", "0", "disabled", "false"] {
+        let err = with_model(&["--flash-attn", off])
+            .apply_llama_flags()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("backend property"), "{off}: {err}");
+    }
+    let err = with_model(&["--flash-attn", "maybe"])
+        .apply_llama_flags()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expected on, off or auto"), "{err}");
+    assert_eq!(
+        with_model(&["--flash-attn"]).flash_attn.as_deref(),
+        Some("auto")
+    );
+    with_model(&["--flash-attn", "on"])
+        .apply_llama_flags()
+        .unwrap();
+}
+
+/// The paired switches: the default is on, and the later spelling wins,
+/// as llama.cpp's `{"--warmup"}, {"--no-warmup"}` pair is last-wins.
+///
+/// Sabotage: make `warmup_enabled` return `true`; the `--no-warmup`
+/// assertion goes red.
+#[test]
+fn warmup_and_show_timings_default_on_and_the_last_spelling_wins() {
+    assert!(with_model(&[]).warmup_enabled());
+    assert!(!with_model(&["--no-warmup"]).warmup_enabled());
+    assert!(with_model(&["--no-warmup", "--warmup"]).warmup_enabled());
+    assert!(!with_model(&["--warmup", "--no-warmup"]).warmup_enabled());
+    assert!(with_model(&[]).show_timings_enabled());
+    assert!(!with_model(&["--no-show-timings"]).show_timings_enabled());
+    assert!(with_model(&["--no-show-timings", "--show-timings"]).show_timings_enabled());
+}
+
+/// `-co` takes llama.cpp's truthy, falsey and auto spellings, a bare
+/// `-co` is on, and anything else is refused as upstream throws.
+///
+/// Sabotage: map `Switch::Off` to `Some(true)`; the `off` row goes red.
+#[test]
+fn color_takes_llama_cpps_values() {
+    for (argv, want) in [
+        (&["--color", "on"][..], Some(true)),
+        (&["--color", "1"], Some(true)),
+        (&["--color", "off"], Some(false)),
+        (&["--color", "false"], Some(false)),
+        (&["--color", "auto"], None),
+        (&["--color"], Some(true)),
+        (&[], None),
+    ] {
+        assert_eq!(with_model(argv).colour_choice().unwrap(), want, "{argv:?}");
+    }
+    let err = with_model(&["--color", "rainbow"])
+        .colour_choice()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expected on, off or auto"), "{err}");
+}

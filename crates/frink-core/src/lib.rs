@@ -51,6 +51,7 @@ pub mod lightning;
 pub mod gdn_chunk;
 pub mod host_memory;
 pub mod instance;
+pub mod kernel_matrix;
 pub mod kernel_registry;
 pub mod kv_block;
 pub mod kv_disk;

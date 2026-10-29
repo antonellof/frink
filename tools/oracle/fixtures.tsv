@@ -1,0 +1,214 @@
+# Every synthetic fixture under crates/frink-models/tests/fixtures/:
+#
+#   <fixture> <expected oracle outcome> <script under scripts/ and its args, OUT = the fixture>
+#
+# Read by tools/oracle/fixtures.py (regenerates each fixture in place with
+# llama.cpp's own gguf-py) and tools/oracle/parity.py (runs `frink parity
+# --tokens 3,7,11,19,23,5 --decode-steps 32` on it and fails when the
+# outcome differs from the one written here, in either direction). The
+# outcomes are defined in tools/oracle/parity.py. A non-`match` row says
+# why on its own line end; one naming an issue is a known divergence,
+# not a pass. tests/oracle_manifest.rs fails if a fixture has no row.
+afmoe_tiny                               match                        make_afmoe_fixture.py OUT
+apertus_qknorm_bias_tiny                 match                        make_apertus_fixture.py OUT --qk-norm-bias
+apertus_scalar_tiny                      match                        make_apertus_fixture.py OUT --scalar
+apertus_tiny                             match                        make_apertus_fixture.py OUT
+arcee_gated_tiny                         both-fail                    make_arcee_fixture.py OUT --gated  # refusal evidence: ReluSqr is ungated, llama.cpp rejects the extra tensor too
+arcee_tiny                               match                        make_arcee_fixture.py OUT
+arctic_tiny                              match                        make_arctic_fixture.py OUT
+arctic_wscale_tiny                       match                        make_arctic_fixture.py OUT --weights-scale 2.5
+baichuan13b_tiny                         match                        make_alibi_fixture.py OUT --arch baichuan
+baichuan_tiny                            match                        make_baichuan_fixture.py OUT
+bailingmoe2_tiny                         match                        make_bailingmoe2_fixture.py OUT
+bailingmoe_tiny                          match                        make_bailingmoe_fixture.py OUT
+bitnet_scales_tiny                       refused                      make_bitnet_fixture.py OUT --with-scales
+bitnet_tiny                              match                        make_bitnet_fixture.py OUT
+bloom_tiny                               match                        make_alibi_fixture.py OUT --arch bloom
+chatglm_tiny                             match                        make_chatglm_fixture.py OUT
+codeshell_tiny                           match                        make_proj_bias_fixture.py codeshell OUT
+cohere2_nowindow_tiny                    both-fail                    make_cohere2_fixture.py OUT --no-window  # refusal evidence: the window key is REQUIRED upstream
+cohere2_pattern_tiny                     match                        make_cohere2_fixture.py OUT --pattern-key
+cohere2_tiny                             match                        make_cohere2_fixture.py OUT
+cohere2moe_mtp_tiny                      match                        make_cohere2moe_fixture.py OUT --mtp
+cohere2moe_normw_tiny                    match                        make_cohere2moe_fixture.py OUT --norm-w
+cohere2moe_rms_tiny                      match                        make_cohere2moe_fixture.py OUT --rms
+cohere2moe_tiny                          match                        make_cohere2moe_fixture.py OUT
+command_r_noscale_tiny                   match                        make_command_r_fixture.py OUT --no-logit-scale
+command_r_plus_tiny                      refused                      make_command_r_fixture.py OUT --plus
+command_r_tiny                           match                        make_command_r_fixture.py OUT
+dbrx_noclamp_tiny                        both-fail                    make_dbrx_fixture.py OUT --no-clamp  # refusal evidence: clamp_kqv is REQUIRED upstream
+dbrx_tiny                                match                        make_dbrx_fixture.py OUT
+deci_attn_ffnfree_tiny                   refused                      make_deci_fixture.py OUT --attn-ffnfree
+deci_kv_only_tiny                        match                        make_deci_fixture.py OUT --kv-only
+deci_tiny                                match                        make_deci_fixture.py OUT
+deepseek2_legacy_tiny                    match                        make_deepseek2_fixture.py OUT --legacy-kv-b
+deepseek2_temp_tiny                      refused                      make_deepseek2_fixture.py OUT --temperature
+deepseek2_tiny                           match                        make_deepseek2_fixture.py OUT
+deepseek2_yarn_legacy_tiny               match                        make_deepseek2_fixture.py OUT --legacy-kv-b --yarn 0.707
+deepseek2_yarn_v2_tiny                   match                        make_deepseek2_fixture.py OUT --yarn 0.707
+deepseek2_yarn_v3_tiny                   match                        make_deepseek2_fixture.py OUT --yarn 1.0
+deepseek_tiny                            match                        make_deepseek_fixture.py OUT
+dots1_tiny                               match                        make_dots1_fixture.py OUT
+ernie4_5_moe_step2_tiny                  both-fail                    make_ernie4_5_moe_fixture.py OUT --step 2  # refusal evidence: interleave step 2
+ernie4_5_moe_tiny                        match                        make_ernie4_5_moe_fixture.py OUT
+ernie4_5_tiny                            match                        make_ernie4_5_fixture.py OUT
+eurobert_tiny                            refused                      make_eurobert_fixture.py OUT
+exaone4_32b_tiny                         match                        make_exaone4_fixture.py OUT --layers 64
+exaone4_tiny                             match                        make_exaone4_fixture.py OUT
+exaone_moe_array_flipped_tiny            prefill=WRONG,decode=WRONG  make_exaone_moe_fixture.py OUT --window-array disagree  # #420: libllama honours the inverted window array, frink runs the period
+exaone_moe_array_tiny                    match                        make_exaone_moe_fixture.py OUT --window-array agree
+exaone_moe_mtp_tiny                      match                        make_exaone_moe_fixture.py OUT --window-array agree --mtp
+exaone_moe_tiny                          match                        make_exaone_moe_fixture.py OUT
+exaone_tiny                              match                        make_exaone_fixture.py OUT
+falcon_40b_tiny                          match                        make_falcon_fixture.py OUT --40b
+falcon_h1_nossmnorm_tiny                 match                        make_falcon_h1_fixture.py OUT --no-ssm-norm
+falcon_h1_output_tiny                    match                        make_falcon_h1_fixture.py OUT --output
+falcon_h1_tiny                           match                        make_falcon_h1_fixture.py OUT
+falcon_tiny                              match                        make_falcon_fixture.py OUT
+frink_real_mixed_test                    ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+frink_real_moe_test                      ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+frink_real_test                          ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+frink_real_test_split-00001-of-00003     ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+frink_real_test_split-00002-of-00003     ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+frink_real_test_split-00003-of-00003     ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+gemma_tiny                               match                        make_gemma_fixture.py OUT
+glm4_mrope_tiny                          refused                      make_glm4_fixture.py OUT --mrope
+glm4_tiny                                match                        make_glm4_fixture.py OUT
+glm4moe_air_tiny                         match                        make_glm4moe_fixture.py OUT --no-qk-norm
+glm4moe_mrope_tiny                       match                        make_glm4moe_fixture.py OUT --mrope
+glm4moe_tiny                             match                        make_glm4moe_fixture.py OUT
+gpt2_tiny                                match                        make_gpt2_fixture.py OUT
+gptneox_sequential_tiny                  match                        make_gptneox_fixture.py OUT --sequential
+gptneox_tiny                             match                        make_gptneox_fixture.py OUT
+gptoss_tiny                              match                        make_gptoss_fixture.py OUT
+granite-moe_tiny                         ref-fails                    make_granitemoe_fixture.py OUT --arch granite-moe  # a hyphenated alias llama.cpp has never named
+granite_nologit_tiny                     both-fail                    make_granite_fixture.py OUT --no-logit-scale  # refusal evidence: logit_scale is REQUIRED upstream
+granite_norope_tiny                      match                        make_granite_fixture.py OUT --no-rope
+granite_swa_tiny                         match                        make_granite_swa_fixture.py OUT
+granite_tiny                             match                        make_granite_fixture.py OUT
+granitehybrid_moe_tiny                   match                        make_granite_hybrid_fixture.py OUT --moe
+granitehybrid_rope_tiny                  match                        make_granite_hybrid_fixture.py OUT --rope
+granitehybrid_tiny                       match                        make_granite_hybrid_fixture.py OUT
+granitemoe_tiny                          match                        make_granitemoe_fixture.py OUT
+grok_declared_tiny                       match                        make_grok_fixture.py OUT --declared
+grok_dense_ffn_tiny                      match                        make_grok_fixture.py OUT --dense-ffn
+grok_tiny                                match                        make_grok_fixture.py OUT
+hrm_text_deep_tiny                       match                        make_hrm_text_fixture.py OUT --deep
+hrm_text_tiny                            match                        make_hrm_text_fixture.py OUT
+hunyuan_dense_tiny                       match                        make_hunyuan_dense_fixture.py OUT
+hunyuan_moe_tiny                         match                        make_hunyuan_moe_fixture.py OUT
+internlm2_tiny                           match                        make_internlm2_fixture.py OUT
+jais2_tiny                               match                        make_proj_bias_fixture.py jais2 OUT
+jais_tiny                                match                        make_alibi_fixture.py OUT --arch jais
+jamba_tiny                               match                        make_mamba_fixture.py OUT
+jina_bert_v2_tiny                        refused                      make_jina_bert_v2_fixture.py OUT
+jina_bert_v3_tiny                        refused                      make_jina_bert_v3_fixture.py OUT
+kolibri1_no_bias_tiny                    both-fail                    make_kolibri1_fixture.py OUT --no-bias  # refusal evidence: exp_probs_b is REQUIRED upstream (kolibri1.cpp:54)
+kolibri1_softmax_tiny                    match                        make_kolibri1_fixture.py OUT --softmax
+kolibri1_tiny                            match                        make_kolibri1_fixture.py OUT
+laguna_swa_rot_tiny                      match                        make_laguna_fixture.py OUT --swa-rot
+laguna_swa_tiny                          match                        make_laguna_fixture.py OUT --swa
+laguna_swa_yarn_tiny                     refused                      make_laguna_fixture.py OUT --swa-yarn
+laguna_tiny                              match                        make_laguna_fixture.py OUT
+lfm2_fused_tiny                          match                        make_lfm2_fixture.py OUT --fused-qkv
+lfm2_output_tiny                         match                        make_lfm2_fixture.py OUT --output
+lfm2_tiny                                match                        make_lfm2_fixture.py OUT
+lfm2_window_tiny                         refused                      make_lfm2_fixture.py OUT --window
+lfm2moe_tiny                             match                        make_lfm2_fixture.py OUT --moe
+lfm3_no_post_norm_tiny                   match                        make_lfm3_fixture.py OUT --no-post-norm
+lfm3_non_causal_tiny                     refused                      make_lfm3_fixture.py OUT --non-causal
+lfm3_tiny                                match                        make_lfm3_fixture.py OUT
+llama4_128e_tiny                         match                        make_llama4_fixture.py OUT --128e --output
+llama4_dense_tiny                        both-fail                    make_llama4_fixture.py OUT --dense  # refusal evidence: llama.cpp throws on zero experts
+llama4_noswa_tiny                        both-fail                    make_llama4_fixture.py OUT --noswa  # refusal evidence: llama.cpp asserts on a zero window
+llama4_tiny                              match                        make_llama4_fixture.py OUT
+llama_biases_tiny                        match                        make_proj_bias_fixture.py llama OUT
+llama_embed_tiny                         skip                         make_proj_bias_fixture.py llama OUT --spelled llama-embed  # #421: libllama computes no logits for llama-embed (llama.cpp:238 skips the head)
+lora_a_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
+lora_b_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
+lora_base_tied_tiny                      match                        -  # written by make_lora_fixture.py together with the adapters, which needs torch/PEFT and llama.cpp's convert_lora_to_gguf.py
+lora_base_tiny                           match                        -  # written by make_lora_fixture.py together with the adapters, which needs torch/PEFT and llama.cpp's convert_lora_to_gguf.py
+lora_e_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
+maincoder_tiny                           match                        make_maincoder_fixture.py OUT
+mamba2_tiny                              match                        make_mamba_fixture.py OUT --arch mamba2 --output
+mamba_dtbcrms_tiny                       match                        make_mamba_fixture.py OUT --arch mamba --dt-b-c-rms
+mamba_tiny                               match                        make_mamba_fixture.py OUT --arch mamba
+maple_tiny                               match                        make_maple_fixture.py OUT
+mellum_tiny                              match                        make_mellum_fixture.py OUT
+mimo2_novscale_tiny                      match                        make_mimo2_fixture.py OUT --no-value-scale
+mimo2_split_tiny                         match                        make_mimo2_fixture.py OUT --split
+mimo2_tiny                               match                        make_mimo2_fixture.py OUT
+minicpm_attention_scale_tiny             refused                      make_minicpm_fixture.py OUT --attention-scale
+minicpm_declared_tiny                    match                        make_minicpm_fixture.py OUT --declared
+minicpm_tiny                             match                        make_minicpm_fixture.py OUT
+minimax_01_array_tiny                    match                        make_minimax_01_fixture.py OUT --array
+minimax_01_fused_qkv_tiny                match                        make_minimax_01_fixture.py OUT --fused-qkv
+minimax_01_output_tiny                   match                        make_minimax_01_fixture.py OUT --output
+minimax_01_tiny                          match                        make_minimax_01_fixture.py OUT
+minimax_01_unit_scale_tiny               match                        make_minimax_01_fixture.py OUT --unit-scale
+minimax_m2_tiny                          match                        make_minimax_fixture.py OUT
+mistral3_temp_ctx_tiny                   match                        make_mistral3_fixture.py OUT --temp-ctx
+mistral3_temp_tiny                       match                        make_mistral3_fixture.py OUT --temp
+mistral3_tiny                            match                        make_mistral3_fixture.py OUT
+mistral3_yarn_logmul_tiny                match                        make_mistral3_fixture.py OUT --yarn-logmul
+mistral3_yarn_tiny                       match                        make_mistral3_fixture.py OUT --yarn
+mpt_posembd_tiny                         match                        make_alibi_fixture.py OUT --arch mpt --pos-embd
+mpt_tiny                                 match                        make_alibi_fixture.py OUT --arch mpt --clamp
+muse_glimmer_tiny                        match                        make_muse_glimmer_fixture.py OUT
+nanbeige_loop1_tiny                      match                        make_nanbeige_fixture.py OUT --loops 1
+nanbeige_skipnorm_tiny                   match                        make_nanbeige_fixture.py OUT --skip-loop-norm
+nanbeige_tiny                            match                        make_nanbeige_fixture.py OUT
+nemotron_biases_tiny                     match                        make_nemotron_fixture.py OUT --biases
+nemotron_h_biases_tiny                   match                        make_nemotron_h_fixture.py OUT --biases
+nemotron_h_moe_tiny                      match                        make_nemotron_h_fixture.py OUT --moe
+nemotron_h_output_tiny                   match                        make_nemotron_h_fixture.py OUT --output
+nemotron_h_tiny                          match                        make_nemotron_h_fixture.py OUT
+nemotron_tiny                            match                        make_nemotron_fixture.py OUT
+neo_bert_tiny                            refused                      make_neo_bert_fixture.py OUT
+nomic_bert_tiny                          refused                      make_nomic_bert_fixture.py OUT
+olmo2_tiny                               match                        make_olmo2_fixture.py OUT
+olmo_clamped_tiny                        match                        make_olmo_fixture.py OUT --clamp
+olmo_tiny                                match                        make_olmo_fixture.py OUT
+openelm_tiny                             match                        make_openelm_fixture.py OUT
+orion_tiny                               match                        make_orion_fixture.py OUT
+pangu_embedded_fused_tiny                match                        make_pangu_fixture.py OUT --fused-qkv
+pangu_embedded_output_tiny               match                        make_pangu_fixture.py OUT --output
+pangu_embedded_tiny                      match                        make_pangu_fixture.py OUT
+phi2_fused_tiny                          match                        make_phi2_fixture.py OUT --fused
+phi2_tiny                                match                        make_phi2_fixture.py OUT
+phimoe_plain_tiny                        match                        make_phimoe_fixture.py OUT --no-longrope
+phimoe_tiny                              match                        make_phimoe_fixture.py OUT
+plamo2_scalar_heads_tiny                 match                        make_plamo2_fixture.py OUT --scalar-heads
+plamo2_tiny                              timeout                      make_plamo2_fixture.py OUT  # libllama 604cc430 spins in ggml_compute_forward_rope_flt on the converter's head_count array (n_rot 0); the golden is plamo2_scalar_heads
+plamo3_tiny                              match                        make_plamo3_fixture.py OUT
+plamo_tiny                               match                        make_plamo_fixture.py OUT
+plm_decoy_output_tiny                    both-fail                    make_plm_fixture.py OUT --decoy-output  # refusal evidence
+plm_tiny                                 match                        make_plm_fixture.py OUT
+qwen35_array_tiny                        match                        make_qwen35_fixture.py OUT --array
+qwen35_output_tiny                       match                        make_qwen35_fixture.py OUT --output
+qwen35_tiny                              match                        make_qwen35_fixture.py OUT
+qwen35moe_tiny                           match                        make_qwen35_fixture.py OUT --moe
+qwen3moe_tiny                            match                        make_qwen3moe_fixture.py OUT
+qwen3next_tiny                           match                        make_qwen35_fixture.py OUT --next
+qwen_tiny                                match                        make_qwen_fixture.py OUT
+refact_tiny                              match                        make_alibi_fixture.py OUT --arch refact
+seed_oss_tiny                            match                        make_seed_oss_fixture.py OUT
+smallthinker_nowindow_tiny               match                        make_smallthinker_fixture.py OUT --no-window
+smallthinker_swa2_tiny                   match                        make_smallthinker_fixture.py OUT --swa-period 2
+smallthinker_tiny                        match                        make_smallthinker_fixture.py OUT
+smollm3_tiny                             match                        make_smollm3_fixture.py OUT
+spark25_tiny                             match                        make_spark25_fixture.py OUT
+spm-special-tokens-test-vocab            both-fail                    -  # a vocab-only tokenizer fixture, held by the tokenizer unit tests
+stablelm_parallel_tiny                   match                        make_stablelm_fixture.py OUT --parallel
+stablelm_parkey_tiny                     match                        make_stablelm_fixture.py OUT --par-key
+stablelm_qknorm_tiny                     refused                      make_stablelm_fixture.py OUT --qk-norm
+stablelm_tiny                            match                        make_stablelm_fixture.py OUT
+starcoder2_tiny                          match                        make_proj_bias_fixture.py starcoder2 OUT
+starcoder_tiny                           match                        make_gpt2_fixture.py OUT --starcoder
+step35_mtp_tiny                          match                        make_step35_fixture.py OUT --mtp
+step35_noclamp_tiny                      match                        make_step35_fixture.py OUT --no-clamp
+step35_tiny                              match                        make_step35_fixture.py OUT
+talkie_nogains_tiny                      match                        make_talkie_fixture.py OUT --no-gains
+talkie_tiny                              match                        make_talkie_fixture.py OUT
+unigram-test-vocab                       both-fail                    -  # a vocab-only tokenizer fixture, held by the tokenizer unit tests
+xverse_tiny                              match                        make_xverse_fixture.py OUT

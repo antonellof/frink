@@ -162,7 +162,12 @@ fn the_execution_plan_row_is_still_true() {
         .into_iter()
         .filter(|(p, _)| {
             let s = p.to_string_lossy();
-            !s.ends_with("documented_capabilities.rs") && !s.contains("execution_plan.rs")
+            // The #403 snapshot guard records the plan so the migration
+            // that folds it into `ModelPlan` can show it unchanged; a
+            // snapshot is not a consumer.
+            !s.ends_with("documented_capabilities.rs")
+                && !s.contains("execution_plan.rs")
+                && !s.ends_with("model_config_snapshot.rs")
         })
         .filter(|(_, t)| without_comments(t).contains("execution_plan."))
         .map(|(p, _)| p.to_string_lossy().into_owned())

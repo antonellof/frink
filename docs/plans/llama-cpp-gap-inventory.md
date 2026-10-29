@@ -314,7 +314,7 @@ CUDA `weight_matrix.rs:500-506` + `crates/frink-cuda/src/gpu.rs:140,208,306,403,
 | Q4_K | Y Y Y | Y | Y `cuda/gpu.rs:306` | Y / Y |
 | Q5_K | Y Y Y | Y | Y `cuda/gpu.rs:403` | Y / Y |
 | Q6_K | Y Y Y | Y | Y `cuda/gpu.rs:496` | Y / Y |
-| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | Y Y Y | Y (scalar or AVX2; no NEON) | N | **N / N** |
+| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | Y Y Y | Y (scalar or AVX2; no NEON) | N | Y / Y `metal/src/iq.rs` (#405) |
 | IQ4_NL | Y Y Y (+`mul_mv_ext` r1_2..5) | Y `quant/lib.rs:4898` | N | **N / N** |
 | IQ4_XS | Y Y Y | Y `quant/lib.rs:4962` | N | Y `gpu.rs:4820` / Y |
 | **MXFP4** | Y Y Y (`mmq.cuh:74`, `mmvq.cu:19`, `mul_mm_mxfp4_f32`) | Y `quant/lib.rs:5081` | N | **N / N** -- this is why gpt-oss decodes on CPU |
@@ -395,7 +395,7 @@ on the CPU.
 | `GGML_OP_SSM_CONV` / `SSM_SCAN` (`ggml-metal-ops.cpp:337,341`), `RWKV_WKV6/7` (`:345`), `GATED_DELTA_NET` (`:350`) | none | high | XL |
 | `IM2COL`, `CONV_2D`, `CONV_2D_DW`, `CONV_3D`, `CONV_TRANSPOSE_1D/2D`, `COL2IM_1D`, `POOL_1D/2D`, `UPSCALE` (`:396-478`) | none | medium | XL |
 | `ARGSORT` (`:448`), `TOP_K` (`:452`), `ARGMAX` (`:482`) | `argmax_f32` (`elem.rs`) and `moe_topk_softmax_batch` (routing-specific) only; no general argsort or top-k | medium | M |
-| standalone `SOFT_MAX` (`:333`), `GET_ROWS` for all 22 types (`:366`), `SET_ROWS` (`:370`), `CPY`/`DUP`/`CONT` (`:468-470`), plus `CONCAT`, `PAD`, `ROLL`, `ARANGE`, `TIMESTEP_EMBEDDING`, `CUMSUM`, `DIAG`, `TRI`, `SOLVE_TRI`, `L2_NORM`, `GROUP_NORM`, `ACC`, `SET`, `COUNT_EQUAL`, `SUM`/`SUM_ROWS`/`MEAN`, 22 unary ops, 6 GLU ops (`ggml-metal-device.cpp:239-319`) | `get_rows_q4_k` / `get_rows_q6_k` (`embd.rs`); `rms_norm*`, `add_rms_norm*`, `silu_mul`, `gelu_mul`, `vec_add`, `axpy`, `f32_to_f16` (`elem.rs`) | medium | XL |
+| standalone `SOFT_MAX` (`:333`), `GET_ROWS` for all 22 types (`:366`), `SET_ROWS` (`:370`), `CPY`/`DUP`/`CONT` (`:468-470`), plus `CONCAT`, `PAD`, `ROLL`, `ARANGE`, `TIMESTEP_EMBEDDING`, `CUMSUM`, `DIAG`, `TRI`, `SOLVE_TRI`, `L2_NORM`, `GROUP_NORM`, `ACC`, `SET`, `COUNT_EQUAL`, `SUM`/`SUM_ROWS`/`MEAN`, 22 unary ops, 6 GLU ops (`ggml-metal-device.cpp:239-319`) | `get_rows_*` for every Metal matvec kind through the GEMM dequant functors (`embd.rs`); `rms_norm*`, `add_rms_norm*`, `silu_mul`, `gelu_mul`, `vec_add`, `axpy`, `f32_to_f16` (`elem.rs`) | medium | XL |
 | KV cache dtypes f32/f16/bf16/q8_0/q4_0/q4_1/q5_0/q5_1/iq4_nl | f32/f16/q8_0/q4 (`crates/frink-models/src/kv_budget.rs:100-108`) | low | S |
 
 Where frink is genuinely competitive: the Metal MoE stack is real and
@@ -672,7 +672,7 @@ These are the rows that matter most, because nothing errors.
 | `--rope-scaling`, `--rope-freq-base`, `--rope-freq-scale`, `--yarn-*` | `arg.cpp:2281-2340` | ALL MISSING | medium | M |
 | `-ot` / `--override-tensor`, `-cmoe` / `--cpu-moe`, `-ncmoe` | `arg.cpp:2670,2676,2683` | MISSING. **Notable**: this is per-tensor CPU/GPU placement, which is exactly what frink's `frink-core` expert-residency stack was built to execute and which nothing currently drives | high | L |
 | `-sm` / `--split-mode`, `-mg` / `--main-gpu`, `-ts` / `--tensor-split` | `arg.cpp:2717,2768,2741` | MISSING; frink has no multi-GPU concept | medium | XL |
-| `--lora` / `--lora-scaled` | `arg.cpp:2865,2875` | **DONE** (`run.rs`, `frink-server/src/cli.rs`; the adapter is a `WeightMatrix::Adapted` decoration in `frink-core/src/weight_matrix/lora.rs`, attached by name in `frink-models/src/lora_attach.rs`). Routed-expert targets, aLoRA and the dedicated engines refuse by name | -- | -- |
+| `--lora` / `--lora-scaled` | `arg.cpp:2865,2875` | **DONE** (`run.rs`, `frink-server/src/cli/mod.rs`; the adapter is a `WeightMatrix::Adapted` decoration in `frink-core/src/weight_matrix/lora.rs`, attached by name in `frink-models/src/lora_attach.rs`). Routed-expert targets, aLoRA and the dedicated engines refuse by name | -- | -- |
 | `-l` / `--logit-bias` | `arg.cpp:2193` | MISSING; the API refuses it by name on `/v1/completions` (`openai_extra.rs:198-207`) and silently drops it on chat (§3.2/E5) | medium | M |
 | `--keep`, `-r` / `--reverse-prompt`, `-sp` / `--special`, `--in-prefix`/`--in-suffix` | `arg.cpp:1630,1835,1842,1898,1906` | ALL MISSING | medium | S-M |
 | `--jinja` / `--no-jinja` | `arg.cpp:3571` | MISSING; frink always uses its own engine (`chat_template.rs`) | medium | S |

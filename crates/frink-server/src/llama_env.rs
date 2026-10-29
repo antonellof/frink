@@ -46,14 +46,25 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_SLOT_SAVE_PATH", "slot-save-path"),
     ("LLAMA_ARG_THINK_BUDGET", "reasoning-budget"),
     ("LLAMA_ARG_PREFILL_ASSISTANT", "prefill-assistant"),
+    // llama.cpp declares the plain `HF_TOKEN` on `--hf-token`, which is
+    // also the variable frink's downloader reads, so the two agree.
+    ("HF_TOKEN", "hf-token"),
+    ("LLAMA_ARG_SSL_KEY_FILE", "ssl-key-file"),
+    ("LLAMA_ARG_SSL_CERT_FILE", "ssl-cert-file"),
+    ("LLAMA_ARG_CORS_ORIGINS", "cors-origins"),
+    ("LLAMA_ARG_THREADS_HTTP", "threads-http"),
+    ("LLAMA_ARG_ENDPOINT_METRICS", "metrics"),
 ];
 
-/// llama.cpp's `common_arg_utils::is_truthy` / `is_falsey`.
+/// llama.cpp's `is_truthy` / `is_falsey`, through the one copy of them
+/// ([`frink_core::argv::llama_switch`]). A switch's variable has no
+/// `auto`, so that spelling is refused here like any other.
 fn switch_value(value: &str) -> Option<bool> {
-    match value {
-        "on" | "enabled" | "true" | "1" => Some(true),
-        "off" | "disabled" | "false" | "0" => Some(false),
-        _ => None,
+    use frink_core::argv::Switch;
+    match frink_core::argv::llama_switch(value)? {
+        Switch::On => Some(true),
+        Switch::Off => Some(false),
+        Switch::Auto => None,
     }
 }
 

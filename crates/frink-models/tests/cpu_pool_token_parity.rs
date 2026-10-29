@@ -24,7 +24,7 @@
 //! and both arms would run the same serial loop and agree by
 //! construction.
 //!
-//! So [`synthetic`] writes a 2-layer llama per run, 512 wide with a
+//! So [`synthetic_llama`] writes a 2-layer llama per run, 512 wide with a
 //! 1536 FFN, in Q8_0 and in Q4_K. Its narrowest projection (K/V, 256 x
 //! 512) is over that floor, so under `FRINK_CPU_POOL=spin` every weight
 //! matrix in the step goes through `frink_core::cpu_pool`. The real
@@ -39,9 +39,12 @@
 //! binary. Both children are spawned the same way, so neither arm gets
 //! the advantage of being the one that ran in-process.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use common::synthetic_llama;
 use frink_core::cache::KvCache;
 use frink_gguf::{GgmlType, ShardedGguf};
 use frink_models::config::ModelConfig;
@@ -55,7 +58,7 @@ const MAX_NEW_TOKENS: usize = 12;
 const CHILD: &str = "FRINK_TEST_CPU_POOL_CHILD";
 /// The checkpoint a child should generate from.
 const CHILD_GGUF: &str = "FRINK_TEST_CPU_POOL_GGUF";
-/// Set on a child to feed it [`SYNTHETIC_PROMPT`] as raw token ids: a
+/// Set on a child to feed it [`synthetic_llama::PROMPT`] as raw token ids: a
 /// synthetic checkpoint carries no vocabulary to encode [`PROMPT`] with.
 const CHILD_RAW_PROMPT: &str = "FRINK_TEST_CPU_POOL_RAW_PROMPT";
 /// The line a child prints its token ids on.
@@ -89,13 +92,19 @@ fn real_checkpoints() -> Vec<PathBuf> {
     .collect()
 }
 
-/// Token ids a synthetic checkpoint is prompted with. Distinct, and not
-/// a run, so a wrong embedding row is a wrong prefill.
-const SYNTHETIC_PROMPT: [usize; 6] = [3, 141, 59, 265, 358, 97];
-
-/// The synthetic llama that makes this suite run everywhere.
-#[path = "common/synthetic_llama.rs"]
-mod synthetic;
+/// The two kinds this suite writes, with `frink_quant`'s encoders.
+fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in w.chunks(cols) {
+        let ok = match dtype {
+            GgmlType::Q8_0 => frink_quant::encode_row_q8_0(row, &mut out),
+            GgmlType::Q4K => frink_quant::encode_row_q4_k(row, None, &mut out),
+            other => panic!("the fixture does not encode {other:?}"),
+        };
+        ok.expect("every fixture row length is a whole number of blocks");
+    }
+    out
+}
 
 fn argmax(logits: &[f32]) -> usize {
     logits
@@ -114,7 +123,7 @@ fn greedy_tokens(path: &Path, raw_prompt: bool) -> Vec<usize> {
     let decoder = Decoder::from_gguf(path, config.clone()).expect("load decoder");
 
     let prompt: Vec<usize> = if raw_prompt {
-        SYNTHETIC_PROMPT.to_vec()
+        synthetic_llama::PROMPT.to_vec()
     } else {
         GgufBpeTokenizer::from_gguf(&file)
             .expect("tokenizer")
@@ -231,7 +240,7 @@ fn assert_schedulers_agree(path: &Path, raw_prompt: bool) {
 #[test]
 fn the_two_cpu_schedulers_produce_token_identical_output() {
     for dtype in [GgmlType::Q8_0, GgmlType::Q4K] {
-        let path = synthetic::write(synthetic::Shape::PARITY, dtype, "parity");
+        let path = synthetic_llama::write("cpu_pool_parity", dtype, encode);
         assert_schedulers_agree(&path, true);
         std::fs::remove_file(&path).ok();
     }

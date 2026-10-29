@@ -934,6 +934,7 @@ mod tests {
                 norm_topk_prob: true,
                 expert_group_count: None,
                 expert_group_used_count: None,
+                selection: frink_moe::SelectionRule::BiasAfterGating,
             },
             n_dense_leading_layers: 1,
             moe_interleave_step: None,

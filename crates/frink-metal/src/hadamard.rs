@@ -215,7 +215,8 @@ pub fn encode_fold_rows(
         );
     }
     let groups = width / plan.block;
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+    crate::dispatch::dispatch_counted(
+        encoder,
         MTLSize {
             width: groups,
             height: 1,

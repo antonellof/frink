@@ -104,7 +104,7 @@ const TOL: f32 = 1e-6;
 fn load() -> Decoder {
     let file = frink_gguf::GgufFile::open(FIXTURE).expect("fixture opens");
     let config = ModelConfig::from_gguf(&file).expect("fixture config parses");
-    Decoder::from_gguf(FIXTURE, config).expect("fixture loads")
+    common::load_decoder(FIXTURE, config)
 }
 
 fn prefill(decoder: &Decoder) -> Vec<f32> {
@@ -196,6 +196,7 @@ fn the_bias_reorders_the_selection_on_this_fixture() {
     let unbiased = frink_moe::route_top_k_biased(
         &logits,
         None,
+        frink_moe::SelectionRule::BiasAfterGating,
         k,
         decoder.config.moe.gating,
         decoder.config.moe.norm_topk_prob,
@@ -204,6 +205,7 @@ fn the_bias_reorders_the_selection_on_this_fixture() {
     let biased = frink_moe::route_top_k_biased(
         &logits,
         Some(&bias),
+        frink_moe::SelectionRule::BiasAfterGating,
         k,
         decoder.config.moe.gating,
         decoder.config.moe.norm_topk_prob,
@@ -248,6 +250,7 @@ fn routing_bias_golden_is_not_vacuous() {
         let correct = frink_moe::route_top_k_biased(
             &logits,
             Some(&bias),
+            frink_moe::SelectionRule::BiasAfterGating,
             2,
             frink_moe::GatingFunction::Sigmoid,
             true,
@@ -257,6 +260,7 @@ fn routing_bias_golden_is_not_vacuous() {
         let wrong = frink_moe::route_top_k_biased(
             &biased_logits,
             None,
+            frink_moe::SelectionRule::BiasAfterGating,
             2,
             frink_moe::GatingFunction::Sigmoid,
             true,

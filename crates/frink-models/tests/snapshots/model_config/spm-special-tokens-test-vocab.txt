@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/spm-special-tokens-test-vocab.gguf
+config: REFUSED: GGUF file is missing required hparam metadata key 'llama.block_count'

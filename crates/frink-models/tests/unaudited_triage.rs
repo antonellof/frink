@@ -67,7 +67,7 @@ fn every_unaudited_architecture_renders_a_detail_line() {
         assert!(detail.len() > 100, "`{}` renders {detail:?}", p.gguf_name);
     }
     assert_eq!(
-        n, 10,
+        n, 9,
         "the unaudited count moved. It was 47 until the triage itself found `minicpm3` was \
          an MLA model sitting on the generic-GQA row and it was reclassified to \
          DedicatedOnly, 46 until `deepseek`, `bailingmoe`, `seed_oss`, `maincoder` and \
@@ -190,7 +190,9 @@ fn every_unaudited_architecture_renders_a_detail_line() {
          triaged the same day -- `kolibri1`, `lfm3`, `flint`, `beam`, `maion-coder`, \
          `k2-horizon`, `muse-spark` (docs/plans/parity-audit-2026-10-28.md), and 11 to 10 \
          the same day when `lfm3` closed on exactly the rows its verdict named \
-         (tests/lfm3_graphs.rs)"
+         (tests/lfm3_graphs.rs), and 10 to 9 on 2026-10-29 when `kolibri1` closed on a \
+         second selection rule in `frink_moe` (`SelectionRule::BiasBeforeGating`, \
+         tests/kolibri1_graphs.rs)"
     );
 }
 
@@ -339,9 +341,14 @@ fn the_post_norm_group_is_three_topologies_and_only_two_of_them_closed() {
             "`{name}` is the post-norm-only topology"
         );
     }
+    // Over the catalog, since the rows live in `frink_models::models`.
     assert_eq!(
-        frink_models::capability::POST_NORM_ONLY_ARCHITECTURES,
-        &["olmo2", "exaone4"],
+        frink_models::capability::architecture_catalog()
+            .iter()
+            .map(|p| p.gguf_name)
+            .filter(|n| frink_models::capability::is_post_norm_only(n))
+            .collect::<Vec<_>>(),
+        ["olmo2", "exaone4"],
         "a third name here is a third llama.cpp graph somebody read"
     );
 
@@ -365,8 +372,12 @@ fn the_post_norm_group_is_three_topologies_and_only_two_of_them_closed() {
         "OLMo-1's norm has no parameters, which is the whole row"
     );
     assert_eq!(
-        frink_models::capability::NON_PARAMETRIC_LAYER_NORM,
-        &["olmo"],
+        frink_models::capability::architecture_catalog()
+            .iter()
+            .map(|p| p.gguf_name)
+            .filter(|n| frink_models::capability::uses_non_parametric_layer_norm(n))
+            .collect::<Vec<_>>(),
+        ["olmo"],
         "a second name here would be a second llama.cpp graph with a null-weight \
          `LLM_NORM`, and the scan over all 155 found none"
     );
@@ -442,8 +453,9 @@ fn the_remaining_work_is_counted() {
     // 2 before the 2026-09-19 pin move (`grovemoe`, `phi4`), plus the
     // eight upstream architectures it brought in (six closed since),
     // plus the seven generic-path candidates the 2026-10-28 move to
-    // `604cc430` brought in, less `lfm3`, which closed the same day.
-    assert_eq!(triaged + TRIAGE_PENDING.len(), 10);
+    // `604cc430` brought in, less `lfm3`, which closed the same day,
+    // and `kolibri1`, which closed the next.
+    assert_eq!(triaged + TRIAGE_PENDING.len(), 9);
 }
 
 /// `minicpm3` is refused as an MLA model, not as an unaudited one.
@@ -1213,10 +1225,11 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
     }
     assert_eq!(
         (fixture, arm, new_code, unknown),
-        (0, 0, 9, 1),
+        (0, 0, 8, 1),
         "the triage distribution moved; if a verdict changed on evidence that is correct, \
-         update this and docs/MODELS.md together. It is (0, 0, 9, 1) since the same day \
-         the pin moved: `lfm3` closed on its table rows, and `kolibri1` moved to NEW CODE \
+         update this and docs/MODELS.md together. It is (0, 0, 8, 1) since 2026-10-29, \
+         when `kolibri1` closed on `frink_moe::SelectionRule::BiasBeforeGating` \
+         (tests/kolibri1_graphs.rs). It was (0, 0, 9, 1) from the day the pin moved: `lfm3` closed on its table rows, and `kolibri1` moved to NEW CODE \
          when wiring it showed its router ranks `logits + exp_probs_b` BEFORE the sigmoid \
          (`src/models/kolibri1.cpp:138`), where every router here adds the bias after \
          it -- a ONE MATCH ARM verdict read from the graph file that the generic builder \
@@ -1326,7 +1339,7 @@ fn every_unaudited_row_is_triaged_and_the_distribution_is_pinned() {
          single UNKNOWN left is `phi4`; `mistral`, `mixtral` and `yi` were the other \
          three and turned out not to be architectures at all"
     );
-    assert_eq!(fixture + arm + new_code + unknown, 10);
+    assert_eq!(fixture + arm + new_code + unknown, 9);
 }
 
 /// The per-layer activation-parameter seam closed two rows whose

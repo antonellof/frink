@@ -1,22 +1,49 @@
-//! A llama checkpoint written per run, at whatever width a suite needs.
+//! The synthetic llama several suites write per run: a 2-layer llama,
+//! 512 wide with a 1536 FFN, every weight matrix in one quant kind.
 //!
-//! Two suites need a real-shaped dense decode step without a checkpoint
-//! on disk: `cpu_pool_token_parity` (the two CPU schedulers agree token
-//! for token) and `decode_scheduler_choice` (one decode step does not
-//! alternate between them). They used to differ only in the constants,
-//! so the constants are a [`Shape`] and the writer is this one file.
+//! 512 wide so its narrowest projection (K/V, 256 x 512) is over
+//! `frink_core::threads::should_parallelize`'s floor and over a Metal
+//! GEMM tile, which the committed 32-wide `tests/fixtures/*.gguf` are
+//! not. The caller supplies the encoder, so a kind with no
+//! `frink_quant` encoder can still be written by the suite that needs
+//! it.
 //!
-//! Each suite compiles this as its own module and uses part of it, as
-//! with `common/mod.rs`.
-
-#![allow(dead_code)]
+//! The width is the default, not a fixture of the file: [`Shape`] holds
+//! it, [`Shape::DEFAULT`] is the 512-wide llama above, and [`write_shaped`]
+//! writes any other, for a suite whose assertion depends on where a
+//! layer's matvecs sit against a size threshold (`decode_scheduler_choice`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use frink_gguf::{GgmlType, GgufValue, GgufWriter, TensorPlan};
 
-/// The dimensions of one synthetic llama.
+/// Encodes `values`, a whole number of rows `cols` wide, as `dtype`.
+pub type Encode = fn(GgmlType, usize, &[f32]) -> Vec<u8>;
+
+/// Token ids a synthetic checkpoint is prompted with. Distinct, and not
+/// a run, so a wrong embedding row is a wrong prefill.
+pub const PROMPT: [usize; 6] = [3, 141, 59, 265, 358, 97];
+
+pub const N_EMBD: usize = 512;
+pub const N_FF: usize = 1536;
+pub const N_HEAD: usize = 8;
+pub const N_HEAD_KV: usize = 4;
+pub const HEAD_DIM: usize = N_EMBD / N_HEAD;
+pub const N_LAYER: usize = 2;
+pub const N_VOCAB: usize = 512;
+
+/// The MoE variant ([`write_moe`]): Mixtral's shape (the llama graph
+/// with `{arch}.expert_count`, softmax routing, top-k renormalized),
+/// plain SwiGLU experts and no shared expert. llama.cpp sizes a llama
+/// expert by `feed_forward_length` (`llama-model.cpp`, `ffn_gate_exps
+/// {n_embd, n_ff, n_expert}`), so the expert width is [`N_FF`].
+pub const N_EXPERT: usize = 4;
+pub const N_EXPERT_USED: usize = 2;
+pub const N_FF_EXP: usize = N_FF;
+
+/// The dimensions of one synthetic llama. The constants above are
+/// [`Shape::DEFAULT`]'s fields, so the two cannot disagree.
 #[derive(Debug, Clone, Copy)]
 pub struct Shape {
     pub n_embd: usize,
@@ -28,16 +55,13 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// 512 wide with a 1536 FFN, two layers. Its narrowest projection
-    /// (K/V, 256 x 512) is over `frink_core::threads::should_parallelize`'s
-    /// floor, so every weight matrix in the step really runs in parallel.
-    pub const PARITY: Self = Self {
-        n_embd: 512,
-        n_ff: 1536,
-        n_head: 8,
-        n_head_kv: 4,
-        n_layer: 2,
-        n_vocab: 512,
+    pub const DEFAULT: Self = Self {
+        n_embd: N_EMBD,
+        n_ff: N_FF,
+        n_head: N_HEAD,
+        n_head_kv: N_HEAD_KV,
+        n_layer: N_LAYER,
+        n_vocab: N_VOCAB,
     };
 
     pub fn head_dim(self) -> usize {
@@ -60,25 +84,14 @@ fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for row in w.chunks(cols) {
-        let ok = match dtype {
-            GgmlType::Q8_0 => frink_quant::encode_row_q8_0(row, &mut out),
-            GgmlType::Q4K => frink_quant::encode_row_q4_k(row, None, &mut out),
-            other => panic!("the fixture does not encode {other:?}"),
-        };
-        ok.expect("every fixture row length is a whole number of blocks");
-    }
-    out
-}
-
 /// One tensor: its name, output rows, input columns, dtype, values.
 /// GGUF's shape is `[cols, rows]`, fastest dimension first.
 struct Tensor {
     name: String,
     rows: usize,
     cols: usize,
+    /// Stacked experts (a 3-D `[cols, rows, n_expert]` tensor), else 1.
+    n_expert: usize,
     dtype: GgmlType,
     values: Vec<f32>,
 }
@@ -108,7 +121,16 @@ fn metadata(s: Shape) -> BTreeMap<String, GgufValue> {
     .collect()
 }
 
-fn tensors(s: Shape, dtype: GgmlType) -> Vec<Tensor> {
+fn tensors(s: Shape, dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
+    let Shape {
+        n_embd,
+        n_ff,
+        n_head_kv,
+        n_layer,
+        n_vocab,
+        ..
+    } = s;
+    let head_dim = s.head_dim();
     let mut seed = 0u64;
     let mut matrix = |name: String, rows: usize, cols: usize, dtype: GgmlType| {
         seed += 1;
@@ -117,6 +139,7 @@ fn tensors(s: Shape, dtype: GgmlType) -> Vec<Tensor> {
             name,
             rows,
             cols,
+            n_expert: 1,
             dtype,
             values: fill(seed, rows * cols, scale),
         }
@@ -124,57 +147,128 @@ fn tensors(s: Shape, dtype: GgmlType) -> Vec<Tensor> {
     let norm = |name: String, seed: u64| Tensor {
         name,
         rows: 1,
-        cols: s.n_embd,
+        cols: n_embd,
+        n_expert: 1,
         dtype: GgmlType::F32,
-        values: fill(1000 + seed, s.n_embd, 0.2)
+        values: fill(1000 + seed, n_embd, 0.2)
             .into_iter()
             .map(|v| 1.0 + v)
             .collect(),
     };
 
-    let kv = s.n_head_kv * s.head_dim();
+    let kv = n_head_kv * head_dim;
     let mut out = vec![matrix(
         "token_embd.weight".to_string(),
-        s.n_vocab,
-        s.n_embd,
-        GgmlType::F32,
+        n_vocab,
+        n_embd,
+        embd,
     )];
-    for l in 0..s.n_layer {
+    for l in 0..n_layer {
         out.push(norm(format!("blk.{l}.attn_norm.weight"), 2 * l as u64));
         for (name, rows, cols) in [
-            ("attn_q", s.n_embd, s.n_embd),
-            ("attn_k", kv, s.n_embd),
-            ("attn_v", kv, s.n_embd),
-            ("attn_output", s.n_embd, s.n_embd),
+            ("attn_q", n_embd, n_embd),
+            ("attn_k", kv, n_embd),
+            ("attn_v", kv, n_embd),
+            ("attn_output", n_embd, n_embd),
         ] {
             out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
         }
         out.push(norm(format!("blk.{l}.ffn_norm.weight"), 2 * l as u64 + 1));
+        if moe {
+            // The router stays F32, as converters store it.
+            out.push(matrix(
+                format!("blk.{l}.ffn_gate_inp.weight"),
+                N_EXPERT,
+                n_embd,
+                GgmlType::F32,
+            ));
+            for (name, rows, cols) in [
+                ("ffn_gate_exps", N_FF_EXP, n_embd),
+                ("ffn_up_exps", N_FF_EXP, n_embd),
+                ("ffn_down_exps", n_embd, N_FF_EXP),
+            ] {
+                let mut t = matrix(
+                    format!("blk.{l}.{name}.weight"),
+                    rows * N_EXPERT,
+                    cols,
+                    dtype,
+                );
+                t.rows = rows;
+                t.n_expert = N_EXPERT;
+                out.push(t);
+            }
+            continue;
+        }
         for (name, rows, cols) in [
-            ("ffn_gate", s.n_ff, s.n_embd),
-            ("ffn_up", s.n_ff, s.n_embd),
-            ("ffn_down", s.n_embd, s.n_ff),
+            ("ffn_gate", n_ff, n_embd),
+            ("ffn_up", n_ff, n_embd),
+            ("ffn_down", n_embd, n_ff),
         ] {
             out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
         }
     }
     out.push(norm("output_norm.weight".to_string(), 99));
-    out.push(matrix(
-        "output.weight".to_string(),
-        s.n_vocab,
-        s.n_embd,
-        dtype,
-    ));
+    out.push(matrix("output.weight".to_string(), n_vocab, n_embd, dtype));
     out
 }
 
-/// Writes the checkpoint with every weight matrix in `dtype` and returns
-/// its path. `tag` keeps two suites (and two shapes) from sharing a file.
-pub fn write(shape: Shape, dtype: GgmlType, tag: &str) -> PathBuf {
-    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(shape, dtype)
+/// Writes the checkpoint with every weight matrix in `dtype`, encoded
+/// by `encode`, and returns its path. `tag` names the file, so two
+/// suites never share one.
+pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, Shape::DEFAULT, dtype, GgmlType::F32, false, encode)
+}
+
+/// [`write`] at `shape` instead of [`Shape::DEFAULT`].
+pub fn write_shaped(tag: &str, shape: Shape, dtype: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, shape, dtype, GgmlType::F32, false, encode)
+}
+
+/// [`write`] with the token embedding stored as `embd` rather than F32,
+/// for the suites that exercise a backend's embedding gather.
+pub fn write_with_embd(tag: &str, dtype: GgmlType, embd: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, Shape::DEFAULT, dtype, embd, false, encode)
+}
+
+/// [`write`] with every FFN a routed MoE of [`N_EXPERT`] experts of
+/// [`N_FF_EXP`], top [`N_EXPERT_USED`], the experts stored as `dtype`.
+pub fn write_moe(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, Shape::DEFAULT, dtype, GgmlType::F32, true, encode)
+}
+
+fn write_variant(
+    tag: &str,
+    shape: Shape,
+    dtype: GgmlType,
+    embd: GgmlType,
+    moe: bool,
+    encode: Encode,
+) -> PathBuf {
+    assert!(
+        !moe || matches!(
+            shape,
+            Shape {
+                n_embd: N_EMBD,
+                n_ff: N_FF,
+                ..
+            }
+        ),
+        "the MoE variant sizes its experts by N_FF_EXP and is written at Shape::DEFAULT only"
+    );
+    let mut meta = metadata(shape);
+    if moe {
+        meta.insert("llama.expert_count".into(), GgufValue::U32(N_EXPERT as u32));
+        meta.insert(
+            "llama.expert_used_count".into(),
+            GgufValue::U32(N_EXPERT_USED as u32),
+        );
+    }
+    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(shape, dtype, embd, moe)
         .into_iter()
         .map(|t| {
-            let dims = if t.rows == 1 {
+            let shape = if t.n_expert > 1 {
+                vec![t.cols as u64, t.rows as u64, t.n_expert as u64]
+            } else if t.rows == 1 {
                 vec![t.cols as u64]
             } else {
                 vec![t.cols as u64, t.rows as u64]
@@ -186,7 +280,7 @@ pub fn write(shape: Shape, dtype: GgmlType, tag: &str) -> PathBuf {
             };
             let plan = TensorPlan {
                 name: t.name,
-                shape: dims,
+                shape,
                 dtype: t.dtype,
                 byte_len: bytes.len(),
             };
@@ -195,16 +289,16 @@ pub fn write(shape: Shape, dtype: GgmlType, tag: &str) -> PathBuf {
         .collect();
     let plan = encoded.iter().map(|(p, _)| p.clone()).collect();
 
-    // `target/`, so a leftover is swept by `cargo clean`; the pid keeps
-    // two concurrent runs apart.
+    // `target/`, so a leftover is swept by `cargo clean`; the pid
+    // keeps two concurrent runs apart.
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(&dir).expect("create the fixture directory");
     let path = dir.join(format!(
-        "synthetic_llama_{tag}_{dtype:?}-{}.gguf",
+        "{tag}_{dtype:?}_{embd:?}-{}.gguf",
         std::process::id()
     ));
     let file = std::fs::File::create(&path).expect("create the fixture");
-    let mut w = GgufWriter::create(file, &metadata(shape), plan).expect("write the header");
+    let mut w = GgufWriter::create(file, &meta, plan).expect("write the header");
     for (p, bytes) in &encoded {
         w.write_tensor(&p.name, bytes).expect("write a tensor");
     }

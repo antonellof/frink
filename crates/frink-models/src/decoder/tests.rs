@@ -13,6 +13,20 @@ mod paged;
 mod predicates;
 mod token;
 
+/// The decoder every test here builds: random small weights, on the
+/// HOST.
+///
+/// These tests pin host properties (batched equals sequential to one
+/// ulp, a feature changes the output). Without the pin a `--features
+/// metal` build routed them to the GPU, whose GEMM accumulates in its
+/// own order, and six failed under a name that said nothing about
+/// Metal. `pin_host_backend` holds for the whole process whatever ran
+/// first, so the test order cannot change it.
+fn host_decoder(config: ModelConfig, n_layers: usize, vocab_size: usize) -> Decoder {
+    frink_core::weight_matrix::pin_host_backend();
+    Decoder::new_random_small(config, n_layers, vocab_size)
+}
+
 /// Small config used purely to keep the test fast: same
 /// architecture *shape* (GQA ratio, MoE topology) as GLM-5.2, but
 /// with tiny dims so the whole thing runs in milliseconds.

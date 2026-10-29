@@ -61,7 +61,9 @@
 /// [`crate::rope_finetuned::ROPE_GATED_ON_FINETUNED`] follows for
 /// `granitehybrid` still applies: a row this list does not serve is
 /// not listed.
-pub const CLAMPED_QKV_ARCHITECTURES: &[&str] = &["olmo", "dbrx", "mpt"];
+///
+/// `olmo` states its row in `crate::models::olmo` (#403 step 3).
+pub const CLAMPED_QKV_ARCHITECTURES: &[&str] = &["dbrx", "mpt"];
 
 /// The subset of [`CLAMPED_QKV_ARCHITECTURES`] whose loader reads the
 /// key as REQUIRED.
@@ -102,10 +104,29 @@ impl ClampError {
 /// zero and a negative value both mean "no clamp" there and must mean
 /// it here. Reading zero as a clamp would zero every projection.
 pub fn resolve_clamp(arch: &str, declared: Option<f32>) -> Result<Option<f32>, ClampError> {
-    if !CLAMPED_QKV_ARCHITECTURES.contains(&arch) {
+    resolve_clamp_for(
+        crate::models::ArchFacts::of(arch).scaling.clamp_kqv,
+        declared,
+    )
+}
+
+/// The row: `None` where the graph reads no clamp, `Some(required)`
+/// where it does, from these two lists alone (`ArchFacts::from_tables`).
+pub(crate) fn clamp_row_from_table(arch: &str) -> Option<bool> {
+    CLAMPED_QKV_ARCHITECTURES
+        .contains(&arch)
+        .then(|| CLAMP_KQV_REQUIRED.contains(&arch))
+}
+
+/// [`resolve_clamp`] given the row (`ArchFacts`).
+pub fn resolve_clamp_for(
+    row: Option<bool>,
+    declared: Option<f32>,
+) -> Result<Option<f32>, ClampError> {
+    let Some(required) = row else {
         return Ok(None);
-    }
-    if declared.is_none() && CLAMP_KQV_REQUIRED.contains(&arch) {
+    };
+    if declared.is_none() && required {
         return Err(ClampError::MissingRequired);
     }
     Ok(declared.filter(|v| *v > 0.0))

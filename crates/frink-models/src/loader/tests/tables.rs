@@ -20,17 +20,19 @@ use super::*;
 /// drop a name back into the renormalising default.
 #[test]
 fn the_architectures_llama_cpp_does_not_renormalise_are_pinned() {
+    // Through the facts: `qwen2moe`'s row is in `crate::models`.
+    let no_renorm = |a: &str| crate::models::ArchFacts::of(a).moe.no_topk_renormalize;
     for arch in ["deepseek", "olmoe", "qwen2moe"] {
         assert!(
-            NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&arch),
+            no_renorm(arch),
             "{arch} passes norm_w=false in llama.cpp and must not be renormalised"
         );
     }
     // `deepseek2` is a DIFFERENT architecture whose converter DOES
     // write the key, so it must not be on this list -- it gets its
     // answer from the file.
-    assert!(!NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&"deepseek2"));
-    assert!(!NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&"qwen3moe"));
+    assert!(!no_renorm("deepseek2"));
+    assert!(!no_renorm("qwen3moe"));
 }
 
 /// Every architecture llama.cpp defaults to SIGMOID gating must be
@@ -212,7 +214,9 @@ fn the_layer_shape_tables_only_name_audited_architectures() {
 #[test]
 fn qwen2moe_disables_topk_renorm() {
     assert!(
-        NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&"qwen2moe"),
+        crate::models::ArchFacts::of("qwen2moe")
+            .moe
+            .no_topk_renormalize,
         "qwen2moe must have norm_topk_prob=false (llama.cpp build_moe_ffn norm_w=false)"
     );
 }

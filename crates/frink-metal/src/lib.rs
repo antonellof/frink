@@ -49,8 +49,41 @@ pub(crate) mod scratch_pool;
 /// PrismML's PTQ1_0 trit format on Metal (`ternary::PTQ1_0Dequant`).
 pub mod ternary;
 
+/// `Q2_K` on Metal: the matvec and the GEMM functor.
+#[cfg(feature = "metal")]
+pub mod q2_k;
+
+/// `Q3_K` on Metal: the matvec and the GEMM functor.
+#[cfg(feature = "metal")]
+pub mod q3_k;
+
+/// The kernel-vs-CPU-dequant check `q2_k` and `q3_k` share.
+#[cfg(all(test, feature = "metal"))]
+mod k_quant_check;
+
 #[cfg(feature = "metal")]
 pub mod attn;
+
+/// IQ4_NL and MXFP4: the two 32-element codebook formats, one body.
+#[cfg(feature = "metal")]
+pub mod codebook4;
+
+/// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and IQ1_M: one
+/// `group` / `affine` pair per kind, every kernel generated from it.
+#[cfg(feature = "metal")]
+pub mod iq;
+
+/// The IQ grid and sign tables as MSL, from `frink_quant::iq_tables`.
+#[cfg(feature = "metal")]
+mod iq_grids;
+
+/// The MoE id matvecs generated from a kind's decode matvec `_impl`.
+#[cfg(feature = "metal")]
+mod moe_mv_id;
+
+/// The Q5_K, Q6_K and IQ4_XS decode matvecs, as `_impl` functions.
+#[cfg(feature = "metal")]
+mod k_quant_mv;
 
 /// The KV wire format: dtypes, append and dequant kernels. Split from
 /// `attn` so the store and the softmax are separate concepts.
@@ -109,5 +142,8 @@ pub mod norm;
 
 #[cfg(feature = "metal")]
 pub mod embd;
+
+/// Which kinds [`embd`] gathers, compiled on every build.
+pub mod embd_kinds;
 
 pub use capability::MetalProfile;

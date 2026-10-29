@@ -439,3 +439,42 @@ fn serve_reads_the_same_single_dash_names_as_frink_server() {
     .unwrap();
     assert_eq!(via_cli, standalone);
 }
+
+/// `--version` on a subcommand names the binary that exists (`frink`,
+/// or `frink-server` for `serve`), not clap's `frink-run`; `--usage` is
+/// help, as it is in llama.cpp, before and after the run rewrite.
+///
+/// Sabotage: drop the `display_name("frink")` loop in `built_cli`; the
+/// `run` row prints `frink-run` and goes red.
+#[test]
+fn version_and_usage_work_on_every_front_end_spelling() {
+    let mut cases = vec![
+        (vec!["frink", "--version"], "frink "),
+        (vec!["frink", "run", "--version"], "frink "),
+    ];
+    if cfg!(feature = "serve") {
+        cases.push((vec!["frink", "serve", "--version"], "frink-server "));
+    }
+    for (argv, want) in cases {
+        let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+        let err = crate::argv::parse(argv.clone())
+            .err()
+            .expect("--version must exit");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayVersion,
+            "{argv:?}"
+        );
+        assert!(err.to_string().starts_with(want), "{argv:?}: {err}");
+    }
+    for argv in [
+        &["frink", "--usage"][..],
+        &["frink", "run", "--usage"],
+        &["frink", "-m", "x.gguf", "--usage"],
+    ] {
+        let err = crate::argv::parse(rewrite(argv))
+            .err()
+            .expect("--usage must exit");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp, "{argv:?}");
+    }
+}

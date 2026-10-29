@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/dbrx_noclamp_tiny.gguf
+config: REFUSED: architecture 'dbrx' requires unimplemented feature: `dbrx.attention.clamp_kqv` is REQUIRED for this architecture (src/models/dbrx.cpp:5 reads it with no default) and the file does not declare it; llama.cpp refuses the same file

@@ -177,3 +177,62 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # The llama.cpp oracle (ADR 0001, ADR 0011): libllama at the pin, every
+  # fixture and every llama.cpp golden regenerated from it, and `frink
+  # parity` (first-token logits and a 32-step greedy decode) on every
+  # fixture. Fails when a golden is not libllama's current answer or a
+  # fixture's outcome is not the one tools/oracle/fixtures.tsv expects.
+  # The same script runs locally: `scripts/oracle.sh`.
+  #
+  # The goldens are THIS job's answer (ADR 0011: a golden is a cache of
+  # the oracle's). So the answer must not depend on which runner picks
+  # the job up: ubuntu runners are several CPU models, and a
+  # GGML_NATIVE build answers differently on each (ggml's reductions
+  # follow the SIMD width; on the pin native vs portable is up to 3.9e-4
+  # on `bloom`). tools/oracle/llama_build.sh builds libllama with
+  # GGML_NATIVE=OFF at the AVX2/FMA/F16C baseline every runner has, and
+  # AVX-512 off. The cache key therefore names the image and compiler
+  # (which also set the answer) and not the CPU model. When this job
+  # rewrites goldens, the rewritten files are uploaded as the
+  # `oracle-rewritten-goldens` artifact: that is the answer to commit.
+  oracle:
+    name: llama.cpp oracle (frink parity at the pin)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r tools/oracle/requirements.txt
+      - name: Cache key
+        id: key
+        run: |
+          echo "pin=$(tr -d '[:space:]' < tools/llama_cpp_pin)" >> "$GITHUB_OUTPUT"
+          echo "cc=$({ cc --version; c++ --version; cmake --version; } | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target/oracle/${{ steps.key.outputs.pin }}/src
+            target/oracle/${{ steps.key.outputs.pin }}/build
+          key: libllama-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.cc }}-${{ steps.key.outputs.pin }}-${{ hashFiles('tools/oracle/llama_build.sh') }}
+      - run: bash scripts/oracle.sh
+      - name: What the oracle rewrote
+        if: failure()
+        run: git --no-pager diff -- crates/frink-models/tests ':!*.gguf' | head -400
+      - name: Rewritten goldens and fixtures, as files
+        if: failure()
+        run: |
+          mkdir -p target/oracle-rewritten
+          git ls-files -m -- crates/frink-models/tests > target/oracle-rewritten/files.txt
+          git --no-pager diff -- crates/frink-models/tests ':!*.gguf' > target/oracle-rewritten/goldens.diff
+          tar -czf target/oracle-rewritten/rewritten.tgz -T target/oracle-rewritten/files.txt
+          cp target/oracle/*/summary.md target/oracle-rewritten/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: oracle-rewritten-goldens
+          path: target/oracle-rewritten/
+          if-no-files-found: ignore

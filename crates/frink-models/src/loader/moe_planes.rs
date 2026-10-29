@@ -38,6 +38,17 @@ pub(super) fn try_build_moe_packed_q4_planes(
                     QuantKind::Q6K => "Q6_K",
                     QuantKind::Q8_0 => "Q8_0",
                     QuantKind::IQ4XS => "IQ4_XS",
+                    QuantKind::Q2K => "Q2_K",
+                    QuantKind::Q3K => "Q3_K",
+                    QuantKind::IQ4NL => "IQ4_NL",
+                    QuantKind::Mxfp4Gguf => "MXFP4",
+                    QuantKind::IQ2XXS => "IQ2_XXS",
+                    QuantKind::IQ2XS => "IQ2_XS",
+                    QuantKind::IQ2S => "IQ2_S",
+                    QuantKind::IQ3XXS => "IQ3_XXS",
+                    QuantKind::IQ3S => "IQ3_S",
+                    QuantKind::IQ1S => "IQ1_S",
+                    QuantKind::IQ1M => "IQ1_M",
                     _ => return None,
                 };
                 let _ = frink_metal::gpu::mul_mm_sg_meta(kind_str)?;

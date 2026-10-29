@@ -120,13 +120,20 @@ pub const SHARED_EXPERT_SUM_SCALE: &[(&str, f32, &str)] =
 /// The scale on `moe_out + shexp_out` for `arch`, when its routed
 /// layer carries a shared expert; `None` for a plain sum.
 pub fn shared_expert_sum_scale(arch: &str, has_shared_expert: bool) -> Option<f32> {
-    if !has_shared_expert {
-        return None;
-    }
+    sum_scale_on_layer(shared_expert_sum_scale_row(arch), has_shared_expert)
+}
+
+/// `arch`'s [`SHARED_EXPERT_SUM_SCALE`] row: the scale alone.
+pub fn shared_expert_sum_scale_row(arch: &str) -> Option<f32> {
     SHARED_EXPERT_SUM_SCALE
         .iter()
         .find(|(a, _, _)| *a == arch)
         .map(|(_, scale, _)| *scale)
+}
+
+/// The row's scale on a layer that loaded a shared expert, else `None`.
+pub fn sum_scale_on_layer(row: Option<f32>, has_shared_expert: bool) -> Option<f32> {
+    row.filter(|_| has_shared_expert)
 }
 
 /// The row for an architecture, or `None` for one whose routed layers

@@ -81,16 +81,12 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     // `granite-swa.cpp:79`, optional as every Granite row's is.
     ("granite_swa", Presence::Optional),
     ("gptneox", Presence::Required),
-    ("granite", Presence::Optional),
     ("granitehybrid", Presence::Optional),
     ("granite-hybrid", Presence::Optional),
     ("jais", Presence::Required),
     ("mpt", Presence::Optional),
     ("phi2", Presence::Required),
-    ("granitemoe", Presence::Optional),
-    ("granite-moe", Presence::Optional),
     ("jais2", Presence::Required),
-    ("llama", Presence::Optional),
     ("minicpm", Presence::Optional),
     ("mistral3", Presence::Optional),
     ("nemotron", Presence::Optional),
@@ -111,17 +107,13 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
     ("deci", Presence::Optional, true),
     ("gpt2", Presence::Required, false),
     ("gptneox", Presence::Required, false),
-    ("granite", Presence::Optional, true),
     // `granite-swa.cpp:100-102`, the dense branch only (its MoE branch
     // creates no expert biases, as `granite.cpp`'s does not).
     ("granite_swa", Presence::Optional, true),
     ("granitehybrid", Presence::Optional, true),
     ("granite-hybrid", Presence::Optional, true),
-    ("granitemoe", Presence::Optional, true),
-    ("granite-moe", Presence::Optional, true),
     ("jais", Presence::Required, true),
     ("jais2", Presence::Required, false),
-    ("llama", Presence::Optional, true),
     ("minicpm", Presence::Optional, true),
     ("mistral3", Presence::Optional, true),
     ("mpt", Presence::Optional, false),
@@ -141,10 +133,16 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
 pub const OUTPUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("phi2", Presence::Required),
     ("phimoe", Presence::Required),
-    ("qwen2", Presence::Optional),
+    // `qwen2` states its row in `crate::models::qwen2` (#403 step 4).
 ];
 
-fn output_presence(arch: &str) -> Option<Presence> {
+/// Whether `arch`'s graph creates `output.bias`, through the registry.
+pub fn output_presence(arch: &str) -> Option<Presence> {
+    crate::models::ArchFacts::of(arch).tensors.output_bias
+}
+
+/// [`OUTPUT_BIAS_CREATORS`]' answer alone, for `ArchFacts::from_tables`.
+pub(crate) fn output_presence_from_table(arch: &str) -> Option<Presence> {
     OUTPUT_BIAS_CREATORS
         .iter()
         .find(|(n, _)| *n == arch)
@@ -157,22 +155,37 @@ fn output_presence(arch: &str) -> Option<Presence> {
 pub fn load_output_bias(
     file: &impl TensorSource,
     arch: &str,
+    row: Option<Presence>,
     vocab_size: usize,
 ) -> Result<Option<Vec<f32>>, LoadError> {
-    let Some(presence) = output_presence(arch) else {
+    let Some(presence) = row else {
         return Ok(None);
     };
     load_bias(file, arch, "output.bias", presence, vocab_size)
 }
 
-fn attn_out_presence(arch: &str) -> Option<Presence> {
+/// Whether `arch`'s graph creates `blk.N.attn_output.bias`, through the
+/// registry (`llama` and the Granite rows live in `crate::models`).
+pub fn attn_out_presence(arch: &str) -> Option<Presence> {
+    crate::models::ArchFacts::of(arch).tensors.attn_out_bias
+}
+
+/// The same for the dense FFN biases, with whether `ffn_gate.bias` is
+/// among them.
+pub fn ffn_presence(arch: &str) -> Option<(Presence, bool)> {
+    crate::models::ArchFacts::of(arch).tensors.ffn_bias
+}
+
+/// [`ATTN_OUT_BIAS_CREATORS`]' answer alone, for `ArchFacts::from_tables`.
+pub(crate) fn attn_out_presence_from_table(arch: &str) -> Option<Presence> {
     ATTN_OUT_BIAS_CREATORS
         .iter()
         .find(|(n, _)| *n == arch)
         .map(|(_, p)| *p)
 }
 
-fn ffn_presence(arch: &str) -> Option<(Presence, bool)> {
+/// [`FFN_BIAS_CREATORS`]' answer alone, for `ArchFacts::from_tables`.
+pub(crate) fn ffn_presence_from_table(arch: &str) -> Option<(Presence, bool)> {
     FFN_BIAS_CREATORS
         .iter()
         .find(|(n, _, _)| *n == arch)
@@ -212,10 +225,11 @@ fn load_bias(
 pub fn load_attn_out_bias(
     file: &impl TensorSource,
     arch: &str,
+    row: Option<Presence>,
     l: usize,
     hidden_dim: usize,
 ) -> Result<Option<Vec<f32>>, LoadError> {
-    let Some(presence) = attn_out_presence(arch) else {
+    let Some(presence) = row else {
         return Ok(None);
     };
     load_bias(
@@ -235,12 +249,13 @@ pub fn load_attn_out_bias(
 pub fn load_dense_ffn_bias(
     file: &impl TensorSource,
     arch: &str,
+    row: Option<(Presence, bool)>,
     l: usize,
     hidden_dim: usize,
     ffn_dim: usize,
     ungated: bool,
 ) -> Result<Option<DenseBias>, LoadError> {
-    let Some((presence, has_gate)) = ffn_presence(arch) else {
+    let Some((presence, has_gate)) = row else {
         return Ok(None);
     };
     let up = load_bias(

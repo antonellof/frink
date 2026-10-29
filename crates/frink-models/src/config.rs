@@ -1057,7 +1057,8 @@ pub fn glm_5_2() -> ModelConfig {
             // config.json (unavailable in this environment).
             gating: GatingFunction::Sigmoid,
             norm_topk_prob: true,
-         expert_group_count: None, expert_group_used_count: None,},
+         expert_group_count: None, expert_group_used_count: None,
+         selection: frink_moe::SelectionRule::BiasAfterGating,},
         // No evidence found (via ik_llama.cpp source or public
         // reporting) that GLM-5.2 skips MoE on any leading layers;
         // defaulting to 0 (every layer uses this model's MoE
@@ -1159,7 +1160,8 @@ pub fn deepseek_v4_pro() -> ModelConfig {
             // reason; not confirmed against V4 Pro's own config.json.
             gating: GatingFunction::Sigmoid,
             norm_topk_prob: true,
-         expert_group_count: None, expert_group_used_count: None,},
+         expert_group_count: None, expert_group_used_count: None,
+         selection: frink_moe::SelectionRule::BiasAfterGating,},
         // DeepSeek-V3's own published technical report documents the
         // first 3 transformer layers as dense (ordinary FFN, no
         // expert routing), with MoE starting from layer 4 onward;
@@ -1262,7 +1264,8 @@ pub fn kimi_k3() -> ModelConfig {
             // "moe_router_activation_func": "sigmoid".
             gating: GatingFunction::Sigmoid,
             norm_topk_prob: true,
-         expert_group_count: None, expert_group_used_count: None,},
+         expert_group_count: None, expert_group_used_count: None,
+         selection: frink_moe::SelectionRule::BiasAfterGating,},
         // Confirmed directly from the real config.json:
         // "first_k_dense_replace": 1.
         n_dense_leading_layers: 1,
@@ -1385,6 +1388,7 @@ pub fn test_dense_fixture() -> ModelConfig {
             norm_topk_prob: true,
             expert_group_count: None,
             expert_group_used_count: None,
+            selection: frink_moe::SelectionRule::BiasAfterGating,
         },
         n_dense_leading_layers: 0,
         moe_interleave_step: None,
@@ -1463,6 +1467,7 @@ pub fn test_moe_fixture() -> ModelConfig {
             norm_topk_prob: true,
             expert_group_count: None,
             expert_group_used_count: None,
+            selection: frink_moe::SelectionRule::BiasAfterGating,
         },
         n_dense_leading_layers: 0,
         moe_interleave_step: None,
@@ -1543,6 +1548,7 @@ pub fn test_mixed_fixture() -> ModelConfig {
             norm_topk_prob: true,
             expert_group_count: None,
             expert_group_used_count: None,
+            selection: frink_moe::SelectionRule::BiasAfterGating,
         },
         n_dense_leading_layers: 1,
         moe_interleave_step: None,

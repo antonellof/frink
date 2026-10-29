@@ -28,7 +28,7 @@ ferrox-journal.log*
 # Transient benchmark logs (often embed absolute home paths).
 benchmarks/receipts/_tmp_*.log
 benchmarks/receipts/_suite_*.log
-models/
+/models/
 data/
 .env
 

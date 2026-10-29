@@ -3,8 +3,8 @@
 //! produced.
 //!
 //! Each test runs two requests on a server that cannot hold both, with
-//! the second submitted only once the first has streamed a token, so
-//! the first is DECODING when the second arrives. Every test also
+//! the worker held inside the first request's first token until the
+//! second is queued, so the first is DECODING when the second arrives. Every test also
 //! asserts that a preemption actually happened: a run that never
 //! evicted anything would pass every output check trivially.
 
@@ -29,41 +29,86 @@ struct Seen {
 /// short enough that one fails the run rather than hanging it.
 const DEADLINE: Duration = Duration::from_secs(60);
 
-/// Runs `first`, then `second` as soon as `first` has streamed its first
-/// delta, and returns both as their clients saw them.
+/// Holds the batcher's worker inside its first token-to-text call.
+///
+/// The decode function runs on the worker thread, so while it is held
+/// no row advances. Releasing it only once the second request is queued
+/// makes "the first row is decoding when the second arrives" a fact
+/// rather than a race: on a tiny model the first request's whole
+/// output took microseconds, and a second thread woken by its first
+/// streamed delta could arrive after it finished, so nothing was
+/// preempted.
+#[derive(Clone, Default)]
+struct Gate(Arc<(std::sync::Mutex<GateState>, std::sync::Condvar)>);
+
+#[derive(Default)]
+struct GateState {
+    entered: bool,
+    open: bool,
+}
+
+impl Gate {
+    /// `identity_decode`, except that its first call waits for [`Gate::open`].
+    fn decode(&self) -> DecodeFn {
+        let gate = self.clone();
+        let inner = identity_decode();
+        Arc::new(move |ids: &[usize]| {
+            let (lock, cv) = &*gate.0;
+            let mut st = lock.lock().unwrap();
+            st.entered = true;
+            cv.notify_all();
+            while !st.open {
+                st = cv.wait(st).unwrap();
+            }
+            drop(st);
+            inner(ids)
+        })
+    }
+
+    fn wait_entered(&self) {
+        let (lock, cv) = &*self.0;
+        let st = lock.lock().unwrap();
+        let (st, timeout) = cv
+            .wait_timeout_while(st, DEADLINE, |st| !st.entered)
+            .unwrap();
+        assert!(
+            !timeout.timed_out() && st.entered,
+            "the first request never produced a token"
+        );
+    }
+
+    fn open(&self) {
+        let (lock, cv) = &*self.0;
+        lock.lock().unwrap().open = true;
+        cv.notify_all();
+    }
+}
+
+/// Runs `first`, holds the worker at its first token (`gate`, which
+/// must be the one `batcher` was spawned with), queues `second`, then
+/// lets both run, and returns both as their clients saw them.
 ///
 /// Fails the test, rather than hanging it, if either does not finish
 /// within [`DEADLINE`]: a preemption policy that livelocks or leaks a
 /// reservation shows up here as a timeout.
 fn run_overlapping(
     batcher: &ContinuousBatcher,
+    gate: &Gate,
     first: (Vec<usize>, GenerationParams),
     second: (Vec<usize>, GenerationParams),
 ) -> [Seen; 2] {
-    let (go_tx, go_rx) = mpsc::channel::<()>();
     let (done_tx, done_rx) = mpsc::channel::<(usize, Result<Seen, DecodeError>)>();
-    let spawn = |i: usize,
-                 (prompt, params): (Vec<usize>, GenerationParams),
-                 mut go: Option<mpsc::Sender<()>>,
-                 wait: Option<mpsc::Receiver<()>>| {
+    let spawn = |i: usize, (prompt, params): (Vec<usize>, GenerationParams)| {
         let batcher = batcher.clone();
         let done = done_tx.clone();
         thread::spawn(move || {
-            if let Some(wait) = wait {
-                wait.recv().expect("the first request started streaming");
-            }
             let mut deltas = Vec::new();
             let out = batcher
                 .generate_streaming(
                     prompt,
                     params,
                     StopTokens::default(),
-                    Some(|chunk: &str| {
-                        deltas.push(chunk.to_string());
-                        if let Some(go) = go.take() {
-                            let _ = go.send(());
-                        }
-                    }),
+                    Some(|chunk: &str| deltas.push(chunk.to_string())),
                 )
                 .map(|(finish, ids, text, usage)| Seen {
                     finish,
@@ -75,8 +120,22 @@ fn run_overlapping(
             let _ = done.send((i, out));
         })
     };
-    let a = spawn(0, first, Some(go_tx), None);
-    let b = spawn(1, second, None, Some(go_rx));
+    let a = spawn(0, first);
+    gate.wait_entered();
+    let b = spawn(1, second);
+    // The worker frees a queue slot only when it admits the job, so a
+    // depth of one is the second request waiting. The slot is taken
+    // just before the job is sent; the pause covers that last step.
+    let deadline = std::time::Instant::now() + DEADLINE;
+    while batcher.stats().queue_depth == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the second request never queued"
+        );
+        thread::yield_now();
+    }
+    thread::sleep(Duration::from_millis(20));
+    gate.open();
     let mut seen: [Option<Seen>; 2] = [None, None];
     for _ in 0..2 {
         match done_rx.recv_timeout(DEADLINE) {
@@ -137,13 +196,15 @@ fn a_preempted_row_produces_the_tokens_an_unpreempted_one_does() {
         .map(|(p, n, seed)| sequential_ids(&decoder, p, &greedy_params(*n, *seed)))
         .collect();
 
+    let gate = Gate::default();
     let batcher = ContinuousBatcher::spawn_with_config(
         Arc::clone(&decoder),
-        identity_decode(),
+        gate.decode(),
         one_at_a_time(Some(0)),
     );
     let [a, b] = run_overlapping(
         &batcher,
+        &gate,
         (jobs[0].0.clone(), greedy_params(jobs[0].1, jobs[0].2)),
         (jobs[1].0.clone(), greedy_params(jobs[1].1, jobs[1].2)),
     );
@@ -184,22 +245,24 @@ fn a_preempted_seeded_row_keeps_its_rng_position() {
         )
     };
 
+    let gate = Gate::default();
     let plain = ContinuousBatcher::spawn_with_config(
         Arc::clone(&decoder),
-        identity_decode(),
+        gate.decode(),
         one_at_a_time(None),
     );
     let (first, second) = jobs();
-    let [want_a, want_b] = run_overlapping(&plain, first, second);
+    let [want_a, want_b] = run_overlapping(&plain, &gate, first, second);
     assert_eq!(plain.stats().preempted, 0, "preemption is off by default");
 
+    let gate = Gate::default();
     let preempting = ContinuousBatcher::spawn_with_config(
         Arc::clone(&decoder),
-        identity_decode(),
+        gate.decode(),
         one_at_a_time(Some(0)),
     );
     let (first, second) = jobs();
-    let [a, b] = run_overlapping(&preempting, first, second);
+    let [a, b] = run_overlapping(&preempting, &gate, first, second);
     assert_preempted(&preempting.stats());
     assert_eq!(a.ids, want_a.ids, "the first row's draws moved");
     assert_eq!(b.ids, want_b.ids, "the second row's draws moved");
@@ -247,13 +310,15 @@ fn a_preempted_rows_streamed_deltas_concatenate_to_the_unpreempted_text() {
         p
     };
 
+    let gate = Gate::default();
     let batcher = ContinuousBatcher::spawn_with_config(
         Arc::clone(&decoder),
-        identity_decode(),
+        gate.decode(),
         one_at_a_time(Some(0)),
     );
     let [a, b] = run_overlapping(
         &batcher,
+        &gate,
         (prompts[0].clone(), params(0)),
         (prompts[1].clone(), params(1)),
     );
@@ -302,10 +367,12 @@ fn two_rows_that_cannot_both_fit_both_finish_with_bounded_preemption() {
         ("block budget", one_at_a_time(Some(0))),
         ("sequence cap", seat_capped),
     ] {
+        let gate = Gate::default();
         let batcher =
-            ContinuousBatcher::spawn_with_config(Arc::clone(&decoder), identity_decode(), config);
+            ContinuousBatcher::spawn_with_config(Arc::clone(&decoder), gate.decode(), config);
         let [a, b] = run_overlapping(
             &batcher,
+            &gate,
             (vec![1, 2, 3], greedy_params(21, 1)),
             (vec![4, 5, 6], greedy_params(21, 2)),
         );
@@ -367,14 +434,16 @@ fn a_preempted_paged_row_resumes_through_its_own_prefix() {
         .map(|p| sequential_ids(&decoder, p, &greedy_params(21, 6)))
         .collect();
 
+    let gate = Gate::default();
     let batcher = ContinuousBatcher::spawn_with_config_paged(
         Arc::clone(&decoder),
-        identity_decode(),
+        gate.decode(),
         one_at_a_time(Some(0)),
         Some(paged),
     );
     let [a, b] = run_overlapping(
         &batcher,
+        &gate,
         (prompts[0].clone(), greedy_params(21, 6)),
         (prompts[1].clone(), greedy_params(21, 6)),
     );

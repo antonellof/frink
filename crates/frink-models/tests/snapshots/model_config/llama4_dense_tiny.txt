@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/llama4_dense_tiny.gguf
+config: REFUSED: architecture 'llama4' requires unimplemented feature: `llama4.expert_count` is 0: llama.cpp throws `llama4 model cannot have zero experts` before creating a tensor (src/models/llama4.cpp:6,49-51,64; measured on scripts/make_llama4_fixture.py --dense), so a dense Llama 4 (MobileLLM) has no reference graph to match

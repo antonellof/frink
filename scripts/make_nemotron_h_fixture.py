@@ -119,7 +119,13 @@ def main(out_path: str, biases: bool, separate_output: bool, moe: bool) -> None:
     w.add_head_count_kv([kv for kv, _ in layers])
     w.add_key_length(HEAD_DIM)
     w.add_value_length(HEAD_DIM)
-    w.add_layer_norm_rms_eps(RMS_EPS)
+    # The converter's key, not the RMS one: NemotronH's config spells it
+    # `layer_norm_epsilon`, so `conversion/base.py:1688-1690` writes
+    # `attention.layer_norm_epsilon` and no `layer_norm_rms_epsilon`.
+    # Since llama.cpp 604cc430 `nemotron-h.cpp:18` REQUIRES that key and
+    # falls back to it for the RMS norms (`:19-21`); a fixture carrying
+    # only the RMS key no longer loads in libllama at all.
+    w.add_layer_norm_eps(RMS_EPS)
     w.add_ssm_conv_kernel(D_CONV)
     w.add_ssm_inner_size(D_INNER)
     w.add_ssm_state_size(D_STATE)

@@ -251,7 +251,7 @@ fn mellum_with_the_seeded_period_instead_of_its_array_diverges_from_llama_cpp() 
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.swa_layers = SwaLayers::period(4, false);
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     assert_eq!(d.config.layer_sliding_window(2), Some(3), "sabotage landed");
     assert_eq!(d.config.layer_sliding_window(3), None, "sabotage landed");
     let worst = worst_vs(&prefill(&d), &MELLUM_GOLDEN);
@@ -269,7 +269,7 @@ fn mellum_windowing_every_layer_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.swa_layers = SwaLayers::All;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let worst = worst_vs(&prefill(&d), &MELLUM_GOLDEN);
     assert!(worst > 1e-2, "windowing layer 2 must be visible: {worst}");
 }

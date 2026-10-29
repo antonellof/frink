@@ -45,6 +45,17 @@ CI also builds that CLI/server chain and, on `macos-latest`, compiles
 `cargo clippy -p frink-metal -p frink-cli --features metal`. Hardware
 kernel tests stay `#[ignore]`d on hosted CI.
 
+The model-level goldens in `crates/frink-models/tests/` are libllama's
+CPU answers, so the shared helpers in `tests/common/` pin every test
+process to the host backend, even on a `--features metal` build, and
+fail if any Metal dispatch is encoded after the pin.
+`FRINK_GOLDEN_BACKEND=metal` is the opt-in Metal golden mode: the same
+comparisons on the GPU at `METAL_GOLDEN_TOL` (see
+`tests/common/backend.rs` for the measured spread behind it). That mode
+is a measurement, since many suites also assert host-only properties;
+the Metal gate is `decode_step_graphs::metal_decode_matches_cpu_and_llama_cpp`
+(`--ignored`, needs a GPU).
+
 CI builds `frink-cli --features serve` too, which is what the release
 tarball ships: `serve` on Linux and `serve metal` on macOS. That gate
 was added after noticing a break confined to `serve` could reach users

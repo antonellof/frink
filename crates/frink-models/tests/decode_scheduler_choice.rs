@@ -25,14 +25,14 @@
 //! A second test running concurrently in this binary would add its own
 //! regions to the count.
 
-#[path = "common/synthetic_llama.rs"]
-mod synthetic;
+mod common;
 
+use common::quant_encode;
+use common::synthetic_llama::{self, Shape};
 use frink_core::par::{self, Backend, RegionTally};
 use frink_gguf::{GgmlType, ShardedGguf};
 use frink_models::config::ModelConfig;
 use frink_models::decoder::Decoder;
-use synthetic::Shape;
 
 /// One layer at SmolLM2-135M's widths: every layer matvec is under the
 /// crossover, and the pool measured -37% on that model.
@@ -71,7 +71,7 @@ fn one_warm_decode_step(decoder: &Decoder) -> RegionTally {
 }
 
 fn load(shape: Shape, tag: &str) -> (Decoder, std::path::PathBuf) {
-    let path = synthetic::write(shape, GgmlType::Q8_0, tag);
+    let path = synthetic_llama::write_shaped(tag, shape, GgmlType::Q8_0, quant_encode::encode);
     let file = ShardedGguf::open(&path).expect("open the fixture");
     let config = ModelConfig::from_gguf(&file).expect("fixture config");
     let decoder = Decoder::from_gguf(&path, config).expect("load the fixture");

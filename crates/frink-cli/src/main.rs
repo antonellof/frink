@@ -5,11 +5,14 @@ mod argv;
 mod batched_bench;
 mod bench_bw;
 mod bench_client;
+mod bench_cmd;
 mod bench_contract;
 mod bench_guard;
+mod bench_llama;
 mod bench_model;
 mod bench_render;
 mod bench_suite;
+mod caps;
 mod chat;
 mod cli_output;
 mod download;
@@ -41,7 +44,12 @@ use frink_models::{
 };
 
 #[derive(Parser)]
-#[command(name = "frink", version, about = "Pure-Rust MoE inference engine")]
+#[command(
+    name = "frink",
+    version,
+    propagate_version = true,
+    about = "Pure-Rust MoE inference engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -204,7 +212,17 @@ enum Commands {
     /// RAM, SIMD flags, and CUDA device info if built with --features
     /// cuda). See frink-cuda's docs for exactly what is and isn't
     /// verified about the CUDA fields.
-    Caps,
+    ///
+    /// --kernels prints the kernel coverage matrix instead: for every
+    /// quant kind, backend and op, whether a kernel runs it or it falls
+    /// back to the host. Derived from the dispatch tables, not this
+    /// host. --write PATH writes it to a file (docs/KERNELS.md).
+    Caps {
+        #[arg(long)]
+        kernels: bool,
+        #[arg(long)]
+        write: Option<String>,
+    },
     /// Run a tiny synthetic forward-pass smoke test for a preset
     /// (random weights, small dims) to prove the pipeline executes.
     Smoke {
@@ -228,11 +246,6 @@ enum Commands {
         #[arg(long, default_value = "dense")]
         fixture: String,
     },
-    /// Benchmark: fused quantized matvec vs. dequant-then-matmul, at a
-    /// realistic single-expert-FFN matrix size, measuring both wall
-    /// time and resident memory. Also benchmarks end-to-end decode
-    /// throughput (tokens/sec) for each preset at synthetic-but-full-
-    /// scale-shape dimensions.
     /// Check that a GPU backend agrees with the CPU reference.
     ///
     /// Greedy-decodes the same prompt on both and compares token ids.
@@ -306,6 +319,16 @@ enum Commands {
         /// each other answer that, with no frink in the comparison.
         #[arg(long)]
         dump_logits: Option<String>,
+        /// Token ids to compare on, comma separated, instead of
+        /// tokenizing `--prompt`. Skips the tokenizer half: libllama's
+        /// tokenizer cannot load a synthetic fixture's vocabulary.
+        #[arg(long, value_delimiter = ',')]
+        tokens: Option<Vec<u32>>,
+        /// Also compare a greedy decode of this many steps, each frink
+        /// step fed llama.cpp's own previous token. Prefill parity alone
+        /// cannot see a defect that shows only once decode starts.
+        #[arg(long, default_value_t = 0)]
+        decode_steps: usize,
     },
     /// Corpus perplexity, llama.cpp's `perplexity` tool.
     ///
@@ -398,79 +421,8 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
-    Bench {
-        /// Real GGUF to benchmark. With this set, `bench` becomes a
-        /// `llama-bench` work-alike (pp/tg on real weights) and the
-        /// synthetic matvec microbenchmark below is skipped.
-        #[arg(short = 'm', long)]
-        model: Option<String>,
-        /// Prompt tokens for the `pp<N>` batched-prefill row (`0` skips).
-        #[arg(short = 'p', long = "n-prompt", default_value_t = 512)]
-        n_prompt: usize,
-        /// Decode steps for the `tg<N>` row (`0` skips).
-        #[arg(short = 'n', long = "n-gen", default_value_t = 128)]
-        n_gen: usize,
-        /// Timed repetitions per row; one extra warmup is discarded.
-        #[arg(short = 'r', long = "repetitions", default_value_t = 3)]
-        reps: usize,
-        /// CPU threads (`0` = performance-core default)
-        #[arg(short = 't', long, default_value_t = 0)]
-        threads: usize,
-        /// GPU layers, llama-bench's `-ngl`: `0` forces CPU, the model's
-        /// layer count or more offloads all of them, and a partial count
-        /// in between is refused (frink has no partial placement).
-        #[arg(long = "n-gpu-layers", visible_alias = "ngl", default_value_t = 0)]
-        n_gpu_layers: usize,
-        /// Context size (`0` = GGUF default)
-        #[arg(short = 'c', long, default_value_t = 0)]
-        ctx_size: usize,
-        #[arg(long, default_value_t = 4096)]
-        hidden: usize,
-        #[arg(long, default_value_t = 14336)]
-        ffn_dim: usize,
-        #[arg(long, default_value_t = 20)]
-        iters: usize,
-        /// Also run `llama-bench` on the same GGUF and print the gap.
-        #[arg(long)]
-        compare: bool,
-        /// Run every entry in `benchmarks/suite.json` (each in a fresh
-        /// child process), write engine receipts, then re-render the
-        /// engine table in `benchmarks/RESULTS.md`.
-        #[arg(long)]
-        suite: bool,
-        /// Re-render the engine table from existing receipts only.
-        #[arg(long)]
-        render: bool,
-        /// Restrict `--suite` to one suite id.
-        #[arg(long)]
-        id: Option<String>,
-        /// Restrict `--suite` to one backend.
-        #[arg(long)]
-        backend: Option<String>,
-        /// Skip suite entries whose estimated RAM exceeds ~75% of host RAM.
-        #[arg(long)]
-        fit_host: bool,
-        /// Skip suite entries whose GGUF is not present.
-        #[arg(long)]
-        skip_missing: bool,
-        /// benchmarks/ directory.
-        #[arg(long, default_value = "benchmarks")]
-        bench_dir: String,
-        /// Internal (`--suite` children): suite id to record in the receipt.
-        #[arg(long)]
-        suite_id: Option<String>,
-        /// Internal (`--suite` children): backend label for the receipt.
-        #[arg(long, default_value = "cpu")]
-        backend_label: String,
-        /// Write a JSON receipt to this path.
-        #[arg(long)]
-        receipt: Option<String>,
-        /// Refuse to start a timed run when the host's 1-minute load
-        /// average is at or above this. `0` disables the check and
-        /// marks the receipt as not quiet-host.
-        #[arg(long, default_value_t = host_state::DEFAULT_MAX_LOAD)]
-        max_load: f64,
-    },
+    /// Benchmark a GGUF like `llama-bench`, or the synthetic kernels.
+    Bench(bench_cmd::BenchCmd),
     /// Demonstrate prompt-lookup speculative decoding on a repetitive
     /// prompt, reporting forward_batch call count vs. tokens produced.
     /// Uses synthetic (random) weights -- see the printed caveat about
@@ -629,16 +581,11 @@ fn instance_target(command: &Commands) -> Option<(&'static str, Option<String>)>
         // not a timing, so `--allow-multiple-instances` costs nothing but
         // the words.
         Commands::Perplexity { model, .. } => Some(("perplexity", Some(model.clone()))),
-        Commands::Bench {
-            model,
-            suite,
-            render,
-            ..
-        } => {
-            if *suite || *render || model.is_none() {
+        Commands::Bench(args) => {
+            if args.suite || args.render || args.list_devices || args.model.is_none() {
                 return None;
             }
-            Some(("bench", model.clone()))
+            Some(("bench", args.model.clone()))
         }
         Commands::BatchedBench(args) => Some(("batched-bench", Some(args.model.clone()))),
         Commands::Smoke { preset, .. } => Some(("smoke", Some(preset.clone()))),
@@ -680,7 +627,7 @@ fn main() -> anyhow::Result<()> {
             .error(clap::error::ErrorKind::UnknownArgument, e)
             .exit()
     });
-    let cli = Cli::parse_from(argv);
+    let cli = argv::parse(argv).unwrap_or_else(|e| e.exit());
 
     // BEFORE `claim_instance`, and that ordering is the whole point.
     //
@@ -694,20 +641,13 @@ fn main() -> anyhow::Result<()> {
     // "Metal"` next to `backend: "cpu"` without anything comparing the
     // two (#126).
     match &cli.command {
-        Commands::Bench {
-            threads,
-            n_gpu_layers,
-            suite,
-            render,
-            model,
-            ..
-        } => {
+        Commands::Bench(args) => {
             // `--suite` and `--render` do not benchmark in THIS process:
             // the suite spawns a child per entry and render only reads
             // receipts, so applying a backend here would pin the parent
             // to one backend for children that each want their own.
-            if !suite && !render {
-                bench_model::apply_env(*threads, *n_gpu_layers, model.as_deref())?;
+            if !args.suite && !args.render && !args.list_devices {
+                bench_model::apply_env(args.threads, args.n_gpu_layers, args.model.as_deref())?;
             }
         }
         // Same ordering constraint, same function: the batched bench
@@ -806,6 +746,15 @@ fn main() -> anyhow::Result<()> {
             let fit = report.auto_context(ctx_cap);
             println!("  {fit}");
             println!("  {}", budget.caveat());
+            if let Ok(file) = ShardedGguf::open(&path) {
+                let tensors: Vec<_> = file
+                    .tensors()
+                    .map(|(_, t)| (t.name.as_str(), t.dtype))
+                    .collect();
+                for line in caps::plan_lines(&tensors, backend) {
+                    println!("{line}");
+                }
+            }
             if strict {
                 if let Err(e) = report.check_strict() {
                     eprintln!("{e}");
@@ -840,40 +789,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{report}");
             }
         }
-        Commands::Caps => {
-            let profile = frink_cuda::HardwareProfile::detect();
-            println!("Hardware capabilities (detected, not assumed):");
-            println!("  CPU logical cores : {}", profile.cpu_logical_cores);
-            if profile.host_ram_total_bytes > 0 {
-                println!(
-                    "  Host RAM total    : {:.2} GiB",
-                    profile.host_ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-            } else {
-                println!("  Host RAM total    : could not detect (non-Linux host?)");
-            }
-            println!("  SIMD              : {}", profile.simd.label());
-            println!(
-                "    avx2={} avx512f={} fma={} neon={}",
-                profile.simd.avx2, profile.simd.avx512f, profile.simd.fma, profile.simd.neon
-            );
-            if profile.cuda_available {
-                println!(
-                    "  CUDA              : {} device(s), first = {:?}, {:.2} GiB VRAM",
-                    profile.cuda_device_count,
-                    profile.cuda_device_name,
-                    profile.cuda_vram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-            } else {
-                println!("  CUDA              : not available (no device found, or built without --features cuda)");
-            }
-            let metal = frink_metal::MetalProfile::detect();
-            if metal.available {
-                println!("  Metal             : {:?}", metal.device_name);
-            } else {
-                println!("  Metal             : not available (no device found, or built without --features metal)");
-            }
-        }
+        Commands::Caps { kernels, write } => caps::run(kernels, write)?,
         Commands::Smoke { preset, steps } => {
             let base_cfg = preset_by_name(&preset)?;
             println!(
@@ -983,6 +899,8 @@ fn main() -> anyhow::Result<()> {
             top_k,
             dumper,
             dump_logits,
+            tokens,
+            decode_steps,
         } => {
             return parity::run(parity::ParityArgs {
                 model,
@@ -991,6 +909,8 @@ fn main() -> anyhow::Result<()> {
                 top_k,
                 dumper,
                 dump_logits,
+                tokens,
+                decode_steps,
             });
         }
         Commands::Perplexity {
@@ -1045,314 +965,7 @@ fn main() -> anyhow::Result<()> {
                 top,
             });
         }
-        Commands::Bench {
-            model,
-            n_prompt,
-            n_gen,
-            reps,
-            threads,
-            n_gpu_layers,
-            ctx_size,
-            hidden,
-            ffn_dim,
-            iters,
-            compare,
-            suite,
-            render,
-            id,
-            backend,
-            fit_host,
-            skip_missing,
-            bench_dir,
-            suite_id,
-            backend_label,
-            receipt,
-            max_load,
-        } => {
-            if render {
-                return bench_render::render(std::path::Path::new(&bench_dir));
-            }
-            if suite {
-                return bench_suite::run_suite(bench_suite::SuiteArgs {
-                    bench_dir: bench_dir.into(),
-                    n_prompt,
-                    n_gen,
-                    reps,
-                    only_id: id,
-                    only_backend: backend,
-                    fit_host,
-                    skip_missing,
-                    max_load,
-                });
-            }
-            if let Some(model) = model {
-                // Already applied above, before `claim_instance` could
-                // freeze the backend. Kept as a no-op call rather than
-                // deleted so a future caller of this arm cannot get an
-                // unconfigured process.
-                bench_model::apply_env(threads, n_gpu_layers, Some(&model))?;
-                return bench_model::run(bench_model::BenchArgs {
-                    model,
-                    n_prompt,
-                    n_gen,
-                    reps,
-                    ctx_size,
-                    compare,
-                    backend: backend_label,
-                    receipt: receipt.map(Into::into),
-                    id: suite_id,
-                    max_load,
-                });
-            }
-            use frink_core::weight_matrix::{QuantKind, WeightBytes, WeightMatrix};
-            use std::time::Instant;
-
-            println!(
-                "=== matvec microbenchmark: [{ffn_dim} x {hidden}] weight, {iters} iterations ==="
-            );
-
-            let mut rng_state: u64 = 12345;
-            let mut next = || {
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                ((rng_state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
-            };
-            let weights: Vec<f32> = (0..ffn_dim * hidden).map(|_| next() * 0.1).collect();
-            let x: Vec<f32> = (0..hidden).map(|_| next() * 0.1).collect();
-
-            let f32_matrix = WeightMatrix::F32(frink_core::tensor::Tensor::new(
-                weights.clone(),
-                vec![ffn_dim, hidden],
-            ));
-            let mut packed = Vec::new();
-            for row in weights.chunks(hidden) {
-                packed.extend(frink_quant::quantize_q8_0(row));
-            }
-            let packed_for_scalar_bench = packed.clone();
-            let quant_matrix = WeightMatrix::Quantized {
-                data: WeightBytes::Owned(packed),
-                rows: ffn_dim,
-                cols: hidden,
-                kind: QuantKind::Q8_0,
-            };
-
-            // warm-up
-            let _ = f32_matrix.apply(&x);
-            let _ = quant_matrix.apply(&x);
-
-            let t0 = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(f32_matrix.apply(&x));
-            }
-            let f32_elapsed = t0.elapsed();
-
-            let t1 = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(quant_matrix.apply(&x));
-            }
-            let quant_elapsed = t1.elapsed();
-
-            // This isolates the *scalar* kernel cost as a single-
-            // threaded direct loop, to compare against "dispatched"
-            // below (which goes through WeightMatrix::apply, i.e. both
-            // rayon row-parallelism AND AVX2/FMA SIMD dispatch if the
-            // host supports it). On an AVX2-capable x86_64 host, most
-            // of that gap is genuinely SIMD; on an ARM host without a
-            // NEON kernel for this format, the "dispatched" path
-            // silently falls back to the same scalar kernel per row,
-            // so the entire gap here is multi-core parallelism, not
-            // SIMD -- confirmed by comparing this against the explicit
-            // 1-thread-vs-all-cores section below, which isolates
-            // parallelism on its own. Don't read this ratio as "SIMD
-            // speedup" without checking which case you're in.
-            let row_bytes =
-                (hidden / frink_quant::Q8_0_BLOCK_ELEMS) * frink_quant::Q8_0_BLOCK_BYTES;
-            let scalar_rows: Vec<&[u8]> = packed_for_scalar_bench.chunks_exact(row_bytes).collect();
-            let t2 = Instant::now();
-            for _ in 0..iters {
-                let mut acc = 0f32;
-                for row in &scalar_rows {
-                    acc += frink_quant::dot_q8_0_f32_scalar(row, &x);
-                }
-                std::hint::black_box(acc);
-            }
-            let scalar_elapsed = t2.elapsed();
-
-            let f32_bytes = f32_matrix.resident_bytes();
-            let quant_bytes = quant_matrix.resident_bytes();
-
-            println!(
-                "  f32 dequant-resident matmul : {:>8.3} ms/call  ({} bytes resident)",
-                f32_elapsed.as_secs_f64() * 1000.0 / iters as f64,
-                f32_bytes
-            );
-            println!(
-                "  fused Q8_0 (scalar, no SIMD, single-threaded) : {:>8.3} ms/call",
-                scalar_elapsed.as_secs_f64() * 1000.0 / iters as f64
-            );
-            println!(
-                "  fused Q8_0 (dispatched, row-parallel)          : {:>8.3} ms/call  ({} bytes resident)  <- rayon row parallelism + AVX2/FMA (x86_64) or NEON (aarch64) if host supports it",
-                quant_elapsed.as_secs_f64() * 1000.0 / iters as f64,
-                quant_bytes
-            );
-            println!(
-                "  dispatched is {:.2}x the single-threaded scalar path's time (see \"multi-core scaling\" below to separate the SIMD and parallelism contributions to this number)",
-                quant_elapsed.as_secs_f64() / scalar_elapsed.as_secs_f64()
-            );
-            println!(
-                "  memory reduction: {:.2}x smaller resident",
-                f32_bytes as f64 / quant_bytes as f64
-            );
-            println!(
-                "  speed ratio: fused Q8_0 (dispatched) is {:.2}x the f32 path's time (<1.0 = fused is faster; with AVX2+FMA this is usually both faster AND smaller, not a memory-for-speed tradeoff)",
-                quant_elapsed.as_secs_f64() / f32_elapsed.as_secs_f64()
-            );
-
-            println!("\n=== Q4_0 matvec microbenchmark: [{ffn_dim} x {hidden}] weight, {iters} iterations ===");
-            let q4_row_bytes =
-                (hidden / frink_quant::Q4_0_BLOCK_ELEMS) * frink_quant::Q4_0_BLOCK_BYTES;
-            let mut q4_packed = Vec::with_capacity(ffn_dim * q4_row_bytes);
-            for row in weights.chunks(hidden) {
-                for block in row.chunks(frink_quant::Q4_0_BLOCK_ELEMS) {
-                    let amax = block.iter().fold(0f32, |a, &b| a.max(b.abs()));
-                    let scale = if amax == 0.0 { 1.0 } else { amax / 7.0 };
-                    q4_packed.extend_from_slice(&half::f16::from_f32(scale).to_le_bytes());
-                    for i in 0..16 {
-                        let lo = ((block.get(i).copied().unwrap_or(0.0) / scale)
-                            .round()
-                            .clamp(-8.0, 7.0) as i32
-                            + 8) as u8;
-                        let hi = ((block.get(i + 16).copied().unwrap_or(0.0) / scale)
-                            .round()
-                            .clamp(-8.0, 7.0) as i32
-                            + 8) as u8;
-                        q4_packed.push(lo | (hi << 4));
-                    }
-                }
-            }
-            let q4_rows: Vec<&[u8]> = q4_packed.chunks_exact(q4_row_bytes).collect();
-
-            let t3 = Instant::now();
-            for _ in 0..iters {
-                let mut acc = 0f32;
-                for row in &q4_rows {
-                    acc += frink_quant::dot_q4_0_f32_scalar(row, &x);
-                }
-                std::hint::black_box(acc);
-            }
-            let q4_scalar_elapsed = t3.elapsed();
-
-            // Route through WeightMatrix::apply, not a direct
-            // dot_q4_0_f32 loop -- same rayon row-parallel dispatch the
-            // Q8_0 "dispatched" number above uses. An earlier version of
-            // this benchmark called dot_q4_0_f32 directly in a plain
-            // sequential loop here, which meant it never exercised
-            // multi-core parallelism at all and wasn't measuring the
-            // same thing as the Q8_0 number above -- caught by actually
-            // comparing RAYON_NUM_THREADS=1 vs default on real multi-
-            // core hardware and finding the two numbers didn't move
-            // together the way they should have.
-            let q4_quant_matrix = WeightMatrix::Quantized {
-                data: WeightBytes::Owned(q4_packed.clone()),
-                rows: ffn_dim,
-                cols: hidden,
-                kind: QuantKind::Q4_0,
-            };
-            let _ = q4_quant_matrix.apply(&x); // warm-up
-            let t4 = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(q4_quant_matrix.apply(&x));
-            }
-            let q4_dispatched_elapsed = t4.elapsed();
-
-            println!(
-                "  Q4_0 (scalar, no SIMD, single-threaded) : {:>8.3} ms/call  ({} bytes resident)",
-                q4_scalar_elapsed.as_secs_f64() * 1000.0 / iters as f64,
-                q4_packed.len()
-            );
-            println!(
-                "  Q4_0 (dispatched, row-parallel)          : {:>8.3} ms/call  <- rayon row parallelism + AVX2/FMA (x86_64) or NEON (aarch64) if host supports it",
-                q4_dispatched_elapsed.as_secs_f64() * 1000.0 / iters as f64
-            );
-            println!(
-                "  Q4_0 dispatched is {:.2}x the single-threaded scalar path's time",
-                q4_dispatched_elapsed.as_secs_f64() / q4_scalar_elapsed.as_secs_f64()
-            );
-            println!(
-                "  Q4_0 memory reduction vs f32: {:.2}x smaller resident",
-                f32_bytes as f64 / q4_packed.len() as f64
-            );
-
-            println!("\n=== multi-core scaling: fused Q8_0 matvec, [{ffn_dim} x {hidden}], {iters} iterations ===");
-            let available_cores = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            let single_thread_pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build()
-                .expect("building a 1-thread rayon pool must not fail");
-            let t5 = Instant::now();
-            single_thread_pool.install(|| {
-                for _ in 0..iters {
-                    std::hint::black_box(quant_matrix.apply(&x));
-                }
-            });
-            let single_thread_elapsed = t5.elapsed();
-            let single_thread_ms = single_thread_elapsed.as_secs_f64() * 1000.0 / iters as f64;
-            let all_cores_ms = quant_elapsed.as_secs_f64() * 1000.0 / iters as f64;
-            println!("  available cores (std::thread::available_parallelism): {available_cores}");
-            println!("  1 thread            : {single_thread_ms:>8.3} ms/call");
-            println!("  {available_cores} threads (default) : {all_cores_ms:>8.3} ms/call");
-            println!(
-                "  measured speedup: {:.2}x (ideal linear speedup would be {:.2}x for {} cores)",
-                single_thread_ms / all_cores_ms,
-                available_cores,
-                available_cores
-            );
-
-            println!("\n=== end-to-end decode throughput (synthetic weights, capped layer count for sandbox runtime) ===");
-            for (name, preset) in [
-                ("glm-5.2", glm_5_2()),
-                ("deepseek-v4-pro", deepseek_v4_pro()),
-                ("kimi-k3", kimi_k3()),
-            ] {
-                let mut cfg = preset;
-                cfg.hidden_dim = 512;
-                cfg.n_heads = 8;
-                cfg.n_kv_heads = 2;
-                cfg.head_dim = 64;
-                cfg.moe.hidden_dim = 512;
-                cfg.moe.n_experts = cfg.moe.n_experts.min(32);
-                cfg.moe.expert_ffn_dim = 512;
-                let n_layers = 4;
-                let vocab = 256;
-
-                let decoder = Decoder::new_random_small(cfg, n_layers, vocab);
-                let mut caches: Vec<frink_core::cache::KvCache> = decoder.config.new_kv_caches();
-
-                let n_tokens = 32;
-                let t0 = Instant::now();
-                for pos in 0..n_tokens {
-                    std::hint::black_box(decoder.forward_token(pos % vocab, pos, &mut caches));
-                }
-                let elapsed = t0.elapsed();
-                let toks_per_sec = n_tokens as f64 / elapsed.as_secs_f64();
-                println!(
-                    "  {name:<16} {n_layers} layers, hidden=512, {} experts ({} active): {:>7.1} tok/s ({:.2} ms/token, CPU reference, single thread pool)",
-                    decoder.config.moe.n_experts,
-                    decoder.config.moe.n_experts_active,
-                    toks_per_sec,
-                    elapsed.as_secs_f64() * 1000.0 / n_tokens as f64
-                );
-            }
-            println!(
-                "\nNote: these are CPU-reference numbers on this sandbox's vCPUs, not GPU numbers."
-            );
-            println!("They demonstrate the pipeline's relative cost structure (attention vs MoE FFN, memory");
-            println!("footprint of quantized vs f32 weights), not absolute performance on target hardware");
-            println!("like a DGX Spark. See benchmarks/RESULTS.md for methodology and caveats.");
-        }
+        Commands::Bench(args) => return args.run(),
         Commands::Speculative {
             preset,
             prompt,
