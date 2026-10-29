@@ -3669,8 +3669,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         })
     };
     match arch {
-        // src/models/openai-moe.cpp:9
-        "gpt-oss" => last_dense(2),
         // src/models/gemma2.cpp:6
         "gemma2" => last_dense(2),
         // src/models/gemma3.cpp:7
@@ -3707,10 +3705,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // narrower than the prompt, so both the period override and
         // this phase are exercised end to end against libllama.
         "plamo3" => last_dense(8),
-        // src/models/llama4.cpp:19 ("pattern: 3 chunked - 1 full").
-        // LIVE: the chunked window is `crate::chunked_swa`, and
-        // tests/llama4_graphs.rs drives a period of 2 from the file.
-        "llama4" => last_dense(4),
         // --- dense_first = true -----------------------------------
         //
         // These four put the full-attention layer at `il % p == 0`, not
@@ -3766,10 +3760,8 @@ pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
             | "exaone-moe"
             | "gemma2"
             | "laguna"
-            | "llama4"
             | "maple"
             | "mellum"
-            | "gpt-oss"
             | "smallthinker"
     )
 }
@@ -3817,10 +3809,8 @@ pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
             | "dflash"      // dflash.cpp:59, :71
             | "exaone-moe"  // exaone-moe.cpp:10
             | "gemma2"      // gemma2.cpp:11
-            | "llama4"      // llama4.cpp:24
             | "maple"       // maple.cpp:13
             | "mellum"      // mellum.cpp:20
-            | "gpt-oss"     // openai-moe.cpp:14
             | "smallthinker" // smallthinker.cpp:14
     )
 }

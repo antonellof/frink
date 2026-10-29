@@ -65,15 +65,12 @@ pub(crate) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
     // `nemotron-h.cpp:218`: the SIGMOID literal; the converter writes no
     // `expert_gating_func` (`conversion/nemotron.py:238-250`).
     ("nemotron_h_moe", GatingFunction::Sigmoid),
-    // `llama4.cpp:230`: the SIGMOID literal, with `norm_w = false` at
-    // `:228` (`NO_TOPK_RENORMALIZE_ARCHITECTURES`); the converter
-    // writes no key (`conversion/llama.py:374-394`).
-    ("llama4", GatingFunction::Sigmoid),
+    // `llama4` is in `crate::models::llama4` (#403 step 6b).
 ];
 
 /// The names alone, for the cross-table test.
 #[cfg(test)]
-pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe", "llama4"];
+pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe"];
 
 /// Architectures whose `load_arch_hparams` reads
 /// `{arch}.expert_weights_scale` (`LLM_KV_EXPERT_WEIGHTS_SCALE`) -- and
@@ -210,7 +207,7 @@ pub(super) const DEDICATED_OWNS_ITS_BEHAVIOUR: &[(&str, &str)] = &[
 // the experts unrenormalised.
 // `qwen2moe` and `olmoe` state their rows in `crate::models` (#403
 // steps 4 and 6).
-pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] = &["deepseek", "jamba", "llama4"];
+pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] = &["deepseek", "jamba"];
 
 /// Architectures whose checkpoints carry `{arch}.leading_dense_block_count`
 /// while their reference graph never branches on it: **every** layer is

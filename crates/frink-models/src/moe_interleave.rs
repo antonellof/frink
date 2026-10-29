@@ -83,13 +83,6 @@
 /// hard failures upstream.
 pub const INTERLEAVE_STEP_IS_REQUIRED: &[&str] = &["ernie4_5-moe"];
 
-/// Architectures whose loader creates the expert tensors on exactly
-/// the layers `(i + 1) % step == 0` (`llama4.cpp:64`), so the step is
-/// served, with the line that refuses a zero expert count before any
-/// layer is read (`:49-51`).
-pub const INTERLEAVE_STEP_HONOURED_BY_LOADER: &[(&str, &str)] =
-    &[("llama4", "src/models/llama4.cpp:6,49-51,64")];
-
 /// The step `ModelConfig::layer_is_dense` applies for `arch`, or
 /// `None` where the loader does not branch on it. `n_experts` is the
 /// file's `expert_count`, refused at zero where llama.cpp throws.
@@ -98,10 +91,26 @@ pub fn interleave_step(
     step: Option<u64>,
     n_experts: usize,
 ) -> Result<Option<usize>, String> {
-    let Some((_, lines)) = INTERLEAVE_STEP_HONOURED_BY_LOADER
-        .iter()
-        .find(|(a, _)| *a == arch)
-    else {
+    interleave_step_for(
+        arch,
+        crate::models::ArchFacts::of(arch)
+            .moe
+            .interleave_step_honoured,
+        step,
+        n_experts,
+    )
+}
+
+/// [`interleave_step`] given the row (`ArchFacts`): the llama.cpp lines
+/// where the loader honours the step (`llama4`, `llama4.cpp:6,49-51,64`,
+/// is the one graph with one).
+pub fn interleave_step_for(
+    arch: &str,
+    row: Option<&'static str>,
+    step: Option<u64>,
+    n_experts: usize,
+) -> Result<Option<usize>, String> {
+    let Some(lines) = row else {
         return Ok(None);
     };
     if n_experts == 0 {
@@ -169,10 +178,22 @@ pub fn dense_by_router_absence(
 ///   leading-dense prefix, which frink implements.
 /// * absent-but-required, `0`, or `> 1` -> refused, by name.
 pub fn interleave_step_refusal(arch: &str, step: Option<u64>) -> Option<String> {
-    if INTERLEAVE_STEP_HONOURED_BY_LOADER
-        .iter()
-        .any(|(a, _)| *a == arch)
-    {
+    interleave_step_refusal_for(
+        arch,
+        crate::models::ArchFacts::of(arch)
+            .moe
+            .interleave_step_honoured,
+        step,
+    )
+}
+
+/// [`interleave_step_refusal`] given the row (`ArchFacts`).
+pub fn interleave_step_refusal_for(
+    arch: &str,
+    row: Option<&'static str>,
+    step: Option<u64>,
+) -> Option<String> {
+    if row.is_some() {
         return None;
     }
     match step {

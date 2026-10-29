@@ -37,19 +37,29 @@
 
 use crate::loader::LoadError;
 
-/// Architectures whose window is chunked, with the literal chunk.
-pub const CHUNKED_SWA_ARCHITECTURES: &[(&str, usize, &str)] =
-    &[("llama4", 8192, "src/models/llama4.cpp:5-21")];
-
 /// The chunk `arch` attends within, given what the file declares for
 /// `attention.sliding_window`, or `None` for every sliding-window
 /// architecture. A declared zero is refused: llama.cpp's own graph
 /// aborts on that branch (module doc).
+///
+/// The chunk is a row of the architecture's `crate::models` definition
+/// (`llama4`, `llama4.cpp:5-21`, is the one graph with one).
 pub fn chunked_window(arch: &str, declared: Option<u64>) -> Result<Option<usize>, LoadError> {
-    let Some((_, chunk, lines)) = CHUNKED_SWA_ARCHITECTURES
-        .iter()
-        .find(|(a, _, _)| *a == arch)
-    else {
+    chunked_window_for(
+        arch,
+        crate::models::ArchFacts::of(arch).swa.chunked,
+        declared,
+    )
+}
+
+/// [`chunked_window`] given the row (`ArchFacts`): the chunk and the
+/// llama.cpp lines.
+pub fn chunked_window_for(
+    arch: &str,
+    row: Option<(usize, &'static str)>,
+    declared: Option<u64>,
+) -> Result<Option<usize>, LoadError> {
+    let Some((chunk, lines)) = row else {
         return Ok(None);
     };
     if declared == Some(0) {
@@ -65,7 +75,7 @@ pub fn chunked_window(arch: &str, declared: Option<u64>) -> Result<Option<usize>
             ),
         ));
     }
-    Ok(Some(*chunk))
+    Ok(Some(chunk))
 }
 
 #[cfg(test)]

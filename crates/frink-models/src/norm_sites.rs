@@ -69,14 +69,10 @@ use frink_gguf::{GgufError, TensorSource};
 /// tensors (sinks, biases, the SwiGLU clamp), and widening it would have
 /// handed `seed_oss` attention sinks it does not have. Two facts, two
 /// predicates.
-pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] = &[
-    "gpt-oss",
-    "seed_oss",
-    "glm4moe",
-    "qwen35",
-    "qwen35moe",
-    "qwen3next",
-];
+///
+/// `gpt-oss` states its row in `crate::models::gpt_oss` (#403 step 6b).
+pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] =
+    &["seed_oss", "glm4moe", "qwen35", "qwen35moe", "qwen3next"];
 
 /// Architectures whose OPTIONAL second pre-norm `blk.N.attn_norm_2`
 /// feeds ATTENTION when present, with `attn_norm` moving to the FFN.

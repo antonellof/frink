@@ -99,13 +99,22 @@ fn assert_rules_agree(name: &str, a: HparamRules, b: HparamRules) {
         attention_scale_override: sa,
         rope_layers: ra,
         load_checks: ca,
+        weightless_qk_norm: qa,
     } = a;
     let HparamRules {
         swa_window_override: wb,
         attention_scale_override: sb,
         rope_layers: rb,
         load_checks: cb,
+        weightless_qk_norm: qb,
     } = b;
+    for n_experts in [0, 1, 16, 128] {
+        assert_eq!(
+            qa(name, n_experts),
+            qb(name, n_experts),
+            "{name}: weightless_qk_norm({n_experts})"
+        );
+    }
     // An empty file: every check that reads a key or a tensor answers.
     let empty = crate::test_source::StubSource::with_tensors(&[]);
     for n_layers in [0, 1, 4] {
@@ -198,10 +207,15 @@ fn the_facts_agree_with_every_public_lookup() {
             audited: cap::is_audited_generic(name),
             moe: MoeFacts {
                 sigmoid_by_default: t::SIGMOID_GATING_ARCHITECTURES.contains(&name),
-                gating_literal: t::GATING_LITERAL_ARCHITECTURES
-                    .iter()
-                    .find(|(n, _)| *n == name)
-                    .map(|(_, g)| *g),
+                gating_literal: def.map_or(
+                    t::GATING_LITERAL_ARCHITECTURES
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, g)| *g),
+                    |f| f.moe.gating_literal,
+                ),
+                // No legacy table: only a definition states it.
+                interleave_step_honoured: def.and_then(|f| f.moe.interleave_step_honoured),
                 reads_expert_weights_norm: def
                     .map_or(t::EXPERT_WEIGHTS_NORM_READERS.contains(&name), |f| {
                         f.moe.reads_expert_weights_norm
@@ -237,6 +251,8 @@ fn the_facts_agree_with_every_public_lookup() {
                 rope_base_follows_model: cap::swa_rope_base_follows_model(name),
                 rope_scale_follows_model: cap::swa_rope_scale_follows_model(name),
                 rope_base_key_unread: def.and_then(|f| f.swa.rope_base_key_unread),
+                // No legacy table: only a definition states it.
+                chunked: def.and_then(|f| f.swa.chunked),
             },
             ffn: FfnFacts {
                 // No legacy table: only a definition states it.
@@ -272,6 +288,8 @@ fn the_facts_agree_with_every_public_lookup() {
                     crate::loader::rope_scaling::YARN_BETA_READERS.contains(&name),
                     |f| f.scaling.reads_yarn_beta,
                 ),
+                // No legacy table: only a definition states it.
+                attn_temperature_literal: def.and_then(|f| f.scaling.attn_temperature_literal),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(name),
@@ -312,6 +330,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 attention_scale_override: cap::attention_scale_override,
                 rope_layers: crate::rope_layers::rope_layers,
                 load_checks: def.map_or(super::no_load_checks, |f| f.rules.load_checks),
+                weightless_qk_norm: crate::weightless_qk_norm::weightless_qk_norm,
             },
         };
         assert_same(name, ArchFacts::of(name), want);
