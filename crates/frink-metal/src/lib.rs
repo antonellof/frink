@@ -68,6 +68,10 @@ pub mod attn;
 #[cfg(feature = "metal")]
 pub mod codebook4;
 
+/// The MoE id matvecs generated from a kind's decode matvec `_impl`.
+#[cfg(feature = "metal")]
+mod moe_mv_id;
+
 /// The KV wire format: dtypes, append and dequant kernels. Split from
 /// `attn` so the store and the softmax are separate concepts.
 #[cfg(feature = "metal")]

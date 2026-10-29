@@ -28,6 +28,15 @@ pub const HEAD_DIM: usize = N_EMBD / N_HEAD;
 pub const N_LAYER: usize = 2;
 pub const N_VOCAB: usize = 512;
 
+/// The MoE variant ([`write_moe`]): Mixtral's shape (the llama graph
+/// with `{arch}.expert_count`, softmax routing, top-k renormalized),
+/// plain SwiGLU experts and no shared expert. llama.cpp sizes a llama
+/// expert by `feed_forward_length` (`llama-model.cpp`, `ffn_gate_exps
+/// {n_embd, n_ff, n_expert}`), so the expert width is [`N_FF`].
+pub const N_EXPERT: usize = 4;
+pub const N_EXPERT_USED: usize = 2;
+pub const N_FF_EXP: usize = N_FF;
+
 /// A deterministic, sign-balanced fill. A 64-bit LCG is enough: the
 /// weights only have to be fixed, not good.
 fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
@@ -49,6 +58,8 @@ struct Tensor {
     name: String,
     rows: usize,
     cols: usize,
+    /// Stacked experts (a 3-D `[cols, rows, n_expert]` tensor), else 1.
+    n_expert: usize,
     dtype: GgmlType,
     values: Vec<f32>,
 }
@@ -78,7 +89,7 @@ fn metadata() -> BTreeMap<String, GgufValue> {
     .collect()
 }
 
-fn tensors(dtype: GgmlType) -> Vec<Tensor> {
+fn tensors(dtype: GgmlType, moe: bool) -> Vec<Tensor> {
     let mut seed = 0u64;
     let mut matrix = |name: String, rows: usize, cols: usize, dtype: GgmlType| {
         seed += 1;
@@ -87,6 +98,7 @@ fn tensors(dtype: GgmlType) -> Vec<Tensor> {
             name,
             rows,
             cols,
+            n_expert: 1,
             dtype,
             values: fill(seed, rows * cols, scale),
         }
@@ -95,6 +107,7 @@ fn tensors(dtype: GgmlType) -> Vec<Tensor> {
         name,
         rows: 1,
         cols: N_EMBD,
+        n_expert: 1,
         dtype: GgmlType::F32,
         values: fill(1000 + seed, N_EMBD, 0.2)
             .into_iter()
@@ -120,6 +133,31 @@ fn tensors(dtype: GgmlType) -> Vec<Tensor> {
             out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
         }
         out.push(norm(format!("blk.{l}.ffn_norm.weight"), 2 * l as u64 + 1));
+        if moe {
+            // The router stays F32, as converters store it.
+            out.push(matrix(
+                format!("blk.{l}.ffn_gate_inp.weight"),
+                N_EXPERT,
+                N_EMBD,
+                GgmlType::F32,
+            ));
+            for (name, rows, cols) in [
+                ("ffn_gate_exps", N_FF_EXP, N_EMBD),
+                ("ffn_up_exps", N_FF_EXP, N_EMBD),
+                ("ffn_down_exps", N_EMBD, N_FF_EXP),
+            ] {
+                let mut t = matrix(
+                    format!("blk.{l}.{name}.weight"),
+                    rows * N_EXPERT,
+                    cols,
+                    dtype,
+                );
+                t.rows = rows;
+                t.n_expert = N_EXPERT;
+                out.push(t);
+            }
+            continue;
+        }
         for (name, rows, cols) in [
             ("ffn_gate", N_FF, N_EMBD),
             ("ffn_up", N_FF, N_EMBD),
@@ -137,10 +175,30 @@ fn tensors(dtype: GgmlType) -> Vec<Tensor> {
 /// by `encode`, and returns its path. `tag` names the file, so two
 /// suites never share one.
 pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
-    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype)
+    write_variant(tag, dtype, false, encode)
+}
+
+/// [`write`] with every FFN a routed MoE of [`N_EXPERT`] experts of
+/// [`N_FF_EXP`], top [`N_EXPERT_USED`], the experts stored as `dtype`.
+pub fn write_moe(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, dtype, true, encode)
+}
+
+fn write_variant(tag: &str, dtype: GgmlType, moe: bool, encode: Encode) -> PathBuf {
+    let mut meta = metadata();
+    if moe {
+        meta.insert("llama.expert_count".into(), GgufValue::U32(N_EXPERT as u32));
+        meta.insert(
+            "llama.expert_used_count".into(),
+            GgufValue::U32(N_EXPERT_USED as u32),
+        );
+    }
+    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype, moe)
         .into_iter()
         .map(|t| {
-            let shape = if t.rows == 1 {
+            let shape = if t.n_expert > 1 {
+                vec![t.cols as u64, t.rows as u64, t.n_expert as u64]
+            } else if t.rows == 1 {
                 vec![t.cols as u64]
             } else {
                 vec![t.cols as u64, t.rows as u64]
@@ -167,7 +225,7 @@ pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("create the fixture directory");
     let path = dir.join(format!("{tag}_{dtype:?}-{}.gguf", std::process::id()));
     let file = std::fs::File::create(&path).expect("create the fixture");
-    let mut w = GgufWriter::create(file, &metadata(), plan).expect("write the header");
+    let mut w = GgufWriter::create(file, &meta, plan).expect("write the header");
     for (p, bytes) in &encoded {
         w.write_tensor(&p.name, bytes).expect("write a tensor");
     }

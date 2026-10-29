@@ -3638,6 +3638,10 @@ pub fn mul_mm_id_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "Q4_K" => Some(("q4_k_mul_mm_id", 144, 256)),
         "Q8_0" => Some(("q8_0_mul_mm_id", 34, 32)),
         "Q4_0" => Some(("q4_0_mul_mm_id", 18, 32)),
+        "Q2_K" => Some(("q2_k_mul_mm_id", 84, 256)),
+        "Q3_K" => Some(("q3_k_mul_mm_id", 110, 256)),
+        "IQ4_NL" => Some(("iq4_nl_mul_mm_id", 18, 32)),
+        "MXFP4" => Some(("mxfp4_mul_mm_id", 17, 32)),
         _ => None,
     }
 }
@@ -3649,6 +3653,10 @@ pub fn mul_mm_id_f16_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
                 "q4_k_mul_mm_id" => "q4_k_mul_mm_id_f16",
                 "q8_0_mul_mm_id" => "q8_0_mul_mm_id_f16",
                 "q4_0_mul_mm_id" => "q4_0_mul_mm_id_f16",
+                "q2_k_mul_mm_id" => "q2_k_mul_mm_id_f16",
+                "q3_k_mul_mm_id" => "q3_k_mul_mm_id_f16",
+                "iq4_nl_mul_mm_id" => "iq4_nl_mul_mm_id_f16",
+                "mxfp4_mul_mm_id" => "mxfp4_mul_mm_id_f16",
                 _ => base,
             },
             bb,
@@ -6095,12 +6103,12 @@ impl PrefillMoeMetal<'_> {
     }
 }
 
-struct MoeMatvecIdDispatch {
-    kernel_src: &'static str,
-    fn_name: &'static str,
-    rows_per_tg: usize,
-    tg_threads: (usize, usize, usize),
-    tg_mem: usize,
+pub(crate) struct MoeMatvecIdDispatch {
+    pub(crate) kernel_src: &'static str,
+    pub(crate) fn_name: &'static str,
+    pub(crate) rows_per_tg: usize,
+    pub(crate) tg_threads: (usize, usize, usize),
+    pub(crate) tg_mem: usize,
 }
 
 fn moe_matvec_id_dispatch(kind: &str) -> Option<MoeMatvecIdDispatch> {
@@ -6133,7 +6141,8 @@ fn moe_matvec_id_dispatch(kind: &str) -> Option<MoeMatvecIdDispatch> {
             tg_threads: (128, 1, 1),
             tg_mem: 32,
         }),
-        _ => None,
+        // Generated from each kind's decode matvec `_impl`.
+        _ => crate::moe_mv_id::dispatch(kind, false),
     }
 }
 
@@ -6167,7 +6176,7 @@ fn moe_down_id_dispatch(kind: &str) -> Option<MoeMatvecIdDispatch> {
             tg_threads: (128, 1, 1),
             tg_mem: 32,
         }),
-        _ => None,
+        _ => crate::moe_mv_id::dispatch(kind, true),
     }
 }
 
@@ -6360,7 +6369,7 @@ fn moe_mm_id_map0(
 
 /// llama.cpp `ne21_mm_id_min` — prefer `mul_mm_id` when tokens-per-expert
 /// (after map0) can be large; gate on total prompt tokens as a proxy.
-const MOE_MM_ID_TOKEN_MIN: usize = 8;
+pub(crate) const MOE_MM_ID_TOKEN_MIN: usize = 8;
 
 /// Reused MoE prefill scratch (avoids alloc+wait tax every layer).
 struct MoePrefillScratch {
@@ -6797,7 +6806,7 @@ pub(crate) fn encode_q4_0_moe_id(
 ///    experts is slower than slot-parallel `mul_mv_id` -- OLMoE
 ///    fair-chat regressed ~143 to 84 prompt/s when this was ignored.
 /// 2. `mul_mm_id_meta` has a kernel for all three planes. It knows
-///    Q4_0, Q8_0 and Q4_K, and NOTHING ELSE.
+///    Q4_0, Q8_0, Q4_K, Q2_K, Q3_K, IQ4_NL and MXFP4, and nothing else.
 ///
 /// The second was missing, and the loader does not agree with it: the
 /// packed planes admit Q5_0, Q5_K, Q6_K and IQ4_XS as well, because
@@ -6809,9 +6818,15 @@ pub(crate) fn encode_q4_0_moe_id(
 /// quantization.
 ///
 /// Falling back to `mul_mv_id` is the right answer rather than a
-/// refusal: that path handles all seven kinds and is merely slower, so
-/// the checkpoint runs.
-fn moe_use_mm_id(max_batch: usize, gate_kind: &str, up_kind: &str, down_kind: &str) -> bool {
+/// refusal where that path has the kind (Q5_0; see
+/// `moe_packed_mul_mv_id_supported`): it is merely slower, so the
+/// checkpoint runs.
+pub(crate) fn moe_use_mm_id(
+    max_batch: usize,
+    gate_kind: &str,
+    up_kind: &str,
+    down_kind: &str,
+) -> bool {
     max_batch >= MOE_MM_ID_TOKEN_MIN
         && mul_mm_id_meta(gate_kind).is_some()
         && mul_mm_id_meta(up_kind).is_some()
@@ -7772,16 +7787,16 @@ pub fn launch_matvec_batch(
 mod tests {
     use super::*;
 
-    /// The loader packs seven quant kinds into MoE planes; `mul_mm_id`
-    /// has kernels for three. Batch size alone used to decide, so the
-    /// other four failed with `CommandFailed` as soon as one expert
+    /// The loader packs more quant kinds into MoE planes than `mul_mm_id`
+    /// has kernels for. Batch size alone used to decide, so the
+    /// others failed with `CommandFailed` as soon as one expert
     /// gathered eight tokens -- and stayed fine below that, which is
     /// what made it a prompt-length-dependent failure rather than a
     /// load error.
     #[test]
     fn a_pack_without_a_mul_mm_id_kernel_falls_back_instead_of_failing() {
         let big = MOE_MM_ID_TOKEN_MIN;
-        for kind in ["Q4_0", "Q8_0", "Q4_K"] {
+        for kind in ["Q4_0", "Q8_0", "Q4_K", "Q2_K", "Q3_K", "IQ4_NL", "MXFP4"] {
             assert!(
                 moe_use_mm_id(big, kind, kind, kind),
                 "{kind} has a mul_mm_id kernel and should use it"
