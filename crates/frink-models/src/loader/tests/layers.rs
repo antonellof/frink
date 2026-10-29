@@ -137,18 +137,17 @@ fn the_two_exaone4_sizes_get_different_windows_and_different_rotation() {
 
 /// NextN/MTP blocks are inside `block_count` and llama.cpp skips
 /// them (`n_layer = n_layer_all - n_layer_nextn`, llama-hparams.cpp
-/// :280-282). For a graph that reads the key (`exaone-moe.cpp:23`)
-/// the trunk is what loads; the key is written as `0` by
-/// `conversion/exaone.py:146` for every EXAONE-MoE export without an
-/// MTP head, so zero must be the whole file. A nonzero value on a
-/// graph that does NOT read the key stays refused
+/// :348-350). For a graph whose tensor loader creates them
+/// (`exaone-moe.cpp:47`) the trunk is what loads; the key is written as
+/// `0` by `conversion/exaone.py:146` for every EXAONE-MoE export without
+/// an MTP head, so zero must be the whole file. A nonzero value on a
+/// graph whose loader does NOT create them stays refused
 /// (`mtp_blocks::tests`).
 ///
-/// The second half pins the ORDER of two reads in `exaone4.cpp`:
-/// `:4` tests `n_layer() == 64` before `:18` reads the key, so it
-/// sees `block_count`. A 64-trunk file with one MTP block appended
-/// is 65 there and gets NO window in llama.cpp; frink feeds
-/// `block_count` to the same gate and gets the same answer.
+/// The second half pins what `exaone4.cpp:4` sees: the common loader
+/// has read the key before it (`llama-model.cpp:1411,1571`), so a
+/// 64-trunk file with one MTP block appended is the 32B, and 65 blocks
+/// with no MTP block is not (#441).
 #[test]
 fn nextn_predict_layers_subtracts_the_trunk_for_a_reader_and_zero_is_the_whole_file() {
     let base = |nextn: u32| -> Vec<(&str, Kv)> {
@@ -175,8 +174,8 @@ fn nextn_predict_layers_subtracts_the_trunk_for_a_reader_and_zero_is_the_whole_f
         .expect("zero is the whole file");
     assert_eq!((cfg.n_layers, cfg.n_mtp_blocks), (5, 0));
 
-    // `exaone4.cpp:4` before `:18`: 64 trunk layers plus one MTP
-    // block is NOT the 32B to llama.cpp.
+    // `exaone4.cpp:4` tests the trunk: 64 layers plus one MTP block IS
+    // the 32B to llama.cpp, and 65 layers is not.
     let exaone4 = |block_count: u32, nextn: u32| -> Vec<(&str, Kv)> {
         vec![
             ("general.architecture", Kv::Str("exaone4")),
@@ -188,23 +187,69 @@ fn nextn_predict_layers_subtracts_the_trunk_for_a_reader_and_zero_is_the_whole_f
             ("exaone4.attention.key_length", Kv::U32(8)),
             ("exaone4.attention.value_length", Kv::U32(8)),
             ("exaone4.rope.freq_base", Kv::F32(10_000.0)),
-            ("exaone4.attention.sliding_window", Kv::U32(4096)),
+            ("exaone4.attention.sliding_window", Kv::U32(128)),
         ]
     };
     let with_mtp =
         ModelConfig::from_gguf(&open_metadata_gguf("exaone4_65", &exaone4(65, 1))).unwrap();
     assert_eq!((with_mtp.n_layers, with_mtp.n_mtp_blocks), (64, 1));
     assert_eq!(
-        with_mtp.sliding_window, None,
-        "exaone4.cpp:4 sees n_layer_all = 65 and never reaches set_swa_pattern"
+        with_mtp.sliding_window,
+        Some(128),
+        "exaone4.cpp:4 sees n_layer() = 64, the trunk, and slides"
     );
-    let without =
-        ModelConfig::from_gguf(&open_metadata_gguf("exaone4_64", &exaone4(64, 0))).unwrap();
+    let deeper =
+        ModelConfig::from_gguf(&open_metadata_gguf("exaone4_65_trunk", &exaone4(65, 0))).unwrap();
     assert_eq!(
-        without.sliding_window,
-        Some(4096),
-        "the same trunk without the block is the 32B"
+        deeper.sliding_window, None,
+        "a 65-layer trunk is not the 32B"
     );
+}
+
+/// EXAONE-4 32B with NO window key slides at 4096 (#440):
+/// `exaone4.cpp:6` seeds `n_swa = 4096` before `:14` reads the key as
+/// OPTIONAL. A declared ZERO overwrites the seed with a window that
+/// masks every key, and is refused. Below 64 layers the absent key is
+/// still no window.
+#[test]
+fn exaone4_32b_without_its_window_key_slides_at_the_seeded_4096() {
+    let base = |n_layers: u32, window: Option<u32>| -> Vec<(&str, Kv)> {
+        let mut v = vec![
+            ("general.architecture", Kv::Str("exaone4")),
+            ("exaone4.block_count", Kv::U32(n_layers)),
+            ("exaone4.embedding_length", Kv::U32(32)),
+            ("exaone4.attention.head_count", Kv::U32(4)),
+            ("exaone4.attention.head_count_kv", Kv::U32(2)),
+            ("exaone4.attention.key_length", Kv::U32(8)),
+            ("exaone4.attention.value_length", Kv::U32(8)),
+            ("exaone4.rope.freq_base", Kv::F32(10_000.0)),
+        ];
+        if let Some(w) = window {
+            v.push(("exaone4.attention.sliding_window", Kv::U32(w)));
+        }
+        v
+    };
+    let cfg = ModelConfig::from_gguf(&open_metadata_gguf("exaone4_64_nowin", &base(64, None)))
+        .expect("loads");
+    assert_eq!(cfg.sliding_window, Some(4096));
+    assert_eq!(
+        cfg.swa_layers,
+        crate::swa_layers::SwaLayers::period(4, false)
+    );
+    assert!(
+        !cfg.layer_rotates(3),
+        "the full-attention layers rotate nothing"
+    );
+    let cfg = ModelConfig::from_gguf(&open_metadata_gguf("exaone4_30_nowin", &base(30, None)))
+        .expect("loads");
+    assert_eq!(cfg.sliding_window, None);
+    match ModelConfig::from_gguf(&open_metadata_gguf("exaone4_64_zero", &base(64, Some(0)))) {
+        Err(crate::loader::LoadError::UnsupportedFeature(a, m)) => {
+            assert_eq!(a, "exaone4");
+            assert!(m.contains("sliding_window` is 0"), "{m}");
+        }
+        other => panic!("a declared zero window must be refused, got {other:?}"),
+    }
 }
 
 /// `expert_used_count` is scalar-or-array upstream, and the array

@@ -9,65 +9,53 @@
 //! `exaone.py:132,224`, `glm.py:99,116`, `deepseek.py:457,525`) and
 //! write `{arch}.nextn_predict_layers` beside it.
 //!
-//! llama.cpp never runs them as layers:
+//! llama.cpp at the pin (`604cc430`) never runs them as layers:
 //!
-//! - `llama-model.cpp:1092` reads `block_count` into `n_layer_all`;
-//! - `llama-hparams.cpp:280-282` defines `n_layer()` as
-//!   `n_layer_all - n_layer_nextn`;
-//! - `llama-graph.cpp:1433` builds every graph with `n_layer =
-//!   hparams.n_layer()`, so `mimo2.cpp:108`, `step35.cpp:205`,
-//!   `glm4-moe.cpp:161`, `deepseek2.cpp:470` loop over the trunk only;
-//! - each tensor loader loops `0..n_layer_all` and creates the blocks
-//!   at `i >= n_layer` with `TENSOR_SKIP` (`exaone4.cpp:43-49`,
-//!   `mimo2.cpp:35-37,51-52`) unless the context was opened as an MTP
-//!   draft (`load_mtp`), so the bytes are neither read nor missed.
+//! - the COMMON loader reads `block_count` into `n_layer_all` and
+//!   `nextn_predict_layers` into `n_layer_nextn` for EVERY architecture
+//!   (`llama-model.cpp:1409-1412`, with `GGML_ASSERT(n_layer_nextn <=
+//!   n_layer_all)`), before any `load_arch_hparams` (`:1571`);
+//! - `llama-hparams.cpp:348-350` defines `n_layer()` as `n_layer_all -
+//!   n_layer_nextn`, so every per-graph `n_layer()` test already sees
+//!   the trunk (`exaone4.cpp:4`'s `== 64` among them);
+//! - `llama-graph.cpp:1555` builds every graph with `n_layer =
+//!   hparams.n_layer()`, so `mimo2.cpp:100`, `step35.cpp:192`,
+//!   `glm4-moe.cpp:312`, `deepseek2.cpp:459` loop over the trunk only.
 //!
-//! **UPSTREAM CHANGED THIS, and the change is recorded before it is
-//! followed.** When the pin moved to `5b59b83` on 2026-09-19,
-//! `llama-model.cpp:1261` reads `LLM_KV_NEXTN_PREDICT_LAYERS` in the
-//! COMMON loader, for every architecture, right after `block_count`
-//! and with a `GGML_ASSERT(n_layer_nextn <= n_layer_all)` beside it
-//! (upstream commit 9d81721, "load hparams.n_layer_nextn before
-//! n_layer() calls"). So upstream now subtracts the trailing blocks
-//! whatever the architecture, where it used to subtract only in the
-//! per-architecture loaders, and `grep -l
-//! LLM_KV_NEXTN_PREDICT_LAYERS src/models/*.cpp` is down to six files
-//! that read it a second time for their own reasons.
+//! **Which architectures load such a file is decided by the TENSOR
+//! loader.** `LLAMA_LOAD_LOCALS` binds `n_layer` to the trunk
+//! (`llama-model.h:1001`), so a loader that loops `0..n_layer` never
+//! creates the trailing blocks and libllama fails on them (`done_getting_
+//! tensors: wrong number of tensors`, `llama-model-loader.cpp:1405-1408`;
+//! measured on `llama_nextn_tiny.gguf`). The graphs in
+//! [`NEXTN_READERS`] create them, either looping `0..n_layer_all` or
+//! `n_layer..n_layer_all`, with `TENSOR_SKIP` unless the context was
+//! opened as an MTP draft (`nextn_flags`, `llama-model.cpp:3931-3949`),
+//! so the bytes are neither read nor missed. That is the census: frink
+//! subtracts for those, and refuses a nonzero key on every other
+//! architecture, where upstream does not load the file either.
 //!
-//! frink still refuses a nonzero key on an architecture outside
-//! [`NEXTN_READERS`], which is now an OVER-refusal rather than a
-//! divergence in the dangerous direction: a file upstream would run
-//! by skipping its MTP blocks stops here instead of running them as
-//! decoder layers. Lifting it is a row of its own -- it needs a
-//! libllama golden built from the moved pin, on an architecture that
-//! is NOT one of the seventeen -- and until that exists the table
-//! below is what has evidence.
+//! Until 2026-10-29 the census was the graphs whose `load_arch_hparams`
+//! read the key themselves (measured 2026-09-11 at the `5b59b83` pin).
+//! Upstream moved the read into the common loader (commit 9d81721,
+//! "load hparams.n_layer_nextn before n_layer() calls"); re-measured
+//! at `604cc430` (#441), the loaders that create the blocks are the
+//! old sixteen plus `exaone4` (in `crate::models::exaone4`) and eight
+//! more: `bailingmoe3`, `dots3note`, `glm5-next` and `qwen4exp`
+//! (refused by name for other things), `clef` (deferred; `qwen35`'s
+//! loader), `mistral4` (`deepseek2`'s loader, `models.h:1624-1631`),
+//! and the two that frink serves, `mellum` and `nemotron_h_moe`, whose
+//! MTP files frink refused before. `nemotron_h` shares
+//! `nemotron-h.cpp`'s loader but stays out: its MTP loop throws on a
+//! block with no expert width (`:157-160`), which a dense file has.
+//! `deepseek4` (`deepseek4.cpp:12-18`) resets the count to zero when
+//! its first `nextn.eh_proj` is absent; it is refused by name.
 //!
-//! **Only the graphs that READ the key subtract** (the measurement as
-//! it stood at the 2026-08-04 pin, and the one the table is built
-//! from): `grep -l
-//! LLM_KV_NEXTN_PREDICT_LAYERS src/models/*.cpp` was the seventeen in
-//! [`NEXTN_READERS`]. For any other architecture `n_layer_nextn` stays
-//! 0, every block runs, and a file carrying `nextn.*` tensors fails
-//! llama.cpp's own "not all tensors loaded" check -- so for those a
-//! nonzero key is refused here rather than honoured. Until 2026-09-11
-//! frink refused it for EVERY architecture (`capability::
-//! unsupported_feature_keys`), which was safe and over-broad: every
-//! real MiMo-V2 (`mimo.py:167`, three blocks), Step-3.5 (`step3.py:223`,
-//! three), K-EXAONE (`exaone.py:146`, one), GLM-4.5/4.6 (`glm.py:106`,
-//! one) and DeepSeek-V3 (`deepseek.py:498`, one) export carries the key
-//! with a nonzero value.
-//!
-//! **The order of the two reads matters, and is copied.** `exaone4.cpp:4`
-//! tests `n_layer() == 64` BEFORE `:18` reads the key, and
-//! `mimo2.cpp:12` / `step35.cpp:26` size the sliding-window array by
-//! `n_layer()` before `:19` / `:32` read it, so both see `n_layer_all`.
-//! The loader therefore feeds `block_count` -- [`TrunkLayers::
-//! block_count`], not [`TrunkLayers::n_layers`] -- to
-//! `capability::swa_disabled_by_arch` and to every per-layer array
-//! length check, and only the trunk to the layer loop. A hypothetical
-//! EXAONE-4.5 with 64 trunk layers and one MTP block gets NO window in
-//! llama.cpp, and gets none here.
+//! **Array lengths.** `get_key_or_arr` arrays that `load_arch_hparams`
+//! sizes with `hparams.n_layer_all` (`mimo2.cpp:8`, `step35.cpp:12,28`,
+//! `cohere2moe.cpp:16`) are one entry per BLOCK, so the loader feeds
+//! [`TrunkLayers::block_count`] to every per-layer array length check
+//! and only the trunk to the layer loop and to the layer-count gates.
 //!
 //! This module decides the trunk once ([`trunk_layers`]) and marks the
 //! skipped blocks' tensors as deliberately unread
@@ -86,27 +74,37 @@ use frink_gguf::{ShardedGguf, TensorSource};
 
 use crate::loader::LoadError;
 
-/// Every graph whose `load_arch_hparams` reads
-/// `LLM_KV_NEXTN_PREDICT_LAYERS`, with the file. Measured over all 155
-/// `src/models/*.cpp`; `llama-arch.cpp` and `llama-model-saver.cpp` are
-/// the only other hits and neither is a graph.
+/// Every graph whose tensor loader creates the blocks past `n_layer()`,
+/// with the loop. Measured over all `src/models/*.cpp` at `604cc430`
+/// (module doc); `exaone4` is in `crate::models::exaone4`.
 pub const NEXTN_READERS: &[(&str, &str)] = &[
-    ("bailingmoe2", "src/models/bailingmoe2.cpp"),
-    ("cohere2moe", "src/models/cohere2moe.cpp"),
-    ("deepseek2", "src/models/deepseek2.cpp"),
-    ("deepseek32", "src/models/deepseek32.cpp"),
-    ("deepseek4", "src/models/deepseek4.cpp"),
-    ("exaone-moe", "src/models/exaone-moe.cpp:23"),
-    ("gemma4-assistant", "src/models/gemma4-assistant.cpp"),
-    ("glm-dsa", "src/models/glm-dsa.cpp"),
-    ("glm4moe", "src/models/glm4-moe.cpp"),
-    ("glm4", "src/models/glm4.cpp"),
-    ("hy-v3", "src/models/hy-v3.cpp"),
-    ("mimo2", "src/models/mimo2.cpp:19"),
-    ("qwen35", "src/models/qwen35.cpp"),
-    ("qwen35moe", "src/models/qwen35moe.cpp"),
-    ("qwen3next", "src/models/qwen3next.cpp"),
-    ("step35", "src/models/step35.cpp:32"),
+    ("bailingmoe2", "src/models/bailingmoe2.cpp:35"),
+    ("bailingmoe3", "src/models/bailingmoe3.cpp:122"),
+    ("clef", "src/models/clef.cpp:27 (qwen35.cpp:125)"),
+    ("cohere2moe", "src/models/cohere2moe.cpp:131"),
+    ("deepseek2", "src/models/deepseek2.cpp:88"),
+    ("deepseek32", "src/models/deepseek32.cpp:81"),
+    ("deepseek4", "src/models/deepseek4.cpp:101"),
+    ("dots3note", "src/models/dots3note.cpp:70"),
+    ("exaone-moe", "src/models/exaone-moe.cpp:47"),
+    ("gemma4-assistant", "src/models/gemma4-assistant.cpp:47"),
+    ("glm-dsa", "src/models/glm-dsa.cpp:109"),
+    ("glm4moe", "src/models/glm4-moe.cpp:49"),
+    ("glm4", "src/models/glm4.cpp:28"),
+    ("glm5-next", "src/models/glm5-next.cpp:76"),
+    ("hy-v3", "src/models/hy-v3.cpp:74"),
+    ("mellum", "src/models/mellum.cpp:79"),
+    ("mimo2", "src/models/mimo2.cpp:38"),
+    ("mistral4", "src/models/models.h:1624 (deepseek2.cpp:88)"),
+    (
+        "nemotron_h_moe",
+        "src/models/models.h:1770 (nemotron-h.cpp:149)",
+    ),
+    ("qwen35", "src/models/qwen35.cpp:125"),
+    ("qwen35moe", "src/models/qwen35moe.cpp:144"),
+    ("qwen3next", "src/models/qwen3next.cpp:126"),
+    ("qwen4exp", "src/models/qwen4exp.cpp:310"),
+    ("step35", "src/models/step35.cpp:170"),
 ];
 
 /// Does `arch`'s graph subtract `nextn_predict_layers` from its layer
@@ -133,8 +131,8 @@ pub struct TrunkLayers {
     pub block_count: usize,
     /// The blocks that are decoder layers: `block_count - n_mtp_blocks`.
     pub n_layers: usize,
-    /// `{arch}.nextn_predict_layers` where the architecture reads it,
-    /// else 0.
+    /// `{arch}.nextn_predict_layers` where the architecture's loader
+    /// creates the blocks, else 0.
     pub n_mtp_blocks: usize,
 }
 
@@ -151,10 +149,10 @@ impl TrunkLayers {
 
 /// Decides the trunk for `arch` from `{arch}.nextn_predict_layers`.
 ///
-/// Refuses a nonzero count on an architecture whose graph does not
-/// read the key (module doc), and a count that is not below
-/// `block_count` (`mimo2.cpp:20`, `step35.cpp:33`, `exaone4.cpp:20`:
-/// `GGML_ASSERT(n_layer_nextn < n_layer_all)`).
+/// Refuses a nonzero count on an architecture whose tensor loader does
+/// not create the trailing blocks (module doc), and a count that is not
+/// below `block_count`: `llama-model.cpp:1412` asserts only `<=`, and a
+/// file that is all MTP blocks has no trunk for this decoder to run.
 pub fn trunk_layers(
     file: &impl TensorSource,
     arch: &str,
@@ -177,12 +175,11 @@ pub fn trunk_layers(
         return Err(LoadError::UnsupportedFeature(
             arch.to_string(),
             format!(
-                "NextN/MTP prediction layers are counted in block_count and llama.cpp skips \
-                 them (n_layer = n_layer_all - n_layer_nextn) only for the graphs that read \
-                 the key; `{arch}` is not one of them (metadata {key}={n_mtp_blocks}), so \
-                 upstream would run every block and fail on the unread `nextn.*` tensors, \
-                 and the generic decoder would run the speculative head as ordinary \
-                 decoder layers"
+                "NextN/MTP prediction layers are counted in block_count; llama.cpp \
+                 subtracts them for every architecture (n_layer = n_layer_all - n_layer_nextn) \
+                 but `{arch}`'s tensor loader creates only the trunk (metadata \
+                 {key}={n_mtp_blocks}), so upstream fails on the trailing blocks' tensors, and \
+                 the generic decoder would run the speculative head as ordinary decoder layers"
             ),
         ));
     }
@@ -190,8 +187,8 @@ pub fn trunk_layers(
         return Err(LoadError::UnsupportedFeature(
             arch.to_string(),
             format!(
-                "{key}={n_mtp_blocks} is not below block_count={block_count}; llama.cpp \
-                 asserts `n_layer_nextn < n_layer_all` and aborts on this file"
+                "{key}={n_mtp_blocks} is not below block_count={block_count}: the file has no \
+                 trunk layer (n_layer_nextn < n_layer_all)"
             ),
         ));
     }
@@ -315,19 +312,20 @@ mod tests {
         );
     }
 
-    /// llama.cpp's own assert, as a refusal rather than an abort.
+    /// A file with no trunk layer is refused.
     #[test]
     fn a_count_not_below_block_count_is_refused() {
         for n in [4, 5] {
             assert!(matches!(
                 trunk_layers(&nextn("mimo2", Some(n)), "mimo2", 4),
-                Err(LoadError::UnsupportedFeature(a, m)) if a == "mimo2" && m.contains("n_layer_nextn < n_layer_all")
+                Err(LoadError::UnsupportedFeature(a, m)) if a == "mimo2" && m.contains("no trunk layer")
             ));
         }
     }
 
-    /// The census is what the predicate answers, and the three
-    /// architectures this task was aimed at are in it.
+    /// The census is what the predicate answers, the loaders this task
+    /// was aimed at are in it, and the ones that create only the trunk
+    /// are not.
     #[test]
     fn the_reader_census_is_the_predicate() {
         for (arch, _) in NEXTN_READERS {
@@ -340,10 +338,22 @@ mod tests {
             "exaone-moe",
             "glm4moe",
             "deepseek2",
+            "mistral4",
+            "mellum",
+            "nemotron_h_moe",
         ] {
             assert!(reads_nextn(arch), "{arch}");
         }
-        for arch in ["llama", "grok", "gemma4", "qwen3moe", "mistral4"] {
+        // `nemotron_h`: the shared loader throws on a dense MTP block.
+        // `deepseek41`: its own tensor loader loops the trunk only.
+        for arch in [
+            "llama",
+            "grok",
+            "gemma4",
+            "qwen3moe",
+            "nemotron_h",
+            "deepseek41",
+        ] {
             assert!(!reads_nextn(arch), "{arch}");
         }
         // The census spans the table and the registry.
@@ -352,7 +362,7 @@ mod tests {
             .filter(|d| d.facts.topology.reads_nextn)
             .map(|d| d.names.len())
             .sum::<usize>();
-        assert_eq!(NEXTN_READERS.len() + moved, 17, "measured on 2026-09-11");
+        assert_eq!(NEXTN_READERS.len() + moved, 25, "measured at 604cc430");
     }
 
     /// Exactly the skipped range, and only `blk.` names.

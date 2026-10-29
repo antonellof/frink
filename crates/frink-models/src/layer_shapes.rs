@@ -101,7 +101,7 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
          (`crate::kv_head_dims`, the V width :47-48 sizes apart from K's) and the value \
          scale (`crate::attn_value_scale`, :16,181); the sinks at :58 are \
          `AttnWeights::sinks`, the is_swa array at :12 is `crate::swa_layers` and the NEXTN \
-         blocks at :19 are `crate::mtp_blocks`",
+         blocks its tensor loader creates at :38 are `crate::mtp_blocks`",
     ),
     (
         "step35",
@@ -109,7 +109,7 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
          layer. Closed with the per-layer activation seam (`crate::act_layers`, the clamp \
          arrays at :28-29) and the two-valued rotary width (`crate::swa_geometry`, :9); the \
          gate at :96 is `crate::attn_gate`, the is_swa array at :26 `crate::swa_layers`, \
-         the NEXTN blocks at :32 `crate::mtp_blocks`",
+         the NEXTN blocks its tensor loader creates at :170 `crate::mtp_blocks`",
     ),
     (
         "spark2_5",
@@ -650,12 +650,10 @@ impl LayerShapes {
 /// carries; this is the read that sees both spellings.
 /// [`read_u64_per_layer`] for a file that may carry NextN/MTP blocks:
 /// the array is length-checked against `block_count`, which is what
-/// llama.cpp passes (`llama-model.cpp:1148-1156` read the three shape
-/// arrays with `hparams.n_layer()` BEFORE `load_arch_hparams` at `:1233`
-/// has read `nextn_predict_layers`, so `n_layer()` is still
-/// `n_layer_all`, and `conversion/mimo.py:146-150` writes the arrays at
-/// that length with the MTP entries appended), and only the trunk's
-/// entries are returned.
+/// llama.cpp passes (`llama-model.cpp:1477-1486` read the three shape
+/// arrays with `hparams.n_layer_all`, and `conversion/mimo.py:146-150`
+/// writes them at that length with the MTP entries appended), and only
+/// the trunk's entries are returned.
 ///
 /// The loader reads every per-layer shape through this and never
 /// through the raw function, so a call site cannot hand the trunk count

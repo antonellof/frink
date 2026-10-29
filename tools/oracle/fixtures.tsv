@@ -53,6 +53,8 @@ ernie4_5_moe_step2_tiny                  both-fail                    make_ernie
 ernie4_5_moe_tiny                        match                        make_ernie4_5_moe_fixture.py OUT
 ernie4_5_tiny                            match                        make_ernie4_5_fixture.py OUT
 eurobert_tiny                            refused                      make_eurobert_fixture.py OUT
+exaone4_32b_mtp_tiny                     match                        make_exaone4_fixture.py OUT --layers 64 --mtp
+exaone4_32b_nowindow_tiny                match                        make_exaone4_fixture.py OUT --layers 64 --no-window
 exaone4_32b_tiny                         match                        make_exaone4_fixture.py OUT --layers 64
 exaone4_tiny                             match                        make_exaone4_fixture.py OUT
 exaone_moe_array_flipped_tiny            prefill=WRONG,decode=WRONG  make_exaone_moe_fixture.py OUT --window-array disagree  # #420: libllama honours the inverted window array, frink runs the period
@@ -89,6 +91,7 @@ granite_tiny                             match                        make_grani
 granitehybrid_moe_tiny                   match                        make_granite_hybrid_fixture.py OUT --moe
 granitehybrid_rope_tiny                  match                        make_granite_hybrid_fixture.py OUT --rope
 granitehybrid_tiny                       match                        make_granite_hybrid_fixture.py OUT
+granitemoe_norope_tiny                   match                        make_granitemoe_fixture.py OUT --no-rope
 granitemoe_tiny                          match                        make_granitemoe_fixture.py OUT
 grok_declared_tiny                       match                        make_grok_fixture.py OUT --declared
 grok_dense_ffn_tiny                      match                        make_grok_fixture.py OUT --dense-ffn
@@ -124,6 +127,7 @@ llama4_noswa_tiny                        both-fail                    make_llama
 llama4_tiny                              match                        make_llama4_fixture.py OUT
 llama_biases_tiny                        match                        make_proj_bias_fixture.py llama OUT
 llama_embed_tiny                         skip                         make_proj_bias_fixture.py llama OUT --spelled llama-embed  # #421: libllama computes no logits for llama-embed (llama.cpp:238 skips the head)
+llama_nextn_tiny                         both-fail                    make_proj_bias_fixture.py llama OUT --nextn  # refusal evidence: llama's tensor loader creates only the trunk, libllama fails on the MTP block (#441)
 lora_a_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
 lora_b_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
 lora_base_tied_tiny                      match                        -  # written by make_lora_fixture.py together with the adapters, which needs torch/PEFT and llama.cpp's convert_lora_to_gguf.py
@@ -133,7 +137,9 @@ maincoder_tiny                           match                        make_mainc
 mamba2_tiny                              match                        make_mamba_fixture.py OUT --arch mamba2 --output
 mamba_dtbcrms_tiny                       match                        make_mamba_fixture.py OUT --arch mamba --dt-b-c-rms
 mamba_tiny                               match                        make_mamba_fixture.py OUT --arch mamba
+maple_model_rope_tiny                    match                        make_maple_fixture.py OUT --model-rope
 maple_tiny                               match                        make_maple_fixture.py OUT
+mellum_mtp_tiny                          match                        make_mellum_fixture.py OUT --mtp
 mellum_tiny                              match                        make_mellum_fixture.py OUT
 mimo2_novscale_tiny                      match                        make_mimo2_fixture.py OUT --no-value-scale
 mimo2_split_tiny                         match                        make_mimo2_fixture.py OUT --split
@@ -160,6 +166,7 @@ nanbeige_skipnorm_tiny                   match                        make_nanbe
 nanbeige_tiny                            match                        make_nanbeige_fixture.py OUT
 nemotron_biases_tiny                     match                        make_nemotron_fixture.py OUT --biases
 nemotron_h_biases_tiny                   match                        make_nemotron_h_fixture.py OUT --biases
+nemotron_h_moe_mtp_tiny                  match                        make_nemotron_h_fixture.py OUT --moe --mtp
 nemotron_h_moe_tiny                      match                        make_nemotron_h_fixture.py OUT --moe
 nemotron_h_output_tiny                   match                        make_nemotron_h_fixture.py OUT --output
 nemotron_h_tiny                          match                        make_nemotron_h_fixture.py OUT

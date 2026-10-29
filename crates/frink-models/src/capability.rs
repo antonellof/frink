@@ -3435,17 +3435,19 @@ pub struct SwaPattern {
 ///
 /// `src/models/exaone4.cpp:4-14` wraps the ENTIRE SWA setup --
 /// `swa_type`, `n_swa`, `set_swa_pattern`, both SWA RoPE fields -- in
-/// `if (hparams.n_layer() == 64)`, and only then reads
-/// `LLM_KV_ATTENTION_SLIDING_WINDOW` at :16 into an `hparams.n_swa` no
-/// layer consults. So EXAONE-4 1.2B (30 layers) attends over the whole
-/// context on every layer no matter what its file declares, and
-/// EXAONE-4 32B (64) does not.
+/// `if (hparams.n_layer() == 64)` (the TRUNK: the common loader has
+/// already subtracted `nextn_predict_layers`, `llama-model.cpp:1411`),
+/// and only then reads `LLM_KV_ATTENTION_SLIDING_WINDOW` at :14 into an
+/// `hparams.n_swa` no layer consults. So EXAONE-4 1.2B (30 layers)
+/// attends over the whole context on every layer no matter what its
+/// file declares, and EXAONE-4 32B (64) slides, at 4096 when the file
+/// declares no window (`:6`, [`SwaWindowOverride::Seed`]).
 ///
 /// It is the same QUESTION as `phi3`'s -- "does this file get a window
 /// at all" -- so it is the same predicate rather than a second one
 /// beside it. `crate::rope_layers::rope_layers` takes this function's
 /// answer, not the raw presence of the key, and getting that wrong
-/// would rope the 1.2B as if it were the 32B: `exaone4.cpp:116` gates
+/// would rope the 1.2B as if it were the 32B: `exaone4.cpp:111` gates
 /// rotation on `is_swa(il)`, so a spurious window would silently stop
 /// three layers in four from rotating.
 pub fn swa_disabled_by_arch(arch: &str, n_layers: usize) -> bool {
@@ -3456,10 +3458,10 @@ pub fn swa_disabled_by_arch(arch: &str, n_layers: usize) -> bool {
 /// file declares, for the architectures whose `load_arch_hparams` does
 /// not simply honour it.
 ///
-/// Three answers, one table: HONOUR (every architecture not named),
-/// DROP (the two [`swa_disabled_by_arch`] rows -- no layer slides), and
+/// Four answers, one table: HONOUR (every architecture not named),
+/// DROP (the two [`swa_disabled_by_arch`] rows -- no layer slides),
 /// PIN (the window is replaced by a literal, and the layers still
-/// slide). [`swa_disabled_by_arch`] is DERIVED from this so the two
+/// slide), and SEED (a literal when the file declares none). [`swa_disabled_by_arch`] is DERIVED from this so the two
 /// cannot disagree about which rows decline the file's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwaWindowOverride {
@@ -3469,6 +3471,11 @@ pub enum SwaWindowOverride {
     Drop,
     /// This window, whatever the file says.
     Pin(usize),
+    /// This window when the file declares none, else the file's: the
+    /// graph seeds `n_swa` and then reads the key as OPTIONAL
+    /// (`exaone4.cpp:6,14`). A declared ZERO overwrites the seed with a
+    /// window that masks every key, which the loader refuses.
+    Seed(usize),
 }
 
 /// The third case's one row: `src/models/smallthinker.cpp:4-8` reads
@@ -3757,6 +3764,7 @@ pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
             | "gemma2"
             | "laguna"
             | "llama4"
+            | "maple"
             | "mellum"
             | "gpt-oss"
             | "smallthinker"
@@ -3807,6 +3815,7 @@ pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
             | "exaone-moe"  // exaone-moe.cpp:10
             | "gemma2"      // gemma2.cpp:11
             | "llama4"      // llama4.cpp:24
+            | "maple"       // maple.cpp:13
             | "mellum"      // mellum.cpp:20
             | "gpt-oss"     // openai-moe.cpp:14
             | "smallthinker" // smallthinker.cpp:14
