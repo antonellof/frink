@@ -5,37 +5,36 @@
 //!
 //! Until 2026-09-11 frink carried the layout as a scalar period plus a
 //! phase, read the key as a scalar, and REFUSED the array form for every
-//! architecture. llama.cpp reads the key with `get_key_or_arr`, and that
-//! name hides THREE behaviours, decided per architecture by which
-//! overload the graph's `load_arch_hparams` calls:
+//! architecture. At the pin (`604cc430`, re-derived for #420) a graph
+//! reads the key in one of two ways, or not at all:
 //!
-//! | mode | call | scalar in the file | ARRAY in the file |
-//! |---|---|---|---|
-//! | [`PatternKeyRead::ScalarPeriod`] | `get_key_or_arr(kid, swa_period, false)` | overrides the seeded period | **IGNORED**: the scalar overload returns `false` on an array when `required` is false (`llama-model-loader.cpp:490-512`), and the seeded period stands |
-//! | [`PatternKeyRead::PerLayerBool`] | `get_arr(kid, hparams.is_swa_impl)` (required) | **refused**: `array key not found in model` (`:356-360`) | the per-layer truth at any length up to `LLAMA_MAX_LAYERS` (below) |
-//! | [`PatternKeyRead::ScalarThenArray`] | the first, then the second on `false` | a period | the per-layer truth |
+//! | mode | call | absent | scalar in the file | ARRAY in the file |
+//! |---|---|---|---|---|
+//! | [`PatternKeyRead::ArrayThenScalar`] | `load_swa_pattern(ml, n, dense_first)` (`llama-model.cpp:3952-3959`) | the seeded period `n` | the period, with the seed's phase | the per-layer truth |
+//! | [`PatternKeyRead::PerLayerBool`] | `get_arr(kid, hparams.is_swa_impl)` (required) | refused: `array key not found in model` (`llama-model-loader.cpp:356-360`) | refused, the same throw | the per-layer truth |
+//! | [`PatternKeyRead::Unread`] | none | the seed | ignored | ignored |
 //!
-//! The census is measured, not remembered: `grep -n
-//! LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN src/models/*.cpp` over all
-//! 155 graphs. Twenty-two read the key. Five read only the array
-//! ([`PER_LAYER_ARRAY_READERS`]), two try the scalar and fall back to
-//! the array ([`SCALAR_THEN_ARRAY_READERS`]), and the other fifteen read
-//! only the scalar. An architecture that reads the key in NO form
-//! (`llama`, `qwen2`, ...) is treated as the scalar-only mode here,
-//! which is what the loader did before: a scalar period in such a file
-//! is honoured, an array is ignored.
+//! `load_swa_pattern` tries the ARRAY first, optional (`:3953`), then
+//! the scalar, optional (`:3957`), then keeps the seed: so the array is
+//! honoured on every graph that calls it. Until #420 frink ignored it on
+//! the rows the older pin read through the scalar overload (`exaone4`,
+//! `exaone-moe`, `olmo2`, `gemma2`, `gemma3`, ...) and REQUIRED it on
+//! `mellum`, `cohere2moe` and `muse-glimmer`, which run on the seed
+//! upstream when the key is absent.
 //!
-//! **The IGNORED cell is the one that matters for real files.** The
-//! converters write the array for `exaone4`, `exaone-moe`
-//! (`conversion/exaone.py:84`), `olmo2` (`olmo.py:59-66`) and `gemma3n`
-//! (`gemma.py:532-535`), and all four graphs read the SCALAR overload,
-//! so every real EXAONE-4 32B, EXAONE-MoE and Olmo-3 export carries an
-//! array that llama.cpp never looks at and runs on the literal period
-//! (`exaone4.cpp:7`, `exaone-moe.cpp:6`, `olmo2.cpp:9`). frink refused
-//! all of them. That the array and the literal AGREE for every real
-//! checkpoint is why upstream gets away with it; `tests/
-//! window_array_graphs.rs` measures that libllama's logits do not move
-//! when the array is rewritten to DISAGREE, and frink matches both.
+//! The census is measured, not remembered: `grep -nE
+//! 'SLIDING_WINDOW_PATTERN|load_swa_pattern' src/models/*.cpp`.
+//! Nineteen graphs call `load_swa_pattern` ([`LOAD_SWA_PATTERN_CALLERS`])
+//! and fifteen read the array with `get_arr` ([`PER_LAYER_ARRAY_READERS`]
+//! has thirteen; `beam.cpp:23-25` and `maion-coder.cpp:15-17` also throw
+//! unless the array has `n_layer_all` entries, and both are refused by
+//! name for other things). Every other graph reads the key in no form.
+//!
+//! Real exports write an array that AGREES with the seeded period
+//! (`conversion/exaone.py:84`, `olmo.py:59-66`, `gemma.py:532-535`), so a
+//! converter-made file reads the same either way; `tests/
+//! window_array_graphs.rs` measures a file whose array DISAGREES, and
+//! libllama's logits follow the array.
 //!
 //! **The array's length is not checked.** At the pin every array read
 //! goes through `get_arr` into the fixed `is_swa_impl` array
@@ -144,20 +143,19 @@ impl SwaLayers {
     }
 }
 
-/// Which `get_key_or_arr` overload an architecture's `load_arch_hparams`
-/// reads `{arch}.attention.sliding_window_pattern` through. See the
-/// module doc for what each does with each shape.
+/// How an architecture's `load_arch_hparams` reads
+/// `{arch}.attention.sliding_window_pattern`. See the module doc for
+/// what each does with each shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternKeyRead {
-    /// `get_key_or_arr(kid, uint32_t & swa_period, false)`: scalar
-    /// honoured as the period, array ignored.
-    ScalarPeriod,
+    /// Not read: the seeded layout, whatever the file says.
+    Unread,
     /// `get_arr(kid, hparams.is_swa_impl)`: array honoured, a scalar
     /// or an absent key refused (REQUIRED).
     PerLayerBool,
-    /// The scalar overload first, the array on its `false`. The array
-    /// read is REQUIRED, so an absent key refuses.
-    ScalarThenArray,
+    /// `load_swa_pattern`: the array if the file has one, else the
+    /// scalar as a period, else the seed. Neither read is required.
+    ArrayThenScalar,
 }
 
 /// Every graph that reads the key ONLY as the per-layer array, with the
@@ -166,15 +164,18 @@ pub enum PatternKeyRead {
 /// `step35` and `mimo2` closed on other seams and run on this one;
 /// `dflash` is deferred.
 pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
-    ("gemma4", "src/models/gemma4.cpp:5"),
+    ("gemma4", "src/models/gemma4.cpp:6"),
     ("gemma4-assistant", "src/models/gemma4-assistant.cpp:7"),
-    ("dflash", "src/models/dflash.cpp:69"),
+    ("dflash", "src/models/dflash.cpp:119"),
+    ("dots3note", "src/models/dots3note.cpp:34"),
+    ("flint", "src/models/flint.cpp:13"),
+    ("muse-spark", "src/models/muse-spark.cpp:17"),
     ("step35", "src/models/step35.cpp:26"),
     ("mimo2", "src/models/mimo2.cpp:12"),
     // Landed upstream after the 2026-08-04 pin; `ml.get_arr` with no
     // scalar attempt, like the four above.
     ("spark2_5", "src/models/spark2-5.cpp:8"),
-    ("maple", "src/models/maple.cpp:8"),
+    ("maple", "src/models/maple.cpp:10"),
     ("granite_swa", "src/models/granite-swa.cpp:17"),
     // Landed upstream after the 2026-09-19 pin.
     ("lfm3", "src/models/lfm3.cpp:13"),
@@ -187,30 +188,39 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
 /// accepts into `is_swa_impl`.
 pub const LLAMA_MAX_LAYERS: usize = 512;
 
-/// Every graph that tries the scalar and falls back to the array, with
-/// the line.
-pub const SCALAR_THEN_ARRAY_READERS: &[(&str, &str)] = &[
-    ("mellum", "src/models/mellum.cpp:12-17"),
-    ("cohere2moe", "src/models/cohere2moe.cpp:32-36"),
-    // `muse-glimmer.cpp:26` calls `load_swa_pattern(ml, 4)`, which
-    // tries the ARRAY first (`llama-model.cpp:3309`) and falls back to
-    // the scalar and then to a seeded period of 4 with `dense_first =
-    // false`. Array-first versus scalar-first is not observable: one
-    // key holds either a scalar or an array, and each overload returns
-    // false for the other's spelling.
-    ("muse-glimmer", "src/models/muse-glimmer.cpp:26"),
+/// Every graph that calls `load_swa_pattern`, with the line. The seed
+/// each passes is `capability::default_swa_layout`'s row (or the
+/// registry's `SwaFacts::default_layout`).
+pub const LOAD_SWA_PATTERN_CALLERS: &[(&str, &str)] = &[
+    ("afmoe", "src/models/afmoe.cpp:17"),
+    ("cohere2", "src/models/cohere2.cpp:5"),
+    ("cohere2moe", "src/models/cohere2moe.cpp:28"),
+    ("exaone-moe", "src/models/exaone-moe.cpp:6"),
+    ("exaone4", "src/models/exaone4.cpp:7"),
+    ("gemma-embedding", "src/models/gemma-embedding.cpp:5"),
+    ("gemma-embedding2", "src/models/gemma-embedding2.cpp:5"),
+    ("gemma2", "src/models/gemma2.cpp:6"),
+    ("gemma3", "src/models/gemma3.cpp:7"),
+    ("gemma3n", "src/models/gemma3n.cpp:5"),
+    ("gpt-oss", "src/models/openai-moe.cpp:9"),
+    ("laguna", "src/models/laguna.cpp:42"),
+    ("llama4", "src/models/llama4.cpp:19"),
+    ("mellum", "src/models/mellum.cpp:16"),
+    ("modern-bert", "src/models/modern-bert.cpp:11"),
+    ("muse-glimmer", "src/models/muse-glimmer.cpp:13"),
+    ("olmo2", "src/models/olmo2.cpp:9"),
+    ("plamo3", "src/models/plamo3.cpp:9"),
+    ("smallthinker", "src/models/smallthinker.cpp:9"),
 ];
 
-/// THE table. Derived from the two censuses above rather than restated
-/// beside them: an architecture in neither is the scalar mode, which is
-/// also what an architecture that never reads the key gets.
+/// THE table, derived from the two censuses above.
 pub fn pattern_key_read(arch: &str) -> PatternKeyRead {
     if PER_LAYER_ARRAY_READERS.iter().any(|(a, _)| *a == arch) {
         PatternKeyRead::PerLayerBool
-    } else if SCALAR_THEN_ARRAY_READERS.iter().any(|(a, _)| *a == arch) {
-        PatternKeyRead::ScalarThenArray
+    } else if LOAD_SWA_PATTERN_CALLERS.iter().any(|(a, _)| *a == arch) {
+        PatternKeyRead::ArrayThenScalar
     } else {
-        PatternKeyRead::ScalarPeriod
+        PatternKeyRead::Unread
     }
 }
 
@@ -273,19 +283,13 @@ pub fn read_swa_layers(
         Ok(SwaLayers::PerLayer(out.into()))
     };
     match pattern_key_read(arch) {
-        PatternKeyRead::ScalarPeriod => match value {
-            // `get_key_or_arr(kid, swa_period, false)` returns false on
-            // an array and the seed stands. NOT a refusal, because every
-            // real EXAONE-4 32B / EXAONE-MoE / Olmo-3 export carries one;
-            // see the module doc.
-            None | Some(GgufValue::Array(_)) => Ok(SwaLayers::from_default(seeded)),
-            Some(scalar) => period_from_scalar(scalar),
-        },
-        PatternKeyRead::ScalarThenArray => match value {
-            // The array read is REQUIRED on the fallback path
-            // (`mellum.cpp:16`, `cohere2moe.cpp:35` pass no `required`),
-            // so an absent key is llama.cpp's `key not found in model`.
-            None => Err(LoadError::MissingHparam(key.to_string())),
+        // No read: the file's key, scalar or array, is dead metadata.
+        PatternKeyRead::Unread => Ok(SwaLayers::from_default(seeded)),
+        // `load_swa_pattern` (`llama-model.cpp:3952-3959`): the array if
+        // there is one (`:3953`, optional), else the scalar (`:3957`,
+        // optional), else the seed. No absent key refuses.
+        PatternKeyRead::ArrayThenScalar => match value {
+            None => Ok(SwaLayers::from_default(seeded)),
             Some(GgufValue::Array(items)) => per_layer(items),
             Some(scalar) => period_from_scalar(scalar),
         },
@@ -388,8 +392,7 @@ mod tests {
     }
 
     /// The census and the table are one thing: every listed reader
-    /// answers its listed mode, and an unlisted name answers the
-    /// scalar mode.
+    /// answers its listed mode, and an unlisted name reads nothing.
     #[test]
     fn every_listed_reader_answers_its_mode() {
         for (arch, _) in PER_LAYER_ARRAY_READERS {
@@ -399,39 +402,50 @@ mod tests {
                 "{arch}"
             );
         }
-        for (arch, _) in SCALAR_THEN_ARRAY_READERS {
+        for (arch, _) in LOAD_SWA_PATTERN_CALLERS {
             assert_eq!(
                 pattern_key_read(arch),
-                PatternKeyRead::ScalarThenArray,
+                PatternKeyRead::ArrayThenScalar,
                 "{arch}"
             );
         }
-        for arch in ["exaone4", "exaone-moe", "olmo2", "gemma3", "llama"] {
-            assert_eq!(
-                pattern_key_read(arch),
-                PatternKeyRead::ScalarPeriod,
-                "{arch}"
-            );
+        for arch in ["llama", "qwen2", "phi3"] {
+            assert_eq!(pattern_key_read(arch), PatternKeyRead::Unread, "{arch}");
         }
     }
 
-    /// The IGNORED cell: an array in a scalar-mode file leaves the
-    /// seeded period standing, even when the array DISAGREES with it.
-    /// This is the EXAONE / Olmo-3 over-refusal, lifted.
+    /// `load_swa_pattern` honours an array even where it DISAGREES with
+    /// the seeded period (#420), takes a scalar as a period with the
+    /// seed's phase, and keeps the seed when the key is absent.
     #[test]
-    fn a_scalar_mode_architecture_ignores_the_array_and_keeps_its_seed() {
+    fn a_load_swa_pattern_architecture_takes_the_array_then_the_scalar_then_the_seed() {
         // Disagrees with last-dense-4 on every layer.
         let file = with(Some(bools(&[false, false, false, true])));
         let got = read_swa_layers(&file, "exaone-moe", KEY, &trunk(4, 4), LAST_DENSE_4).unwrap();
-        assert_eq!(got, SwaLayers::period(4, false));
-        // And an absent key is the same answer.
-        let got =
-            read_swa_layers(&with(None), "exaone-moe", KEY, &trunk(4, 4), LAST_DENSE_4).unwrap();
-        assert_eq!(got, SwaLayers::period(4, false));
-        // A scalar still overrides the seed, keeping the seed's phase.
+        assert_eq!(
+            got,
+            SwaLayers::PerLayer(vec![false, false, false, true].into())
+        );
         let file = with(Some(GgufValue::U32(2)));
         let got = read_swa_layers(&file, "exaone-moe", KEY, &trunk(4, 4), LAST_DENSE_4).unwrap();
         assert_eq!(got, SwaLayers::period(2, false));
+        let got = read_swa_layers(&file, "cohere2moe", KEY, &trunk(4, 4), DENSE_FIRST_4).unwrap();
+        assert_eq!(got, SwaLayers::period(2, true));
+        // Absent: the seed, on every caller, `mellum` included.
+        for arch in ["exaone-moe", "mellum"] {
+            let got = read_swa_layers(&with(None), arch, KEY, &trunk(4, 4), LAST_DENSE_4).unwrap();
+            assert_eq!(got, SwaLayers::period(4, false), "{arch}");
+        }
+    }
+
+    /// A graph that reads no key keeps its seed whatever the file says.
+    #[test]
+    fn an_unread_key_is_dead_metadata() {
+        for v in [GgufValue::U32(2), bools(&[true, false, true, false])] {
+            let got =
+                read_swa_layers(&with(Some(v)), "llama", KEY, &trunk(4, 4), LAST_DENSE_4).unwrap();
+            assert_eq!(got, SwaLayers::period(4, false));
+        }
     }
 
     /// The array mode honours the array at ANY length up to
@@ -503,36 +517,5 @@ mod tests {
                 Err(LoadError::UnsupportedFeature(a, m)) if a == "step35" && m.contains("only as an array")
             ));
         }
-    }
-
-    /// The scalar-then-array mode takes whichever shape the file has,
-    /// and refuses an absent key because its fallback read is REQUIRED.
-    #[test]
-    fn a_scalar_then_array_architecture_takes_either_shape_and_requires_one() {
-        let got = read_swa_layers(
-            &with(Some(GgufValue::U32(2))),
-            "mellum",
-            KEY,
-            &trunk(4, 4),
-            LAST_DENSE_4,
-        )
-        .unwrap();
-        assert_eq!(got, SwaLayers::period(2, false));
-        let got = read_swa_layers(
-            &with(Some(bools(&[true, true, false, true]))),
-            "mellum",
-            KEY,
-            &trunk(4, 4),
-            LAST_DENSE_4,
-        )
-        .unwrap();
-        assert_eq!(
-            got,
-            SwaLayers::PerLayer(vec![true, true, false, true].into())
-        );
-        assert!(matches!(
-            read_swa_layers(&with(None), "mellum", KEY, &trunk(4, 4), LAST_DENSE_4),
-            Err(LoadError::MissingHparam(k)) if k == KEY
-        ));
     }
 }

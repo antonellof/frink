@@ -219,9 +219,9 @@ pub struct TensorFacts {
     pub ffn_bias: Option<(Presence, bool)>,
     /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
     pub output_bias: Option<Presence>,
-    /// `qkv_fused::QKV_BIAS_CREATORS`: which Q/K/V biases the graph
+    /// `qkv_fused::QKV_TENSOR_CREATORS`: which Q/K/V biases the graph
     /// creates, and how.
-    pub qkv_bias: crate::qkv_fused::QkvBias,
+    pub qkv_tensors: crate::qkv_fused::QkvTensors,
     /// A present `blk.N.attn_norm_2` feeds attention and `attn_norm`
     /// moves to the FFN (`falcon.cpp:35-36,79-85,124`).
     pub attn_norm_2_feeds_attention: bool,
@@ -343,7 +343,7 @@ impl ArchFacts {
             attn_out_bias: None,
             ffn_bias: None,
             output_bias: None,
-            qkv_bias: crate::qkv_fused::QkvBias::Helper,
+            qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
             attn_norm_2_feeds_attention: false,
             parallel_dense: None,
         },
@@ -460,7 +460,7 @@ impl ArchFacts {
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
-                qkv_bias: crate::qkv_fused::qkv_bias_from_table(arch),
+                qkv_tensors: crate::qkv_fused::qkv_tensors_from_table(arch),
                 // No table: `falcon` was the only row.
                 attn_norm_2_feeds_attention: false,
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn_from_table(arch),

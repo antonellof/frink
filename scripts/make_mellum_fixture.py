@@ -58,11 +58,16 @@ the tensor loader creates it `TENSOR_SKIP` (`nextn_flags`, :35-37), so
 libllama's logits are the four-layer file's (#441). The block is drawn
 after every other tensor, so the trunk is byte-identical.
 
+**`--no-pattern`** drops `attention.sliding_window_pattern`.
+`mellum.cpp:16` reads it through `load_swa_pattern(ml, 4)`
+(`llama-model.cpp:3952-3959`), where neither read is required, so the
+file runs on the seeded period 4 [T, T, T, F] (#420).
+
 Weights are pseudo-random from a fixed seed so the file is byte-stable.
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \\
-        python3 scripts/make_mellum_fixture.py OUT.gguf [--mtp]
+        python3 scripts/make_mellum_fixture.py OUT.gguf [--mtp] [--no-pattern]
 
 The golden values that go with it are produced by llama.cpp itself
 (see `scripts/gptoss_reference_logits.cpp`), not by this script.
@@ -95,7 +100,7 @@ RMS_EPS = 1e-6
 SWA_LAYERS = [True, True, False, True]
 
 
-def main(out_path: str, mtp: bool = False) -> None:
+def main(out_path: str, mtp: bool = False, pattern: bool = True) -> None:
     rng = np.random.default_rng(0x3E11)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -118,7 +123,8 @@ def main(out_path: str, mtp: bool = False) -> None:
     w.add_rope_dimension_count(HEAD_DIM)
     w.add_sliding_window(SWA_WINDOW)
     # mellum.py:28, verbatim: a bool per layer.
-    w.add_sliding_window_pattern(SWA_LAYERS + ([False] if mtp else []))
+    if pattern:
+        w.add_sliding_window_pattern(SWA_LAYERS + ([False] if mtp else []))
     w.add_expert_count(N_EXPERT)
     w.add_expert_used_count(N_EXPERT_USED)
     w.add_expert_feed_forward_length(N_FF_EXP)
@@ -191,5 +197,10 @@ def main(out_path: str, mtp: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--mtp"]
-    main(args[0] if args else "mellum-fixture.gguf", "--mtp" in sys.argv[1:])
+    flags = ("--mtp", "--no-pattern")
+    args = [a for a in sys.argv[1:] if a not in flags]
+    main(
+        args[0] if args else "mellum-fixture.gguf",
+        "--mtp" in sys.argv[1:],
+        "--no-pattern" not in sys.argv[1:],
+    )

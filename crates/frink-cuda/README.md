@@ -17,6 +17,10 @@ The CHANGELOG entry for 0.22.0 records it running on an RTX 3090. It ships with 
 `cargo test -p frink-cuda` exercises, and with
 `tools/mul_mm_host_check/run.sh`, which compiles the emitted CUDA C
 against a barrier shim and runs it on this CPU to check it against that
-twin. Neither of those is a measurement. A kernel change merges only
+twin. The decode matvec kernels for Q4_K, Q5_K, Q6_K and Q8_0
+(`matvec_kinds/coalesced.rs`) have the same pair: twins in
+`coalesced_twin.rs` and `tools/matvec_host_check/run.sh`, which runs
+both widths (`FRINK_CUDA_MATVEC`, see `docs/CONFIG.md`) against them.
+Neither of those is a measurement. A kernel change merges only
 after `cargo test -p frink-cuda --features cuda -- --ignored` has run
 on a real device.

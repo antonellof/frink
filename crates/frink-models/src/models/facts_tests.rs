@@ -84,7 +84,7 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(crate::proj_bias::ATTN_OUT_BIAS_CREATORS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::FFN_BIAS_CREATORS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::OUTPUT_BIAS_CREATORS.iter().map(|r| r.0));
-    names.extend(crate::qkv_fused::QKV_BIAS_CREATORS.iter().map(|r| r.0));
+    names.extend(crate::qkv_fused::QKV_TENSOR_CREATORS.iter().map(|r| r.0));
     names.sort_unstable();
     names.dedup();
     names
@@ -320,7 +320,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 attn_out_bias: crate::proj_bias::attn_out_presence(name),
                 ffn_bias: crate::proj_bias::ffn_presence(name),
                 output_bias: crate::proj_bias::output_presence(name),
-                qkv_bias: crate::qkv_fused::qkv_bias(name),
+                qkv_tensors: crate::qkv_fused::qkv_tensors(name),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
                 attn_norm_2_feeds_attention: crate::norm_sites::attn_norm_2_feeds_attention(name),
             },

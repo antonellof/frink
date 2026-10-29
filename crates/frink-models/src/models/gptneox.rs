@@ -6,7 +6,7 @@
 //!   `use_parallel_residual`, `:143-166`): two norms, attention over
 //!   `attn_norm(x)` and the FFN over `ffn_norm(x)`
 //!   ([`crate::parallel_residual::GPTNEOX`]).
-//! - **REQUIRED biases** on the fused `attn_qkv` (`:67`), on
+//! - **REQUIRED biases** on the fused `attn_qkv` (`:66-67`), on
 //!   `attn_output` and on the dense FFN's up and down (no gate: the FFN
 //!   is the ungated GELU).
 //!
@@ -17,7 +17,7 @@ use super::ModelDef;
 use crate::norm::NormFunction;
 use crate::norm_sites::NormSites;
 use crate::proj_bias::Presence;
-use crate::qkv_fused::QkvBias;
+use crate::qkv_fused::QkvTensors;
 
 pub const FACTS: ArchFacts = ArchFacts {
     ffn: FfnFacts {
@@ -35,7 +35,7 @@ pub const FACTS: ArchFacts = ArchFacts {
         },
         attn_out_bias: Some(Presence::Required),
         ffn_bias: Some((Presence::Required, false)),
-        qkv_bias: QkvBias::Fused(Presence::Required),
+        qkv_tensors: QkvTensors::Fused(Some(Presence::Required)),
         ..ArchFacts::DEFAULT.tensors
     },
     ..ArchFacts::DEFAULT

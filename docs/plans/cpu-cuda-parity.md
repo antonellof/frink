@@ -409,6 +409,25 @@ utilization and 9x to 17x off, that is where essentially all of the
 difference is. Compare one kernel against its ggml-cuda equivalent for
 the same kind and shape, and close the arithmetic.
 
+**Update, 2026-10-28 (#133, unverified on hardware).** That paragraph
+predates #144 to #146, which made the matvec one warp per row with a
+coalesced lane mapping. What still differs from llama.cpp's `mmvq`
+(pin `604cc430`, `calc_nwarps` / `calc_rows_per_block` in `mmvq.cu`)
+is how much of ONE row is in flight: llama.cpp splits a row across 4
+warps, each taking 2 super-blocks (8 Q8_0 blocks) per loop trip, while
+frink's warp took one block per trip and walked the row serially. For
+Q8_0 that is 34 bytes per warp in flight and 96 dependent trips for a
+3072-wide row, a latency ceiling near 28% of an RTX 3070's bandwidth
+at full occupancy. The coalesced kernels now compile at a WIDE width by
+default (four super-blocks, or eight Q8_0 blocks, per warp per trip,
+8 to 24 byte runs per lane); `FRINK_CUDA_MATVEC=narrow` is the old
+geometry, same source. The arithmetic and the A/B to run are in the PR.
+One thing the arithmetic does NOT explain: the narrow Q4_K kernel's own
+model already predicts most of the card, against ~20% measured end to
+end, so the first hardware step is per-kernel time (`nsys`), not tok/s.
+If matvec time is a minority of the token, the next lever is the ~3
+host round trips per layer, whatever this change measures.
+
 **A dead API that should still go.** 
 `frink-cuda/src/gpu.rs` defines `DeviceAct` / `upload_act` /
 `matvec_into` / `download_act`, whose doc says they exist "so a

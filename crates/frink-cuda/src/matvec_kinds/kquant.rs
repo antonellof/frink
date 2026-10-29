@@ -4,8 +4,8 @@
 //! Moved here verbatim from `gpu.rs`; see [`super::legacy`] for why.
 //! Q2_K and Q3_K joined on 2026-09-09 and have no coalesced twin.
 //! These are the *uncoalesced* kernels. Q4_K, Q5_K, Q6_K and Q8_0 also
-//! have coalesced rewrites, which still live in `gpu.rs` beside
-//! `coalesced_matvec_kernel` because choosing between them is a launch
+//! have coalesced rewrites, in [`super::coalesced`] beside
+//! `coalesced_matvec_kernel`, because choosing between them is a launch
 //! decision rather than a format one.
 
 pub const Q4_K_MATVEC_KERNEL_SRC: &str = r#"

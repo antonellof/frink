@@ -11,8 +11,7 @@
 //!   the tensor names crossed relative to `gptneox`
 //!   ([`crate::parallel_residual::FALCON`],
 //!   `TensorFacts::attn_norm_2_feeds_attention`).
-//! - **No Q/K/V bias**: the fused `attn_qkv` is created without one
-//!   (`:38`).
+//! - **A fused `attn_qkv` with no bias** (`:38`).
 //!
 //! Evidence: `tests/falcon_graphs.rs`, against libllama.
 
@@ -20,7 +19,7 @@ use super::facts::{ArchFacts, FfnFacts, TensorFacts, TopologyFacts};
 use super::ModelDef;
 use crate::norm::NormFunction;
 use crate::norm_sites::NormSites;
-use crate::qkv_fused::QkvBias;
+use crate::qkv_fused::QkvTensors;
 
 pub const FACTS: ArchFacts = ArchFacts {
     ffn: FfnFacts {
@@ -36,7 +35,7 @@ pub const FACTS: ArchFacts = ArchFacts {
             function: NormFunction::LayerNormBias,
             ..NormSites::GENERIC
         },
-        qkv_bias: QkvBias::NotCreated,
+        qkv_tensors: QkvTensors::Fused(None),
         attn_norm_2_feeds_attention: true,
         ..ArchFacts::DEFAULT.tensors
     },

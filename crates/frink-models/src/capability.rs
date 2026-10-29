@@ -3680,6 +3680,10 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // src/models/gemma-embedding.cpp:5. Deferred (embedding scope),
         // so latent rather than live.
         "gemma-embedding" => last_dense(6),
+        // src/models/gemma-embedding2.cpp:5 and muse-glimmer.cpp:13,
+        // the two `load_swa_pattern` callers this table missed (#420).
+        "gemma-embedding2" => last_dense(6),
+        "muse-glimmer" => last_dense(4),
         // src/models/cohere2.cpp:5 (`exaone4` and `olmo2`, the same
         // period, state it in `crate::models`)
         "cohere2" => last_dense(4),

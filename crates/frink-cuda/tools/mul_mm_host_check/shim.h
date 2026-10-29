@@ -79,3 +79,31 @@ static inline float __int_as_float(int i) {
 #define __forceinline__ inline
 #define __shared__ static
 #define __restrict__
+
+// ---- Warp-level pieces, used by the matvec host check only. ----
+//
+// CUDA's 128-bit unsigned vector, which the wide coalesced matvec reads
+// a 16-byte run of quants through. Not `alignas(16)`, for the same
+// reason `float4` above is not.
+struct uint4 {
+    unsigned int x, y, z, w;
+};
+
+// `__shfl_down_sync` over a full warp: every lane publishes its value,
+// the warp meets at its own barrier, each lane reads `lane + delta`
+// (its own value when that is past the warp, which is CUDA's rule),
+// and the warp meets again before the slot can be reused. A barrier
+// PER WARP, not per block, because a warp whose row is past the end
+// returns before reducing, and a block-wide barrier would wait for it
+// forever. `matvec_host_check/main.cpp` sets `g_warp_bar` up.
+static Barrier** g_warp_bar = nullptr;
+static float g_shfl[1024];
+static inline float __shfl_down_sync(unsigned /*mask*/, float v, unsigned delta) {
+    const unsigned t = threadIdx.x;
+    const unsigned lane = t % 32;
+    g_shfl[t] = v;
+    g_warp_bar[t / 32]->wait();
+    const float r = lane + delta < 32 ? g_shfl[t + delta] : v;
+    g_warp_bar[t / 32]->wait();
+    return r;
+}

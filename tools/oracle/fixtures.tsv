@@ -57,7 +57,7 @@ exaone4_32b_mtp_tiny                     match                        make_exaon
 exaone4_32b_nowindow_tiny                match                        make_exaone4_fixture.py OUT --layers 64 --no-window
 exaone4_32b_tiny                         match                        make_exaone4_fixture.py OUT --layers 64
 exaone4_tiny                             match                        make_exaone4_fixture.py OUT
-exaone_moe_array_flipped_tiny            prefill=WRONG,decode=WRONG  make_exaone_moe_fixture.py OUT --window-array disagree  # #420: libllama honours the inverted window array, frink runs the period
+exaone_moe_array_flipped_tiny            match                        make_exaone_moe_fixture.py OUT --window-array disagree
 exaone_moe_array_tiny                    match                        make_exaone_moe_fixture.py OUT --window-array agree
 exaone_moe_mtp_tiny                      match                        make_exaone_moe_fixture.py OUT --window-array agree --mtp
 exaone_moe_tiny                          match                        make_exaone_moe_fixture.py OUT
@@ -80,9 +80,11 @@ glm4_tiny                                match                        make_glm4_
 glm4moe_air_tiny                         match                        make_glm4moe_fixture.py OUT --no-qk-norm
 glm4moe_mrope_tiny                       match                        make_glm4moe_fixture.py OUT --mrope
 glm4moe_tiny                             match                        make_glm4moe_fixture.py OUT
+gpt2_split_tiny                          both-fail                    make_gpt2_fixture.py OUT --split  # refusal evidence: gpt2.cpp:37-38 creates only the fused attn_qkv (#461)
 gpt2_tiny                                match                        make_gpt2_fixture.py OUT
 gptneox_sequential_tiny                  match                        make_gptneox_fixture.py OUT --sequential
 gptneox_tiny                             match                        make_gptneox_fixture.py OUT
+gptoss_nowindow_tiny                     both-fail                    make_gptoss_fixture.py OUT --no-window  # refusal evidence: openai-moe.cpp:6 reads the window REQUIRED (#458)
 gptoss_tiny                              match                        make_gptoss_fixture.py OUT
 granite-moe_tiny                         ref-fails                    make_granitemoe_fixture.py OUT --arch granite-moe  # a hyphenated alias llama.cpp has never named
 granite_nologit_tiny                     both-fail                    make_granite_fixture.py OUT --no-logit-scale  # refusal evidence: logit_scale is REQUIRED upstream
@@ -143,6 +145,7 @@ maple_swa_long_tiny                      match                        make_maple
 maple_swa_short_tiny                     match                        make_maple_fixture.py OUT --swa-array short
 maple_tiny                               match                        make_maple_fixture.py OUT
 mellum_mtp_tiny                          match                        make_mellum_fixture.py OUT --mtp
+mellum_nopattern_tiny                    match                        make_mellum_fixture.py OUT --no-pattern
 mellum_tiny                              match                        make_mellum_fixture.py OUT
 mimo2_novscale_tiny                      match                        make_mimo2_fixture.py OUT --no-value-scale
 mimo2_split_tiny                         match                        make_mimo2_fixture.py OUT --split
