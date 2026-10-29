@@ -1,5 +1,6 @@
-//! A MoE model with Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K or IQ4_XS
-//! experts runs its experts through Metal's fused id kernels, and
+//! A MoE model with Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K, IQ4_XS or
+//! IQ1/IQ2/IQ3 experts runs its experts through Metal's fused id
+//! kernels, and
 //! answers as the CPU does (#405, #448). A pack in a kind with no id
 //! kernel falls back to one matvec per expert instead of failing.
 //!
@@ -52,7 +53,7 @@ const CHILD: &str = "FRINK_MOE_ID_KINDS_CHILD";
 
 /// The kinds under test.
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
-const KINDS: [GgmlType; 7] = [
+const KINDS: [GgmlType; 14] = [
     GgmlType::Q2K,
     GgmlType::Q3K,
     GgmlType::IQ4NL,
@@ -60,6 +61,13 @@ const KINDS: [GgmlType; 7] = [
     GgmlType::Q5K,
     GgmlType::Q6K,
     GgmlType::IQ4XS,
+    GgmlType::IQ2XXS,
+    GgmlType::IQ2XS,
+    GgmlType::IQ2S,
+    GgmlType::IQ3XXS,
+    GgmlType::IQ3S,
+    GgmlType::IQ1S,
+    GgmlType::IQ1M,
 ];
 
 /// The IQ4_NL, IQ4_XS and MXFP4 fixture encoders pack the weights
@@ -238,16 +246,9 @@ mod metal {
         let mut keep = Vec::new();
         for dtype in KINDS {
             let path = synthetic_llama::write_moe("metal_moe_id", dtype, quant_encode::encode);
-            let kind = match dtype {
-                GgmlType::Q2K => "Q2_K",
-                GgmlType::Q3K => "Q3_K",
-                GgmlType::IQ4NL => "IQ4_NL",
-                GgmlType::MXFP4 => "MXFP4",
-                GgmlType::Q5K => "Q5_K",
-                GgmlType::Q6K => "Q6_K",
-                GgmlType::IQ4XS => "IQ4_XS",
-                other => panic!("{other:?}"),
-            };
+            let kind = frink_core::weight_matrix::quant_kind_for(dtype)
+                .unwrap_or_else(|| panic!("{dtype:?}"))
+                .name();
             let (tokens, cpu) = cpu_rows(&path);
             let d = load(&path);
             assert_packed(&d, kind);

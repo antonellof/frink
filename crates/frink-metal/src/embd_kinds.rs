@@ -28,12 +28,19 @@ pub enum EmbdKind {
     Q3K,
     Iq4Nl,
     Mxfp4,
+    Iq2Xxs,
+    Iq2Xs,
+    Iq2S,
+    Iq3Xxs,
+    Iq3S,
+    Iq1S,
+    Iq1M,
 }
 
 impl EmbdKind {
     /// Every variant. `every_variant_is_listed_once` holds this to the
     /// exhaustive matches below.
-    pub const ALL: [EmbdKind; 12] = [
+    pub const ALL: [EmbdKind; 19] = [
         EmbdKind::Q8_0,
         EmbdKind::Q4_0,
         EmbdKind::Q5_0,
@@ -46,6 +53,13 @@ impl EmbdKind {
         EmbdKind::Q3K,
         EmbdKind::Iq4Nl,
         EmbdKind::Mxfp4,
+        EmbdKind::Iq2Xxs,
+        EmbdKind::Iq2Xs,
+        EmbdKind::Iq2S,
+        EmbdKind::Iq3Xxs,
+        EmbdKind::Iq3S,
+        EmbdKind::Iq1S,
+        EmbdKind::Iq1M,
     ];
 
     /// The GGUF name of the stored type, as `frink_core::QuantKind::name`
@@ -64,6 +78,13 @@ impl EmbdKind {
             EmbdKind::Q3K => "Q3_K",
             EmbdKind::Iq4Nl => "IQ4_NL",
             EmbdKind::Mxfp4 => "MXFP4",
+            EmbdKind::Iq2Xxs => "IQ2_XXS",
+            EmbdKind::Iq2Xs => "IQ2_XS",
+            EmbdKind::Iq2S => "IQ2_S",
+            EmbdKind::Iq3Xxs => "IQ3_XXS",
+            EmbdKind::Iq3S => "IQ3_S",
+            EmbdKind::Iq1S => "IQ1_S",
+            EmbdKind::Iq1M => "IQ1_M",
         }
     }
 
@@ -83,6 +104,13 @@ impl EmbdKind {
             EmbdKind::Q3K => "q3_k_matvec",
             EmbdKind::Iq4Nl => "iq4_nl_matvec",
             EmbdKind::Mxfp4 => "mxfp4_matvec",
+            EmbdKind::Iq2Xxs => "iq2_xxs_matvec",
+            EmbdKind::Iq2Xs => "iq2_xs_matvec",
+            EmbdKind::Iq2S => "iq2_s_matvec",
+            EmbdKind::Iq3Xxs => "iq3_xxs_matvec",
+            EmbdKind::Iq3S => "iq3_s_matvec",
+            EmbdKind::Iq1S => "iq1_s_matvec",
+            EmbdKind::Iq1M => "iq1_m_matvec",
         }
     }
 
@@ -101,6 +129,13 @@ impl EmbdKind {
             EmbdKind::Q3K => "get_rows_q3_k",
             EmbdKind::Iq4Nl => "get_rows_iq4_nl",
             EmbdKind::Mxfp4 => "get_rows_mxfp4",
+            EmbdKind::Iq2Xxs => "get_rows_iq2_xxs",
+            EmbdKind::Iq2Xs => "get_rows_iq2_xs",
+            EmbdKind::Iq2S => "get_rows_iq2_s",
+            EmbdKind::Iq3Xxs => "get_rows_iq3_xxs",
+            EmbdKind::Iq3S => "get_rows_iq3_s",
+            EmbdKind::Iq1S => "get_rows_iq1_s",
+            EmbdKind::Iq1M => "get_rows_iq1_m",
         }
     }
 
@@ -120,6 +155,13 @@ impl EmbdKind {
             EmbdKind::Q3K => "Q3KDequant",
             EmbdKind::Iq4Nl => "IQ4NLDequant",
             EmbdKind::Mxfp4 => "MXFP4Dequant",
+            EmbdKind::Iq2Xxs => "IQ2XXSDequant",
+            EmbdKind::Iq2Xs => "IQ2XSDequant",
+            EmbdKind::Iq2S => "IQ2SDequant",
+            EmbdKind::Iq3Xxs => "IQ3XXSDequant",
+            EmbdKind::Iq3S => "IQ3SDequant",
+            EmbdKind::Iq1S => "IQ1SDequant",
+            EmbdKind::Iq1M => "IQ1MDequant",
         }
     }
 
@@ -160,7 +202,14 @@ mod tests {
                 | EmbdKind::Q2K
                 | EmbdKind::Q3K
                 | EmbdKind::Iq4Nl
-                | EmbdKind::Mxfp4 => {}
+                | EmbdKind::Mxfp4
+                | EmbdKind::Iq2Xxs
+                | EmbdKind::Iq2Xs
+                | EmbdKind::Iq2S
+                | EmbdKind::Iq3Xxs
+                | EmbdKind::Iq3S
+                | EmbdKind::Iq1S
+                | EmbdKind::Iq1M => {}
             }
         }
     }

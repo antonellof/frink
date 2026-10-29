@@ -22,7 +22,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 |---|---|---|---|
 | cpu | 17 | 17 | 0 |
 | cuda | 12 | 12 | 23 |
-| metal | 11 | 11 | 11 |
+| metal | 4 | 4 | 4 |
 | vulkan | 22 | 23 | 23 |
 
 ## matvec (decode)
@@ -42,13 +42,13 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q8_1 | f32 | HOST | HOST | HOST |
 | IQ4_NL | f32 | kernel | kernel | HOST |
 | IQ4_XS | kernel | kernel | kernel | HOST |
-| IQ1_S | f32 | HOST | HOST | HOST |
-| IQ2_XXS | f32 | HOST | HOST | HOST |
-| IQ3_XXS | f32 | HOST | HOST | HOST |
-| IQ2_XS | f32 | HOST | HOST | HOST |
-| IQ2_S | f32 | HOST | HOST | HOST |
-| IQ3_S | f32 | HOST | HOST | HOST |
-| IQ1_M | f32 | HOST | HOST | HOST |
+| IQ1_S | f32 | HOST | kernel | HOST |
+| IQ2_XXS | f32 | HOST | kernel | HOST |
+| IQ3_XXS | f32 | HOST | kernel | HOST |
+| IQ2_XS | f32 | HOST | kernel | HOST |
+| IQ2_S | f32 | HOST | kernel | HOST |
+| IQ3_S | f32 | HOST | kernel | HOST |
+| IQ1_M | f32 | HOST | kernel | HOST |
 | MXFP4 | f32 | kernel | kernel | HOST |
 | TQ1_0 | f32 | HOST | HOST | HOST |
 | PTQ1_0 | f32 | HOST | kernel | HOST |
@@ -70,13 +70,13 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q8_1 | f32 | HOST | HOST | HOST |
 | IQ4_NL | f32 | kernel | kernel | HOST |
 | IQ4_XS | kernel | kernel | kernel | HOST |
-| IQ1_S | f32 | HOST | HOST | HOST |
-| IQ2_XXS | f32 | HOST | HOST | HOST |
-| IQ3_XXS | f32 | HOST | HOST | HOST |
-| IQ2_XS | f32 | HOST | HOST | HOST |
-| IQ2_S | f32 | HOST | HOST | HOST |
-| IQ3_S | f32 | HOST | HOST | HOST |
-| IQ1_M | f32 | HOST | HOST | HOST |
+| IQ1_S | f32 | HOST | kernel | HOST |
+| IQ2_XXS | f32 | HOST | kernel | HOST |
+| IQ3_XXS | f32 | HOST | kernel | HOST |
+| IQ2_XS | f32 | HOST | kernel | HOST |
+| IQ2_S | f32 | HOST | kernel | HOST |
+| IQ3_S | f32 | HOST | kernel | HOST |
+| IQ1_M | f32 | HOST | kernel | HOST |
 | MXFP4 | f32 | kernel | kernel | HOST |
 | TQ1_0 | f32 | HOST | HOST | HOST |
 | PTQ1_0 | f32 | HOST | kernel | HOST |
@@ -98,13 +98,13 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q8_1 | kernel | HOST | HOST | HOST |
 | IQ4_NL | kernel | HOST | kernel | HOST |
 | IQ4_XS | kernel | HOST | kernel | HOST |
-| IQ1_S | kernel | HOST | HOST | HOST |
-| IQ2_XXS | kernel | HOST | HOST | HOST |
-| IQ3_XXS | kernel | HOST | HOST | HOST |
-| IQ2_XS | kernel | HOST | HOST | HOST |
-| IQ2_S | kernel | HOST | HOST | HOST |
-| IQ3_S | kernel | HOST | HOST | HOST |
-| IQ1_M | kernel | HOST | HOST | HOST |
+| IQ1_S | kernel | HOST | kernel | HOST |
+| IQ2_XXS | kernel | HOST | kernel | HOST |
+| IQ3_XXS | kernel | HOST | kernel | HOST |
+| IQ2_XS | kernel | HOST | kernel | HOST |
+| IQ2_S | kernel | HOST | kernel | HOST |
+| IQ3_S | kernel | HOST | kernel | HOST |
+| IQ1_M | kernel | HOST | kernel | HOST |
 | MXFP4 | kernel | HOST | kernel | HOST |
 | TQ1_0 | kernel | HOST | HOST | HOST |
 | PTQ1_0 | kernel | HOST | kernel | HOST |

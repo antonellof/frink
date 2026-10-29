@@ -30,9 +30,10 @@ const STEPS: usize = 8;
 /// Set on the child: the fixture to print rows for.
 const CHILD: &str = "FRINK_EMBD_GATHER_CHILD";
 
-/// `frink_quant`'s row encoders for the two kinds under test: Q8_0 (a
-/// 32-element kind) and Q5_K (a 256-element one), neither of which the
-/// gather covered before.
+/// `frink_quant`'s row encoders for Q8_0 (a 32-element kind) and Q5_K
+/// (a 256-element one), neither of which the gather covered before, and
+/// the fixture's for IQ2_XXS and IQ1_M (the gathers built on the IQ
+/// grids, the second with no `half` scale field).
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -40,7 +41,11 @@ fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
         match dtype {
             GgmlType::Q8_0 => frink_quant::encode_row_q8_0(row, &mut out),
             GgmlType::Q5K => frink_quant::encode_row_q5_k(row, None, &mut out),
-            other => panic!("this suite encodes Q8_0 and Q5_K, not {other:?}"),
+            GgmlType::IQ2XXS | GgmlType::IQ1M => {
+                out.extend(common::quant_encode::encode(dtype, cols, row));
+                Some(())
+            }
+            other => panic!("this suite encodes Q8_0, Q5_K, IQ2_XXS and IQ1_M, not {other:?}"),
         }
         .expect("whole blocks");
     }
@@ -158,7 +163,12 @@ mod metal {
         }
         common::pin_backend(common::Backend::Metal);
         frink_models::set_metal_greedy_argmax(false);
-        for dtype in [GgmlType::Q8_0, GgmlType::Q5K] {
+        for dtype in [
+            GgmlType::Q8_0,
+            GgmlType::Q5K,
+            GgmlType::IQ2XXS,
+            GgmlType::IQ1M,
+        ] {
             let quant = synthetic_llama::write_with_embd("metal_embd_gather", dtype, dtype, encode);
             let f32_embd =
                 synthetic_llama::write_with_embd("metal_embd_gather", dtype, GgmlType::F32, encode);

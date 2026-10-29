@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 mod backend;
+pub mod iq_encode;
 pub mod quant_encode;
 pub mod synthetic_llama;
 #[allow(unused_imports)]

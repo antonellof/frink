@@ -68,6 +68,15 @@ pub mod attn;
 #[cfg(feature = "metal")]
 pub mod codebook4;
 
+/// IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and IQ1_M: one
+/// `group` / `affine` pair per kind, every kernel generated from it.
+#[cfg(feature = "metal")]
+pub mod iq;
+
+/// The IQ grid and sign tables as MSL, from `frink_quant::iq_tables`.
+#[cfg(feature = "metal")]
+mod iq_grids;
+
 /// The MoE id matvecs generated from a kind's decode matvec `_impl`.
 #[cfg(feature = "metal")]
 mod moe_mv_id;

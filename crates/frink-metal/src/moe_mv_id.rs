@@ -4,11 +4,11 @@
 //! ggml's `kernel_mul_mv_id` is one template over the plain matvec's
 //! `_impl`: slot `tgpig.z` reads its expert id, offsets the weights to
 //! that expert, the activation to its token and the output to its slot,
-//! and runs the same body. The Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K
-//! and IQ4_XS matvecs are written as such an `_impl` (`crate::q2_k`,
-//! `crate::q3_k`, `crate::codebook4`, `crate::k_quant_mv`), so their id
-//! kernels are generated here from
-//! that one function: the dequant and the dot exist once per kind, and
+//! and runs the same body. The Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K,
+//! IQ4_XS and the seven IQ1/IQ2/IQ3 matvecs are written as such an
+//! `_impl` (`crate::q2_k`, `crate::q3_k`, `crate::codebook4`,
+//! `crate::k_quant_mv`, `crate::iq`), so their id kernels are generated
+//! here from that one function: the dequant and the dot exist once per kind, and
 //! the decode matvec's own kernel-vs-CPU tests cover the body the id
 //! kernel runs.
 //!
@@ -96,13 +96,16 @@ fn kind_entry(kind: &str) -> Option<(&'static str, &'static str)> {
         "Q5_K" => Some((crate::k_quant_mv::q5_k_matvec_src(), "q5_k")),
         "Q6_K" => Some((crate::k_quant_mv::q6_k_matvec_src(), "q6_k")),
         "IQ4_XS" => Some((crate::k_quant_mv::iq4_xs_matvec_src(), "iq4_xs")),
-        _ => None,
+        _ => crate::iq::by_name(kind).map(|k| (crate::iq::iq_matvec_src(), k.prefix)),
     }
 }
 
 /// The kinds [`dispatch`] answers for.
 #[cfg(test)]
-pub(crate) const KINDS: [&str; 7] = ["Q2_K", "Q3_K", "IQ4_NL", "MXFP4", "Q5_K", "Q6_K", "IQ4_XS"];
+pub(crate) const KINDS: [&str; 14] = [
+    "Q2_K", "Q3_K", "IQ4_NL", "MXFP4", "Q5_K", "Q6_K", "IQ4_XS", "IQ2_XXS", "IQ2_XS", "IQ2_S",
+    "IQ3_XXS", "IQ3_S", "IQ1_S", "IQ1_M",
+];
 
 /// One generated id kernel's launch: source, entry point, rows per
 /// threadgroup (the decode matvec's, from `matvec_launch_meta`) and
@@ -125,7 +128,14 @@ pub(crate) fn dispatch(kind: &str, down: bool) -> Option<crate::gpu::MoeMatvecId
         ("q6_k", true) => "q6_k_moe_down_id",
         ("iq4_xs", false) => "iq4_xs_moe_matvec_id",
         ("iq4_xs", true) => "iq4_xs_moe_down_id",
-        _ => return None,
+        _ => {
+            let k = crate::iq::by_name(kind)?;
+            if down {
+                k.moe_down_id
+            } else {
+                k.moe_matvec_id
+            }
+        }
     };
     Some(crate::gpu::MoeMatvecIdDispatch {
         kernel_src,

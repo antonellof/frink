@@ -202,8 +202,9 @@ pub fn iq4_nl_row(row: &[f32]) -> Vec<u8> {
     out
 }
 
-/// `w`, a whole number of `cols`-wide rows, as `dtype`: the four kinds
-/// above, and Q8_0, Q5_K and Q6_K through `frink_quant`'s own encoders.
+/// `w`, a whole number of `cols`-wide rows, as `dtype`: the kinds
+/// above, the IQ1/IQ2/IQ3 kinds through `super::iq_encode`, and Q8_0,
+/// Q5_K and Q6_K through `frink_quant`'s own encoders.
 pub fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
     let mut out = Vec::new();
     match dtype {
@@ -230,6 +231,9 @@ pub fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
         GgmlType::Q8_0 => w.chunks_exact(cols).for_each(|r| {
             frink_quant::encode_row_q8_0(r, &mut out).expect("whole blocks");
         }),
+        iq if super::iq_encode::KINDS.contains(&iq) => {
+            return super::iq_encode::encode(iq, w).expect("an IQ kind");
+        }
         other => panic!("no fixture encoder for {other:?}"),
     }
     out

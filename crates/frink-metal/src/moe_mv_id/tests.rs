@@ -33,7 +33,7 @@ fn every_dispatch_names_an_entry_its_source_generates() {
     assert!(dispatch("Q4_1", false).is_none());
 }
 
-/// Each of the four has both id paths, so a pack of it never falls
+/// Each kind has both id paths, so a pack of it never falls
 /// back to one matvec per expert. Runs without a device.
 #[test]
 fn every_kind_has_both_id_paths() {
@@ -80,6 +80,13 @@ fn kind(name: &str) -> Kind {
         "Q5_K" => (176, 256, frink_quant::dequant_q5_k),
         "Q6_K" => (210, 256, frink_quant::dequant_q6_k),
         "IQ4_XS" => (136, 256, frink_quant::dequant_iq4_xs),
+        "IQ2_XXS" => (66, 256, frink_quant::dequant_iq2_xxs),
+        "IQ2_XS" => (74, 256, frink_quant::dequant_iq2_xs),
+        "IQ2_S" => (82, 256, frink_quant::dequant_iq2_s),
+        "IQ3_XXS" => (98, 256, frink_quant::dequant_iq3_xxs),
+        "IQ3_S" => (110, 256, frink_quant::dequant_iq3_s),
+        "IQ1_S" => (50, 256, frink_quant::dequant_iq1_s),
+        "IQ1_M" => (56, 256, frink_quant::dequant_iq1_m),
         other => panic!("{other}"),
     }
 }
@@ -87,6 +94,9 @@ fn kind(name: &str) -> Kind {
 /// `n_blocks` blocks of pseudo-random bytes with each format's scale
 /// fields forced to realistic magnitudes.
 fn blocks(name: &str, n_blocks: usize, seed: u32) -> Vec<u8> {
+    if crate::iq::by_name(name).is_some() {
+        return crate::iq::test_blocks(name, seed, n_blocks);
+    }
     let (bb, _, _) = kind(name);
     let mut w = crate::k_quant_check::pseudo_bytes(seed, n_blocks * bb);
     for b in 0..n_blocks {
