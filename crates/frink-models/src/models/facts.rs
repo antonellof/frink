@@ -216,9 +216,9 @@ pub struct TensorFacts {
     pub ffn_bias: Option<(Presence, bool)>,
     /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
     pub output_bias: Option<Presence>,
-    /// `qkv_fused::QKV_BIAS_CREATORS`: which Q/K/V biases the graph
+    /// `qkv_fused::QKV_TENSOR_CREATORS`: which Q/K/V biases the graph
     /// creates, and how.
-    pub qkv_bias: crate::qkv_fused::QkvBias,
+    pub qkv_tensors: crate::qkv_fused::QkvTensors,
     /// `parallel_dense_ffn`: a dense FFN summed with the routed experts.
     pub parallel_dense: Option<&'static crate::parallel_dense_ffn::ParallelDenseFfn>,
 }
@@ -336,7 +336,7 @@ impl ArchFacts {
             attn_out_bias: None,
             ffn_bias: None,
             output_bias: None,
-            qkv_bias: crate::qkv_fused::QkvBias::Helper,
+            qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
             parallel_dense: None,
         },
         rules: HparamRules::LEGACY,
@@ -449,7 +449,7 @@ impl ArchFacts {
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
-                qkv_bias: crate::qkv_fused::qkv_bias_from_table(arch),
+                qkv_tensors: crate::qkv_fused::qkv_tensors_from_table(arch),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn_from_table(arch),
             },
             rules: HparamRules::LEGACY,

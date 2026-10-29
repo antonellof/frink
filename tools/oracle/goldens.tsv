@@ -165,6 +165,8 @@ sub_norm_graphs.rs:BITNET_SCALES_GOLDEN_HEAD logits $F/bitnet_scales_tiny.gguf @
 ungated_ffn_graphs.rs:ARCEE_GOLDEN logits $F/arcee_tiny.gguf @GRAPH
 window_array_graphs.rs:EXAONE_MOE_MTP_GOLDEN logits $F/exaone_moe_mtp_tiny.gguf @GRAPH
 window_array_graphs.rs:MELLUM_GOLDEN logits $F/mellum_tiny.gguf @GRAPH
+window_array_graphs.rs:EXAONE_MOE_FLIPPED_GOLDEN logits $F/exaone_moe_array_flipped_tiny.gguf @GRAPH
+window_array_graphs.rs:MELLUM_NOPATTERN_GOLDEN logits $F/mellum_nopattern_tiny.gguf @GRAPH
 window_array_graphs.rs:MELLUM_MTP_GOLDEN logits $F/mellum_mtp_tiny.gguf @GRAPH
 fixtures/decode_steps/cohere2.txt decode REF_DECODE_STEPS=32 $F/cohere2_tiny.gguf @GRAPH
 fixtures/decode_steps/glm4.txt decode REF_DECODE_STEPS=32 $F/glm4_tiny.gguf @GRAPH

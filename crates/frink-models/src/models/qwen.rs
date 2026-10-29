@@ -20,7 +20,7 @@
 use super::facts::{ArchFacts, FfnFacts, TensorFacts};
 use super::ModelDef;
 use crate::proj_bias::Presence;
-use crate::qkv_fused::QkvBias;
+use crate::qkv_fused::QkvTensors;
 
 pub const FACTS: ArchFacts = ArchFacts {
     ffn: FfnFacts {
@@ -28,7 +28,7 @@ pub const FACTS: ArchFacts = ArchFacts {
         ..ArchFacts::DEFAULT.ffn
     },
     tensors: TensorFacts {
-        qkv_bias: QkvBias::Fused(Presence::Required),
+        qkv_tensors: QkvTensors::Fused(Some(Presence::Required)),
         ..ArchFacts::DEFAULT.tensors
     },
     ..ArchFacts::DEFAULT

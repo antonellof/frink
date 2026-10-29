@@ -181,7 +181,7 @@ impl Decoder {
                         &file,
                         l,
                         &config,
-                        facts.tensors.qkv_bias,
+                        facts.tensors.qkv_tensors,
                     )?;
                     let q_norm =
                         load_f32_vec_optional(&file, &format!("blk.{l}.attn_q_norm.weight"))?;

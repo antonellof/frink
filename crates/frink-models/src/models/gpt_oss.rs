@@ -10,9 +10,11 @@
 //!   clamp), so `seed_oss`, which shares the norm slot, is not handed
 //!   attention sinks.
 //! - **A REQUIRED `attn_output.bias`.**
-//!
-//! `:6` reads `attention.sliding_window` as REQUIRED and frink does not
-//! refuse a file without it (#458).
+//! - **`attention.sliding_window` is REQUIRED** (`:6`, no `false`): a
+//!   file without it does not load upstream, and is refused here (#458).
+//! - The window pattern through `load_swa_pattern(ml, 2)` (`:9`): an
+//!   array in the file wins over the seeded period
+//!   (`crate::swa_layers::LOAD_SWA_PATTERN_CALLERS`, #420).
 //!
 //! Evidence: `tests/gptoss_graph.rs`, against libllama.
 
@@ -30,6 +32,7 @@ pub const FACTS: ArchFacts = ArchFacts {
         }),
         rope_base_follows_model: true,
         rope_scale_follows_model: true,
+        window_required: Some("openai-moe.cpp:6"),
         ..ArchFacts::DEFAULT.swa
     },
     tensors: TensorFacts {

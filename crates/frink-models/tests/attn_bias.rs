@@ -472,17 +472,19 @@ fn the_bias_transcription_is_complete_enough_to_be_worth_pinning() {
 
 /// The required-bias transcription above and the loader's Q/K/V bias
 /// row agree (#447): every row that requires `attn_qkv.bias` is
-/// `QkvBias::Fused(Required)` in the facts the loader reads, and no
+/// `QkvTensors::Fused(Required)` in the facts the loader reads, and no
 /// other generic row is. One table could otherwise say REQUIRED while
 /// the loader went on treating the bias as optional, which is what
 /// `qwen` did.
 #[test]
 fn every_required_fused_qkv_bias_is_required_by_the_loader() {
     use frink_models::proj_bias::Presence;
-    use frink_models::qkv_fused::{QkvBias, QKV_BIAS_CREATORS};
+    use frink_models::qkv_fused::{QkvTensors, QKV_TENSOR_CREATORS};
     let required = |arch: &str| {
-        frink_models::models::ArchFacts::of(arch).tensors.qkv_bias
-            == QkvBias::Fused(Presence::Required)
+        frink_models::models::ArchFacts::of(arch)
+            .tensors
+            .qkv_tensors
+            == QkvTensors::Fused(Some(Presence::Required))
     };
     for (arch, biases, _) in LLAMA_REQUIRED_BIASES {
         assert_eq!(
@@ -494,8 +496,8 @@ fn every_required_fused_qkv_bias_is_required_by_the_loader() {
         // the pin (`create_tensor_qkv` creates them optional).
         assert!(!biases.contains(&"attn_q.bias"), "{arch}");
     }
-    for (arch, rule, _) in QKV_BIAS_CREATORS {
-        if *rule == QkvBias::Fused(Presence::Required) {
+    for (arch, rule, _) in QKV_TENSOR_CREATORS {
+        if *rule == QkvTensors::Fused(Some(Presence::Required)) {
             assert!(
                 LLAMA_REQUIRED_BIASES.iter().any(|(a, ..)| a == arch),
                 "{arch} is required by the loader but not transcribed"
@@ -544,5 +546,27 @@ fn a_falcon_file_with_a_fused_qkv_bias_is_refused() {
             assert!(msg.contains("attn_qkv.bias"), "{msg}");
         }
         Ok(_) => panic!("a falcon file carrying attn_qkv.bias must be refused"),
+    }
+}
+
+/// `gpt2.cpp:37-38` creates ONLY the fused `attn_qkv`: libllama does not
+/// load `gpt2_split_tiny.gguf` (`check_tensor_dims: tensor
+/// 'blk.0.attn_qkv.weight' not found`, measured), and frink refuses it
+/// by name where it used to run the split weights (#461).
+#[test]
+fn a_gpt2_file_with_split_qkv_weights_is_refused() {
+    let path = format!(
+        "{}/tests/fixtures/gpt2_split_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    let config = frink_models::ModelConfig::from_gguf(&file).expect("config parses");
+    match frink_models::Decoder::from_gguf(&path, config) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("split attn_{q,k,v}.weight"), "{msg}");
+            assert!(msg.contains("only attn_qkv.weight"), "{msg}");
+        }
+        Ok(_) => panic!("a gpt2 file with split Q/K/V must be refused"),
     }
 }
