@@ -167,3 +167,6 @@ fixtures/decode_steps/smallthinker_swa2.txt decode REF_DECODE_STEPS=32 $F/smallt
 lfm3_graphs.rs:LFM3_GOLDEN logits $F/lfm3_tiny.gguf @GRAPH
 lfm3_graphs.rs:LFM3_NO_POST_NORM_GOLDEN logits $F/lfm3_no_post_norm_tiny.gguf @GRAPH
 fixtures/decode_steps/lfm3.txt decode REF_DECODE_STEPS=32 $F/lfm3_tiny.gguf @GRAPH
+kolibri1_graphs.rs:KOLIBRI1_GOLDEN logits $F/kolibri1_tiny.gguf @GRAPH
+kolibri1_graphs.rs:KOLIBRI1_SOFTMAX_GOLDEN logits $F/kolibri1_softmax_tiny.gguf @GRAPH
+fixtures/decode_steps/kolibri1.txt decode REF_DECODE_STEPS=32 $F/kolibri1_tiny.gguf @GRAPH

@@ -103,6 +103,9 @@ jais_tiny                                match                        make_alibi
 jamba_tiny                               match                        make_mamba_fixture.py OUT
 jina_bert_v2_tiny                        refused                      make_jina_bert_v2_fixture.py OUT
 jina_bert_v3_tiny                        refused                      make_jina_bert_v3_fixture.py OUT
+kolibri1_no_bias_tiny                    both-fail                    make_kolibri1_fixture.py OUT --no-bias  # refusal evidence: exp_probs_b is REQUIRED upstream (kolibri1.cpp:54)
+kolibri1_softmax_tiny                    match                        make_kolibri1_fixture.py OUT --softmax
+kolibri1_tiny                            match                        make_kolibri1_fixture.py OUT
 laguna_swa_rot_tiny                      match                        make_laguna_fixture.py OUT --swa-rot
 laguna_swa_tiny                          match                        make_laguna_fixture.py OUT --swa
 laguna_swa_yarn_tiny                     refused                      make_laguna_fixture.py OUT --swa-yarn

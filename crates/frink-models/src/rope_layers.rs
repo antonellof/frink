@@ -230,6 +230,9 @@ pub fn reads_rope_pattern(arch: &str) -> bool {
     ROPE_PATTERN_READERS.iter().any(|(a, _)| *a == arch)
 }
 
+/// Which layers of `arch` rotate, through the registry: the rule a
+/// `crate::models` entry states (`HparamRules::rope_layers`), else
+/// [`rope_layers_from_table`].
 pub fn rope_layers(
     arch: &str,
     n_layers: usize,

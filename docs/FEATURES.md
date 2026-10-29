@@ -6,8 +6,8 @@ happens inside the matvec. Backends: CPU, Apple Metal, and CUDA.
 
 ## Models
 
-101 architectures run with a benchmark row, a pinned logit
-comparison against real `libllama`, or a fixture behind each. Ten
+102 architectures run with a benchmark row, a pinned logit
+comparison against real `libllama`, or a fixture behind each. Nine
 more on the same path have been read and stop with an error that names
 what is missing. `frink archs` prints the
 current list; [`MODELS.md`](MODELS.md) says what runs, what refuses and

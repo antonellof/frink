@@ -273,7 +273,7 @@ pub struct StoredNorm {
 }
 
 impl StoredNorm {
-    const fn required(names: &'static [&'static str]) -> Self {
+    pub(crate) const fn required(names: &'static [&'static str]) -> Self {
         Self {
             names,
             required: true,
