@@ -218,6 +218,20 @@ fn metal_matvec_launch(kind: QuantKind) -> Option<MetalMatvecLaunchFn> {
         QuantKind::Q6K => Some(frink_metal::gpu::launch_q6_k_matvec),
         QuantKind::IQ4XS => Some(frink_metal::gpu::launch_iq4_xs_matvec),
         QuantKind::Ptq1_0 => Some(frink_metal::gpu::launch_ptq1_0_matvec),
+        QuantKind::Q2K => Some(frink_metal::q2_k::launch_q2_k_matvec),
+        QuantKind::Q3K => Some(frink_metal::q3_k::launch_q3_k_matvec),
+        QuantKind::IQ4NL => Some(frink_metal::codebook4::launch_iq4_nl_matvec),
+        QuantKind::Mxfp4Gguf => Some(frink_metal::codebook4::launch_mxfp4_matvec),
+        QuantKind::IQ2XXS => Some(frink_metal::iq::launch_iq2_xxs_matvec),
+        QuantKind::IQ2XS => Some(frink_metal::iq::launch_iq2_xs_matvec),
+        QuantKind::IQ2S => Some(frink_metal::iq::launch_iq2_s_matvec),
+        QuantKind::IQ3XXS => Some(frink_metal::iq::launch_iq3_xxs_matvec),
+        QuantKind::IQ3S => Some(frink_metal::iq::launch_iq3_s_matvec),
+        QuantKind::IQ1S => Some(frink_metal::iq::launch_iq1_s_matvec),
+        QuantKind::IQ1M => Some(frink_metal::iq::launch_iq1_m_matvec),
+        QuantKind::Q4_1 => Some(frink_metal::dq_mv::launch_q4_1_matvec),
+        QuantKind::Q5_1 => Some(frink_metal::dq_mv::launch_q5_1_matvec),
+        QuantKind::Tq1_0 => Some(frink_metal::dq_mv::launch_tq1_0_matvec),
         _ => None,
     }
 }
@@ -318,7 +332,21 @@ impl BackendCaps for Metal {
             | QuantKind::Q5K
             | QuantKind::Q6K
             | QuantKind::IQ4XS
-            | QuantKind::Ptq1_0 => Some(kind.name()),
+            | QuantKind::Ptq1_0
+            | QuantKind::Q2K
+            | QuantKind::Q3K
+            | QuantKind::IQ4NL
+            | QuantKind::Mxfp4Gguf
+            | QuantKind::IQ2XXS
+            | QuantKind::IQ2XS
+            | QuantKind::IQ2S
+            | QuantKind::IQ3XXS
+            | QuantKind::IQ3S
+            | QuantKind::IQ1S
+            | QuantKind::IQ1M
+            | QuantKind::Q4_1
+            | QuantKind::Q5_1
+            | QuantKind::Tq1_0 => Some(kind.name()),
             _ => None,
         }
     }
@@ -356,6 +384,20 @@ impl BackendCaps for Metal {
                 | QuantKind::Q6K
                 | QuantKind::IQ4XS
                 | QuantKind::Ptq1_0
+                | QuantKind::Q2K
+                | QuantKind::Q3K
+                | QuantKind::IQ4NL
+                | QuantKind::Mxfp4Gguf
+                | QuantKind::IQ2XXS
+                | QuantKind::IQ2XS
+                | QuantKind::IQ2S
+                | QuantKind::IQ3XXS
+                | QuantKind::IQ3S
+                | QuantKind::IQ1S
+                | QuantKind::IQ1M
+                | QuantKind::Q4_1
+                | QuantKind::Q5_1
+                | QuantKind::Tq1_0
         )
     }
 }
@@ -434,7 +476,7 @@ impl BackendCaps for Vulkan {
     /// `apply_batch_with_acts` has a CUDA arm and a Metal arm. So a
     /// prefill against a Vulkan-resident kind runs on the host, and
     /// this names the host path rather than inventing a GPU one.
-    const GEMM_FALLBACK: &'static str = "CPU apply_batch";
+    const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
     /// Exactly one kind, because there is exactly one shader:
     /// `frink_vulkan::q8_0_shader`.
@@ -528,6 +570,10 @@ impl BackendDispatch for Metal {
     }
 
     fn dense_enabled() -> bool {
+        // Before the cell: a host pin holds whatever was decided first.
+        if super::host_pin::host_backend_pinned() {
+            return false;
+        }
         use std::sync::OnceLock;
         // A `static` inside a generic function is shared across every
         // monomorphization, so this cache cannot be hoisted into a
@@ -575,6 +621,10 @@ impl BackendDispatch for Cuda {
     }
 
     fn dense_enabled() -> bool {
+        // Before the cell: a host pin holds whatever was decided first.
+        if super::host_pin::host_backend_pinned() {
+            return false;
+        }
         use std::sync::OnceLock;
         // See the note on `Metal::dense_enabled` for why this cell is
         // not shared through a default method.
@@ -676,6 +726,10 @@ impl BackendDispatch for Vulkan {
     }
 
     fn dense_enabled() -> bool {
+        // Before the cell: a host pin holds whatever was decided first.
+        if super::host_pin::host_backend_pinned() {
+            return false;
+        }
         use std::sync::OnceLock;
         // See the note on `Metal::dense_enabled` for why this cell is
         // not shared through a default method.

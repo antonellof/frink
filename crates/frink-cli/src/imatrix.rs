@@ -135,7 +135,7 @@ pub fn run(args: ImatrixArgs) -> Result<()> {
     }
     // Pins the CPU backend and reads the decision back. See the module
     // doc for why the tap needs the CPU path.
-    crate::bench_model::apply_env(args.threads, 0)?;
+    crate::bench_model::apply_env(args.threads, 0, None)?;
 
     let path = crate::pull::resolve_model_path(&args.model)?;
     let text = std::fs::read_to_string(&args.file)

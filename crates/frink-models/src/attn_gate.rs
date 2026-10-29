@@ -197,6 +197,20 @@ pub const ATTN_GATE_ARCHS: &[(&str, AttnGateSpec)] = &[
             lines: "src/models/spark2-5.cpp:41,97-105",
         },
     ),
+    // Landed upstream after the 2026-09-19 pin: `lfm3.cpp:77` creates
+    // the tensor REQUIRED at `{n_embd, n_head}` on every attention
+    // layer, and `:132-139` project it from the `attn_norm` output
+    // (`cur_in`), sigmoid it and multiply it in per head before `wo`.
+    // `spark2_5`'s corner.
+    (
+        "lfm3",
+        AttnGateSpec {
+            act: GateAct::Sigmoid,
+            widths: &[GateWidth::PerHead],
+            presence: GatePresence::Required,
+            lines: "src/models/lfm3.cpp:77,132-139",
+        },
+    ),
 ];
 
 /// The three graphs whose FULL-attention layers gate the softmax output
@@ -497,7 +511,8 @@ mod tests {
     /// Six rows since 2026-09-19: `spark2_5`, `muse-glimmer` and
     /// `hrm_text` all landed upstream after the 2026-08-04 pin -- the
     /// first is `step35`'s pair with the tensor required and the other
-    /// two are `afmoe`'s.
+    /// two are `afmoe`'s. `lfm3` made seven on 2026-10-28, `spark2_5`'s
+    /// corner again.
     #[test]
     fn the_table_covers_the_softmax_gates_and_excludes_the_gdn_z_gates() {
         let names: Vec<&str> = ATTN_GATE_ARCHS.iter().map(|(n, _)| *n).collect();
@@ -509,7 +524,8 @@ mod tests {
                 "step35",
                 "hrm_text",
                 "muse-glimmer",
-                "spark2_5"
+                "spark2_5",
+                "lfm3"
             ]
         );
         for (arch, spec) in ATTN_GATE_ARCHS {

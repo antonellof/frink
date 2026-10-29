@@ -477,8 +477,8 @@ fn a_parameterised_activation_has_no_whole_model_answer_for_the_fused_kernels() 
 #[test]
 #[ignore = "needs Apple Metal GPU"]
 fn a_parameterised_activation_stays_on_the_host_with_metal_switched_on() {
-    std::env::set_var("FRINK_METAL", "1");
-    std::env::set_var("FRINK_METAL_ATTN", "1");
+    #[cfg(feature = "metal")]
+    common::pin_backend(common::Backend::Metal);
     #[cfg(not(feature = "metal"))]
     {
         eprintln!("skip: built without --features metal");

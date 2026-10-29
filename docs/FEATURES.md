@@ -6,8 +6,8 @@ happens inside the matvec. Backends: CPU, Apple Metal, and CUDA.
 
 ## Models
 
-100 architectures run with a benchmark row, a pinned logit
-comparison against real `libllama`, or a fixture behind each. Eleven
+102 architectures run with a benchmark row, a pinned logit
+comparison against real `libllama`, or a fixture behind each. Nine
 more on the same path have been read and stop with an error that names
 what is missing. `frink archs` prints the
 current list; [`MODELS.md`](MODELS.md) says what runs, what refuses and
@@ -58,6 +58,13 @@ recurrent state cannot be rolled back to a middle position.
 | **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15), and a resident dense prefill stack (norms, QKV bias, QK norm, RoPE, causal GQA, SwiGLU, residuals on the device; K/V rows back to the host cache) |
 | **Vulkan** | `Q8_0` matvec only, no GEMM (`--features vulkan`). A beachhead rather than a full backend: see below |
 
+Which quant kinds each backend runs, per op (matvec for decode, GEMM
+for prefill, `get_rows` for the embedding), and which fall back to the
+host, is [`KERNELS.md`](KERNELS.md). It is generated from the dispatch
+tables by `frink caps --kernels` and a test fails when it drifts. A
+fallback also prints a `NO KERNEL` line at load, and `frink inspect-plan`
+lists the tensors of one GGUF that would take one.
+
 Vulkan is a single kernel. `--features vulkan` gives a `Q8_0` matvec
 and nothing else. It reports no GEMM for any kind, so a prefill lands on
 the host, and it claims no other quantization. It ran on real hardware
@@ -107,22 +114,30 @@ the kernel tables:
 |---|---|---|---|
 | Full | `Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` | AVX2 + NEON, plus the int-dot path | Metal matvec + GEMM, CUDA matvec + GEMM |
 | Metal only | `IQ4_XS`, `Q5_0` | AVX2 + NEON | Metal matvec + GEMM |
-| Metal only, scalar CPU | `PTQ1_0` (PrismML ternary) | scalar | Metal matvec + GEMM |
-| CPU-vectorized | `Q4_1`, `Q5_1`, `Q8_1`, `Q2_K`, `Q3_K`, `IQ4_NL`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none |
-| AVX2 only | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | none |
-| Scalar only | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M`, GGUF-block `MXFP4` | none | none |
+| Metal only, scalar CPU | `PTQ1_0` (PrismML ternary), `TQ1_0` | scalar | Metal matvec + GEMM |
+| GPU, f32 CPU dot | `Q2_K`, `Q3_K` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
+| Codebook | `IQ4_NL` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
+| Codebook, scalar CPU | GGUF-block `MXFP4` (gpt-oss's experts) | scalar | Metal matvec + GEMM, CUDA matvec + GEMM |
+| Legacy with a min | `Q4_1`, `Q5_1` | AVX2 + NEON | Metal matvec + GEMM |
+| CPU-vectorized | `Q8_1`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none; `Q8_1` is ggml's activation format, with no weight path to match (`n/a` in KERNELS.md) |
+| Grid codebook, AVX2 CPU | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | Metal matvec + GEMM |
+| Grid codebook, scalar CPU | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M` | none | Metal matvec + GEMM |
 
-Metal's MoE indexed GEMM (`mul_mm_id`) is narrower still: `Q4_0`,
-`Q8_0` and `Q4_K` only.
+Metal's MoE id kernels (`mul_mv_id` for decode, `mul_mm_id` for
+prefill) cover every kind in the table above with a Metal kernel but
+two: `Q5_0` has `mul_mv_id` only, and `PTQ1_0` has neither, so its
+experts run one matvec each. The per-backend matrix is
+[`docs/KERNELS.md`](KERNELS.md).
 
 Before choosing a quant:
 
-- The bottom two tiers are correct and deliberately slow. They were
-  added for coverage: before them those tags could not be decoded at
-  all, which ruled out 5 of the 16 published Unsloth `UD-*` variants. A
-  vectorized path was left out because no golden vector existed that
-  could tell it apart from the scalar one.
-- On an Apple machine the "AVX2 only" row is the scalar row.
+- The two grid-codebook tiers are correct and deliberately slow on the
+  CPU; on Metal they have kernels in ggml's geometry (#405). The CPU
+  paths were added for coverage: before them those tags could not be
+  decoded at all, which ruled out 5 of the 16 published Unsloth `UD-*`
+  variants. A vectorized path was left out because no golden vector
+  existed that could tell it apart from the scalar one.
+- On an Apple machine's CPU the "AVX2 CPU" row is the scalar row.
   `IQ1_S`, `IQ2_XXS` and `IQ3_XXS` have x86 kernels and no NEON ones.
 - `I32`, `TQ2_0`, `NVFP4`, `Q1_0`, `Q2_0` and `PQ2_0` are recognized
   and sized, and nothing executes them. They parse, `frink inspect`
@@ -379,18 +394,25 @@ OpenAI-compatible HTTP API:
   drifts a window past it. An alternating-SWA model (gpt-oss,
   Gemma-3) does not slide *there*: a page group holds one block in
   every layer, and the full-attention layers still read position 0
-- On the contiguous host store, eviction is per layer, so the
-  alternating models do get it: each layer's `KvCache` carries its own
-  window from `attention.sliding_window` /
-  `attention.sliding_window_pattern` and drops the rows behind it, while
-  the full-attention layers keep everything. Off unless
-  `FRINK_KV_WINDOW` is set, and it turns itself off under Metal
-  attention, on a draft model, and beside the prefix cache. Output is
-  token-identical with it on or off, asserted on logits as well as token
-  ids against gemma-2-2b-it-Q4_K_M. `--ctx-size auto` and the pre-load
-  admission check are priced against the same per-layer residency the
-  stores evict with, so the saving is context a user is actually offered
-  rather than memory nothing spends. See [`CONFIG.md`](CONFIG.md)
+- On the contiguous host store, eviction is per layer and on by
+  default, so the alternating models get it: each layer's `KvCache`
+  carries its own window from `attention.sliding_window` and
+  `attention.sliding_window_pattern` (or the file's per-layer array) and
+  keeps only `window` rows plus slack, while the full-attention layers
+  keep everything. Gemma-3-4B at a 32k context holds 1.68 GiB of host
+  f32 KV instead of 9.13 GiB. Speculative decoding, the prefix cache and
+  `n > 1` forks all work on an evicting cache: a drain keeps a rollback
+  reserve and drafts are bounded by it, and a prefix-cache match deeper
+  than the cache can truncate to is a miss rather than a history with a
+  hole in it. `FRINK_KV_WINDOW=0` keeps every row. It turns itself off
+  under `FRINK_METAL_ATTN` and on a draft model, and the paged store and
+  the KV pool do not evict. Output is token-identical with it on or off,
+  asserted on logits as well as token ids against gemma-2-2b-it-Q4_K_M
+  and through rejected drafts on a fixture decoding several windows
+  past the end. `--ctx-size auto` and the pre-load admission check are
+  priced against the same per-layer residency the stores evict with, so
+  the saving is context a user is actually offered rather than memory
+  nothing spends. See [`CONFIG.md`](CONFIG.md)
 - `frink serve-bench`: concurrency, TTFT, TPOT and queueing numbers
   for a live server, with the methodology (positional split, pooled
   nearest-rank percentiles, whole-run throughput) tested socket-free.
@@ -449,13 +471,13 @@ stops matching the code turns a test red.
 |---|---|
 | Bandwidth-adaptive CPU/GPU co-execution (`q*`) | **Partial.** `qstar::BandwidthProfile` is in `frink-core` and used by `frink bench-bw`, a measurement tool. The serving path does not consult it. |
 | Full-layer double-buffered prefill streaming | **Built, not wired.** Kept for the out-of-core work, which names it. |
-| Global LRU expert caching | **Yes, and now singular.** `expert_store` is wired into both decode paths and proven bit-identical to resident at a 1-byte budget. The second, competing cache and its separate byte budget were folded in beside it. |
+| Global LRU expert caching | **Yes, singular, and ranked by routing counts.** `expert_store` is wired into both decode paths; for a GGUF model its entries live in the slots of a `SlotDevice` (host RAM, or on Metal one Shared buffer the GPU reads in place), eviction ranks by the decoder's activation counts, and decode is proven identical to resident at half, a quarter and one slot of the expert bytes. |
 | Graph-compatible execution | **No.** Execution is eager. `ExecutionPlan` is built and read by nothing. |
 | FTW fast weight format | **No.** GGUF only. |
 | Semantic anchor checkpoints for KV | **Yes.** `anchor::decode_slide` and `WindowPolicy` are wired into `generate.rs` and the batch scheduler. |
 | Agentic context edits without recompute | **Partial, and no longer leaking.** The radix prefix cache shares pages and reports `cached_tokens` on both the private and the batched path. `evict` is called from `acquire_paged_caches`, which both paths go through, when a request cannot find pages: the tree gives back what no live lease has locked, and the caller retries immediately rather than charging reclamation against its deadline. What is still partial is the edit itself: a changed middle forces a recompute from that point, because the cache is a prefix tree. |
 | Elastic VRAM re-allocation without restart | **Partial.** `POST /v1/cache/rebuild` re-splits KV pool geometry at runtime. Moving bytes between an expert cache and KV is not implemented. |
-| MXFP4 / BF16 | **Yes**, executable. MXFP4 is CPU-only. |
+| MXFP4 / BF16 | **Yes**, executable. GGUF-block MXFP4 has Metal and CUDA matvec and GEMM kernels; the safetensors two-buffer form is CPU-only. |
 | NVFP4 / FP8 | **Refused by name, not executed.** NVFP4 is recognized and sized by `frink-gguf` (tag 40) and has no execution path, so a file carrying it stops instead of computing something else. FP8 appears only as a KV cache wire (`--ctk fp8`), not as a weight format. |
 | DeepSeek-V4-Flash, GLM-5.2, Kimi K3 | **Loaders and primitives only.** Nothing has run end to end on a real checkpoint. |
 | OpenAI + Anthropic compatible APIs | **Yes**, both, plus Responses. Tool calls parsed in eleven wire formats. |
@@ -464,8 +486,13 @@ stops matching the code turns a test red.
 Two notes. Frink runs on Apple Metal, which that description does not
 cover, and Metal is where it is fastest: every `pp512` row is 0.99x to
 1.09x against llama.cpp and every one of the 16 comparable `tg128` rows
-is faster. The largest gap is missing from this table: running a model
-that does not fit in memory exists as policy and is not executed.
+is faster. The largest gap is missing from this table: running a model that does
+not fit in memory now executes its residency policy (set
+`FRINK_EXPERT_CACHE_BYTES` below the expert bytes), and has been checked
+on models that fit, under a budget. It has not yet run a model that
+really exceeds RAM, and streamed layers decode several times slower
+than resident ones even when every expert is cached
+(`docs/plans/out-of-core-moe.md`).
 
 ## Serving policy
 

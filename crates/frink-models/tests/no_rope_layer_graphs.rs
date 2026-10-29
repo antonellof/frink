@@ -143,6 +143,84 @@ const EXAONE4_32B_GOLDEN: [f32; 32] = [
     0.027845688,
 ];
 
+/// `exaone4_32b_nowindow_tiny.gguf`: the 64-layer file without
+/// `attention.sliding_window`. libllama slides it at the seeded 4096
+/// (`exaone4.cpp:6`), so the full-attention layers rotate nothing
+/// (#440).
+const EXAONE4_32B_NOWINDOW_GOLDEN: [f32; 32] = [
+    -0.34208846,
+    -0.3947661,
+    -0.10962723,
+    -0.042137608,
+    0.0108428,
+    -0.6239327,
+    -0.13453189,
+    0.10313081,
+    -0.050256614,
+    -0.12259874,
+    0.19557089,
+    -0.3169595,
+    -0.037645638,
+    0.28570563,
+    0.13868013,
+    0.36613095,
+    0.21560583,
+    -0.03157097,
+    -0.17200866,
+    0.0040836334,
+    0.21910283,
+    0.039009623,
+    0.34845865,
+    0.07631612,
+    0.16707954,
+    0.13410087,
+    0.2729799,
+    -0.2380636,
+    -0.23302345,
+    -0.14149782,
+    -0.029318288,
+    -0.029059485,
+];
+
+/// `exaone4_32b_mtp_tiny.gguf`: the 64-layer file with one MTP block
+/// appended (`block_count` 65, `nextn_predict_layers` 1). libllama's
+/// answer is the 64-layer file's, bit for bit: `exaone4.cpp:4` tests
+/// the trunk and the block is `TENSOR_SKIP` (#441).
+const EXAONE4_32B_MTP_GOLDEN: [f32; 32] = [
+    -0.31675017,
+    -0.52429783,
+    0.26734048,
+    -0.102382086,
+    -0.1522709,
+    -0.7544714,
+    -0.012922343,
+    0.26474053,
+    -0.048706904,
+    0.2536888,
+    0.12412921,
+    -0.1337578,
+    -0.16766791,
+    0.25164938,
+    -0.01992102,
+    0.08800185,
+    0.25482318,
+    0.12509932,
+    -0.3280951,
+    0.15627429,
+    0.19082192,
+    0.062021248,
+    0.31698078,
+    0.0901043,
+    0.025959905,
+    0.1553717,
+    0.6365426,
+    -0.23589525,
+    0.0011638589,
+    -0.15762156,
+    -0.037891954,
+    0.027845688,
+];
+
 const SMOLLM3_GOLDEN: [f32; 48] = [
     0.27115217,
     0.06371546,
@@ -196,6 +274,168 @@ const SMOLLM3_GOLDEN: [f32; 48] = [
 
 /// llama.cpp's logits for `maple_tiny.gguf` over [`GRAPH_PROMPT`].
 const MAPLE_GOLDEN: [f32; 48] = [
+    0.6486808,
+    -0.23711741,
+    -0.5294898,
+    -0.46147358,
+    -1.9501901,
+    3.4603767,
+    0.15342909,
+    0.5967338,
+    0.26974905,
+    3.5528212,
+    -1.273411,
+    -1.2770839,
+    -1.8373278,
+    2.3348446,
+    0.009929895,
+    -0.6402428,
+    2.4302635,
+    0.2994001,
+    -1.1233808,
+    -0.85524726,
+    -2.314069,
+    0.15556979,
+    0.22562456,
+    0.4092492,
+    -2.305313,
+    1.2321382,
+    -0.66026187,
+    1.2131181,
+    3.2547603,
+    -1.1485307,
+    0.2499813,
+    0.66347164,
+    -2.2737732,
+    1.6876196,
+    0.4008119,
+    -0.59180975,
+    0.7276684,
+    0.29646862,
+    0.77146876,
+    1.9338744,
+    4.3427477,
+    1.137814,
+    1.5413116,
+    -0.009805858,
+    -0.3871348,
+    0.8032818,
+    -1.3253019,
+    1.0272561,
+];
+
+/// `maple_model_rope_tiny.gguf`: no `rope.freq_base_swa`, a model base
+/// of 40000 and a linear factor of 2. `maple.cpp:12-13` seed the sliding
+/// layers' base and scale from the model's (#446).
+const MAPLE_MODEL_ROPE_GOLDEN: [f32; 48] = [
+    0.9988805,
+    -0.13319254,
+    0.86428416,
+    -0.60122246,
+    -3.733892,
+    2.8123028,
+    0.06451139,
+    0.32578102,
+    0.53381896,
+    2.6254642,
+    -1.2790289,
+    -0.8403716,
+    -0.5325314,
+    0.7440721,
+    0.22820932,
+    -0.5612092,
+    2.4643466,
+    1.1048443,
+    -0.20520483,
+    -1.860012,
+    -2.1637416,
+    0.31232756,
+    1.1921091,
+    0.45086825,
+    -2.0796974,
+    0.67866784,
+    -1.0180643,
+    -0.22611213,
+    2.5526838,
+    -1.5739808,
+    0.058849514,
+    1.5425493,
+    -1.981108,
+    1.6793767,
+    0.26018664,
+    -0.39497483,
+    0.055113196,
+    0.70387167,
+    1.3647919,
+    2.1699717,
+    2.8602967,
+    0.27044737,
+    1.1593324,
+    -0.91082084,
+    -0.10111934,
+    -0.07340336,
+    -1.1552482,
+    0.2756722,
+];
+
+/// `maple_swa_short_tiny.gguf`: the window array cut to two entries.
+/// `get_arr` checks no length, so layers 2 and 3 keep the zero seed and
+/// run full attention (#452).
+const MAPLE_SWA_SHORT_GOLDEN: [f32; 48] = [
+    0.9170451,
+    -0.36543506,
+    -0.21062836,
+    -0.97631526,
+    -2.0955749,
+    2.6936138,
+    1.0502985,
+    0.8190136,
+    0.3011872,
+    3.7901585,
+    -1.6819832,
+    -1.1008003,
+    -2.770547,
+    1.9392412,
+    1.2552593,
+    -1.2288821,
+    1.5993829,
+    0.56907684,
+    -1.5354404,
+    -0.59103227,
+    -1.747711,
+    0.61552584,
+    0.14505106,
+    1.1718448,
+    -2.0797377,
+    1.1376461,
+    -0.9240891,
+    1.2114604,
+    3.3346639,
+    -0.7496854,
+    1.2863438,
+    1.1049132,
+    -2.352014,
+    -0.17587873,
+    0.538759,
+    -1.3632724,
+    0.83606064,
+    0.8126086,
+    0.88897485,
+    1.3915255,
+    4.479071,
+    0.7887421,
+    1.1859157,
+    0.17517805,
+    -0.43843153,
+    0.6480988,
+    -1.9536508,
+    -0.18973467,
+];
+
+/// `maple_swa_long_tiny.gguf`: the window array with three entries past
+/// `block_count`. Never read: libllama's answer is the base file's, bit
+/// for bit (#452).
+const MAPLE_SWA_LONG_GOLDEN: [f32; 48] = [
     0.6486808,
     -0.23711741,
     -0.5294898,
@@ -395,6 +635,64 @@ fn exaone4_32b_gets_a_window_from_its_layer_count() {
     assert_eq!(
         d.config.swa_layers,
         frink_models::swa_layers::SwaLayers::period(4, false)
+    );
+}
+
+/// Without the key the 32B still slides, at `exaone4.cpp:6`'s 4096,
+/// and its full-attention layers still rotate nothing (#440).
+///
+/// Over this prompt a 4096 window masks nothing, so what the golden
+/// sees is the rotation: no window would rotate every layer, which the
+/// second assertion shows llama.cpp does not do.
+#[test]
+fn exaone4_32b_without_its_window_key_matches_llama_cpp() {
+    assert_all_three_paths_match("exaone4_32b_nowindow", &EXAONE4_32B_NOWINDOW_GOLDEN);
+    let d = load_graph_fixture("exaone4_32b_nowindow");
+    assert_eq!(d.config.sliding_window, Some(4096));
+    let mut every = load_graph_fixture("exaone4_32b_nowindow");
+    every.config.rope_layers = RopeLayers::All;
+    let mut kv = graph_caches(&every);
+    let worst = worst_vs(
+        &every.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
+        &EXAONE4_32B_NOWINDOW_GOLDEN,
+    );
+    assert!(worst > 1e-2, "rotating every layer moved only {worst}");
+}
+
+/// One MTP block appended is still the 32B: `exaone4.cpp:4` sees the
+/// trunk, and libllama's answer is the 64-layer file's (#441).
+#[test]
+fn exaone4_32b_with_an_mtp_block_matches_llama_cpp() {
+    assert_eq!(EXAONE4_32B_MTP_GOLDEN, EXAONE4_32B_GOLDEN);
+    assert_all_three_paths_match("exaone4_32b_mtp", &EXAONE4_32B_MTP_GOLDEN);
+    let d = load_graph_fixture("exaone4_32b_mtp");
+    assert_eq!((d.config.n_layers, d.config.n_mtp_blocks), (64, 1));
+    assert_eq!(d.config.sliding_window, Some(3));
+}
+
+/// Maple's sliding layers rotate at the MODEL's base and scale when the
+/// file has no `rope.freq_base_swa` (`maple.cpp:12-13`, #446), not at
+/// `llama_hparams`' 10000 and 1.
+#[test]
+fn maple_without_a_swa_rope_base_matches_llama_cpp() {
+    assert_all_three_paths_match("maple_model_rope", &MAPLE_MODEL_ROPE_GOLDEN);
+    let d = load_graph_fixture("maple_model_rope");
+    assert_eq!(d.config.rope_theta_swa, Some(40_000.0));
+}
+
+/// A window array shorter or longer than `block_count` loads, and reads
+/// the way libllama's `get_arr` reads it (#452): entry `il` is layer
+/// `il`, layers past a short array are full attention, and a long
+/// array's tail is never read.
+#[test]
+fn maple_with_a_short_or_long_window_array_matches_llama_cpp() {
+    assert_eq!(MAPLE_SWA_LONG_GOLDEN, MAPLE_GOLDEN);
+    assert_all_three_paths_match("maple_swa_long", &MAPLE_SWA_LONG_GOLDEN);
+    assert_all_three_paths_match("maple_swa_short", &MAPLE_SWA_SHORT_GOLDEN);
+    let d = load_graph_fixture("maple_swa_short");
+    assert_eq!(
+        d.config.swa_layers,
+        frink_models::swa_layers::SwaLayers::PerLayer(vec![true, true, false, false].into())
     );
 }
 

@@ -402,21 +402,37 @@ pub const NORM_BY_RMS_EPS_KEY: &[(&str, &str)] =
 /// `attention.layer_norm_rms_epsilon`, for [`NORM_BY_RMS_EPS_KEY`];
 /// every other architecture ignores the argument.
 pub fn norm_function_for_file(arch: &str, declared_rms_eps: Option<f32>) -> NormFunction {
-    if NORM_BY_RMS_EPS_KEY.iter().any(|(a, _)| *a == arch)
-        && declared_rms_eps.is_some_and(|eps| eps != 0.0)
-    {
+    let facts = crate::models::ArchFacts::of(arch);
+    file_norm_function(
+        facts.norm.norm_by_rms_eps_key,
+        facts.tensors.norm_sites.function,
+        declared_rms_eps,
+    )
+}
+
+/// [`norm_function_for_file`] given the rows (`ArchFacts`): RMSNorm
+/// where the file decides it, else the architecture's own function.
+pub fn file_norm_function(
+    by_rms_eps_key: bool,
+    arch_function: NormFunction,
+    declared_rms_eps: Option<f32>,
+) -> NormFunction {
+    if by_rms_eps_key && declared_rms_eps.is_some_and(|eps| eps != 0.0) {
         return NormFunction::Rms;
     }
-    if crate::capability::uses_non_parametric_layer_norm(arch) {
-        NormFunction::LayerNormNoParams
-    } else if crate::capability::uses_non_parametric_rms_norm(arch) {
+    arch_function
+}
+
+/// The architecture's own function from the legacy lists alone, for
+/// `ArchFacts::from_tables` (`olmo`'s non-parametric LayerNorm is in
+/// `crate::models::olmo`).
+pub(crate) fn norm_function_from_table(arch: &str) -> NormFunction {
+    if crate::capability::uses_non_parametric_rms_norm(arch) {
         NormFunction::RmsNoParams
-    } else if crate::capability::uses_weighted_layer_norm(arch) {
+    } else if crate::capability::WEIGHTED_LAYER_NORM.contains(&arch) {
         NormFunction::LayerNorm
     } else if crate::capability::uses_biased_layer_norm(arch) {
         NormFunction::LayerNormBias
-    } else if crate::capability::uses_biased_rms_norm(arch) {
-        NormFunction::RmsBias
     } else {
         NormFunction::Rms
     }

@@ -192,24 +192,61 @@ impl BlockLayout {
 /// and the failure arrived as an OOM. [`KvWindow::rows_after`] is the
 /// single rule; the store calls it to decide and the budget calls it to
 /// price, so there is nothing left for them to disagree about.
+///
+/// # Why there is a rollback reserve
+///
+/// Speculative decoding writes a block of draft rows, reads them back,
+/// and then truncates the ones it rejected. A cache that has just
+/// drained down to exactly `window` rows cannot do that: rolling back
+/// `d` positions leaves `window - d` rows, and the next query, which
+/// reads `window - 1` rows behind itself, would silently read `d - 1`
+/// fewer than the model asks for. So a drain never takes the cache below
+/// `window + reserve` rows, which is what makes rolling back up to
+/// [`Self::max_rollback`] positions safe at every phase of the cycle.
+/// The reserve sits inside the slack, so it costs no memory: the peak
+/// is still `window + slack`, and only the drain gets more frequent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KvWindow {
     window: usize,
     slack: usize,
+    /// Rows above `window` a drain keeps, so a rollback of up to
+    /// `reserve + 1` positions still leaves every row the next query
+    /// reads. Never more than `slack`; see [`Self::with_reserve`].
+    reserve: usize,
 }
 
 impl KvWindow {
     /// `None` for a zero window, for [`BlockLayoutError::ZeroWindow`]'s
     /// reason: a query that attends to nothing is not a model.
+    ///
+    /// No rollback reserve: [`Self::with_reserve`] adds one.
     pub fn new(window: usize, slack: usize) -> Option<Self> {
-        (window > 0).then_some(KvWindow { window, slack })
+        (window > 0).then_some(KvWindow {
+            window,
+            slack,
+            reserve: 0,
+        })
     }
 
-    /// The slack a caller gets when it has no opinion: half a window,
-    /// so the cache peaks at 1.5x the window and moves roughly two rows
-    /// per token instead of `window` of them.
+    /// The same window, draining no lower than `window + reserve` rows.
+    ///
+    /// `None` when the reserve does not fit inside the slack: a drain
+    /// has to drop at least one row, and a reserve above the slack would
+    /// either make the peak exceed `window + slack`, which the budget
+    /// prices as the ceiling, or make the drain drop nothing at all.
+    pub fn with_reserve(self, reserve: usize) -> Option<Self> {
+        (reserve <= self.slack).then_some(KvWindow { reserve, ..self })
+    }
+
+    /// The window a caller gets when it has no opinion: half a window of
+    /// slack, so the cache peaks at 1.5x the window, and half of that
+    /// slack held back as the rollback reserve, so a speculative block
+    /// of up to a quarter window can be rejected without a hole in the
+    /// history. The drain still moves a handful of rows per token
+    /// instead of `window` of them.
     pub fn with_default_slack(window: usize) -> Option<Self> {
-        Self::new(window, (window / 2).max(1))
+        let slack = (window / 2).max(1);
+        Self::new(window, slack)?.with_reserve(slack / 2)
     }
 
     pub fn window(&self) -> usize {
@@ -218,6 +255,27 @@ impl KvWindow {
 
     pub fn slack(&self) -> usize {
         self.slack
+    }
+
+    pub fn reserve(&self) -> usize {
+        self.reserve
+    }
+
+    /// The rows this cache must still hold behind a query it is about to
+    /// answer at `positions`: the `window - 1` before it, or every one
+    /// there is when the sequence is shorter than that. A cache holding
+    /// fewer answers out of a history with a hole in it.
+    pub fn rows_needed_at(&self, positions: usize) -> usize {
+        positions.min(self.window - 1)
+    }
+
+    /// How many positions written from now on a truncate may roll back,
+    /// at any phase of the drain cycle, and still leave
+    /// [`Self::rows_needed_at`] resident. `reserve + 1`: a drain never
+    /// leaves fewer than `window + reserve` rows once it has started, and
+    /// the next query needs `window - 1`.
+    pub fn max_rollback(&self) -> usize {
+        self.reserve + 1
     }
 
     /// The most rows this window ever leaves resident.
@@ -229,8 +287,9 @@ impl KvWindow {
     /// `positions` positions and the holder has evicted at every step.
     ///
     /// Grows one per position up to `window + slack`, then drops back to
-    /// `window` and climbs again, so the resident count cycles through
-    /// `[window, window + slack]` with period `slack + 1`.
+    /// `window + reserve` and climbs again, so the resident count cycles
+    /// through `[window + reserve, window + slack]` with period
+    /// `slack - reserve + 1`.
     ///
     /// The invariant every reader depends on is
     /// `rows_after(p) >= min(p, window)`: the rows kept are always at
@@ -245,7 +304,8 @@ impl KvWindow {
         if positions <= peak {
             return positions;
         }
-        self.window + (positions - peak - 1) % (self.slack + 1)
+        let floor = self.window + self.reserve;
+        floor + (positions - peak - 1) % (peak - floor + 1)
     }
 }
 
@@ -405,9 +465,11 @@ mod tests {
     /// numbers that were themselves derived from the formula.
     #[test]
     fn the_closed_form_matches_a_step_by_step_simulation() {
-        for window in 1..=9usize {
-            for slack in 0..=7usize {
-                let w = KvWindow::new(window, slack).expect("positive window");
+        for (window, slack, reserve) in shapes() {
+            {
+                let w = KvWindow::new(window, slack)
+                    .and_then(|w| w.with_reserve(reserve))
+                    .expect("positive window, reserve inside the slack");
                 let mut rows = 0usize;
                 for positions in 1..=200usize {
                     // What the store does: append one row, then drop
@@ -417,7 +479,7 @@ mod tests {
                     assert_eq!(
                         rows,
                         w.rows_after(positions),
-                        "window {window} slack {slack} at {positions} positions"
+                        "window {window} slack {slack} reserve {reserve} at {positions} positions"
                     );
                 }
             }
@@ -430,9 +492,11 @@ mod tests {
     /// positions.
     #[test]
     fn the_last_window_positions_are_always_still_resident() {
-        for window in 1..=9usize {
-            for slack in 0..=7usize {
-                let w = KvWindow::new(window, slack).expect("positive window");
+        for (window, slack, reserve) in shapes() {
+            {
+                let w = KvWindow::new(window, slack)
+                    .and_then(|w| w.with_reserve(reserve))
+                    .expect("positive window, reserve inside the slack");
                 for positions in 0..=200usize {
                     let rows = w.rows_after(positions);
                     assert!(
@@ -446,6 +510,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every (window, slack, reserve) the formula tests sweep: the reserve
+    /// runs from none to the whole slack, which is the range
+    /// [`KvWindow::with_reserve`] accepts.
+    fn shapes() -> Vec<(usize, usize, usize)> {
+        let mut out = Vec::new();
+        for window in 1..=9usize {
+            for slack in 0..=7usize {
+                for reserve in 0..=slack {
+                    out.push((window, slack, reserve));
+                }
+            }
+        }
+        out
+    }
+
+    /// A reserve above the slack is refused: the drain would have to
+    /// drop nothing, or the peak would pass the `window + slack` the
+    /// budget prices as the ceiling.
+    #[test]
+    fn a_reserve_larger_than_the_slack_is_refused() {
+        let w = KvWindow::new(8, 3).expect("positive window");
+        assert!(w.with_reserve(3).is_some());
+        assert!(w.with_reserve(4).is_none());
+    }
+
+    /// **The rollback guarantee**, which is what lets a speculative
+    /// decoder write a draft block into a draining cache and reject it.
+    ///
+    /// At every phase of the cycle, a cache that has followed the rule
+    /// and is then rolled back by up to `max_rollback` positions still
+    /// holds the `window - 1` rows behind the next query. Swept against
+    /// the formula the store follows rather than against hand-picked
+    /// numbers. Sabotaged by making `max_rollback` return `reserve + 2`,
+    /// this goes red on the first window that drains.
+    #[test]
+    fn rolling_back_up_to_max_rollback_never_leaves_a_hole_in_the_window() {
+        for (window, slack, reserve) in shapes() {
+            let w = KvWindow::new(window, slack)
+                .and_then(|w| w.with_reserve(reserve))
+                .expect("positive window, reserve inside the slack");
+            for positions in 0..=120usize {
+                let rows = w.rows_after(positions);
+                for back in 0..=w.max_rollback().min(positions) {
+                    let target = positions - back;
+                    assert!(
+                        rows - back >= w.rows_needed_at(target),
+                        "window {window} slack {slack} reserve {reserve}: rolling back {back} \
+                         from {positions} leaves {} rows, the next query reads {}",
+                        rows - back,
+                        w.rows_needed_at(target)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The default window keeps a real reserve, so the server's prompt
+    /// lookup drafter (five tokens) can speculate on any window of 24 or
+    /// more, and the peak is still the 1.5x window the budget prices.
+    #[test]
+    fn the_default_window_reserves_a_quarter_window_inside_its_slack() {
+        let w = KvWindow::with_default_slack(1024).expect("positive window");
+        assert_eq!(w.slack(), 512);
+        assert_eq!(w.reserve(), 256);
+        assert_eq!(w.max_rows(), 1536);
+        assert_eq!(w.max_rollback(), 257);
+        assert!(KvWindow::with_default_slack(24).unwrap().max_rollback() >= 5);
+        // The smallest windows still build: a reserve of zero is legal.
+        assert_eq!(KvWindow::with_default_slack(1).unwrap().max_rollback(), 1);
     }
 
     /// The point of the whole exercise: resident rows STOP GROWING.

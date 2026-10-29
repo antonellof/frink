@@ -37,8 +37,17 @@
 
 /// True when `arch` with `n_experts` routed experts norms Q and K this
 /// way (`llama4.cpp:43`: every Llama 4 but the 128-expert one).
+///
+/// The rule is `crate::models::llama4::weightless_qk_norm`; every other
+/// architecture has none ([`no_weightless_qk_norm`]).
 pub fn weightless_qk_norm(arch: &str, n_experts: usize) -> bool {
-    arch == "llama4" && n_experts != 128
+    (crate::models::ArchFacts::of(arch).rules.weightless_qk_norm)(arch, n_experts)
+}
+
+/// `HparamRules::LEGACY`'s: no graph outside `crate::models` norms Q and
+/// K this way.
+pub fn no_weightless_qk_norm(_arch: &str, _n_experts: usize) -> bool {
+    false
 }
 
 #[cfg(test)]

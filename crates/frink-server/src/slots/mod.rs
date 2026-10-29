@@ -492,6 +492,16 @@ async fn restore(
 /// this path would have reproduced it.
 fn prefill_slot(decoder: &Decoder, tokens: Vec<usize>) -> SlotPayload {
     let mut layers: Vec<KvCache> = decoder.config.new_kv_caches();
+    // A slot file holds every position of every layer: its header
+    // carries one position count and the body one row per position
+    // (`file::encode`). A windowed layer that evicted during this
+    // prefill would write fewer rows than the header says, and the file
+    // would be refused on restore. So the prefill keeps every row; the
+    // prefix-cache copies made from it may window again, because a
+    // clone drops the mark (#61).
+    for layer in &mut layers {
+        layer.forbid_eviction();
+    }
     let pending_logits =
         crate::generate::forward_prompt_batch(decoder, &tokens, 0, &mut layers, true);
     #[cfg(feature = "metal")]

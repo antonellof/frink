@@ -207,17 +207,24 @@ fn the_windowed_layers_stop_growing_and_the_dense_ones_do_not() {
     );
 }
 
-/// The switch is off unless it is turned on, and off is byte-for-byte
-/// the store this engine had before #61.
+/// `FRINK_KV_WINDOW=0` is byte-for-byte the store this engine had
+/// before #61.
 #[test]
-fn the_default_policy_keeps_every_row_in_every_layer() {
+fn the_off_policy_keeps_every_row_in_every_layer() {
     let prompt = prompt();
     let steps = 40usize;
     let total = prompt.len() + steps;
     let kv = run(KvWindowPolicy::off(), &prompt, &script(steps)).caches;
     for (l, cache) in kv.iter().enumerate() {
-        assert!(cache.window().is_none(), "layer {l} was armed by default");
-        assert_eq!(cache.rows(), total, "layer {l} dropped a row by default");
+        assert!(
+            cache.window().is_none(),
+            "layer {l} was armed with eviction off"
+        );
+        assert_eq!(
+            cache.rows(),
+            total,
+            "layer {l} dropped a row with eviction off"
+        );
         assert_eq!(cache.positions(), total);
     }
 }

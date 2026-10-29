@@ -71,8 +71,8 @@ fn flush_replies_on_each_rows_own_channel() {
     let (a, ra) = test_slot(3, 11);
     let (mut b, rb) = test_slot(5, 22);
     b.finish = Some(FinishReason::Stop);
-    b.visible.push_str("bee");
-    b.generated_ids.push(7);
+    b.answer.visible.push_str("bee");
+    b.answer.generated_ids.push(7);
     let a = rows.insert(a);
     let b = rows.insert(b);
     let (c, _rc) = test_slot(7, 33);
@@ -110,10 +110,10 @@ fn flush_replies_on_each_rows_own_channel() {
 fn a_finished_batched_row_reports_its_rates() {
     let mut rows = Rows::default();
     let (mut row, rx) = test_slot(4, 44);
-    row.prompt_tokens = 6;
-    row.clock.prefill_finished();
-    row.clock.token();
-    row.generated_ids.push(7);
+    row.answer.prompt_tokens = 6;
+    row.answer.clock.prefill_finished();
+    row.answer.clock.token();
+    row.answer.generated_ids.push(7);
     row.finish = Some(FinishReason::Stop);
     rows.insert(row);
     rows.flush_finished(&no_budget());

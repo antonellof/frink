@@ -230,16 +230,51 @@ pub fn reads_rope_pattern(arch: &str) -> bool {
     ROPE_PATTERN_READERS.iter().any(|(a, _)| *a == arch)
 }
 
+/// Which layers of `arch` rotate, through the registry: the rule a
+/// `crate::models` entry states (`HparamRules::rope_layers`), else
+/// [`rope_layers_from_table`].
 pub fn rope_layers(
     arch: &str,
     n_layers: usize,
     has_sliding_window: bool,
     n_dense_lead: usize,
 ) -> RopeLayers {
-    let no_rope_every = |phase| RopeLayers::NoRopeEvery {
+    (crate::models::ArchFacts::of(arch).rules.rope_layers)(
+        arch,
+        n_layers,
+        has_sliding_window,
+        n_dense_lead,
+    )
+}
+
+/// `exaone4.cpp:111`'s `use_rope = is_swa(il) || swa_type == NONE`:
+/// with a window only the sliding layers rotate, without one all do.
+/// Shared by `exaone4` (`crate::models::exaone4`) and `exaone-moe`.
+pub fn sliding_layers_rotate(has_sliding_window: bool) -> RopeLayers {
+    if has_sliding_window {
+        RopeLayers::SlidingOnly
+    } else {
+        RopeLayers::All
+    }
+}
+
+/// llama.cpp's default `n_no_rope_layer_step` (4): one layer in four
+/// unrotated, at `phase` of each period.
+pub fn default_no_rope_every(phase: NoRopePhase) -> RopeLayers {
+    RopeLayers::NoRopeEvery {
         step: step(LLAMA_CPP_DEFAULT_NO_ROPE_STEP),
         phase,
-    };
+    }
+}
+
+/// [`rope_layers`] from this table alone, for `HparamRules::LEGACY`.
+pub fn rope_layers_from_table(
+    arch: &str,
+    n_layers: usize,
+    has_sliding_window: bool,
+    n_dense_lead: usize,
+) -> RopeLayers {
+    let no_rope_every = default_no_rope_every;
     match arch {
         // `exaone4.cpp:4-9` switches the whole SWA machinery on inside
         // `if (hparams.n_layer() == 64)` and :116 then gates RoPE on it,
@@ -248,14 +283,9 @@ pub fn rope_layers(
         // SWA on unconditionally and :13 reads the window as a REQUIRED
         // key, so its `has_sliding_window` is always true and the second
         // arm here is unreachable for it -- which is the whole reason
-        // the two rows are one rule.
-        "exaone4" | "exaone-moe" => {
-            if has_sliding_window {
-                RopeLayers::SlidingOnly
-            } else {
-                RopeLayers::All
-            }
-        }
+        // the two rows are one rule (`exaone4`'s half is
+        // `crate::models::exaone4`).
+        "exaone-moe" => sliding_layers_rotate(has_sliding_window),
         // `cohere2.cpp:4` pins `swa_type` to STANDARD and `:13` reads the
         // window as a REQUIRED key (the loader refuses a file without
         // it, `crate::swa_geometry::window_required`), so this is
@@ -321,9 +351,8 @@ pub fn rope_layers(
         // aborts on it; every other Llama-4 keeps the default 4 and
         // :145-146 skips `(il + 1) % 4 == 0`, which is exactly the
         // full-attention layer of its 3-chunked-1-full period. LIVE
-        // since 2026-09-14 (`tests/llama4_graphs.rs`); the chunked
-        // window is frink's `sliding_window` with `swa_chunked` set.
-        "llama4" if has_sliding_window => no_rope_every(NoRopePhase::LastOfPeriod),
+        // since 2026-09-14 (`tests/llama4_graphs.rs`). `llama4`'s rule is
+        // `crate::models::llama4`'s (#403 step 6b).
         _ => RopeLayers::All,
     }
 }

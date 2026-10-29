@@ -47,7 +47,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     // Continuous batching.
     (
         "crates/frink-server/src/serving/batch/worker.rs",
-        62,
+        63,
         "fn admit",
     ),
     // Paged KV.
@@ -55,18 +55,18 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ("crates/frink-server/src/generate.rs", 415, "fn fork"),
     (
         "crates/frink-server/src/serving/batch/prefill.rs",
-        158,
+        156,
         "fn step_chunk",
     ),
     // Per-step token budget.
     (
         "crates/frink-server/src/serving/batch/step_budget.rs",
-        55,
+        57,
         "DEFAULT_MAX_BATCH_TOKENS",
     ),
     (
         "crates/frink-server/src/serving/batch/step_budget.rs",
-        63,
+        65,
         "MIN_PREFILL_CHUNK",
     ),
     // Prefix caching.
@@ -100,7 +100,23 @@ const CITATIONS: &[(&str, usize, &str)] = &[
         287,
         "fn evict",
     ),
-    ("crates/frink-server/src/generate.rs", 857, "tree.evict("),
+    ("crates/frink-server/src/generate.rs", 866, "tree.evict("),
+    // Preemption.
+    (
+        "crates/frink-server/src/serving/batch/preempt.rs",
+        55,
+        "const MAX_PREEMPTIONS",
+    ),
+    (
+        "crates/frink-server/src/serving/batch/preempt.rs",
+        111,
+        "fn make_room",
+    ),
+    (
+        "crates/frink-server/src/serving/batch/row.rs",
+        285,
+        "fn into_parts",
+    ),
 ];
 
 /// **Every cited line still holds what the audit says it holds.**
@@ -170,6 +186,45 @@ fn the_audits_admission_bounds_are_the_ones_the_code_uses() {
              argues from must stay visible"
         );
     }
+}
+
+/// **The preemption bound both documents quote is the one the code
+/// holds.**
+///
+/// The termination argument for preemption is that bound and nothing
+/// else, and it is quoted twice: in the audit, and in `CONFIG.md` where
+/// an operator reads what turning the knob on costs. Either drifting
+/// from the constant is a safety claim about a policy that no longer
+/// has it.
+#[test]
+fn the_documented_preemption_bound_is_the_one_the_code_uses() {
+    let src = std::fs::read_to_string(
+        repo_root().join("crates/frink-server/src/serving/batch/preempt.rs"),
+    )
+    .expect("preempt.rs");
+    let decl = src
+        .lines()
+        .find(|l| l.contains("const MAX_PREEMPTIONS"))
+        .expect("no `const MAX_PREEMPTIONS` in preempt.rs");
+    let value: u32 = decl
+        .rsplit('=')
+        .next()
+        .and_then(|v| v.trim().trim_end_matches(';').parse().ok())
+        .unwrap_or_else(|| panic!("cannot read MAX_PREEMPTIONS from: {decl}"));
+
+    let audit = std::fs::read_to_string(repo_root().join("docs/plans/serving-parity-audit.md"))
+        .expect("the serving audit");
+    let quoted = format!("MAX_PREEMPTIONS = {value}");
+    assert!(
+        audit.contains(&quoted),
+        "the audit does not quote `{quoted}`, the bound its termination argument rests on"
+    );
+    let config = std::fs::read_to_string(repo_root().join("docs/CONFIG.md")).expect("CONFIG.md");
+    let operator = format!("preempted at most {value} times");
+    assert!(
+        config.contains(&operator),
+        "CONFIG.md does not say `{operator}`"
+    );
 }
 
 /// **The one modelled number is labelled as modelled.**

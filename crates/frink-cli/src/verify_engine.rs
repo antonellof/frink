@@ -110,16 +110,69 @@ pub fn prefill_logits(
 ) -> anyhow::Result<(Vec<u32>, Vec<f32>)> {
     let (file, tokens, _eos, runtime_ctx) =
         tokenize_checkpoint(path, prompt, specials, prompt_tokens)?;
+    let mut rows = forced_logits(path, &file, &tokens, &[], runtime_ctx)?;
+    Ok((
+        tokens.into_iter().map(|t| t as u32).collect(),
+        rows.swap_remove(0),
+    ))
+}
+
+/// The distribution at the last position of `prompt`, then the one
+/// after each of `forced`, fed one token at a time: a greedy decode
+/// whose tokens are chosen by somebody else.
+///
+/// Teacher-forced on purpose. `frink parity --decode-steps` feeds the
+/// REFERENCE's greedy tokens, so a near tie that flips at one step is
+/// reported at that step and does not change the context of every step
+/// after it. The token ids are given, not tokenized, because libllama
+/// cannot tokenize the synthetic fixtures' vocabularies at all.
+pub fn teacher_forced_logits(
+    path: &Path,
+    prompt: &[usize],
+    forced: &[usize],
+) -> anyhow::Result<Vec<Vec<f32>>> {
+    let file = ShardedGguf::open(path)?;
+    forced_logits(
+        path,
+        &file,
+        prompt,
+        forced,
+        llama_n_ctx(prompt.len() + forced.len()),
+    )
+}
+
+/// ONE engine dispatch for prefill and decode. Row 0 is the last
+/// prompt position, row `i` the position after `forced[i - 1]`.
+fn forced_logits(
+    path: &Path,
+    file: &ShardedGguf,
+    prompt: &[usize],
+    forced: &[usize],
+    runtime_ctx: usize,
+) -> anyhow::Result<Vec<Vec<f32>>> {
     let arch = file
         .metadata_str("general.architecture")
         .unwrap_or_default();
     if GEMMA4_ARCHES.contains(&arch) {
-        return prefill_logits_gemma4(path, &tokens);
+        let served = load_gemma4_engine_from_path(path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ServedEngine::Gemma4(engine) = served else {
+            anyhow::bail!("expected Gemma4Engine for gemma4 checkpoint");
+        };
+        return Ok(engine_rows(engine.as_ref(), prompt, forced));
     }
+    // The MLA engine (`deepseek2` / `mistral4` / `plm`) has one body,
+    // token by token, so its prefill is a decode loop; the distribution
+    // at the last prompt position is the same question. This is what
+    // puts a real DeepSeek or PLM file in front of `frink parity`, where
+    // the generic-only dispatch used to refuse it as `DedicatedOnly`.
     if matches!(select_engine_kind(arch), Ok(SelectedEngineKind::Mla)) {
-        return prefill_logits_mla(path, &tokens);
+        let served = load_mla_engine_from_path(path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ServedEngine::Mla(engine) = served else {
+            anyhow::bail!("expected MlaEngine for an MLA checkpoint");
+        };
+        return Ok(engine_rows(&engine, prompt, forced));
     }
-    let mut config = ModelConfig::from_gguf(&file).context("reading model config")?;
+    let mut config = ModelConfig::from_gguf(file).context("reading model config")?;
     config.apply_runtime_context(runtime_ctx);
     // The reference dumper runs llama.cpp's default context, f16 K/V
     // (`tools/llama_logits.c` takes `llama_context_default_params`), so
@@ -127,39 +180,30 @@ pub fn prefill_logits(
     config.kv_dtype = frink_models::host_kv_dtype_from_env(frink_models::BudgetBackend::Cpu);
     let decoder = Decoder::from_gguf(path, config)?;
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
-    let logits = decoder.forward_batch_last(&tokens, 0, &mut caches);
-    Ok((tokens.into_iter().map(|t| t as u32).collect(), logits))
+    let mut rows = vec![decoder.forward_batch_last(prompt, 0, &mut caches)];
+    for (pos, &tok) in (prompt.len()..).zip(forced) {
+        rows.push(decoder.forward_token(tok, pos, &mut caches));
+    }
+    Ok(rows)
 }
 
-/// The MLA engine (`deepseek2` / `mistral4` / `plm`) has one body,
-/// token by token, so the prefill is a decode loop; the distribution
-/// at the last prompt position is the same question. This is what puts
-/// a real DeepSeek or PLM file in front of `frink parity`, where the
-/// generic-only dispatch used to refuse it as `DedicatedOnly`.
-fn prefill_logits_mla(path: &Path, tokens: &[usize]) -> anyhow::Result<(Vec<u32>, Vec<f32>)> {
-    let served = load_mla_engine_from_path(path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ServedEngine::Mla(engine) = served else {
-        anyhow::bail!("expected MlaEngine for an MLA checkpoint");
-    };
-    let mut state = Engine::new_state(&engine);
-    let mut logits = Vec::new();
-    for (pos, &tok) in tokens.iter().enumerate() {
-        logits = Engine::forward_token(&engine, tok, pos, &mut state);
+/// Token by token through an [`Engine`], keeping the rows from the
+/// last prompt position on.
+fn engine_rows<E: Engine + ?Sized>(
+    engine: &E,
+    prompt: &[usize],
+    forced: &[usize],
+) -> Vec<Vec<f32>> {
+    let mut state = engine.new_state();
+    let first = prompt.len().saturating_sub(1);
+    let mut rows = Vec::with_capacity(forced.len() + 1);
+    for (pos, &tok) in prompt.iter().chain(forced).enumerate() {
+        let logits = engine.forward_token(tok, pos, &mut state);
+        if pos >= first {
+            rows.push(logits);
+        }
     }
-    Ok((tokens.iter().map(|&t| t as u32).collect(), logits))
-}
-
-fn prefill_logits_gemma4(path: &Path, tokens: &[usize]) -> anyhow::Result<(Vec<u32>, Vec<f32>)> {
-    let served = load_gemma4_engine_from_path(path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let ServedEngine::Gemma4(engine) = served else {
-        anyhow::bail!("expected Gemma4Engine for gemma4 checkpoint");
-    };
-    let mut state = Engine::new_state(engine.as_ref());
-    let mut logits = Vec::new();
-    for (pos, &tok) in tokens.iter().enumerate() {
-        logits = Engine::forward_token(engine.as_ref(), tok, pos, &mut state);
-    }
-    Ok((tokens.iter().map(|&t| t as u32).collect(), logits))
+    rows
 }
 
 /// Tokenize a prompt the same way verify/parity do, without loading weights.
@@ -206,8 +250,19 @@ fn tokenize_checkpoint(
     if let Some(want) = prompt_tokens {
         tokens = stretch_prompt(tokens, want, bos)?;
     }
-    let runtime_ctx = tokens.len() + 8;
+    let runtime_ctx = llama_n_ctx(tokens.len());
     Ok((file, tokens, eos, runtime_ctx))
+}
+
+/// The context llama.cpp actually runs `tools/llama_logits.c` at for
+/// `n_positions`: the dumper asks for `n_positions + 8`, and libllama
+/// rounds every context up to a multiple of 256
+/// (`llama-context.cpp:387`, `GGML_PAD(cparams.n_ctx, 256)`) before
+/// LongRoPE compares it against the trained length. Asking frink for
+/// the unpadded number picked the SHORT factor pair on a file whose
+/// `original` length is under 256 while llama.cpp used the long one.
+fn llama_n_ctx(n_positions: usize) -> usize {
+    (n_positions + 8).next_multiple_of(256)
 }
 
 /// Shared setup: open the GGUF, build the tokenizer the header names,
@@ -282,7 +337,7 @@ fn argmax(logits: &[f32]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::stretch_prompt;
+    use super::{llama_n_ctx, stretch_prompt};
 
     #[test]
     fn stretch_repeats_the_body_and_keeps_one_bos() {
@@ -312,15 +367,31 @@ mod tests {
     /// Parity and verify share `load_and_tokenize`; LongRoPE must pick
     /// short factors at small `n_ctx`, not the file's trained length.
     #[test]
-    fn parity_context_size_is_tokens_plus_eight() {
+    fn a_short_prompt_on_a_long_trained_file_picks_short_factors() {
         let mut c = frink_models::config::test_dense_fixture();
         c.rope_orig_ctx = Some(4096);
         c.rope_freqs_short = Some(vec![1.0; 48]);
         c.rope_freqs_long = Some((0..48).map(|i| 1.0 + i as f32).collect());
         c.rope_freqs = None;
-        // Five prompt tokens + 8, same as llama_logits.c for a 5-token run.
-        c.apply_runtime_context(5 + 8);
+        // Five prompt tokens, as llama_logits.c runs a 5-token prompt.
+        c.apply_runtime_context(llama_n_ctx(5));
         assert_eq!(c.rope_freqs.as_ref().unwrap().full[1], 1.0);
+    }
+
+    /// The other side of the same rule: under libllama's 256 padding a
+    /// file trained at 32 positions is past its trained length even for
+    /// a six-token prompt, so the LONG pair is the reference's.
+    #[test]
+    fn parity_context_is_padded_like_libllama() {
+        assert_eq!(llama_n_ctx(6), 256);
+        assert_eq!(llama_n_ctx(249), 512);
+        let mut c = frink_models::config::test_dense_fixture();
+        c.rope_orig_ctx = Some(32);
+        c.rope_freqs_short = Some(vec![1.0; 48]);
+        c.rope_freqs_long = Some((0..48).map(|i| 1.0 + i as f32).collect());
+        c.rope_freqs = None;
+        c.apply_runtime_context(llama_n_ctx(6));
+        assert_eq!(c.rope_freqs.as_ref().unwrap().full[1], 2.0);
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 use crate::bench_contract::{self, HostState};
 use crate::bench_guard::{self, CacheProbe, WorkloadDigest};
+use crate::bench_llama::{self, LlamaRun};
 use anyhow::Context;
 use frink_core::cache::KvCache;
 use frink_models::engine::Engine;
@@ -82,7 +83,25 @@ impl Row {
 /// So this asks `active_backend()` immediately, which both forces the
 /// cache while the env is still fresh and reveals a disagreement, and
 /// it fails loudly rather than measuring the wrong device.
-pub fn apply_env(threads: usize, n_gpu_layers: usize) -> anyhow::Result<()> {
+///
+/// `model` is the GGUF the run will load, when there is one: a PARTIAL
+/// `-ngl` (above zero, below its layer count) is refused against it.
+/// llama-bench's `-ngl 10` offloads ten layers; frink has no partial
+/// placement, and offloading all of them while the receipt says 10 is
+/// a row measuring something other than what it is labelled.
+pub fn apply_env(threads: usize, n_gpu_layers: usize, model: Option<&str>) -> anyhow::Result<()> {
+    if let (Some(path), true) = (model, n_gpu_layers > 0) {
+        if let Ok(file) = frink_gguf::ShardedGguf::open(path) {
+            let arch = file
+                .metadata_str("general.architecture")
+                .unwrap_or("unknown");
+            if let Some(n_layers) = file.metadata_u64(&format!("{arch}.block_count")) {
+                let layers = u32::try_from(n_gpu_layers).unwrap_or(u32::MAX);
+                frink_models::gpu_layers::GpuLayers::Count(layers)
+                    .check_supported(n_layers as usize)?;
+            }
+        }
+    }
     // SAFETY: called from `main` before rayon/Metal workers spawn.
     unsafe {
         if threads > 0 {
@@ -238,7 +257,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
 
     let ngl = if backend == "CPU" { 0 } else { 99 };
     let llama = if args.compare {
-        match run_llama_bench(&model, args.n_prompt, args.n_gen, args.reps, ngl) {
+        match bench_llama::run_llama_bench(&model, args.n_prompt, args.n_gen, args.reps, ngl) {
             Ok(v) => Some(v),
             Err(e) => {
                 eprintln!("frink bench: llama-bench comparison unavailable: {e}");
@@ -261,7 +280,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         );
         println!("| {:-<15} | {:->12} | {:->12} | {:->8} |", "", "", "", "");
         for row in &rows {
-            let l = llama.get(&row.test).copied();
+            let l = llama.tps.get(&row.test).copied();
             let gap = l.map(|l| l / row.median());
             println!(
                 "| {:<15} | {:>12.2} | {:>12} | {:>8} |",
@@ -273,6 +292,19 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             );
         }
         eprintln!("gap = llama / frink; <1 means frink is faster");
+        match llama.identity() {
+            Ok(id) => eprintln!(
+                "llama.cpp: build {} ({}), backends {}",
+                id.build_commit,
+                id.build_number
+                    .map_or_else(|| "?".into(), |n| n.to_string()),
+                id.backends
+            ),
+            Err(missing) => eprintln!(
+                "llama.cpp: llama-bench did not report {}; a receipt of this run is refused",
+                missing.join(" or ")
+            ),
+        }
     }
 
     if let Some(dest) = &args.receipt {
@@ -368,9 +400,15 @@ pub(crate) fn probe(caches: &[KvCache]) -> Vec<CacheProbe> {
 /// position counter is the one length the block advances; reading rows
 /// there refused every hybrid model's bench as "layer 0 consumed 0 of
 /// 128 prompt tokens".
+///
+/// A windowed layer that evicts (#61, the default) is the other case
+/// where rows stop being the length: past `window + slack` positions it
+/// holds fewer rows than it consumed, and reading rows there would
+/// refuse any row whose prompt passes the window as a run that skipped
+/// work. Its position counter is what it consumed.
 fn probe_one(c: &KvCache) -> CacheProbe {
     CacheProbe {
-        seq_len: if c.k_width() == 0 {
+        seq_len: if c.k_width() == 0 || c.window().is_some() {
             c.positions()
         } else {
             c.rows()
@@ -704,71 +742,6 @@ fn human_params(p: u64) -> String {
     }
 }
 
-/// Runs `llama-bench` on the same GGUF with matching workload flags and
-/// parses its markdown table into `{test -> tok/s}`.
-///
-/// Thread count is deliberately *not* forced. Each engine picking its
-/// own default is the comparison that means something: llama.cpp
-/// defaults to performance cores and degrades sharply above them, so
-/// pinning both engines to the same oversubscribed count (as the old
-/// suite did with `-t 10`) handicaps llama by 2-4x on Apple Silicon and
-/// flatters frink.
-fn run_llama_bench(
-    model: &str,
-    n_prompt: usize,
-    n_gen: usize,
-    reps: usize,
-    ngl: usize,
-) -> anyhow::Result<std::collections::BTreeMap<String, f64>> {
-    let out = std::process::Command::new("llama-bench")
-        .args([
-            "-m",
-            model,
-            "-p",
-            &n_prompt.to_string(),
-            "-n",
-            &n_gen.to_string(),
-            "-r",
-            &reps.to_string(),
-            "-ngl",
-            &ngl.to_string(),
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("could not run llama-bench (is it on PATH?): {e}"))?;
-    if !out.status.success() {
-        anyhow::bail!("llama-bench exited with {}", out.status);
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(parse_llama_bench_table(&text))
-}
-
-/// Extracts `{test -> tok/s}` from `llama-bench`'s markdown table.
-///
-/// Its rows look like `| model | size | params | backend | threads |
-/// test | t/s |`, where the `t/s` cell is `123.45 ± 6.78`. Anything that
-/// does not have that shape (header, separator, the trailing `build:`
-/// line) is skipped rather than guessed at.
-fn parse_llama_bench_table(text: &str) -> std::collections::BTreeMap<String, f64> {
-    let mut out = std::collections::BTreeMap::new();
-    for line in text.lines() {
-        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-        if cells.len() < 8 {
-            continue;
-        }
-        let test = cells[6];
-        if test.is_empty() || test == "test" || test.starts_with('-') {
-            continue;
-        }
-        let Some(value) = cells[7].split('±').next() else {
-            continue;
-        };
-        if let Ok(v) = value.trim().parse::<f64>() {
-            out.insert(test.to_string(), v);
-        }
-    }
-    out
-}
-
 #[allow(clippy::too_many_arguments)] // one call site; every field is reported
 fn write_receipt(
     dest: &Path,
@@ -781,17 +754,14 @@ fn write_receipt(
     threads: usize,
     backend: &str,
     rows: &[Row],
-    llama: Option<&std::collections::BTreeMap<String, f64>>,
+    llama: Option<&LlamaRun>,
     load_s: f64,
     host: HostState,
     engine_env: &[(String, String)],
 ) -> anyhow::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut tests = Vec::new();
     for row in rows {
-        let l = llama.and_then(|m| m.get(&row.test)).copied();
+        let l = llama.and_then(|m| m.tps.get(&row.test)).copied();
         tests.push(serde_json::json!({
             "test": row.test,
             "frink_tps": row.median(),
@@ -806,13 +776,19 @@ fn write_receipt(
             "workload_digest": row.digest.hex(),
         }));
     }
+    // ADR 0006: a llama.cpp number names the build that produced it,
+    // or the receipt is not written.
+    let llama_cpp = LlamaRun::receipt_field(llama);
+    bench_llama::check_receipt(&tests, &llama_cpp, llama)?;
     // The shared envelope carries both write-time refusals: a GPU row
     // that cannot name its card, and a label that disagrees with the
     // backend that ran (#126).
     let mut receipt =
         bench_contract::receipt_common(&args.backend, backend, threads, load_s, host, engine_env)?;
     let serde_json::Value::Object(own) = serde_json::json!({
-        "schema": 2,
+        // 3: adds `llama_cpp`. Schema-2 receipts render with an
+        // unknown llama.cpp reference.
+        "schema": 3,
         "kind": "engine",
         "id": args.id,
         "model_path": model,
@@ -826,6 +802,10 @@ fn write_receipt(
         unreachable!("json! with braces is an object");
     };
     receipt.extend(own);
+    receipt.insert(bench_llama::RECEIPT_KEY.to_string(), llama_cpp);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(dest, serde_json::to_string_pretty(&receipt)? + "\n")?;
     Ok(())
 }

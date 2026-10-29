@@ -524,55 +524,50 @@ fn long_prefill_does_not_freeze_an_in_flight_decode() {
         thread::yield_now();
     }
 
-    let long_prompt: Vec<usize> = (0..40).map(|i| (i % 16) + 1).collect();
+    let long_prompt: Vec<usize> = (0..320).map(|i| (i % 16) + 1).collect();
     let total = long_prompt.len() as u64;
-    let prefill_at_submit = batcher.stats().prefill_tokens;
+    let at_submit = batcher.stats();
+    // The prefill thread reads the counters the moment its job returns.
+    // Polling for a partial state from this thread raced the worker: a
+    // descheduled poller saw the prompt go 0 -> done and failed a
+    // correct scheduler (#418). Counters read after the fact only lag,
+    // so they cannot fail a scheduler that interleaves.
     let prefill_job = {
         let batcher = batcher.clone();
         thread::spawn(move || {
-            batcher.generate(long_prompt, greedy_params(1, 9), StopTokens::default())
+            let out = batcher.generate(long_prompt, greedy_params(1, 9), StopTokens::default());
+            (out, batcher.stats())
         })
     };
+    let (out, at_done) = prefill_job.join().unwrap();
 
-    // Claim 1: catch the long prompt mid-prefill. An unbounded
-    // prefill is never observable here -- it goes straight to done.
-    let decode_before = loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "never observed the long prompt mid-prefill"
-        );
-        let st = batcher.stats();
-        let progressed = st.prefill_tokens - prefill_at_submit;
-        assert!(
-            progressed < total,
-            "the whole prompt was prefilled without ever being observed \
-                 partially done: prefill ran as one unbounded unit of work"
-        );
-        if progressed > 0 {
-            break st.decode_steps;
-        }
-        thread::yield_now();
-    };
+    // Claim 1: the prompt ran as bounded chunks, not one call. At
+    // `prefill_chunk: 1` every chunk is the step budget's floor.
+    let chunk = crate::serving::batch::step_budget::MIN_PREFILL_CHUNK as u64;
+    let chunks = total.div_ceil(chunk);
+    assert_eq!(at_done.prefill_tokens - at_submit.prefill_tokens, total);
+    assert_eq!(
+        at_done.prefill_chunks - at_submit.prefill_chunks,
+        chunks,
+        "a {total}-token prompt at a {chunk}-token chunk; one chunk means \
+         prefill ran as one unbounded unit of work"
+    );
+    // Claim 2: decode stepped while those chunks went by. A tick runs at
+    // most one chunk and then the batched decode step, so the in-flight
+    // row steps at least once between consecutive chunks while it lives.
+    // It has at most 89 decode steps in all (its first token comes from
+    // prefill), so the bound stops at what it had left: a decode that
+    // finished early on a slow runner is not a stall.
+    let left = 89u64.saturating_sub(at_submit.decode_steps);
+    let want = (chunks - 1).min(left.saturating_sub(1));
+    let stepped = at_done.decode_steps - at_submit.decode_steps;
+    assert!(
+        stepped >= want,
+        "{stepped} decode steps while a {chunks}-chunk prompt prefilled \
+         (want {want}): prefill froze decode"
+    );
 
-    // Claim 2: decode advances before that prefill finishes.
-    loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "decode stalled while a long prompt prefilled"
-        );
-        let st = batcher.stats();
-        if st.decode_steps > decode_before {
-            break;
-        }
-        assert!(
-            st.prefill_tokens - prefill_at_submit < total,
-            "the prompt finished prefilling before the in-flight decode \
-                 took a single step: prefill froze decode"
-        );
-        thread::yield_now();
-    }
-
-    let (_finish, ids, _text, _usage) = prefill_job.join().unwrap().expect("prefill job");
+    let (_finish, ids, _text, _usage) = out.expect("prefill job");
     assert_eq!(ids.len(), 1);
     let (_finish, ids, _text, _usage) = decode_job.join().unwrap().expect("decode job");
     assert_eq!(ids.len(), 90);

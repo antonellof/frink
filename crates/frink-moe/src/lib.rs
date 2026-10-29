@@ -10,6 +10,9 @@
 
 pub mod dense_bias;
 pub mod glu_act;
+pub mod selection;
+
+pub use selection::SelectionRule;
 
 use frink_core::weight_matrix::WeightMatrix;
 
@@ -78,6 +81,11 @@ pub struct MoeLayerConfig {
     /// reading this field as "experts per group" silently does instead.
     pub expert_group_count: Option<usize>,
     pub expert_group_used_count: Option<usize>,
+    /// Where a layer's `exp_probs_b` enters expert SELECTION
+    /// ([`SelectionRule`]): after the gating function (DeepSeek-V3, what
+    /// `build_moe_ffn` does when it is handed the bias) or on the raw
+    /// logits (`kolibri1`). Inert for a layer without the bias.
+    pub selection: SelectionRule,
     /// llama.cpp's `expert_weights_scale` hparam (GGUF
     /// `{arch}.expert_weights_scale`, `LLM_KV_EXPERT_WEIGHTS_SCALE`): a
     /// constant every routed expert's combine weight is multiplied by
@@ -189,7 +197,9 @@ pub fn route_top_k(
 /// 2. `selection_probs = probs + exp_probs_b` -- the comment in the
 ///    reference reads "leave probs unbiased as it's later used to get
 ///    expert weights", which is the whole point: the bias steers *which*
-///    experts fire, never *how much* each one counts;
+///    experts fire, never *how much* each one counts. That is
+///    [`SelectionRule::BiasAfterGating`]; `rule` can instead say
+///    [`SelectionRule::BiasBeforeGating`], `logits + exp_probs_b`;
 /// 3. top-k over `selection_probs`, weights gathered from `probs`;
 /// 4. optional renormalisation of the selected weights (`norm_w`,
 ///    i.e. `{arch}.expert_weights_norm`);
@@ -207,12 +217,13 @@ pub fn route_top_k(
 pub fn route_top_k_biased(
     logits: &[f32],
     bias: Option<&[f32]>,
+    rule: SelectionRule,
     k: usize,
     gating: GatingFunction,
     norm_w: bool,
     w_scale: f32,
 ) -> RoutingDecision {
-    route_top_k_grouped_biased(logits, bias, 1, 1, k, gating, norm_w, w_scale)
+    route_top_k_grouped_biased(logits, bias, rule, 1, 1, k, gating, norm_w, w_scale)
 }
 
 /// Scores each expert group as the **sum of its top two** member
@@ -283,9 +294,12 @@ fn mask_unselected_groups(selection: &mut [f32], n_groups: usize, topk_group: us
 /// llama.cpp's `build_moe_ffn` `n_expert_groups > 1` block:
 ///
 /// 1. `probs = gating(logits)`;
-/// 2. `selection = probs + exp_probs_b` (bias steers selection only);
+/// 2. `selection = probs + exp_probs_b` (bias steers selection only),
+///    or `logits + exp_probs_b` under [`SelectionRule::BiasBeforeGating`]
+///    (see [`SelectionRule`] for which graph does which);
 /// 3. if `n_groups > 1`, [`mask_unselected_groups`] masks every expert
-///    outside the `topk_group` best groups to `-inf`;
+///    outside the `topk_group` best groups to `-inf` (not under
+///    `BiasBeforeGating`, whose graph bypasses the group block);
 /// 4. **one global** top-`k` over the surviving `selection` scores --
 ///    the groups constrain *where* experts may come from, they do not
 ///    hand out per-group quotas;
@@ -312,6 +326,7 @@ fn mask_unselected_groups(selection: &mut [f32], n_groups: usize, topk_group: us
 pub fn route_top_k_grouped_biased(
     logits: &[f32],
     bias: Option<&[f32]>,
+    rule: SelectionRule,
     n_groups: usize,
     topk_group: usize,
     k: usize,
@@ -330,19 +345,13 @@ pub fn route_top_k_grouped_biased(
         GatingFunction::SqrtSoftplus => logits.iter().map(|&l| sqrt_softplus(l)).collect(),
     };
 
-    let mut selection: Vec<f32> = match bias {
-        Some(b) => {
-            assert_eq!(
-                b.len(),
-                probs.len(),
-                "exp_probs_b must have one entry per expert"
-            );
-            probs.iter().zip(b.iter()).map(|(p, b)| p + b).collect()
-        }
-        None => probs.clone(),
-    };
+    let mut selection = rule.selection_scores(logits, &probs, bias);
 
-    if n_groups > 1 && !selection.is_empty() && selection.len().is_multiple_of(n_groups) {
+    if rule.masks_groups()
+        && n_groups > 1
+        && !selection.is_empty()
+        && selection.len().is_multiple_of(n_groups)
+    {
         mask_unselected_groups(&mut selection, n_groups, topk_group);
     }
 
@@ -410,6 +419,7 @@ pub fn route_top_k_grouped(
     route_top_k_grouped_biased(
         logits,
         None,
+        SelectionRule::BiasAfterGating,
         n_groups,
         topk_group,
         total_k,

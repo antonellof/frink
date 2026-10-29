@@ -16,6 +16,8 @@ use frink_gguf::GgmlType;
 use crate::tensor::Tensor;
 
 pub mod gpu_backend;
+mod host_pin;
+pub use host_pin::{host_backend_pinned, pin_host_backend};
 pub mod hadamard;
 pub mod lora;
 mod repack_cache;
@@ -50,8 +52,12 @@ pub enum WeightBytes {
     /// makes the store's lease pinning structural: as long as any
     /// `WeightMatrix` built over these bytes is alive, the cache entry's
     /// strong count stays >1 and eviction cannot reuse it.
+    ///
+    /// The bytes may be an expert's own heap buffer or one slot of the
+    /// store's slot pool ([`crate::expert_slab`]); either way the slice
+    /// is the expert's exact length.
     Shared {
-        buf: Arc<Vec<u8>>,
+        buf: Arc<crate::expert_store::ExpertBytes>,
         range: Range<usize>,
     },
 }
@@ -188,22 +194,23 @@ impl QuantKind {
             QuantKind::Q6K => Some("Q6_K"),
             QuantKind::IQ4XS => Some("IQ4_XS"),
             QuantKind::Ptq1_0 => Some("PTQ1_0"),
-            // No Metal matvec kernel: scalar host paths only.
-            QuantKind::Q2K
-            | QuantKind::Q3K
-            | QuantKind::Q4_1
-            | QuantKind::Q5_1
-            | QuantKind::Q8_1
-            | QuantKind::IQ4NL
-            | QuantKind::IQ1S
-            | QuantKind::IQ2XXS
-            | QuantKind::IQ3XXS
-            | QuantKind::IQ2XS
-            | QuantKind::IQ2S
-            | QuantKind::IQ3S
-            | QuantKind::IQ1M
-            | QuantKind::Mxfp4Gguf
-            | QuantKind::Tq1_0 => None,
+            QuantKind::Q2K => Some("Q2_K"),
+            QuantKind::Q3K => Some("Q3_K"),
+            QuantKind::IQ4NL => Some("IQ4_NL"),
+            QuantKind::Mxfp4Gguf => Some("MXFP4"),
+            QuantKind::IQ2XXS => Some("IQ2_XXS"),
+            QuantKind::IQ2XS => Some("IQ2_XS"),
+            QuantKind::IQ2S => Some("IQ2_S"),
+            QuantKind::IQ3XXS => Some("IQ3_XXS"),
+            QuantKind::IQ3S => Some("IQ3_S"),
+            QuantKind::IQ1S => Some("IQ1_S"),
+            QuantKind::IQ1M => Some("IQ1_M"),
+            QuantKind::Q4_1 => Some("Q4_1"),
+            QuantKind::Q5_1 => Some("Q5_1"),
+            QuantKind::Tq1_0 => Some("TQ1_0"),
+            // ggml's activation format: no weight path in the reference
+            // to match (`QuantKind::is_activation_format`).
+            QuantKind::Q8_1 => None,
         }
     }
 }
@@ -238,6 +245,18 @@ impl QuantKind {
         QuantKind::Tq1_0,
         QuantKind::Ptq1_0,
     ];
+
+    /// A kind ggml defines only as the activation side of an integer dot
+    /// (`vec_dot_type`), with no weight path: at the pin `Q8_1` has no
+    /// `to_float` in `ggml.c`, no CPU `vec_dot`, no Metal or CUDA kernel,
+    /// and no `llama_ftype` or `gguf-py` quantizer writes it. So no
+    /// backend has a reference kernel to match, and the coverage matrix
+    /// marks its accelerator cells not applicable rather than counting
+    /// them as host fallbacks (#405). frink's CPU still reads such a
+    /// weight if a file holds one.
+    pub fn is_activation_format(self) -> bool {
+        matches!(self, QuantKind::Q8_1)
+    }
 
     /// The GGUF-facing name. Also the key
     /// [`frink_metal::gpu::matvec_launch_meta`] is looked up by, which
@@ -351,10 +370,20 @@ pub fn cuda_matvec_kind_supported(kind: QuantKind) -> bool {
 /// quantized to Q8/Q8_K, int8xint8 dots) rather than the much slower f32
 /// dequant-dot. `cols` matters: the K-quant kernels need a whole number
 /// of 256-element super-blocks, the legacy ones 32-element blocks.
+///
+/// This is a hand list beside the `match *kind` arms in
+/// [`WeightMatrix::apply_cpu`] and [`WeightMatrix::apply_batch`], so
+/// `kernel_matrix::tests::the_cpu_int_dot_table_is_the_dispatch` runs
+/// both entry points for every kind and fails when this disagrees with
+/// the path they actually took. IQ4_XS is why: its `iq4_xs_q8` arms
+/// landed in both and this list was not told, so the registry and the
+/// load-time log called an integer path "f32 dequant-dot".
 pub fn cpu_int_dot_kind_supported(kind: QuantKind, cols: usize) -> bool {
     match kind {
         QuantKind::Q8_0 | QuantKind::Q4_0 => cols.is_multiple_of(32),
-        QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K => cols.is_multiple_of(256),
+        QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K | QuantKind::IQ4XS => {
+            cols.is_multiple_of(256)
+        }
         _ => false,
     }
 }
@@ -897,7 +926,7 @@ impl WeightMatrix {
         }
     }
 
-    fn block_bytes_per_row(&self, kind: QuantKind, cols: usize) -> usize {
+    pub(crate) fn block_bytes_per_row(&self, kind: QuantKind, cols: usize) -> usize {
         match kind {
             QuantKind::Q8_0 => {
                 (cols / frink_quant::Q8_0_BLOCK_ELEMS) * frink_quant::Q8_0_BLOCK_BYTES
@@ -1153,7 +1182,7 @@ impl WeightMatrix {
         rows.saturating_mul(cols) < 256_000
     }
 
-    fn dot(kind: QuantKind, row: &[u8], x: &[f32]) -> f32 {
+    pub(crate) fn dot(kind: QuantKind, row: &[u8], x: &[f32]) -> f32 {
         match kind {
             QuantKind::Q8_0 => frink_quant::dot_q8_0_f32(row, x),
             QuantKind::Q4_0 => frink_quant::dot_q4_0_f32(row, x),
@@ -1296,18 +1325,10 @@ impl WeightMatrix {
         else {
             return None;
         };
-        let kind_name = match kind {
-            QuantKind::Q8_0 => "Q8_0",
-            QuantKind::Q4_0 => "Q4_0",
-            QuantKind::Q5_0 => "Q5_0",
-            QuantKind::Q4K => "Q4_K",
-            QuantKind::Q5K => "Q5_K",
-            QuantKind::Q6K => "Q6_K",
-            QuantKind::IQ4XS => "IQ4_XS",
-            QuantKind::Ptq1_0 => "PTQ1_0",
-            _ => return None,
-        };
-        let (fn_name, block_bytes, block_elems) = frink_metal::gpu::mul_mm_sg_meta(kind_name)?;
+        // Keyed by the kind's own name, so `mul_mm_sg_meta` is the only
+        // list of which kinds have a GEMM. The same hand-written match in
+        // `apply_gpu_batch` once lacked Q5_0 and PTQ1_0.
+        let (fn_name, block_bytes, block_elems) = frink_metal::gpu::mul_mm_sg_meta(kind.name())?;
         Some(frink_metal::gpu::MulMmSgLaunch {
             weights: data.as_slice(),
             rows: *rows,
@@ -1386,22 +1407,32 @@ impl WeightMatrix {
         })
     }
 
+    /// IQ4_NL left this list when Metal gained its GEMM (CUDA already
+    /// had one): it is no longer a kind whose batch is N matvecs. The
+    /// IQ1/IQ2/IQ3 kinds have a GEMM on Metal and none on CUDA, so for
+    /// them the answer is the backend's: Metal's when the dense path runs
+    /// there (#405), and N matvecs otherwise.
     #[cfg(any(feature = "metal", feature = "cuda"))]
     pub fn prefers_gpu_batch(&self) -> bool {
-        !matches!(
-            self.base(),
-            WeightMatrix::Quantized {
-                kind: QuantKind::IQ4NL
-                    | QuantKind::IQ1S
-                    | QuantKind::IQ2XXS
-                    | QuantKind::IQ3XXS
-                    | QuantKind::IQ2XS
-                    | QuantKind::IQ2S
-                    | QuantKind::IQ3S
-                    | QuantKind::IQ1M,
-                ..
-            }
-        )
+        let WeightMatrix::Quantized { kind, .. } = self.base() else {
+            return true;
+        };
+        let no_cuda_gemm = matches!(
+            kind,
+            QuantKind::IQ1S
+                | QuantKind::IQ2XXS
+                | QuantKind::IQ3XXS
+                | QuantKind::IQ2XS
+                | QuantKind::IQ2S
+                | QuantKind::IQ3S
+                | QuantKind::IQ1M
+        );
+        #[cfg(feature = "metal")]
+        if metal_dense_enabled() {
+            use gpu_backend::BackendCaps;
+            return !no_cuda_gemm || gpu_backend::Metal::gemm_supported(*kind);
+        }
+        !no_cuda_gemm
     }
 
     /// Computes `W @ x` for a single activation vector `x` of length
@@ -3791,7 +3822,7 @@ impl WeightMatrix {
         role: &'static str,
         loc: &'static std::panic::Location<'static>,
     ) {
-        use crate::kernel_registry::{op, Backend, Lookup, Outcome};
+        use crate::kernel_registry::{host_fallback, op, Backend, Lookup, Outcome};
 
         let kind = self.quant_kind();
         let cols = self.cols();
@@ -3850,7 +3881,7 @@ impl WeightMatrix {
                     // An accelerator kernel exists for this format.
                     _ if matvec => Outcome::Hit,
                     // No kernel: the whole matvec runs on the host.
-                    Some(_) => Outcome::slow_path("CPU apply_cpu"),
+                    Some(_) => Outcome::slow_path(host_fallback::MATVEC),
                     // F32 has no quantized kernel by construction, and a
                     // lone small F32 matvec (an MoE router) is host work
                     // on purpose -- see `apply_gpu`.
@@ -3871,7 +3902,7 @@ impl WeightMatrix {
                     // comes from the backend instead of from an arm
                     // here that a new variant would fall through.
                     (false, true, _) => Outcome::slow_path(gemm_fallback),
-                    (false, false, Some(_)) => Outcome::slow_path("CPU apply_batch"),
+                    (false, false, Some(_)) => Outcome::slow_path(host_fallback::BATCH),
                     (false, false, None) => Outcome::by_design("CPU f32 GEMM"),
                 },
             );
@@ -3935,7 +3966,7 @@ impl WeightMatrix {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// The task floor is **work-aware**, which is the whole reason
     /// [`crate::par::with_op_work`] exists: a row count alone cannot
@@ -4151,7 +4182,7 @@ mod tests {
     /// The override is process-global, so the guard serializes on a
     /// mutex: two tests forcing opposite values concurrently would
     /// otherwise see each other's setting.
-    pub(super) struct ForceIntDot {
+    pub(crate) struct ForceIntDot {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -4167,7 +4198,7 @@ mod tests {
     static INT_DOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl ForceIntDot {
-        pub(super) fn new(on: bool) -> Self {
+        pub(crate) fn new(on: bool) -> Self {
             let lock = INT_DOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             Self::set(on);
             Self { _lock: lock }
@@ -5171,8 +5202,9 @@ mod tests {
         /// `block_bytes_for_kind`'s partial one) stay in sync.
         ///
         /// The probe was `Q2_K` until 2026-09-09, when Q2_K gained a
-        /// CUDA matvec and a GEMM and stopped being unsupported. `Q4_1`
-        /// has neither on any backend and is the hole now. Moving it
+        /// CUDA matvec and a GEMM and stopped being unsupported, then
+        /// `Q4_1` until Metal gained one (#405). `Q8_1` has a kernel on
+        /// no backend (it is an activation format in ggml). Moving it
         /// found a real defect rather than being bookkeeping: with the
         /// `cuda` feature on and no driver present, the first real
         /// dispatch through `Cuda::launch_matvec` aborted the process
@@ -5181,13 +5213,13 @@ mod tests {
         #[test]
         fn apply_gpu_returns_none_for_an_unsupported_quant_kind() {
             let matrix = WeightMatrix::Quantized {
-                data: WeightBytes::Owned(vec![0u8; frink_quant::Q4_1_BLOCK_BYTES]),
+                data: WeightBytes::Owned(vec![0u8; frink_quant::Q8_1_BLOCK_BYTES]),
                 rows: 1,
-                cols: frink_quant::Q4_1_BLOCK_ELEMS,
-                kind: QuantKind::Q4_1,
+                cols: frink_quant::Q8_1_BLOCK_ELEMS,
+                kind: QuantKind::Q8_1,
             };
             assert!(matrix
-                .apply_gpu(&[0.0; frink_quant::Q4_1_BLOCK_ELEMS])
+                .apply_gpu(&[0.0; frink_quant::Q8_1_BLOCK_ELEMS])
                 .is_none());
         }
 
@@ -5297,15 +5329,15 @@ mod tests {
 
         // Supported: Q4_K has both a Metal matvec and a Metal GEMM.
         shaped(QuantKind::Q4K, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_down", loc);
-        // Unsupported: no Metal kernel of any kind for IQ2_XXS.
-        shaped(QuantKind::IQ2XXS, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_up", loc);
+        // Unsupported: no Metal kernel of any kind for Q8_1.
+        shaped(QuantKind::Q8_1, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_up", loc);
 
         let report = reg.seal();
         let violations = &report.violations;
         assert_eq!(
             violations.len(),
             2,
-            "expected matvec + gemm misses for IQ2_XXS only, got: {:?}",
+            "expected matvec + gemm misses for Q8_1 only, got: {:?}",
             report
                 .entries
                 .iter()
@@ -5315,7 +5347,7 @@ mod tests {
         assert!(
             violations
                 .iter()
-                .all(|v| v.key.kind == Some(QuantKind::IQ2XXS)),
+                .all(|v| v.key.kind == Some(QuantKind::Q8_1)),
             "Q4_K must not be flagged"
         );
         assert!(
@@ -5326,14 +5358,14 @@ mod tests {
             "the report must name the fallback that will actually run"
         );
         let rendered = report.render_violations();
-        assert!(rendered.contains("IQ2_XXS"), "{rendered}");
+        assert!(rendered.contains("Q8_1"), "{rendered}");
         assert!(rendered.contains("weight_matrix.rs"), "{rendered}");
 
-        // And the host tier it lands on is recorded too: IQ2_XXS has no
+        // And the host tier it lands on is recorded too: Q8_1 has no
         // integer vec_dot either, so it is f32 dequant-dot.
         assert!(
             report.entries.iter().any(|e| e.key.backend == Backend::Cpu
-                && e.key.kind == Some(QuantKind::IQ2XXS)
+                && e.key.kind == Some(QuantKind::Q8_1)
                 && matches!(e.outcome, Outcome::Miss { fallback, .. } if fallback == "f32 dequant-dot")),
             "{:?}",
             report.entries.iter().map(|e| e.to_string()).collect::<Vec<_>>()

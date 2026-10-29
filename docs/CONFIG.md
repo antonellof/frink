@@ -53,8 +53,8 @@ library or overriding the CLI.
 | `FRINK_VULKAN_LOADER` | Path to a `libvulkan` the loader should use. Only needed when the platform default is not found; the error names this variable |
 | `FRINK_MODEL_NAME` | What the served model is called in `/v1/models` and every response's `model` field. Same as `--alias`. Read in one place, so it cannot apply to some routes and not others |
 | `FRINK_CACHE` | Where `-hf` puts downloaded checkpoints. Default `$XDG_CACHE_HOME/frink`, else `~/.cache/frink`; models go under `hub/<owner>__<repo>/`. llama.cpp spells this `LLAMA_CACHE` |
-| `FRINK_KV_WINDOW` | `1` evicts KV rows behind a sliding window on the CPU contiguous store. Off by default. Gemma-3-4B at 32768 tokens holds 1.69 GiB at rest instead of 9.13 GiB, with a 1.96 GiB admission ceiling, and `--ctx-size auto` is priced against that ceiling rather than the unwindowed one. Output is token-identical either way, tested on a real quantized SWA checkpoint. Turns itself off under `FRINK_METAL_ATTN`, and does not apply to a draft model; disables the prefix cache, which cannot represent a windowed cache. See the note below |
-| `FRINK_CPU_POOL` | An A/B override, not the decision. Unset, the scheduler is chosen per operation from its size: an operation carrying at least `par::policy::SPIN_MIN_OP_MACS` multiply-accumulates (2.1M, i.e. `rows x cols`) runs on a persistent pool parked on a spin-then-park barrier, the shape llama.cpp's `ggml_threadpool` uses; anything smaller forks and joins with rayon as before. `spin` / `persistent` / `1` / `on` pins the pool at every size; `rayon` / `0` / `off` pins fork-join at every size and is the exact revert. The rule exists because the pool is not uniformly better, measured on 2026-09-04: on a quiet 20-core Cortex-A725 (aarch64, `tg128`, 19 threads) it is +123% at 3B and +87% at 8B, taking decode from losing to llama.cpp to beating it (23.14 vs 17.86 tok/s at 3B, 12.41 vs 9.06 at 8B), and -37% at 135M, reproducibly and on quiet hosts, so it is not contention. On a quiet 10-core Xeon it is +49% / +23% / +15% at 135M / 3B / 8B. The crossover constant is *bracketed* by those model-level numbers rather than swept; see its doc comment. Output is token-identical on all settings, which is tested |
+| `FRINK_KV_WINDOW` | On by default: a sliding-window layer's contiguous host KV keeps its last `window` rows plus slack instead of the whole context, as llama.cpp's `swa_full = false` does. `0` keeps every row. Gemma-3-4B at 32768 tokens holds 1.68 GiB at rest instead of 9.13 GiB, with a 1.96 GiB admission ceiling, and `--ctx-size auto` is priced against that ceiling. Output is token-identical either way, including under speculative rollback and `n > 1` forks. Turns itself off under `FRINK_METAL_ATTN` and on a draft model; the paged store and the KV pool do not evict. See the note below |
+| `FRINK_CPU_POOL` | An A/B override, not the decision. Unset, a single-token CPU decode step picks ONE scheduler for all of its regions from its widest layer matvec (LM head excluded): at least `par::policy::SPIN_MIN_OP_MACS` multiply-accumulates (2.1M, i.e. `rows x cols`) runs the whole step on a persistent pool parked on a spin-then-park barrier, the shape llama.cpp's `ggml_threadpool` uses; anything smaller forks and joins with rayon as before. Every other operation (prefill, engines that do not report a layer width, GPU backends) is still chosen per operation by the same constant. Choosing per operation inside a decode step made it alternate between the two schedulers at every layer (#27). `spin` / `persistent` / `1` / `on` pins the pool at every size; `rayon` / `0` / `off` pins fork-join at every size and is the exact revert. The rule exists because the pool is not uniformly better, measured on 2026-09-04: on a quiet 20-core Cortex-A725 (aarch64, `tg128`, 19 threads) it is +123% at 3B and +87% at 8B, taking decode from losing to llama.cpp to beating it (23.14 vs 17.86 tok/s at 3B, 12.41 vs 9.06 at 8B), and -37% at 135M, reproducibly and on quiet hosts, so it is not contention. On a quiet 10-core Xeon it is +49% / +23% / +15% at 135M / 3B / 8B. The crossover constant is *bracketed* by those model-level numbers rather than swept; see its doc comment. Output is token-identical on all settings, which is tested |
 | `FRINK_CPU_POOL_SPIN_US` | Microseconds a `spin` worker spins before parking. Default 100. A pool that never parks burns a core per thread on an idle server |
 | `FRINK_CPU_THREADS` | Worker threads; same as `-t`. Default: performance cores (`hw.perflevel0.physicalcpu` on macOS), matching llama.cpp, not logical cores |
 | `FRINK_CPU_INT_DOT` | int8×int8 matvec + repacked GEMV/GEMM. On by default in `frink` / `frink-server`; `0` opts out. Off in the library so golden cross-validation stays reference-exact. It is the master switch, not the whole rule: which half of the tier a workload takes is per architecture. aarch64 takes both halves. x86_64 with AVX2+FMA takes the batched GEMM (prefill) and leaves decode on the AVX2 f32 dot, because the int8 matvec measured 4x to 8.8x slower there (#127) while the batch half has AVX2 kernels for Q4_K, Q5_K, Q6_K, Q8_0 and Q4_0 (#152). An x86 host without AVX2 takes neither. Either half repacks weights into the interleaved layout, so the retained copies are bounded by `FRINK_REPACK_CACHE_BYTES` below. On x86 this is what starts spending that budget, since nothing repacked there before |
@@ -84,6 +84,7 @@ library or overriding the CLI.
 | `FRINK_QUIET` | Any value drops the `loaded in ...` line (load time, tokenizer, context size) that `frink run` prints to stderr before generating. The banner and the prompt echo still print |
 | `FRINK_CB_KV_BLOCKS` | Continuous batching: total KV blocks the scheduler may hand out. Unset means it is *derived* at load alongside `FRINK_CB_MAX_CONTEXT`, or absent when the model cannot be priced. Admission is `blocks_needed <= blocks_free`, where a request needs `ceil((prompt + max_tokens) / block_size)` blocks reserved for its whole lifetime |
 | `FRINK_CB_KV_BLOCK_SIZE` | Continuous batching: token positions per KV block (default `256`). The admission quantum. A request bigger than the whole budget gets `400` (`code: device_memory_budget_exceeded`), not `503`, because retrying cannot fix it |
+| `FRINK_CB_PREEMPT_AFTER_TICKS` | Continuous batching: admission passes the next job may wait before the most recently admitted decoding rows are preempted to make room for it (unset: no preemption; `0`: as soon as it does not fit). An evicted row keeps its output, sampler state and stop hold-back, returns to the front of the queue, and is prefilled again from prompt plus generated tokens, so its client sees one unbroken stream. Each row is preempted at most 4 times. Rows on a sliding-window paged lease are never evicted. Each eviction costs a re-prefill; `/metrics` reports the count as `frink_scheduler_preempted_total` |
 | `FRINK_CB_MAX_CONTEXT` | Token positions (prompt + `max_tokens`) any one request may ask for, on both decode paths. Over it, `400` with `code: context_length_exceeded`, `estimated_bytes` and `limit_bytes`. Unset means the ceiling is *derived* at load from weights + per-token KV against the device budget, capped at the model's trained context; unset and unpriceable (no device-budget probe, or a header the planner cannot read) means no ceiling |
 | `FRINK_SSE_ORPHAN_TIMEOUT_MS` | How long a streaming send waits for a client to make room before the stream is declared abandoned and the generation cancelled (default `30000`). `0` disables the deadline. Guards against a client that is neither reading nor disconnected pinning a blocking thread and the model handle it holds |
 | `FRINK_CHUNKED_PREFILL` | Private (non-batched) generate path only: split a long prefill into N-token `forward_batch` chunks. Unrelated to `FRINK_CB_PREFILL_CHUNK`, which is a *scheduling* quantum, not a batch-shape one |
@@ -119,9 +120,15 @@ available memory cannot be determined resolves to resident rather than
 to streaming: guessing a machine is short would silently put every user
 on the slow path.
 
-On Metal there is a further cost today. Several MoE fast paths still
-accept only resident experts, so streaming currently gives up the fused
-Metal MoE kernels as well. The warning says so when it fires.
+The budget buys whole slots of the largest expert's size; the load
+line says how many (`frink: expert store: N of M routed experts
+resident`). Experts the router picks most often stay resident, and a
+miss colder than every resident expert is read without being cached.
+On Metal the slots are one Shared buffer the GPU reads in place, so the
+budget is not counted a second time by `FRINK_METAL_WEIGHT_CACHE_BYTES`.
+A streamed layer still takes the per-layer Metal top-k launch rather
+than the packed whole-stack decode, so streaming costs speed on Metal
+even when every expert fits the budget.
 
 | Variable | Purpose |
 |---|---|
@@ -284,48 +291,83 @@ path. Setting them does nothing.
 `FRINK_GEMV_DEDICATED` · `FRINK_GEMV_THREADS` ·
 `FRINK_MIN_TASK_MACS`
 
-## `FRINK_KV_WINDOW`, and why it is off
+## `FRINK_KV_WINDOW`
 
 A sliding-window layer only ever attends over its last `window`
-positions, so the rows before that are dead weight. Nothing in frink
-evicted them until now, which is why a windowed model cost exactly what
-a full-attention model of the same shape cost.
+positions, so the rows before that are dead weight. The contiguous host
+store drops them, per layer, so an alternating model (Gemma-2/3,
+gpt-oss) evicts in its windowed layers and keeps everything in its
+full-attention ones. The windowed layers are the ones
+`attention.sliding_window_pattern` or the file's per-layer array names.
 
 What it saves, on Gemma-3-4B at 32768 tokens of host f32 KV:
 
 | | bytes |
 |---|---|
-| Off (every layer holds everything) | 9,126,805,504 |
-| On, at rest | 1,692,590,080 |
-| On, admission ceiling (prefill peak) | 1,962,934,272 |
+| `FRINK_KV_WINDOW=0` (every layer holds everything) | 9,126,805,504 |
+| Default, at rest | 1,678,098,432 |
+| Default, admission ceiling (prefill peak) | 1,962,934,272 |
 
 The peak is not the full 9.13 GiB because prefill evicts per layer: one
 layer holds the whole prompt at a time rather than all 34 at once. Five
 of the 34 layers are full attention and still hold everything, which is
 most of what remains.
 
-The ceiling prices each windowed layer at `window + slack` rows (the
-top of the cycle a draining cache runs through, `KvWindow::max_rows`)
-rather than at the exact instantaneous count, which oscillates. That
-costs 0.7% against a number that already carries a whole layer's prompt,
-and in return the cost never falls as the context grows, which is what
-`--ctx-size auto`'s search for the largest fitting context needs.
+A windowed layer's resident rows cycle between `window + reserve` and
+`window + slack`: half a window of slack, so the drain moves a block of
+rows every few hundred tokens rather than the whole window every token,
+and half of that slack held back as a rollback reserve (below). The
+ceiling prices each windowed layer at the top of that cycle
+(`KvWindow::max_rows`) rather than at the instantaneous count, which
+oscillates. That costs 1.5% against a number that already carries a
+whole layer's prompt, and in return the cost never falls as the context
+grows, which is what `--ctx-size auto`'s search for the largest fitting
+context needs.
 
-It is off by default because it is new, not because it is doubted.
 Output is token-identical with it on or off, asserted on identical logit
 vectors as well as identical token ids, on gemma-2-2b-it-Q4_K_M with its
-real SWA layout and real quantized tensors.
+real SWA layout and real quantized tensors, and on synthetic fixtures
+that decode several windows past the end, through rejected speculative
+drafts and through forks.
 
-It disables itself in three cases rather than guessing:
+How each thing that moves a KV cache backwards or sideways is handled:
+
+- **Speculative decoding.** A rejected draft is rolled back with a
+  truncate, and a cache that has just drained to `window` rows cannot
+  roll back without leaving the next query reading across a hole. So a
+  drain keeps a reserve of a quarter window, and every speculative
+  caller (the server's prompt-lookup drafter, `--model-draft`) bounds
+  its draft by what the caches say they can roll back
+  (`KvCache::rollback_limit`) before it writes. On Gemma-3's 1024-token
+  window that is 257 positions; a window too small for the server's
+  5-token draft simply decodes without speculating.
+- **The prefix cache** stores windowed caches, at O(window) for their
+  windowed layers, and reuses one only for a match it can still truncate
+  to. The next turn of a chat, which extends the stored sequence, keeps
+  hitting. A request that diverges further back than the reserve is a
+  miss, counted as `refused_windowed` in the prefix-cache stats, rather
+  than a history with a hole in it.
+- **`n > 1`** forks clone the post-prefill caches, and a clone carries
+  its window and its rows, so each fork drains on its own.
+- **Slot files** hold a whole history, so a slot save's prefill keeps
+  every row.
+- **Context shift** is refused before any of this matters.
+
+It turns itself off in two cases rather than guessing:
 
 - Under `FRINK_METAL_ATTN`, because five sites treat Metal's own
   sequence length and the host cache's resident rows as interchangeable.
-  They are equal only while nothing evicts. Metal is step 3 of
-  [#61](https://github.com/antonellof/frink/issues/61).
+  They are equal only while nothing evicts, and the Metal attention
+  kernels index the device KV linearly from row 0. The default Metal
+  path, which attends on the host, evicts as the CPU does.
 - On a draft model's decoder, which rolls its cache back arbitrarily far
   during speculative verification.
-- Beside the prefix cache, which refuses to store a windowed cache
-  rather than hand back a truncation it cannot represent.
+
+And two stores do not evict at all, so they cost what they always did:
+the paged store (`FRINK_PAGED_KV_BLOCKS`), whose page groups hold one
+block in every layer, and the KV pool (`FRINK_KV_POOL_BLOCKS`), which
+reserves the whole context up front. The paged prefill's scratch copy
+never evicts either, because the scatter reads it back by offset.
 
 Admission and `--ctx-size auto` price what the switch really keeps.
 `KvBudget` carries the same per-layer residency the stores evict with,
@@ -339,9 +381,10 @@ every layer keeps everything, which is the arithmetic this engine always
 had, asserted rather than assumed.
 
 What is still priced at the full number, because no store evicts there
-yet: the paged store ([#61](https://github.com/antonellof/frink/issues/61)
-step 4) and the prompt region while a prefill batch is being written
-(step 5).
+yet: the paged store and the pool
+([#61](https://github.com/antonellof/frink/issues/61)), which is also why
+the server's own pre-load ceiling prices the unwindowed number, and the
+prompt region while a prefill batch is being written.
 
 The byte figures inside a *context-length* refusal
 (`ContextCeiling::bytes_for`) are still the unwindowed ones. That only

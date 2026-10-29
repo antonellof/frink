@@ -82,6 +82,10 @@ pub enum MetalError {
     BufferAllocFailed,
     #[error("Metal command buffer/encoder creation failed")]
     CommandFailed,
+    /// A packed MoE plane whose kind has no `mul_mv_id` kernel, refused
+    /// before anything is encoded (#448).
+    #[error("no Metal MoE id kernel (mul_mv_id) for {0} expert weights")]
+    NoMoeIdKernel(&'static str),
 }
 
 /// Concurrent compute encoder (llama.cpp `MTLDispatchTypeConcurrent`).
@@ -2270,7 +2274,8 @@ kernel void q4_k_mul_mm(
 /// The GEMM translation unit: the K-quant, legacy and IQ4_XS functors
 /// written here, plus PrismML's ternary functor spliced in from
 /// `crate::ternary` so the trit decode exists once (the matvec is
-/// built from the same text). Built on first use and leaked, because
+/// built from the same text), and the embedding gathers
+/// (`crate::embd::get_rows_msl`), one per functor. Built on first use and leaked, because
 /// `ensure_pipeline` keys its cache on a `&'static str`.
 pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
     std::sync::LazyLock::new(|| {
@@ -2284,7 +2289,39 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 "// @FRINK_TERNARY_ENTRIES@",
                 crate::ternary::PTQ1_0_GEMM_ENTRIES_MSL,
                 1,
-            );
+            )
+            .replacen(
+                "// @FRINK_LOW_K_FUNCTORS@",
+                &[crate::q2_k::Q2_K_DEQUANT_MSL, crate::q3_k::Q3_K_DEQUANT_MSL].concat(),
+                1,
+            )
+            .replacen(
+                "// @FRINK_LOW_K_ENTRIES@",
+                &[
+                    crate::q2_k::Q2_K_GEMM_ENTRIES_MSL,
+                    crate::q3_k::Q3_K_GEMM_ENTRIES_MSL,
+                ]
+                .concat(),
+                1,
+            )
+            .replacen(
+                "// @FRINK_CODEBOOK4_FUNCTORS@",
+                crate::codebook4::CODEBOOK4_DEQUANT_MSL,
+                1,
+            )
+            .replacen(
+                "// @FRINK_CODEBOOK4_ENTRIES@",
+                crate::codebook4::CODEBOOK4_GEMM_ENTRIES_MSL,
+                1,
+            )
+            .replacen("// @FRINK_IQ_FUNCTORS@", crate::iq::gemm_functors_msl(), 1)
+            .replacen("// @FRINK_DQ_FUNCTORS@", crate::dq_mv::DQ_FUNCTORS_MSL, 1)
+            .replacen(
+                "// @FRINK_GEN_ENTRIES@",
+                &crate::gen_kinds::gemm_entries_msl(),
+                1,
+            )
+            .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1);
         Box::leak(src.into_boxed_str())
     });
 
@@ -2293,6 +2330,11 @@ const K_QUANT_MUL_MM_SG_KERNEL_BODY: &str = r#"
 using namespace metal;
 
 // @FRINK_TERNARY_FUNCTOR@
+// @FRINK_CODEBOOK4_FUNCTORS@
+// @FRINK_IQ_FUNCTORS@
+// @FRINK_DQ_FUNCTORS@
+
+// @FRINK_LOW_K_FUNCTORS@
 
 // llama `get_scale_min_k4_just2`: Q4_K packs eight 6-bit scale/min pairs
 // into 12 bytes, the low four pairs plainly and the high four with their
@@ -3255,12 +3297,21 @@ MUL_MM_SG_ENTRY(q4_0_mul_mm_sg, Q4_0Dequant)
 MUL_MM_SG_ENTRY(q5_0_mul_mm_sg, Q5_0Dequant)
 MUL_MM_SG_ENTRY(iq4_xs_mul_mm_sg, IQ4XSDequant)
 // @FRINK_TERNARY_ENTRIES@
+// @FRINK_LOW_K_ENTRIES@
+// @FRINK_CODEBOOK4_ENTRIES@
+// @FRINK_GEN_ENTRIES@
 MUL_MM_ID_ENTRY(q4_0_mul_mm_id, Q4_0Dequant)
 MUL_MM_ID_ENTRY(q4_k_mul_mm_id, Q4KDequant)
 MUL_MM_ID_ENTRY(q8_0_mul_mm_id, Q8_0Dequant)
 MUL_MM_ID_F16_ENTRY(q4_0_mul_mm_id_f16, Q4_0Dequant)
 MUL_MM_ID_F16_ENTRY(q4_k_mul_mm_id_f16, Q4KDequant)
 MUL_MM_ID_F16_ENTRY(q8_0_mul_mm_id_f16, Q8_0Dequant)
+MUL_MM_ID_ENTRY(q5_k_mul_mm_id, Q5KDequant)
+MUL_MM_ID_ENTRY(q6_k_mul_mm_id, Q6KDequant)
+MUL_MM_ID_ENTRY(iq4_xs_mul_mm_id, IQ4XSDequant)
+MUL_MM_ID_F16_ENTRY(q5_k_mul_mm_id_f16, Q5KDequant)
+MUL_MM_ID_F16_ENTRY(q6_k_mul_mm_id_f16, Q6KDequant)
+MUL_MM_ID_F16_ENTRY(iq4_xs_mul_mm_id_f16, IQ4XSDequant)
 MUL_MM_SG_F16_ENTRY(q4_k_mul_mm_sg_f16, Q4KDequant)
 MUL_MM_SG_F16_ENTRY(q6_k_mul_mm_sg_f16, Q6KDequant)
 MUL_MM_SG_F16_ENTRY(q5_k_mul_mm_sg_f16, Q5KDequant)
@@ -3268,6 +3319,7 @@ MUL_MM_SG_F16_ENTRY(q8_0_mul_mm_sg_f16, Q8_0Dequant)
 MUL_MM_SG_F16_ENTRY(q4_0_mul_mm_sg_f16, Q4_0Dequant)
 MUL_MM_SG_F16_ENTRY(q5_0_mul_mm_sg_f16, Q5_0Dequant)
 MUL_MM_SG_F16_ENTRY(iq4_xs_mul_mm_sg_f16, IQ4XSDequant)
+// @FRINK_GET_ROWS@
 "#;
 
 /// Launches the simdgroup Q4_K GEMM ([`K_QUANT_MUL_MM_SG_KERNEL_SRC`]).
@@ -3595,7 +3647,11 @@ pub fn mul_mm_sg_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "Q5_0" => Some(("q5_0_mul_mm_sg", 22, 32)),
         "IQ4_XS" => Some(("iq4_xs_mul_mm_sg", 136, 256)),
         "PTQ1_0" => Some(("ptq1_0_mul_mm_sg", 28, 128)),
-        _ => None,
+        "Q2_K" => Some(("q2_k_mul_mm_sg", 84, 256)),
+        "Q3_K" => Some(("q3_k_mul_mm_sg", 110, 256)),
+        "IQ4_NL" => Some(("iq4_nl_mul_mm_sg", 18, 32)),
+        "MXFP4" => Some(("mxfp4_mul_mm_sg", 17, 32)),
+        _ => crate::gen_kinds::gemm_meta(kind, false),
     }
 }
 
@@ -3605,7 +3661,14 @@ pub fn mul_mm_id_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "Q4_K" => Some(("q4_k_mul_mm_id", 144, 256)),
         "Q8_0" => Some(("q8_0_mul_mm_id", 34, 32)),
         "Q4_0" => Some(("q4_0_mul_mm_id", 18, 32)),
-        _ => None,
+        "Q2_K" => Some(("q2_k_mul_mm_id", 84, 256)),
+        "Q3_K" => Some(("q3_k_mul_mm_id", 110, 256)),
+        "IQ4_NL" => Some(("iq4_nl_mul_mm_id", 18, 32)),
+        "MXFP4" => Some(("mxfp4_mul_mm_id", 17, 32)),
+        "Q5_K" => Some(("q5_k_mul_mm_id", 176, 256)),
+        "Q6_K" => Some(("q6_k_mul_mm_id", 210, 256)),
+        "IQ4_XS" => Some(("iq4_xs_mul_mm_id", 136, 256)),
+        _ => crate::gen_kinds::gemm_meta(kind, true),
     }
 }
 
@@ -3616,7 +3679,14 @@ pub fn mul_mm_id_f16_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
                 "q4_k_mul_mm_id" => "q4_k_mul_mm_id_f16",
                 "q8_0_mul_mm_id" => "q8_0_mul_mm_id_f16",
                 "q4_0_mul_mm_id" => "q4_0_mul_mm_id_f16",
-                _ => base,
+                "q2_k_mul_mm_id" => "q2_k_mul_mm_id_f16",
+                "q3_k_mul_mm_id" => "q3_k_mul_mm_id_f16",
+                "iq4_nl_mul_mm_id" => "iq4_nl_mul_mm_id_f16",
+                "mxfp4_mul_mm_id" => "mxfp4_mul_mm_id_f16",
+                "q5_k_mul_mm_id" => "q5_k_mul_mm_id_f16",
+                "q6_k_mul_mm_id" => "q6_k_mul_mm_id_f16",
+                "iq4_xs_mul_mm_id" => "iq4_xs_mul_mm_id_f16",
+                _ => crate::gen_kinds::f16_fn(base).unwrap_or(base),
             },
             bb,
             be,
@@ -4137,7 +4207,35 @@ pub(crate) fn mul_mm_sg_aligned_fn(fn_name: &str) -> Option<&'static str> {
         "q4_0_mul_mm_sg_f16" => "q4_0_mul_mm_sg_f16_a",
         "q5_0_mul_mm_sg_f16" => "q5_0_mul_mm_sg_f16_a",
         "iq4_xs_mul_mm_sg_f16" => "iq4_xs_mul_mm_sg_f16_a",
-        _ => return None,
+        "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_a",
+        "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_a",
+        "q2_k_mul_mm_sg_f16" => "q2_k_mul_mm_sg_f16_a",
+        "q3_k_mul_mm_sg_f16" => "q3_k_mul_mm_sg_f16_a",
+        "iq4_nl_mul_mm_sg" => "iq4_nl_mul_mm_sg_a",
+        "iq4_nl_mul_mm_sg_f16" => "iq4_nl_mul_mm_sg_f16_a",
+        "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_a",
+        "mxfp4_mul_mm_sg_f16" => "mxfp4_mul_mm_sg_f16_a",
+        _ => return crate::gen_kinds::aligned_fn(fn_name),
+    })
+}
+
+/// The half-activation sibling of a `*_mul_mm_sg` entry point
+/// (`MUL_MM_SG_F16_ENTRY`). One table for the fused prefill encode and
+/// its pipeline warm-up, which each kept a copy.
+pub(crate) fn mul_mm_sg_f16_fn(fn_name: &str) -> Option<&'static str> {
+    Some(match fn_name {
+        "q4_k_mul_mm_sg" => "q4_k_mul_mm_sg_f16",
+        "q5_k_mul_mm_sg" => "q5_k_mul_mm_sg_f16",
+        "q6_k_mul_mm_sg" => "q6_k_mul_mm_sg_f16",
+        "q8_0_mul_mm_sg" => "q8_0_mul_mm_sg_f16",
+        "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
+        "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
+        "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
+        "iq4_nl_mul_mm_sg" => "iq4_nl_mul_mm_sg_f16",
+        "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_f16",
+        "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
+        "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
+        _ => return crate::gen_kinds::f16_fn(fn_name),
     })
 }
 
@@ -4178,16 +4276,7 @@ pub(crate) fn encode_mul_mm_sg_f16(
     out_buf: &ProtocolObject<dyn MTLBuffer>,
     batch_size: usize,
 ) -> Result<(), MetalError> {
-    let fn_f16: &'static str = match l.fn_name {
-        "q4_k_mul_mm_sg" => "q4_k_mul_mm_sg_f16",
-        "q5_k_mul_mm_sg" => "q5_k_mul_mm_sg_f16",
-        "q6_k_mul_mm_sg" => "q6_k_mul_mm_sg_f16",
-        "q8_0_mul_mm_sg" => "q8_0_mul_mm_sg_f16",
-        "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
-        "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
-        "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
-        _ => return Err(MetalError::CommandFailed),
-    };
+    let fn_f16 = mul_mm_sg_f16_fn(l.fn_name).ok_or(MetalError::CommandFailed)?;
     let (fn_pick, smem) = mul_mm_sg_variant(fn_f16, l.rows, batch_size);
     let pipeline = ensure_pipeline(device, *K_QUANT_MUL_MM_SG_KERNEL_SRC, fn_pick)?;
     unsafe {
@@ -4646,136 +4735,8 @@ pub fn launch_q4_k_mul_mm(
     Ok(out_slice.to_vec())
 }
 
-/// ggml-metal `kernel_mul_mv_q5_K_f32` port: `N_R0=1` row per simdgroup,
-/// `NSG=2` simdgroups per TG (2 rows / 64 threads). Register-local
-/// `yl`/`yh` activation packs with Q5_K's 5th-bit `qh` plane — same
-/// dequant identity as `frink_quant::dot_q5_k_f32_scalar`. Host
-/// dispatches `ceil(n_rows/2)` threadgroups of 64 threads.
-///
-/// `N_R0` stays at 1 (not 2 like Q4_K/Q6_K): ggml-metal reduced it after
-/// a real register-spill regression (`llama.cpp` #20399).
-///
-/// Verified: compiled by the system Metal compiler and executed on a
-/// real Apple M2 Pro GPU, matching the CPU reference exactly (see
-/// `launch_q5_k_matvec_matches_cpu_reference`).
-pub const Q5_K_MATVEC_KERNEL_SRC: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void q5_k_matvec(
-    device const uchar* weights [[buffer(0)]],
-    device const float* x [[buffer(1)]],
-    device float* out [[buffer(2)]],
-    constant uint& row_bytes [[buffer(3)]],
-    constant uint& n_blocks_per_row [[buffer(4)]],
-    constant uint& n_rows [[buffer(5)]],
-    uint tgpig [[threadgroup_position_in_grid]],
-    uint tid_tg [[thread_position_in_threadgroup]]
-) {
-    constexpr short NSG = 2;
-    constexpr short nr0 = 1;
-    constexpr short NW = 32;
-    constexpr uint16_t kmask1 = 0x3f3f;
-    constexpr uint16_t kmask2 = 0x0f0f;
-    constexpr uint16_t kmask3 = 0xc0c0;
-
-    const ushort tiisg = tid_tg % NW;
-    const ushort sgitg = tid_tg / NW;
-
-    const short tid = tiisg / 4;
-    const short ix = tiisg % 4;
-    const short iq = tid / 4;
-    const short ir = tid % 4;
-
-    const short l0 = 8 * ir;
-    const short q_offset = 32 * iq + l0;
-    const short y_offset = 64 * iq + l0;
-
-    const uchar hm1 = uchar(1u << (2 * iq));
-    const uchar hm2 = hm1 << 1;
-    const uchar hm3 = hm1 << 4;
-    const uchar hm4 = hm2 << 4;
-
-    const int first_row = int(tgpig * NSG + sgitg) * nr0;
-    const int nb = int(n_blocks_per_row);
-
-    if (first_row >= int(n_rows)) {
-        return;
-    }
-
-    float sumf = 0.0f;
-    float yl[16];
-    float yh[16];
-
-    uint16_t sc16[4];
-    thread const uchar* sc8 = (thread const uchar*)sc16;
-
-    device const float* y1 = x + ix * 256 + y_offset;
-
-    for (int i = ix; i < nb; i += 4) {
-        device const uchar* block0 =
-            weights + (size_t)first_row * row_bytes + (size_t)i * 176u;
-        device const uchar* q1 = block0 + 48 + q_offset;
-        device const uchar* qh = block0 + 16 + l0;
-        device const half* dh = (device const half*)(block0);
-        device const uint16_t* a =
-            (device const uint16_t*)(block0 + 4) + iq;
-
-        device const float* y2 = y1 + 128;
-        float4 sumy = float4(0.0f);
-        for (short l = 0; l < 8; ++l) {
-            yl[l + 0] = y1[l + 0];
-            sumy[0] += yl[l + 0];
-            yl[l + 8] = y1[l + 32];
-            sumy[1] += yl[l + 8];
-            yh[l + 0] = y2[l + 0];
-            sumy[2] += yh[l + 0];
-            yh[l + 8] = y2[l + 32];
-            sumy[3] += yh[l + 8];
-        }
-
-        device const uchar* q2 = q1 + 64;
-
-        sc16[0] = a[0] & kmask1;
-        sc16[1] = a[2] & kmask1;
-        sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
-        sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
-
-        float4 acc1 = float4(0.0f);
-        float4 acc2 = float4(0.0f);
-        for (short l = 0; l < 8; ++l) {
-            uchar h = qh[l];
-            acc1[0] += yl[l + 0] * float(q1[l] & 0x0F);
-            acc1[1] += yl[l + 8] * float(q1[l] & 0xF0);
-            acc1[2] += yh[l + 0] * float(q2[l] & 0x0F);
-            acc1[3] += yh[l + 8] * float(q2[l] & 0xF0);
-            acc2[0] += (h & hm1) ? yl[l + 0] : 0.0f;
-            acc2[1] += (h & hm2) ? yl[l + 8] : 0.0f;
-            acc2[2] += (h & hm3) ? yh[l + 0] : 0.0f;
-            acc2[3] += (h & hm4) ? yh[l + 8] : 0.0f;
-        }
-
-        sumf += float(dh[0])
-                * (float(sc8[0]) * (acc1[0] + 16.0f * acc2[0])
-                    + float(sc8[1]) * (acc1[1] / 16.0f + 16.0f * acc2[1])
-                    + float(sc8[4]) * (acc1[2] + 16.0f * acc2[2])
-                    + float(sc8[5]) * (acc1[3] / 16.0f + 16.0f * acc2[3]))
-            - float(dh[1])
-                * (sumy[0] * float(sc8[2]) + sumy[1] * float(sc8[3])
-                    + sumy[2] * float(sc8[6]) + sumy[3] * float(sc8[7]));
-
-        y1 += 4 * 256;
-    }
-
-    float sum_all = simd_sum(sumf);
-    if (tiisg == 0 && first_row < int(n_rows)) {
-        out[first_row] = sum_all;
-    }
-}
-"#;
-
 /// Launches the Q5_K matvec kernel. Verified on a real Apple M2 Pro GPU
-/// -- see `Q5_K_MATVEC_KERNEL_SRC`'s doc comment.
+/// -- see `crate::k_quant_mv`.
 pub fn launch_q5_k_matvec(
     weights: &[u8],
     x: &[f32],
@@ -4783,7 +4744,7 @@ pub fn launch_q5_k_matvec(
     row_bytes: usize,
 ) -> Result<Vec<f32>, MetalError> {
     launch_matvec(
-        Q5_K_MATVEC_KERNEL_SRC,
+        crate::k_quant_mv::q5_k_matvec_src(),
         "q5_k_matvec",
         176,
         256,
@@ -4794,110 +4755,8 @@ pub fn launch_q5_k_matvec(
     )
 }
 
-/// ggml-metal `kernel_mul_mv_q6_K_f32` port: `N_R0=2` rows per simdgroup,
-/// `NSG=2` simdgroups per TG (4 rows / 64 threads). Register-local `yl`
-/// packs; signed int8 sub-block scales match
-/// `frink_quant::dot_q6_k_f32_scalar`. Host dispatches `ceil(n_rows/4)`
-/// threadgroups of 64 threads.
-///
-/// Verified: compiled by the system Metal compiler and executed on a
-/// real Apple M2 Pro GPU, matching the CPU reference exactly (see
-/// `launch_q6_k_matvec_matches_cpu_reference`, which specifically
-/// includes a negative-scale byte in its test data).
-pub const Q6_K_MATVEC_KERNEL_SRC: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-kernel void q6_k_matvec(
-    device const uchar* weights [[buffer(0)]],
-    device const float* x [[buffer(1)]],
-    device float* out [[buffer(2)]],
-    constant uint& row_bytes [[buffer(3)]],
-    constant uint& n_blocks_per_row [[buffer(4)]],
-    constant uint& n_rows [[buffer(5)]],
-    uint tgpig [[threadgroup_position_in_grid]],
-    uint tiisg [[thread_index_in_simdgroup]],
-    uint sgitg [[simdgroup_index_in_threadgroup]]
-) {
-    constexpr short NSG = 2;
-    constexpr short nr0 = 2;
-    constexpr uint8_t kmask1 = 0x03;
-    constexpr uint8_t kmask2 = 0x0C;
-    constexpr uint8_t kmask3 = 0x30;
-    constexpr uint8_t kmask4 = 0xC0;
-
-    const int first_row = int(tgpig * NSG + sgitg) * nr0;
-    const int nb = int(n_blocks_per_row);
-
-    const short tid = tiisg / 2;
-    const short ix = tiisg % 2;
-    const short ip = tid / 8; // 0 or 1
-    const short il = tid % 8;
-    const short l0 = 4 * il;
-    const short is = 8 * ip + l0 / 16;
-
-    const short y_offset = 128 * ip + l0;
-    const short q_offset_l = 64 * ip + l0;
-    const short q_offset_h = 32 * ip + l0;
-
-    float sumf[2] = {0.0f, 0.0f};
-    float yl[16];
-
-    for (int i = ix; i < nb; i += 2) {
-        device const uchar* block0 =
-            weights + (size_t)first_row * row_bytes + (size_t)i * 210u;
-        device const uchar* q1 = block0 + q_offset_l;
-        device const uchar* q2 = q1 + 32;
-        device const uchar* qh = block0 + 128 + q_offset_h;
-        device const char* sc = (device const char*)(block0 + 192 + is);
-        device const half* dh = (device const half*)(block0 + 208);
-
-        device const float* y = x + i * 256 + y_offset;
-
-        for (short l = 0; l < 4; ++l) {
-            yl[4 * l + 0] = y[l + 0];
-            yl[4 * l + 1] = y[l + 32];
-            yl[4 * l + 2] = y[l + 64];
-            yl[4 * l + 3] = y[l + 96];
-        }
-
-        for (short row = 0; row < nr0; ++row) {
-            float4 sums = float4(0.0f);
-
-            for (short l = 0; l < 4; ++l) {
-                sums[0] += yl[4 * l + 0]
-                    * float(int((q1[l] & 0xF) | ((qh[l] & kmask1) << 4)) - 32);
-                sums[1] += yl[4 * l + 1]
-                    * float(int((q2[l] & 0xF) | ((qh[l] & kmask2) << 2)) - 32);
-                sums[2] += yl[4 * l + 2]
-                    * float(int((q1[l] >> 4) | ((qh[l] & kmask3) << 0)) - 32);
-                sums[3] += yl[4 * l + 3]
-                    * float(int((q2[l] >> 4) | ((qh[l] & kmask4) >> 2)) - 32);
-            }
-
-            sumf[row] += float(dh[0])
-                * (sums[0] * float(sc[0]) + sums[1] * float(sc[2])
-                    + sums[2] * float(sc[4]) + sums[3] * float(sc[6]));
-
-            q1 += row_bytes;
-            q2 += row_bytes;
-            qh += row_bytes;
-            sc += row_bytes;
-            dh += row_bytes / 2;
-        }
-    }
-
-    for (int row = 0; row < nr0; ++row) {
-        float sum_all = simd_sum(sumf[row]);
-        if (tiisg == 0 && first_row + row < int(n_rows)) {
-            out[first_row + row] = sum_all;
-        }
-    }
-}
-"#;
-
 /// Launches the Q6_K matvec kernel. Verified on a real Apple M2 Pro GPU
-/// -- see `Q6_K_MATVEC_KERNEL_SRC`'s doc comment.
+/// -- see `crate::k_quant_mv`.
 /// The Q5_0 matvec, and the wrapper whose absence made `Q5_0` a
 /// half-supported kind.
 ///
@@ -4942,7 +4801,7 @@ pub fn launch_q6_k_matvec(
     row_bytes: usize,
 ) -> Result<Vec<f32>, MetalError> {
     launch_matvec(
-        Q6_K_MATVEC_KERNEL_SRC,
+        crate::k_quant_mv::q6_k_matvec_src(),
         "q6_k_matvec",
         210,
         256,
@@ -4953,122 +4812,8 @@ pub fn launch_q6_k_matvec(
     )
 }
 
-/// ggml-metal `kernel_mul_mv_iq4_xs_f32` port: `N_R0=2` rows per
-/// simdgroup, `NSG=2` simdgroups per TG (4 rows / 64 threads). IQ4_XS
-/// blocks are 136 bytes / 256 elements: f16 super-scale `d`, 16 bits of
-/// high scale bits, 4 bytes of low scale nibbles, then 128 bytes of
-/// 4-bit indices into the shared IQ4_NL non-linear codebook (loaded
-/// into 32 floats of threadgroup memory, one copy per 16 lanes). Each
-/// lane owns 8 consecutive bytes of `qs` (16 elements: low nibbles →
-/// elems j, high nibbles → elems j+16 of the 32-elem sub-block), with
-/// odd/even lanes-of-16 walking odd/even blocks. Same dequant identity
-/// as `frink_quant::dot_iq4_xs_f32`.
-///
-/// Verified: compiled by the system Metal compiler and executed on a
-/// real Apple M2 Pro GPU, matching the CPU reference (see
-/// `launch_iq4_xs_matvec_matches_cpu_reference`).
-pub const IQ4_XS_MATVEC_KERNEL_SRC: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-constant float kvalues_iq4nl_f[16] = {
-    -127.0f, -104.0f, -83.0f, -65.0f, -49.0f, -35.0f, -22.0f, -10.0f,
-       1.0f,   13.0f,  25.0f,  38.0f,  53.0f,  69.0f,  89.0f, 113.0f
-};
-
-kernel void iq4_xs_matvec(
-    device const uchar* weights [[buffer(0)]],
-    device const float* x [[buffer(1)]],
-    device float* out [[buffer(2)]],
-    constant uint& row_bytes [[buffer(3)]],
-    constant uint& n_blocks_per_row [[buffer(4)]],
-    constant uint& n_rows [[buffer(5)]],
-    uint tgpig [[threadgroup_position_in_grid]],
-    uint tiisg [[thread_index_in_simdgroup]],
-    uint sgitg [[simdgroup_index_in_threadgroup]],
-    threadgroup float* shmem_f32 [[threadgroup(0)]]
-) {
-    constexpr short NSG = 2;
-    constexpr short nr0 = 2;
-
-    const int nb = int(n_blocks_per_row);
-    const int first_row = int(tgpig * NSG + sgitg) * nr0;
-
-    const short ix = short(tiisg) / 16; // 0/1: block parity
-    const short it = short(tiisg) % 16;
-    const short ib = it / 2;            // 0..7: 32-elem sub-block
-    const short il = it % 2;            // 0/1: 8-byte half of qs sub-block
-
-    shmem_f32[tiisg] = kvalues_iq4nl_f[tiisg % 16];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float4 yl[4];
-    float sumf[nr0] = {0.0f, 0.0f};
-
-    device const float* yb = x + ix * 256 + ib * 32 + il * 8;
-
-    uint32_t aux32[2];
-    thread const uchar* q8 = (thread const uchar*)aux32;
-
-    float4 qf1, qf2;
-
-    for (int ibl = ix; ibl < nb; ibl += 2) {
-        device const float4* y4 = (device const float4*)yb;
-        yl[0] = y4[0];
-        yl[1] = y4[4];
-        yl[2] = y4[1];
-        yl[3] = y4[5];
-
-        for (short row = 0; row < nr0; ++row) {
-            device const uchar* blk = weights
-                + (size_t)(first_row + row) * row_bytes + (size_t)ibl * 136u;
-            device const uint32_t* q4 =
-                (device const uint32_t*)(blk + 8u + 16u * ib + 8u * il);
-
-            float4 acc1 = float4(0.0f);
-            float4 acc2 = float4(0.0f);
-
-            aux32[0] = (q4[0]     ) & 0x0f0f0f0f;
-            aux32[1] = (q4[0] >> 4) & 0x0f0f0f0f;
-            qf1 = float4(shmem_f32[q8[0]], shmem_f32[q8[1]],
-                         shmem_f32[q8[2]], shmem_f32[q8[3]]);
-            qf2 = float4(shmem_f32[q8[4]], shmem_f32[q8[5]],
-                         shmem_f32[q8[6]], shmem_f32[q8[7]]);
-            acc1 += yl[0] * qf1;
-            acc2 += yl[1] * qf2;
-
-            aux32[0] = (q4[1]     ) & 0x0f0f0f0f;
-            aux32[1] = (q4[1] >> 4) & 0x0f0f0f0f;
-            qf1 = float4(shmem_f32[q8[0]], shmem_f32[q8[1]],
-                         shmem_f32[q8[2]], shmem_f32[q8[3]]);
-            qf2 = float4(shmem_f32[q8[4]], shmem_f32[q8[5]],
-                         shmem_f32[q8[6]], shmem_f32[q8[7]]);
-            acc1 += yl[2] * qf1;
-            acc2 += yl[3] * qf2;
-
-            acc1 += acc2;
-
-            const ushort scales_h = *(device const ushort*)(blk + 2);
-            const int ls = int(((blk[4 + ib / 2] >> (4 * (ib % 2))) & 0xf)
-                | (((scales_h >> (2 * ib)) & 3) << 4)) - 32;
-            sumf[row] += float(*(device const half*)blk) * float(ls)
-                * (acc1[0] + acc1[1] + acc1[2] + acc1[3]);
-        }
-
-        yb += 2 * 256;
-    }
-
-    for (short row = 0; row < nr0; ++row) {
-        float sum_all = simd_sum(sumf[row]);
-        if (tiisg == 0 && first_row + row < int(n_rows)) {
-            out[first_row + row] = sum_all;
-        }
-    }
-}
-"#;
-
 /// Launches the IQ4_XS matvec kernel. Verified on a real Apple M2 Pro
-/// GPU -- see `IQ4_XS_MATVEC_KERNEL_SRC`'s doc comment.
+/// GPU -- see `crate::k_quant_mv`.
 pub fn launch_iq4_xs_matvec(
     weights: &[u8],
     x: &[f32],
@@ -5076,7 +4821,7 @@ pub fn launch_iq4_xs_matvec(
     row_bytes: usize,
 ) -> Result<Vec<f32>, MetalError> {
     launch_matvec(
-        IQ4_XS_MATVEC_KERNEL_SRC,
+        crate::k_quant_mv::iq4_xs_matvec_src(),
         "iq4_xs_matvec",
         136,
         256,
@@ -5117,7 +4862,9 @@ pub fn launch_ptq1_0_matvec(
 /// and answered zeros for every row but the first group's. The test
 /// below holds the two together.
 pub const MATVEC_KINDS: &[&str] = &[
-    "F32", "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0",
+    "F32", "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
+    "IQ4_NL", "MXFP4", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ1_S", "IQ1_M", "Q4_1",
+    "Q5_1", "TQ1_0",
 ];
 
 pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usize, usize, usize)> {
@@ -5127,9 +4874,27 @@ pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usi
         "Q4_0" => Some((Q4_0_MATVEC_KERNEL_SRC, "q4_0_matvec", 18, 32, 8)),
         "Q5_0" => Some((Q5_0_MATVEC_KERNEL_SRC, "q5_0_matvec", 22, 32, 8)),
         "Q4_K" => Some((Q4_K_MATVEC_KERNEL_SRC, "q4_k_matvec", 144, 256, 4)),
-        "Q5_K" => Some((Q5_K_MATVEC_KERNEL_SRC, "q5_k_matvec", 176, 256, 2)),
-        "Q6_K" => Some((Q6_K_MATVEC_KERNEL_SRC, "q6_k_matvec", 210, 256, 4)),
-        "IQ4_XS" => Some((IQ4_XS_MATVEC_KERNEL_SRC, "iq4_xs_matvec", 136, 256, 4)),
+        "Q5_K" => Some((
+            crate::k_quant_mv::q5_k_matvec_src(),
+            "q5_k_matvec",
+            176,
+            256,
+            2,
+        )),
+        "Q6_K" => Some((
+            crate::k_quant_mv::q6_k_matvec_src(),
+            "q6_k_matvec",
+            210,
+            256,
+            4,
+        )),
+        "IQ4_XS" => Some((
+            crate::k_quant_mv::iq4_xs_matvec_src(),
+            "iq4_xs_matvec",
+            136,
+            256,
+            4,
+        )),
         "PTQ1_0" => Some((
             crate::ternary::ptq1_0_matvec_src(),
             "ptq1_0_matvec",
@@ -5137,7 +4902,35 @@ pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usi
             128,
             4,
         )),
-        _ => None,
+        "Q2_K" => Some((
+            crate::q2_k::q2_k_matvec_src(),
+            "q2_k_matvec",
+            84,
+            256,
+            crate::q2_k::ROWS_PER_TG,
+        )),
+        "Q3_K" => Some((
+            crate::q3_k::q3_k_matvec_src(),
+            "q3_k_matvec",
+            110,
+            256,
+            crate::q3_k::ROWS_PER_TG,
+        )),
+        "IQ4_NL" => Some((
+            crate::codebook4::codebook4_matvec_src(),
+            "iq4_nl_matvec",
+            18,
+            32,
+            4,
+        )),
+        "MXFP4" => Some((
+            crate::codebook4::codebook4_matvec_src(),
+            "mxfp4_matvec",
+            17,
+            32,
+            4,
+        )),
+        _ => crate::gen_kinds::matvec_launch_meta(kind),
     }
 }
 
@@ -5366,8 +5159,11 @@ const METAL_VM_PAGE: usize = 4096;
 struct ResidentMmapFile {
     buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     /// Keeps the underlying mapping alive for as long as any weight
-    /// buffer aliases it via `BytesNoCopy`.
-    _mmap: Arc<memmap2::Mmap>,
+    /// buffer aliases it via `BytesNoCopy`. `None` for a region whose
+    /// memory `buffer` itself owns (an expert slot slab,
+    /// [`crate::expert_slab`]), where retaining the buffer is the
+    /// keepalive.
+    _mmap: Option<Arc<memmap2::Mmap>>,
     base_ptr: usize,
     len: usize,
 }
@@ -5423,13 +5219,57 @@ pub fn register_weight_mmap(mmap: Arc<memmap2::Mmap>) {
     };
     let entry = Arc::new(ResidentMmapFile {
         buffer,
-        _mmap: mmap,
+        _mmap: Some(mmap),
         base_ptr: base,
         len: buf_len,
     });
     let mut guard = MMAP_FILE_CACHE.lock().unwrap();
     let cache = guard.get_or_insert_with(HashMap::new);
     cache.entry(key).or_insert(entry);
+}
+
+/// Registers a Shared buffer the process allocated (an expert slot
+/// slab) so a weight slice inside its contents aliases it exactly as a
+/// slice inside a registered GGUF mmap does: no copy, and no bytes
+/// charged to the weight cache. On unified memory that is what keeps
+/// the slab's bytes counted once, by the expert store that owns them.
+pub(crate) fn register_owned_region(
+    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    base_ptr: usize,
+    len: usize,
+) {
+    let entry = Arc::new(ResidentMmapFile {
+        buffer,
+        _mmap: None,
+        base_ptr,
+        len,
+    });
+    let mut guard = MMAP_FILE_CACHE.lock().unwrap();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(base_ptr, entry);
+}
+
+/// Undoes [`register_owned_region`], and drops the process-wide weight
+/// cache's aliases of it so they stop retaining the region's buffer.
+/// A thread-local mirror may still hold an alias until its thread
+/// exits; that keeps the memory allocated (so its address cannot be
+/// handed to anything else) and is never served for other bytes.
+pub(crate) fn unregister_owned_region(base_ptr: usize) {
+    let removed = {
+        let mut guard = MMAP_FILE_CACHE.lock().unwrap();
+        guard.as_mut().and_then(|c| c.remove(&base_ptr))
+    };
+    let Some(region) = removed else {
+        return;
+    };
+    if let Some(cache) = WEIGHT_CACHE.lock().unwrap().as_mut() {
+        cache.retain(|_, w| {
+            !w._keepalive
+                .as_ref()
+                .is_some_and(|k| Arc::ptr_eq(k, &region))
+        });
+    }
 }
 
 fn find_registered_mmap(weights: &[u8]) -> Option<(Arc<ResidentMmapFile>, usize)> {
@@ -5457,6 +5297,9 @@ fn build_resident_weight_buffer(
 ) -> Result<ResidentWeightBuffer, MetalError> {
     if !weights.is_empty() {
         if let Some((file, offset)) = find_registered_mmap(weights) {
+            if file._mmap.is_none() {
+                crate::expert_slab::note_slab_bind();
+            }
             return Ok(ResidentWeightBuffer {
                 buffer: file.buffer.clone(),
                 weight_offset: offset,
@@ -5964,12 +5807,12 @@ impl PrefillMoeMetal<'_> {
     }
 }
 
-struct MoeMatvecIdDispatch {
-    kernel_src: &'static str,
-    fn_name: &'static str,
-    rows_per_tg: usize,
-    tg_threads: (usize, usize, usize),
-    tg_mem: usize,
+pub(crate) struct MoeMatvecIdDispatch {
+    pub(crate) kernel_src: &'static str,
+    pub(crate) fn_name: &'static str,
+    pub(crate) rows_per_tg: usize,
+    pub(crate) tg_threads: (usize, usize, usize),
+    pub(crate) tg_mem: usize,
 }
 
 fn moe_matvec_id_dispatch(kind: &str) -> Option<MoeMatvecIdDispatch> {
@@ -6002,7 +5845,8 @@ fn moe_matvec_id_dispatch(kind: &str) -> Option<MoeMatvecIdDispatch> {
             tg_threads: (128, 1, 1),
             tg_mem: 32,
         }),
-        _ => None,
+        // Generated from each kind's decode matvec `_impl`.
+        _ => crate::moe_mv_id::dispatch(kind, false),
     }
 }
 
@@ -6036,7 +5880,7 @@ fn moe_down_id_dispatch(kind: &str) -> Option<MoeMatvecIdDispatch> {
             tg_threads: (128, 1, 1),
             tg_mem: 32,
         }),
-        _ => None,
+        _ => crate::moe_mv_id::dispatch(kind, true),
     }
 }
 
@@ -6229,7 +6073,7 @@ fn moe_mm_id_map0(
 
 /// llama.cpp `ne21_mm_id_min` — prefer `mul_mm_id` when tokens-per-expert
 /// (after map0) can be large; gate on total prompt tokens as a proxy.
-const MOE_MM_ID_TOKEN_MIN: usize = 8;
+pub(crate) const MOE_MM_ID_TOKEN_MIN: usize = 8;
 
 /// Reused MoE prefill scratch (avoids alloc+wait tax every layer).
 struct MoePrefillScratch {
@@ -6394,9 +6238,13 @@ fn moe_prefill_scratch_ex(
 }
 
 /// Pre-bound packed expert planes (llama: experts stay in one MTLBuffer
-/// after load; encode only rebinds ids/scratch). Keyed by gate base ptr.
+/// after load; encode only rebinds ids/scratch). Keyed by the gate
+/// plane's address and length, and a hit is only a hit while each of
+/// the three entries still holds its plane (`Resident::still_holds`):
+/// an owned plane freed and another allocated at its address would
+/// otherwise be served the first one's weights (#449).
 pub(crate) struct MoePackedResident {
-    key: usize,
+    key: (usize, usize),
     pub(crate) gate: Arc<ResidentWeightBuffer>,
     pub(crate) up: Arc<ResidentWeightBuffer>,
     pub(crate) down: Arc<ResidentWeightBuffer>,
@@ -6405,7 +6253,7 @@ pub(crate) struct MoePackedResident {
 thread_local! {
     /// Hoisted packed gate/up/down MTLBuffers — one resolve per layer,
     /// not per token (ROADMAP “expert residency hoist”).
-    static TL_MOE_PACKED: RefCell<HashMap<usize, MoePackedResident>> =
+    static TL_MOE_PACKED: RefCell<HashMap<(usize, usize), MoePackedResident>> =
         RefCell::new(HashMap::new());
 }
 
@@ -6413,14 +6261,21 @@ pub(crate) fn moe_packed_resident(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     packed: &MoePackedQ4<'_>,
 ) -> Result<MoePackedResident, MetalError> {
-    let key = packed.gate.as_ptr() as usize;
+    let key = (packed.gate.as_ptr() as usize, packed.gate.len());
     if let Some(hit) = TL_MOE_PACKED.with(|c| {
-        c.borrow().get(&key).map(|r| MoePackedResident {
-            key: r.key,
-            gate: r.gate.clone(),
-            up: r.up.clone(),
-            down: r.down.clone(),
-        })
+        c.borrow()
+            .get(&key)
+            .filter(|r| {
+                r.gate.still_holds(packed.gate)
+                    && r.up.still_holds(packed.up)
+                    && r.down.still_holds(packed.down)
+            })
+            .map(|r| MoePackedResident {
+                key: r.key,
+                gate: r.gate.clone(),
+                up: r.up.clone(),
+                down: r.down.clone(),
+            })
     }) {
         return Ok(hit);
     }
@@ -6666,7 +6521,7 @@ pub(crate) fn encode_q4_0_moe_id(
 ///    experts is slower than slot-parallel `mul_mv_id` -- OLMoE
 ///    fair-chat regressed ~143 to 84 prompt/s when this was ignored.
 /// 2. `mul_mm_id_meta` has a kernel for all three planes. It knows
-///    Q4_0, Q8_0 and Q4_K, and NOTHING ELSE.
+///    Q4_0, Q8_0, Q4_K, Q2_K, Q3_K, IQ4_NL and MXFP4, and nothing else.
 ///
 /// The second was missing, and the loader does not agree with it: the
 /// packed planes admit Q5_0, Q5_K, Q6_K and IQ4_XS as well, because
@@ -6678,20 +6533,45 @@ pub(crate) fn encode_q4_0_moe_id(
 /// quantization.
 ///
 /// Falling back to `mul_mv_id` is the right answer rather than a
-/// refusal: that path handles all seven kinds and is merely slower, so
-/// the checkpoint runs.
-fn moe_use_mm_id(max_batch: usize, gate_kind: &str, up_kind: &str, down_kind: &str) -> bool {
+/// refusal where that path has the kind (Q5_0; see
+/// `moe_packed_mul_mv_id_supported`): it is merely slower, so the
+/// checkpoint runs.
+pub(crate) fn moe_use_mm_id(
+    max_batch: usize,
+    gate_kind: &str,
+    up_kind: &str,
+    down_kind: &str,
+) -> bool {
     max_batch >= MOE_MM_ID_TOKEN_MIN
         && mul_mm_id_meta(gate_kind).is_some()
         && mul_mm_id_meta(up_kind).is_some()
         && mul_mm_id_meta(down_kind).is_some()
 }
 
-/// Whether the packed-id MoE prefill matvec path supports all three planes.
+/// Whether the packed-id MoE matvec path (`mul_mv_id`) supports all
+/// three planes. The one predicate the decoder's prefill and decode
+/// fences and the decode stack's own check read.
 pub fn moe_packed_mul_mv_id_supported(gate_kind: &str, up_kind: &str, down_kind: &str) -> bool {
     moe_matvec_id_dispatch(gate_kind).is_some()
         && moe_matvec_id_dispatch(up_kind).is_some()
         && moe_down_id_dispatch(down_kind).is_some()
+}
+
+/// The first of the three planes' kinds with no `mul_mv_id` kernel.
+pub(crate) fn moe_packed_mul_mv_id_missing(
+    gate_kind: &'static str,
+    up_kind: &'static str,
+    down_kind: &'static str,
+) -> Option<&'static str> {
+    if moe_matvec_id_dispatch(gate_kind).is_none() {
+        Some(gate_kind)
+    } else if moe_matvec_id_dispatch(up_kind).is_none() {
+        Some(up_kind)
+    } else if moe_down_id_dispatch(down_kind).is_none() {
+        Some(down_kind)
+    } else {
+        None
+    }
 }
 
 /// Prefill MoE FFN: packed-id experts over `n_tokens` positions in one CB.
@@ -7501,6 +7381,15 @@ pub(crate) fn encode_matvec_with_offsets(
         // PTQ1_0: the fork's geometry, ONE simdgroup on NR=4 rows
         // (`N_SG_PTQ1_0 1`, `N_R0_PTQ1_0 4`), simd_sum only.
         "ptq1_0_matvec" => (32usize, 0usize), // NR rows per simdgroup
+        // Q2_K (NR=4) and Q3_K (NR=2): 2 simdgroups x 32 lanes, simd_sum only.
+        "q2_k_matvec" | "q3_k_matvec" => (64usize, 0usize),
+        // ggml IQ4_NL / MXFP4: 2 simdgroups x 2 rows, codebook in TG memory.
+        "iq4_nl_matvec" | "mxfp4_matvec" => crate::codebook4::CODEBOOK4_MATVEC_TG,
+        // The generated kinds (IQ1/IQ2/IQ3, Q4_1, Q5_1, TQ1_0): 2 simdgroups
+        // x 4 rows, nothing staged in threadgroup memory.
+        _ if crate::gen_kinds::by_matvec_fn(launch.fn_name).is_some() => {
+            crate::gen_kinds::MATVEC_TG
+        }
         _ if rows_per_tg > 1 => (32usize, 256 * 4),
         _ => {
             let tg = n_blocks_per_row.next_power_of_two().clamp(32, 256);
@@ -7637,34 +7526,35 @@ pub fn launch_matvec_batch(
 mod tests {
     use super::*;
 
-    /// The loader packs seven quant kinds into MoE planes; `mul_mm_id`
-    /// has kernels for three. Batch size alone used to decide, so the
-    /// other four failed with `CommandFailed` as soon as one expert
+    /// The loader packs more quant kinds into MoE planes than `mul_mm_id`
+    /// has kernels for. Batch size alone used to decide, so the
+    /// others failed with `CommandFailed` as soon as one expert
     /// gathered eight tokens -- and stayed fine below that, which is
     /// what made it a prompt-length-dependent failure rather than a
     /// load error.
     #[test]
     fn a_pack_without_a_mul_mm_id_kernel_falls_back_instead_of_failing() {
         let big = MOE_MM_ID_TOKEN_MIN;
-        for kind in ["Q4_0", "Q8_0", "Q4_K"] {
+        for kind in [
+            "Q4_0", "Q8_0", "Q4_K", "Q2_K", "Q3_K", "IQ4_NL", "MXFP4", "Q5_K", "Q6_K", "IQ4_XS",
+        ] {
             assert!(
                 moe_use_mm_id(big, kind, kind, kind),
                 "{kind} has a mul_mm_id kernel and should use it"
             );
         }
-        // Every kind `mapped_sg` admits that `mul_mm_id_meta` does not
-        // know. These are the four that used to crash.
-        for kind in ["Q5_0", "Q5_K", "Q6_K", "IQ4_XS"] {
-            assert!(
-                !moe_use_mm_id(big, kind, kind, kind),
-                "{kind} has no mul_mm_id kernel and must fall back to mul_mv_id"
-            );
-        }
+        // The kind `mapped_sg` admits that `mul_mm_id_meta` does not
+        // know; with Q5_K, Q6_K and IQ4_XS it was the four that used to
+        // crash.
+        assert!(
+            !moe_use_mm_id(big, "Q5_0", "Q5_0", "Q5_0"),
+            "Q5_0 has no mul_mm_id kernel and must fall back to mul_mv_id"
+        );
         // A pack is only as fused as its weakest plane: one unsupported
         // kind is enough, whichever of the three it is.
-        assert!(!moe_use_mm_id(big, "Q6_K", "Q4_0", "Q4_0"));
-        assert!(!moe_use_mm_id(big, "Q4_0", "Q6_K", "Q4_0"));
-        assert!(!moe_use_mm_id(big, "Q4_0", "Q4_0", "Q6_K"));
+        assert!(!moe_use_mm_id(big, "Q5_0", "Q4_0", "Q4_0"));
+        assert!(!moe_use_mm_id(big, "Q4_0", "Q5_0", "Q4_0"));
+        assert!(!moe_use_mm_id(big, "Q4_0", "Q4_0", "Q5_0"));
         // The batch-size rule still applies to a supported pack.
         assert!(!moe_use_mm_id(
             MOE_MM_ID_TOKEN_MIN - 1,
@@ -7773,7 +7663,8 @@ mod tests {
         // through `metal_matvec_launch`); the cheap check here is that
         // the GEMM table's kinds all have a matvec.
         for kind in [
-            "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0",
+            "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
+            "IQ4_NL", "MXFP4",
         ] {
             assert!(mul_mm_sg_meta(kind).is_some(), "{kind} has no GEMM row");
             assert!(

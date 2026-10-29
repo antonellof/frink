@@ -527,14 +527,10 @@ impl MultiplierSupport {
 /// keys off [`DecoderFamily::GemmaFamily`] instead of naming five
 /// strings that would then have to be kept in step with the catalog).
 ///
-/// `granite-moe` has no llama.cpp spelling -- `llama-arch.cpp:101` is
-/// `granitemoe` -- and exists only because frink's catalog carries the
-/// hyphenated alias. It is here so a file declaring it cannot get
-/// different arithmetic from the row it is an alias FOR.
+/// `granite`, `granitemoe` and `granite-moe` moved to their
+/// `crate::models` files (#403 step 2); [`multiplier_support`] answers
+/// for them through the registry.
 const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
-    ("granite", MultiplierSupport::GRANITE),
-    ("granitemoe", MultiplierSupport::GRANITE),
-    ("granite-moe", MultiplierSupport::GRANITE),
     // `granite-hybrid.cpp:4-7` reads the same four, all optional, and
     // `:113,145-147,175` apply them at the same four sites.
     ("granitehybrid", MultiplierSupport::GRANITE),
@@ -545,7 +541,6 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     // 2026-08-04 pin.
     ("granite_swa", MultiplierSupport::GRANITE),
     ("minicpm", MultiplierSupport::MINICPM),
-    ("grok", MultiplierSupport::GROK),
     ("talkie", MultiplierSupport::TALKIE),
     ("command-r", MultiplierSupport::COMMAND_R),
     ("cohere2", MultiplierSupport::COHERE2),
@@ -576,6 +571,12 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
 /// `capability::attention_scale_override` and `loader.rs`'s family
 /// branch, which is where an arch-computed value belongs.
 pub fn multiplier_support(arch: &str) -> MultiplierSupport {
+    crate::models::ArchFacts::of(arch).scaling.multipliers
+}
+
+/// [`MULTIPLIER_ARCHITECTURES`]' answer alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn multiplier_support_from_table(arch: &str) -> MultiplierSupport {
     MULTIPLIER_ARCHITECTURES
         .iter()
         .find(|(n, _)| *n == arch)

@@ -17,7 +17,7 @@
 //!   `frink-server` as live per-request admission control via
 //!   `FRINK_KV_POOL_BLOCKS`/`FRINK_KV_POOL_BLOCK_SIZE`.
 
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex};
 
 use crate::kv_store::{KvBuf, KvDtype, KvRows};
 use crate::kv_swa::KvWindow;
@@ -207,6 +207,21 @@ pub struct KvCache {
     /// that eviction is *safe for this run* lives in
     /// `frink_models::decoder::kv_window`. See [`Self::arm_window`].
     window: Option<KvWindow>,
+    /// Set on a cache whose holder needs every row it was pushed, so
+    /// [`Self::arm_window`] must not arm it whatever the layer's window
+    /// is. Three holders today, each of which reads the rows back as a
+    /// whole history rather than attending over them:
+    ///
+    /// - the paged prefill's gathered scratch copy
+    ///   ([`PagedKvCache::to_contiguous`]): the forward appends the
+    ///   prompt's rows to it and the scatter then copies rows
+    ///   `seq_len..` back into the page store by offset. Evicting the
+    ///   scratch's front would shift every one of those rows, and the
+    ///   scatter would copy the wrong rows or panic on a short buffer;
+    /// - a slot save's prefill, whose file holds one row per position;
+    /// - `frink layer-divergence`, which compares every row with a
+    ///   device copy that does not evict.
+    eviction_forbidden: bool,
     /// A recurrent layer's state (`crate::recurrent_state`), `None` for
     /// every attention layer and for a recurrent layer's sequence that
     /// has not run a token yet. Created by the layer's block at the
@@ -239,6 +254,11 @@ impl Clone for KvCache {
             // and pretending otherwise would let the clone's
             // `positions` be read as a row count again.
             window: self.window,
+            // Reset, not carried: the mark is about one holder reading
+            // rows back by offset, and a clone is a new holder. A clone
+            // of a cache that has never evicted is a whole history, and
+            // a decoder may window it from here like any other.
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             #[cfg(feature = "cuda")]
@@ -354,6 +374,7 @@ impl KvCache {
             planned_capacity: None,
             pool_state: None,
             window: None,
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             #[cfg(feature = "cuda")]
@@ -386,6 +407,7 @@ impl KvCache {
             planned_capacity: Some(max_seq_len),
             pool_state: None,
             window: None,
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             #[cfg(feature = "cuda")]
@@ -454,6 +476,7 @@ impl KvCache {
                 blocks_held: blocks_needed,
             }),
             window: None,
+            eviction_forbidden: false,
             #[cfg(feature = "metal")]
             metal_attn: None,
             #[cfg(feature = "cuda")]
@@ -571,8 +594,57 @@ impl KvCache {
     /// over the whole prefix and has no "one token ago"
     /// (`crate::recurrent_state`). Every caller that rolls a cache back
     /// to a middle position asks this first, or is fenced off the model.
+    ///
+    /// For a windowed cache (#61), only while the rows left behind still
+    /// cover the window the next query reads
+    /// ([`KvWindow::rows_needed_at`]). A cache that has drained to
+    /// `window` rows and is rolled back `d` positions would otherwise
+    /// hand the next query `d - 1` rows fewer than the model attends
+    /// over, with nothing to say so. [`Self::rollback_limit`] is how far
+    /// a caller may plan to roll back before it writes.
     pub fn can_truncate_to(&self, new_seq_len: usize) -> bool {
-        self.recurrent.is_none() || new_seq_len == 0 || new_seq_len == self.positions
+        if new_seq_len > self.positions {
+            return false;
+        }
+        let recurrent_ok =
+            self.recurrent.is_none() || new_seq_len == 0 || new_seq_len == self.positions;
+        let dropped = self.positions - new_seq_len;
+        let rows = self.rows();
+        // Only a windowed cache can hold fewer rows than positions. An
+        // unwindowed one with no rows at all is a recurrent layer's,
+        // whose history is its state and not its rows.
+        let window_ok = match self.window {
+            None => true,
+            Some(w) => {
+                dropped <= rows
+                    && (new_seq_len == 0 || rows - dropped >= w.rows_needed_at(new_seq_len))
+            }
+        };
+        recurrent_ok && window_ok
+    }
+
+    /// How many of the positions written from now on a later
+    /// [`Self::truncate`] is guaranteed to be able to undo.
+    ///
+    /// The question a speculative decoder asks BEFORE it writes a draft
+    /// block, because asking [`Self::can_truncate_to`] afterwards is too
+    /// late: the rows are written and some of them are already wrong.
+    ///
+    /// - Unbounded for an ordinary attention cache: its rows are a
+    ///   history.
+    /// - Zero for one holding a recurrent state, which is a reduction
+    ///   over the whole prefix with no "one token ago".
+    /// - [`KvWindow::max_rollback`] for a windowed one, because the
+    ///   drain may run between the write and the rollback and only the
+    ///   window's reserve is kept for it.
+    pub fn rollback_limit(&self) -> usize {
+        if self.recurrent.is_some() {
+            return 0;
+        }
+        match self.window {
+            None => usize::MAX,
+            Some(w) => w.max_rollback(),
+        }
     }
 
     /// Rolls the cache back to exactly `new_seq_len` positions,
@@ -580,20 +652,20 @@ impl KvCache {
     /// decoded draft tokens that turned out wrong: their K/V were
     /// already pushed during batched verification, and rejection means
     /// removing them so the next real decode step continues from the
-    /// last *accepted* position, not the last *attempted* one.
-    /// Rolls the cache back to exactly `new_seq_len` POSITIONS.
+    /// last *accepted* position, not the last *attempted* one. The
+    /// target is in POSITIONS.
     ///
-    /// A windowed cache can only roll back into rows it still holds. A
-    /// target further back than [`Self::rows`] names a position this
-    /// cache dropped behind its window, and there is no honest thing to
-    /// return for it -- so it stops, rather than silently rolling back
-    /// to the oldest row it happens to have and answering the next
-    /// token out of a history with a hole in it.
+    /// A windowed cache can only roll back into rows it still holds, and
+    /// only as far as leaves the window the next query reads still
+    /// resident ([`Self::can_truncate_to`]). Further back names a
+    /// position this cache dropped, or leaves a hole the next query
+    /// would attend across, and there is no honest thing to return for
+    /// either. So it stops, rather than silently answering the next
+    /// token out of a shorter history than the model reads.
     ///
     /// Unreachable for a cache that has not been armed by
-    /// [`Self::arm_window`], which is every cache unless
-    /// `FRINK_KV_WINDOW` is on: `rows == positions` there, so the
-    /// second precondition is implied by the first.
+    /// [`Self::arm_window`]: `rows == positions` there, so every target
+    /// at or below `positions` is a row it holds.
     pub fn truncate(&mut self, new_seq_len: usize) {
         assert!(
             new_seq_len <= self.positions,
@@ -603,10 +675,12 @@ impl KvCache {
         let rows = self.rows();
         let dropped = self.positions - new_seq_len;
         assert!(
-            dropped <= rows,
+            self.recurrent.is_some() || self.can_truncate_to(new_seq_len),
             "truncate target {new_seq_len} is {dropped} positions back but only {rows} rows \
-             are resident: this cache evicted behind a {:?} window (#61). Turn off \
-             FRINK_KV_WINDOW for a workload that rolls the KV cache back this far.",
+             are resident: this cache evicted behind a {:?} window (#61), and what is left \
+             would not cover the window the next query reads. A caller that rolls back asks \
+             `rollback_limit` before it writes, or `can_truncate_to` before it truncates; \
+             FRINK_KV_WINDOW=0 keeps every row for a workload that needs more.",
             self.window.map(|w| w.window())
         );
         assert!(
@@ -620,7 +694,7 @@ impl KvCache {
         if new_seq_len == 0 {
             self.recurrent = None;
         }
-        let keep_rows = rows - dropped;
+        let keep_rows = rows.saturating_sub(dropped);
         self.k.truncate(keep_rows * self.k_width());
         self.v.truncate(keep_rows * self.v_width());
         self.positions = new_seq_len;
@@ -643,8 +717,30 @@ impl KvCache {
     ///
     /// Idempotent; a second call with a different window replaces the
     /// first, and rows already dropped stay dropped.
+    ///
+    /// A no-op on a cache that [`Self::forbid_eviction`] has marked.
     pub fn arm_window(&mut self, window: KvWindow) {
-        self.window = Some(window);
+        if !self.eviction_forbidden {
+            self.window = Some(window);
+        }
+    }
+
+    /// Marks this cache as one that must keep every row it is pushed,
+    /// whatever window its layer has. See the field it sets for the
+    /// callers and why. Disarms a window already armed.
+    ///
+    /// Panics on a cache that has already evicted: rows already dropped
+    /// stay dropped, and a disarmed cache holding fewer rows than
+    /// positions would read as an unwindowed one with a hole in it.
+    pub fn forbid_eviction(&mut self) {
+        assert!(
+            self.k_width() == 0 || self.rows() == self.positions,
+            "forbid_eviction on a cache that already dropped {} of its {} positions",
+            self.positions - self.rows(),
+            self.positions
+        );
+        self.eviction_forbidden = true;
+        self.window = None;
     }
 
     /// The window this cache evicts behind, or `None` if it keeps
@@ -736,1779 +832,8 @@ impl KvCache {
     }
 }
 
-/// The other half of PagedAttention that `KvBlockPool`/`KvCache::with_pool`
-/// deliberately don't implement (see this module's doc comment): real,
-/// *shared* physical block storage that many sequences' block tables can
-/// address into, instead of each `KvCache` still owning its own private,
-/// contiguous `Vec`. `KvBlockPool` only ever bounds a *count* of blocks
-/// each cache may grow to; `PagedKvStore` is the actual backing memory,
-/// and a sequence's `PagedKvCache` holds a block table (an ordered list
-/// of block IDs into this shared store) instead of owning K/V data
-/// directly. This is what makes non-contiguous-block reads during
-/// attention (`causal_gqa_attention_paged`, in `attention.rs`) possible
-/// at all -- `causal_gqa_attention`'s existing contiguous-slice read
-/// pattern has no way to express "position 37 lives in block 12, cached
-/// out of order relative to block 5."
-pub struct PagedKvStore {
-    block_size: usize,
-    n_kv_heads: usize,
-    /// K head width; see [`KvCache::head_dim`].
-    head_dim: usize,
-    /// V head width; see [`KvCache::v_head_dim`].
-    v_head_dim: usize,
-    k: KvBuf, // [total_blocks * block_size, n_kv_heads, head_dim], flattened
-    v: KvBuf, // [total_blocks * block_size, n_kv_heads, v_head_dim], flattened
-    free_block_ids: Vec<usize>,
-}
-
-impl PagedKvStore {
-    /// One width for K and V; [`Self::new_split`] is the general form.
-    pub fn new(block_size: usize, total_blocks: usize, n_kv_heads: usize, head_dim: usize) -> Self {
-        Self::new_split(block_size, total_blocks, n_kv_heads, head_dim, head_dim)
-    }
-
-    pub fn new_split(
-        block_size: usize,
-        total_blocks: usize,
-        n_kv_heads: usize,
-        head_dim: usize,
-        v_head_dim: usize,
-    ) -> Self {
-        assert!(block_size > 0, "block_size must be positive");
-        PagedKvStore {
-            block_size,
-            n_kv_heads,
-            head_dim,
-            v_head_dim,
-            k: KvBuf::zeroed(
-                KvDtype::F32,
-                total_blocks * block_size * n_kv_heads * head_dim,
-            ),
-            v: KvBuf::zeroed(
-                KvDtype::F32,
-                total_blocks * block_size * n_kv_heads * v_head_dim,
-            ),
-            // Pushed in descending order so `pop()` hands out ascending
-            // block IDs -- not load-bearing for correctness (any free ID
-            // works), just makes manual debugging/inspection saner.
-            free_block_ids: (0..total_blocks).rev().collect(),
-        }
-    }
-
-    pub fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    pub fn free_block_count(&self) -> usize {
-        self.free_block_ids.len()
-    }
-
-    pub fn n_kv_heads(&self) -> usize {
-        self.n_kv_heads
-    }
-
-    pub fn head_dim(&self) -> usize {
-        self.head_dim
-    }
-
-    pub fn v_head_dim(&self) -> usize {
-        self.v_head_dim
-    }
-
-    /// One position's K row: `n_kv_heads * head_dim` elements.
-    pub fn k_width(&self) -> usize {
-        self.n_kv_heads * self.head_dim
-    }
-
-    /// One position's V row: `n_kv_heads * v_head_dim` elements.
-    pub fn v_width(&self) -> usize {
-        self.n_kv_heads * self.v_head_dim
-    }
-
-    fn acquire_block(&mut self) -> Option<usize> {
-        self.free_block_ids.pop()
-    }
-
-    fn release_block(&mut self, id: usize) {
-        self.free_block_ids.push(id);
-    }
-
-    fn k_elems_per_block(&self) -> usize {
-        self.block_size * self.k_width()
-    }
-
-    fn v_elems_per_block(&self) -> usize {
-        self.block_size * self.v_width()
-    }
-
-    /// One position's K (or V) row within block `id` at `offset` (0-based
-    /// within the block) -- `[n_kv_heads * head_dim]` long. Used by
-    /// `causal_gqa_attention_paged` to read attention inputs directly out
-    /// of shared physical storage via a block table, and by
-    /// `PagedKvCache::push` to write a new position into it.
-    pub fn k_row(&self, id: usize, offset: usize) -> KvRows<'_> {
-        let width = self.k_width();
-        let start = id * self.k_elems_per_block() + offset * width;
-        self.k.view().slice(start..start + width)
-    }
-
-    pub fn v_row(&self, id: usize, offset: usize) -> KvRows<'_> {
-        let width = self.v_width();
-        let start = id * self.v_elems_per_block() + offset * width;
-        self.v.view().slice(start..start + width)
-    }
-
-    /// The same store at `dtype`. Only before any sequence has written
-    /// a row, for the reason [`KvCache::with_dtype`] gives.
-    pub fn with_dtype(mut self, dtype: KvDtype) -> Self {
-        // A zero-width store (a recurrent layer's: no rows at all) has
-        // nothing to convert and no block count to recover from its
-        // buffer length.
-        assert!(
-            self.k_elems_per_block() == 0
-                || self.free_block_ids.len() == self.k.len() / self.k_elems_per_block(),
-            "with_dtype on a paged store with blocks in use"
-        );
-        if self.k.dtype() != dtype {
-            self.k = KvBuf::zeroed(dtype, self.k.len());
-            self.v = KvBuf::zeroed(dtype, self.v.len());
-        }
-        self
-    }
-
-    /// What this store's rows are stored as.
-    pub fn dtype(&self) -> KvDtype {
-        self.k.dtype()
-    }
-
-    /// Copies every position of block `src` over block `dst`.
-    ///
-    /// The one operation copy-on-write needs and nothing else does. A
-    /// sequence that forks shares its full blocks and copies only the
-    /// PART-FULL tail, because that is the single block two forks would
-    /// both write into. Sharing it instead would let one fork's token
-    /// appear in the other's context, which is a wrong answer served
-    /// with a 200 rather than a crash.
-    ///
-    /// The whole block is copied rather than the written prefix of it:
-    /// the unwritten rows are within the block either way, and a
-    /// length-aware copy would need the caller's `seq_len`, which is
-    /// the one number this type deliberately does not hold.
-    pub fn copy_block(&mut self, src: usize, dst: usize) {
-        assert_ne!(src, dst, "copy_block onto itself");
-        let k_span = self.k_elems_per_block();
-        let (ks, kd) = (src * k_span, dst * k_span);
-        self.k.copy_within(ks..ks + k_span, kd);
-        let v_span = self.v_elems_per_block();
-        let (vs, vd) = (src * v_span, dst * v_span);
-        self.v.copy_within(vs..vs + v_span, vd);
-    }
-
-    fn write_k_row(&mut self, id: usize, offset: usize, row: KvRows<'_>) {
-        let width = self.k_width();
-        assert_eq!(row.len(), width);
-        let start = id * self.k_elems_per_block() + offset * width;
-        self.k.write_rows(start, row);
-    }
-
-    fn write_v_row(&mut self, id: usize, offset: usize, row: KvRows<'_>) {
-        let width = self.v_width();
-        assert_eq!(row.len(), width);
-        let start = id * self.v_elems_per_block() + offset * width;
-        self.v.write_rows(start, row);
-    }
-}
-
-/// Returned when a `PagedKvCache` needs another block but its
-/// `PagedKvStore` has none free -- the paged-storage analog of
-/// `KvPoolExhausted`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PagedStoreExhausted;
-
-impl std::fmt::Display for PagedStoreExhausted {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "paged KV store exhausted: no free blocks remain")
-    }
-}
-
-impl std::error::Error for PagedStoreExhausted {}
-
-/// One sequence's view into a shared `PagedKvStore`: a block table
-/// (which physical blocks this sequence's positions live in, in order)
-/// plus how many positions have been written so far. Unlike `KvCache`,
-/// this holds no K/V data itself -- every read and write goes through
-/// the shared store.
-#[derive(Debug, Clone, Default)]
-pub struct PagedKvCache {
-    block_table: Vec<usize>,
-    seq_len: usize,
-    /// A recurrent layer's state, per sequence and NOT paged: the store
-    /// holds rows and a Mamba layer has none. Same rules as
-    /// `KvCache::recurrent`.
-    pub recurrent: Option<crate::recurrent_state::RecurrentState>,
-}
-
-impl PagedKvCache {
-    pub fn new() -> Self {
-        PagedKvCache {
-            block_table: Vec::new(),
-            seq_len: 0,
-            recurrent: None,
-        }
-    }
-
-    /// See `KvCache::can_truncate_to`.
-    pub fn can_truncate_to(&self, new_seq_len: usize) -> bool {
-        self.recurrent.is_none() || new_seq_len == 0 || new_seq_len == self.seq_len
-    }
-
-    pub fn seq_len(&self) -> usize {
-        self.seq_len
-    }
-
-    pub fn block_table(&self) -> &[usize] {
-        &self.block_table
-    }
-
-    /// Appends one position's key/value vectors, acquiring a new block
-    /// from `store` first if the current tail block is full (or none
-    /// held yet). Mirrors `KvCache::push`'s signature/semantics exactly,
-    /// just against shared storage instead of a private buffer.
-    pub fn push(
-        &mut self,
-        store: &mut PagedKvStore,
-        k_step: &[f32],
-        v_step: &[f32],
-    ) -> Result<(), PagedStoreExhausted> {
-        self.push_rows(store, KvRows::F32(k_step), KvRows::F32(v_step))
-    }
-
-    /// [`Self::push`] for a row already at some store's dtype, so a row
-    /// moved from one f16 store to another is copied rather than
-    /// widened and rounded again.
-    fn push_rows(
-        &mut self,
-        store: &mut PagedKvStore,
-        k_step: KvRows<'_>,
-        v_step: KvRows<'_>,
-    ) -> Result<(), PagedStoreExhausted> {
-        let block_size = store.block_size();
-        let offset_in_block = self.seq_len % block_size;
-        // Index by position rather than taking the tail block: a
-        // sequence that pre-reserved (see `reserve`) already holds the
-        // block this position belongs in, and appending another would
-        // both leak a block and write the row in the wrong place.
-        let block_index = self.seq_len / block_size;
-        if block_index >= self.block_table.len() {
-            let id = store.acquire_block().ok_or(PagedStoreExhausted)?;
-            self.block_table.push(id);
-        }
-        let block_id = self.block_table[block_index];
-        store.write_k_row(block_id, offset_in_block, k_step);
-        store.write_v_row(block_id, offset_in_block, v_step);
-        self.seq_len += 1;
-        Ok(())
-    }
-
-    /// Appends a block the caller already owns, without taking one from
-    /// the store.
-    ///
-    /// This is how a sliding window recycles. A block whose positions
-    /// have fallen behind the window is never read again -- the paged
-    /// attention kernel indexes `block_table[t / block_size]` only for
-    /// `t >= seq_len - window` -- so its storage can back a *later*
-    /// position instead of being handed back and re-acquired. The table
-    /// keeps its absolute-position indexing and simply names the same
-    /// physical block at two indices: the stale one, which nothing
-    /// reads, and the live one.
-    ///
-    /// That aliasing is the reason this is a separate method rather than
-    /// a flag on [`Self::reserve`]. A caller that recycles owns the
-    /// obligation to release each distinct block exactly once, and to
-    /// have established that the donor index really is out of window --
-    /// neither of which this type can check for itself.
-    pub fn append_block(&mut self, block_id: usize) {
-        self.block_table.push(block_id);
-    }
-
-    /// Points this sequence at a different set of physical blocks,
-    /// keeping its length.
-    ///
-    /// What a FORK installs. The forked sequence is at the same
-    /// position with the same history, and the only thing that differs
-    /// is where some of those bytes live: the full blocks are the
-    /// original's, shared, and the tail is a copy. The caller owns
-    /// establishing that the new table really holds this sequence's
-    /// content, which is why this is a plain setter and not a `fork`
-    /// method here -- the copying happens a layer up, where the page
-    /// GROUP is the unit and one call covers every layer at once.
-    ///
-    /// The new table must be at least as long as the old, because a
-    /// shorter one would drop blocks the caller still accounts for.
-    pub fn retable(&mut self, block_table: Vec<usize>) {
-        assert!(
-            block_table.len() >= self.block_table.len(),
-            "a retable must not shorten the block table: {} to {}",
-            self.block_table.len(),
-            block_table.len()
-        );
-        self.block_table = block_table;
-    }
-
-    /// Releases every block this sequence holds back to `store`. Must be
-    /// called explicitly (there's no `Drop` here, since dropping needs a
-    /// `&mut PagedKvStore` this type doesn't own a reference to) --
-    /// mirrors `KvCache::release_to_pool`, just not automatic.
-    ///
-    /// Each *distinct* block once: a table that has recycled through
-    /// [`Self::append_block`] names one block at more than one index, and
-    /// releasing per index would put the same id on the free list twice,
-    /// after which two sequences are handed the same memory.
-    pub fn release(&mut self, store: &mut PagedKvStore) {
-        let mut seen: Vec<usize> = Vec::new();
-        for id in self.block_table.drain(..) {
-            if !seen.contains(&id) {
-                seen.push(id);
-                store.release_block(id);
-            }
-        }
-        self.seq_len = 0;
-        self.recurrent = None;
-    }
-
-    /// How many *additional* blocks appending `n_new` positions would
-    /// take from `store`, given what this sequence already holds.
-    ///
-    /// Counted against held CAPACITY rather than against `seq_len`, so
-    /// it is right in both cases. The tail block is usually part-full,
-    /// so the answer is never simply `n_new / block_size`: positions
-    /// that land in a block already held cost nothing. And a sequence
-    /// that pre-reserved (see [`Self::reserve`]) holds blocks beyond
-    /// its length, which a `seq_len`-only sum would ask for twice.
-    ///
-    /// Callers that must not fail part-way through a write check this
-    /// against [`PagedKvStore::free_block_count`] before touching
-    /// anything.
-    pub fn blocks_needed_for(&self, store: &PagedKvStore, n_new: usize) -> usize {
-        let held_capacity = self.block_table.len() * store.block_size();
-        let unused = held_capacity.saturating_sub(self.seq_len);
-        n_new.saturating_sub(unused).div_ceil(store.block_size())
-    }
-
-    /// Takes the blocks `n_new` more positions will need, without
-    /// advancing `seq_len`.
-    ///
-    /// This is what makes a multi-layer append all-or-nothing. The
-    /// check and the taking happen together, so every later
-    /// [`Self::push`] writes into a block this sequence already owns
-    /// and cannot fail. Reserving and then not filling is harmless: the
-    /// blocks are this sequence's until it releases, and `seq_len`
-    /// still says how far it really got.
-    pub fn reserve(
-        &mut self,
-        store: &mut PagedKvStore,
-        n_new: usize,
-    ) -> Result<(), PagedStoreExhausted> {
-        let need = self.blocks_needed_for(store, n_new);
-        if need > store.free_block_count() {
-            return Err(PagedStoreExhausted);
-        }
-        for _ in 0..need {
-            let id = store
-                .acquire_block()
-                .expect("checked against free_block_count immediately above");
-            self.block_table.push(id);
-        }
-        Ok(())
-    }
-
-    /// Installs a block table the caller allocated, with `seq_len`
-    /// positions already computed in it.
-    ///
-    /// This is how a sequence starts life on top of a cached prefix:
-    /// the blocks are somebody else's, already full, and this sequence
-    /// appends past them.
-    ///
-    /// The `seq_len` installed here is therefore also the POSITION the
-    /// caller's next forward pass must run at, and the caller has no
-    /// second source for that number: [`Self::push`] writes at `seq_len`
-    /// and ignores whatever position its caller believes it is at. A
-    /// prefill that started from zero over an adopted prefix put the
-    /// prompt in the rows *after* the prefix while carrying positions
-    /// `0..n`, which is a wrong answer served with a 200.
-    ///
-    /// `seq_len` MUST be a whole number of blocks,
-    /// because the first append writes at `seq_len` and a shared block
-    /// must never be written -- another sequence is attending over it.
-    /// A ragged length would put that write inside the last shared
-    /// block, corrupting a prefix every other holder is reading.
-    pub fn adopt_blocks(&mut self, block_table: Vec<usize>, seq_len: usize, block_size: usize) {
-        assert_eq!(
-            seq_len % block_size,
-            0,
-            "an adopted prefix must end on a block boundary, or the first \
-             append writes into a block another sequence is reading"
-        );
-        assert!(
-            seq_len / block_size <= block_table.len(),
-            "block table too short for the adopted length"
-        );
-        self.block_table = block_table;
-        self.seq_len = seq_len;
-    }
-
-    /// Copies this sequence's KV out of the shared store into a plain
-    /// contiguous [`KvCache`].
-    ///
-    /// This is what lets the batched prefill path run *unchanged* over
-    /// paged storage. Its fast arm hands `cache.k` / `cache.v` to a
-    /// blocked kernel that reads them as flat slices, and a block table
-    /// cannot be expressed that way. Rather than maintain a second
-    /// prefill kernel that reads through the table -- a copy that could
-    /// drift from the one every other model path uses -- the pages are
-    /// materialised once per layer, the existing kernel runs, and the
-    /// new rows go back with [`Self::append_contiguous`].
-    ///
-    /// The cost is one `seq_len * n_kv_heads * head_dim` copy per layer
-    /// per prefill call, against matmuls that dominate prefill. Decode
-    /// still reads through the block table and copies nothing, which is
-    /// where page sharing actually pays.
-    pub fn to_contiguous(&self, store: &PagedKvStore) -> KvCache {
-        let mut cache = KvCache::with_capacity_split(
-            store.n_kv_heads,
-            store.head_dim,
-            store.v_head_dim,
-            self.seq_len,
-        )
-        .with_dtype(store.dtype());
-        cache.k.reserve_exact(self.seq_len * store.k_width());
-        cache.v.reserve_exact(self.seq_len * store.v_width());
-        for pos in 0..self.seq_len {
-            let block_id = self.block_table[pos / store.block_size];
-            let offset = pos % store.block_size;
-            cache.k.extend_from_rows(store.k_row(block_id, offset));
-            cache.v.extend_from_rows(store.v_row(block_id, offset));
-        }
-        // The paged store does not evict either, so its positions and
-        // its rows agree and this one assignment is both.
-        cache.set_positions(self.seq_len);
-        cache.recurrent = self.recurrent.clone();
-        cache
-    }
-
-    /// Appends `count` positions' worth of contiguous K/V rows, the
-    /// inverse of [`Self::to_contiguous`].
-    ///
-    /// Blocks are reserved for the whole append *before* the first row
-    /// is written, so a store that cannot hold the request refuses it
-    /// having changed nothing. Writing rows until the store runs dry
-    /// would leave the sequence with a `seq_len` that disagrees with
-    /// the model's own idea of how far it has got, which is not a
-    /// recoverable state.
-    pub fn append_contiguous<'a>(
-        &mut self,
-        store: &mut PagedKvStore,
-        k: impl Into<KvRows<'a>>,
-        v: impl Into<KvRows<'a>>,
-        count: usize,
-    ) -> Result<(), PagedStoreExhausted> {
-        let (k, v) = (k.into(), v.into());
-        let (k_width, v_width) = (store.k_width(), store.v_width());
-        assert_eq!(k.len(), count * k_width, "k row count");
-        assert_eq!(v.len(), count * v_width, "v row count");
-        if self.blocks_needed_for(store, count) > store.free_block_count() {
-            return Err(PagedStoreExhausted);
-        }
-        for i in 0..count {
-            self.push_rows(
-                store,
-                k.slice(i * k_width..(i + 1) * k_width),
-                v.slice(i * v_width..(i + 1) * v_width),
-            )
-            .expect("blocks reserved above, so no push here can exhaust the store");
-        }
-        Ok(())
-    }
-}
-
-/// Per-layer [`PagedKvStore`]s that many concurrent requests share.
-///
-/// # Why a lock per layer, and why two phases
-///
-/// `frink-server` runs generation on `spawn_blocking` with, in its own
-/// words, "no I/O and no shared lock". `KvBlockPool` survives that
-/// because it only bounds a *count*: each `KvCache` owns a private
-/// `Vec`, and the pool mutex is taken briefly at acquire and release,
-/// never during a forward. A `PagedKvStore` is the opposite -- it IS
-/// the backing memory -- so sharing one across concurrent requests
-/// needs an answer to "who may touch these bytes when".
-///
-/// The answer the API already implies: attention takes
-/// `&PagedKvStore` and only `push` takes `&mut`. So the accesses split
-/// cleanly into many concurrent readers and one short exclusive write
-/// per position, which is exactly an `RwLock` -- and one per LAYER
-/// rather than one for the whole model, so two requests contend only
-/// when both are writing the same layer at the same instant.
-///
-/// A caller must therefore take the write guard for the push alone and
-/// drop it before attending under a read guard. Holding the write
-/// guard across attention would serialise the expensive half and give
-/// back a global lock with extra steps. Nothing breaks in the gap: a
-/// sequence's block table and length are its own, and another
-/// request's push in between only touches blocks it exclusively holds.
-///
-/// # Deadlock
-///
-/// [`Self::write_all`] is the one place several layers are held at
-/// once, and it takes them in ascending layer order. Every caller
-/// getting the same order is what makes that safe; there is no other
-/// multi-layer acquisition in the codebase, and a new one must follow
-/// the same rule.
-///
-/// # Poisoning
-///
-/// A panic while holding a store leaves the KV mid-write, which is not
-/// recoverable state, but it is also not *unsound* -- the bytes are
-/// plain `f32`. Poison is stepped over with `into_inner`, matching how
-/// `frink-server` already treats its pool mutex: a poisoned lock
-/// should not turn one request's panic into a permanently dead server.
-pub struct SharedPagedKv {
-    layers: Vec<RwLock<PagedKvStore>>,
-    /// Guarded separately from the layers, and always taken BEFORE
-    /// them, never while a layer guard is held. That one-way order is
-    /// what keeps group allocation and the per-layer push paths from
-    /// deadlocking against each other.
-    groups: Mutex<GroupTable>,
-}
-
-impl SharedPagedKv {
-    /// One store per layer, each with `blocks_per_layer` blocks.
-    pub fn new(
-        n_layers: usize,
-        block_size: usize,
-        blocks_per_layer: usize,
-        n_kv_heads: usize,
-        head_dim: usize,
-    ) -> Self {
-        SharedPagedKv {
-            layers: (0..n_layers)
-                .map(|_| {
-                    RwLock::new(PagedKvStore::new(
-                        block_size,
-                        blocks_per_layer,
-                        n_kv_heads,
-                        head_dim,
-                    ))
-                })
-                .collect(),
-            groups: Mutex::new(GroupTable::default()),
-        }
-    }
-
-    /// Wraps stores the caller built, for tests and for callers that
-    /// size layers differently.
-    pub fn from_stores(stores: Vec<PagedKvStore>) -> Self {
-        SharedPagedKv {
-            layers: stores.into_iter().map(RwLock::new).collect(),
-            groups: Mutex::new(GroupTable::default()),
-        }
-    }
-
-    pub fn layer_count(&self) -> usize {
-        self.layers.len()
-    }
-
-    /// Shared access to one layer, for attention.
-    pub fn read(&self, layer: usize) -> RwLockReadGuard<'_, PagedKvStore> {
-        self.layers[layer]
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Exclusive access to one layer, for a push. Hold it for the push
-    /// and nothing else -- see the type docs.
-    pub fn write(&self, layer: usize) -> RwLockWriteGuard<'_, PagedKvStore> {
-        self.layers[layer]
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Every layer at once, in ascending order, so a multi-layer append
-    /// is atomic against other requests.
-    ///
-    /// This is what makes "all layers advance or none do" hold under
-    /// concurrency rather than only single-threaded: checking free
-    /// space and then appending are separate steps, and without the
-    /// guards spanning both, another request can take the blocks in
-    /// between and leave this one half-written.
-    ///
-    /// Ascending order is the deadlock rule; see the type docs.
-    pub fn write_all(&self) -> Vec<RwLockWriteGuard<'_, PagedKvStore>> {
-        self.layers
-            .iter()
-            .map(|l| l.write().unwrap_or_else(|poisoned| poisoned.into_inner()))
-            .collect()
-    }
-
-    /// Free blocks in one layer, for admission control. A snapshot: by
-    /// the time a caller acts on it another request may have taken
-    /// them, which is why the append itself re-checks under the guard.
-    pub fn free_blocks(&self, layer: usize) -> usize {
-        self.read(layer).free_block_count()
-    }
-
-    /// Takes one block from EVERY layer as a single group, refcount 1.
-    ///
-    /// All layers or none: a group that existed in some layers and not
-    /// others could not answer "which block holds position p in layer
-    /// l", which is the only question it exists to answer.
-    pub fn acquire_group(&self) -> Option<PageGroup> {
-        let mut guards = self.write_all();
-        if guards.iter().any(|s| s.free_block_count() == 0) {
-            return None;
-        }
-        let blocks: Vec<usize> = guards
-            .iter_mut()
-            .map(|s| {
-                s.acquire_block()
-                    .expect("checked every layer under these same guards")
-            })
-            .collect();
-        let mut groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Some(PageGroup(groups.insert(blocks)))
-    }
-
-    /// One more holder of `group`.
-    ///
-    /// Called when a second sequence adopts a cached prefix. Without
-    /// it, the first sequence to finish frees pages the second is
-    /// still attending over -- a use-after-free that shows up as
-    /// another conversation's tokens rather than as a crash.
-    pub fn retain_group(&self, group: PageGroup) {
-        let mut groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        groups.retain(group.0);
-    }
-
-    /// One fewer holder. At zero the blocks go back to their layers.
-    ///
-    /// Returns whether this was the last holder, so a caller can assert
-    /// on it rather than guess.
-    pub fn release_group(&self, group: PageGroup) -> bool {
-        let blocks = {
-            let mut groups = self
-                .groups
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            match groups.release(group.0) {
-                Some(blocks) => blocks,
-                None => return false,
-            }
-        };
-        // The groups lock is dropped before the layer guards are taken,
-        // so the lock order is always groups-then-layers and never the
-        // reverse. See the type docs on deadlock.
-        let mut guards = self.write_all();
-        for (store, block) in guards.iter_mut().zip(blocks) {
-            store.release_block(block);
-        }
-        true
-    }
-
-    /// Which block in each layer this group owns, indexed by layer.
-    pub fn group_blocks(&self, group: PageGroup) -> Vec<usize> {
-        let groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        groups.blocks(group.0).to_vec()
-    }
-
-    /// How many holders `group` has. Zero means it does not exist.
-    pub fn group_refs(&self, group: PageGroup) -> u32 {
-        let groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        groups.refs(group.0)
-    }
-
-    /// Copies every layer's block from `src` into `dst`.
-    ///
-    /// The group-level form of [`PagedKvStore::copy_block`], which is
-    /// the unit a sequence forks at: a position's KV lives in one block
-    /// per layer, and a fork that copied some layers and shared others
-    /// would answer with half of each.
-    pub fn copy_group(&self, src: PageGroup, dst: PageGroup) {
-        let (from, to) = {
-            let groups = self
-                .groups
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (groups.blocks(src.0).to_vec(), groups.blocks(dst.0).to_vec())
-        };
-        // Groups lock released before the layer guards, as everywhere
-        // else here: see the type docs on deadlock.
-        let mut guards = self.write_all();
-        for ((store, &s), &d) in guards.iter_mut().zip(&from).zip(&to) {
-            store.copy_block(s, d);
-        }
-    }
-
-    /// Groups that could still be allocated, bounded by the layer with
-    /// the fewest free blocks: a group needs one from each.
-    pub fn free_groups(&self) -> usize {
-        (0..self.layers.len())
-            .map(|l| self.free_blocks(l))
-            .min()
-            .unwrap_or(0)
-    }
-}
-
-/// A handle to one block in every layer.
-///
-/// The unit of sharing between sequences, and the only thing small
-/// enough to be what a radix prefix cache stores: that cache maps a
-/// token prefix to ONE index per token, while a position's KV lives in
-/// `n_layers` different blocks. A group is the name for all of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PageGroup(pub u32);
-
-/// Group ids, their per-layer blocks, and how many holders each has.
-#[derive(Debug, Default)]
-struct GroupTable {
-    /// Indexed by group id. `None` for an id currently on the free list.
-    blocks: Vec<Option<Vec<usize>>>,
-    refs: Vec<u32>,
-    free_ids: Vec<u32>,
-}
-
-impl GroupTable {
-    fn insert(&mut self, blocks: Vec<usize>) -> u32 {
-        if let Some(id) = self.free_ids.pop() {
-            self.blocks[id as usize] = Some(blocks);
-            self.refs[id as usize] = 1;
-            return id;
-        }
-        self.blocks.push(Some(blocks));
-        self.refs.push(1);
-        (self.blocks.len() - 1) as u32
-    }
-
-    fn retain(&mut self, id: u32) {
-        let refs = &mut self.refs[id as usize];
-        assert!(*refs > 0, "cannot retain group {id}, which has no holders");
-        *refs += 1;
-    }
-
-    /// Drops one holder, returning the blocks to free only when the
-    /// last one goes.
-    fn release(&mut self, id: u32) -> Option<Vec<usize>> {
-        let refs = &mut self.refs[id as usize];
-        assert!(*refs > 0, "double free of group {id}");
-        *refs -= 1;
-        if *refs > 0 {
-            return None;
-        }
-        // The id is reusable now, but only after the blocks are out:
-        // handing the id back while it still named blocks would let a
-        // later `acquire_group` believe it owns them too.
-        let blocks = self.blocks[id as usize]
-            .take()
-            .expect("a group with holders always has blocks");
-        self.free_ids.push(id);
-        Some(blocks)
-    }
-
-    fn blocks(&self, id: u32) -> &[usize] {
-        self.blocks[id as usize]
-            .as_deref()
-            .expect("group has no blocks; it was already released")
-    }
-
-    fn refs(&self, id: u32) -> u32 {
-        self.refs.get(id as usize).copied().unwrap_or(0)
-    }
-}
+mod paged;
+pub use paged::*;
 
 #[cfg(test)]
-mod tests {
-    use crate::kv_store::KvDtype;
-
-    /// The f16 store holds half the bytes of the f32 one for the same
-    /// rows, and every edit a cache makes (push, truncate, evict, clone)
-    /// keeps its dtype and its rounded values.
-    #[test]
-    fn an_f16_cache_is_half_the_bytes_and_keeps_its_dtype_through_every_edit() {
-        let rows: Vec<Vec<f32>> = (0..6)
-            .map(|p| (0..8).map(|i| 0.1 * (p * 8 + i) as f32).collect())
-            .collect();
-        let mut a = KvCache::with_capacity(2, 4, 6);
-        let mut b = KvCache::with_capacity(2, 4, 6).with_dtype(KvDtype::F16);
-        for r in &rows {
-            a.push(r, r).unwrap();
-            b.push(r, r).unwrap();
-        }
-        assert_eq!(b.dtype(), KvDtype::F16);
-        assert_eq!(b.allocated_bytes() * 2, a.allocated_bytes());
-        let want: Vec<f32> = rows
-            .iter()
-            .flatten()
-            .map(|&x| half::f16::from_f32(x).to_f32())
-            .collect();
-        assert_eq!(b.k.to_f32_vec(), want);
-        assert_ne!(
-            b.k.to_f32_vec(),
-            a.k.to_f32_vec(),
-            "0.1 * n is not exact in f16"
-        );
-        b.truncate(4);
-        assert_eq!(b.rows(), 4);
-        assert_eq!(b.v.to_f32_vec(), want[..32].to_vec());
-        let c = b.clone();
-        assert_eq!(c.dtype(), KvDtype::F16);
-        assert_eq!(c.k_rows(), b.k_rows());
-    }
-
-    use super::*;
-
-    /// `blocks_needed_for` is the reservation the whole no-partial-write
-    /// guarantee rests on, and it is wrong in two opposite directions
-    /// that fail very differently.
-    ///
-    /// UNDER-counting is the dangerous one: `append_contiguous` reserves
-    /// on this answer and then pushes with an `expect`, so too small a
-    /// number panics part-way through a layer -- exactly the corrupted
-    /// state the reservation exists to prevent. Over-counting merely
-    /// refuses a request that would have fitted.
-    ///
-    /// Both mistakes are one edit away. Flooring instead of ceiling
-    /// under-counts whenever the append does not land on a block
-    /// boundary; ignoring the part-full tail over-counts whenever a
-    /// sequence is mid-block, which after the first token is almost
-    /// always. Neither shows up when the numbers happen to divide
-    /// evenly, so the cases here are chosen so that they do not.
-    #[test]
-    fn blocks_needed_for_accounts_for_the_part_full_tail_block() {
-        let mut store = PagedKvStore::new(/* block_size = */ 4, 64, 1, 1);
-        let mut cache = PagedKvCache::new();
-        let row = [1.0f32];
-        // Real pushes rather than poking `seq_len`: the count is
-        // against blocks this sequence HOLDS, so a length with no
-        // blocks behind it is a state that cannot occur and would only
-        // let the test agree with an arithmetic nothing produces.
-        let advance = |cache: &mut PagedKvCache, store: &mut PagedKvStore, n: usize| {
-            for _ in 0..n {
-                cache.push(store, &row, &row).unwrap();
-            }
-        };
-
-        // Empty: a whole-block boundary, and a remainder that a floor
-        // would round away.
-        assert_eq!(cache.blocks_needed_for(&store, 0), 0);
-        assert_eq!(cache.blocks_needed_for(&store, 1), 1);
-        assert_eq!(cache.blocks_needed_for(&store, 4), 1);
-        assert_eq!(cache.blocks_needed_for(&store, 5), 2, "5 into 4s needs 2");
-
-        // One position in: three slots free in the tail, so appending up
-        // to three costs NOTHING. Ignoring the tail would say 1.
-        advance(&mut cache, &mut store, 1);
-        assert_eq!(cache.blocks_needed_for(&store, 3), 0, "fits in the tail");
-        assert_eq!(cache.blocks_needed_for(&store, 4), 1);
-        assert_eq!(cache.blocks_needed_for(&store, 8), 2);
-
-        // The awkward case: 1 free in the tail, 6 to append. 5 spill
-        // over 4-wide blocks, so 2. A floor gives 1 and a tail-blind
-        // ceil gives 2 for the wrong reason, so this pins the shape.
-        advance(&mut cache, &mut store, 2); // seq_len = 3
-        assert_eq!(cache.blocks_needed_for(&store, 6), 2);
-        assert_eq!(cache.blocks_needed_for(&store, 5), 1);
-
-        // Tail exactly full: no free slots, so this behaves like empty.
-        advance(&mut cache, &mut store, 1); // seq_len = 4
-        assert_eq!(cache.blocks_needed_for(&store, 1), 1);
-        assert_eq!(cache.blocks_needed_for(&store, 4), 1);
-
-        // A RESERVED block is capacity this sequence already holds, so
-        // it must not be asked for twice. Counting from `seq_len` alone
-        // would say 1 here and take a second block for positions the
-        // reservation already covers.
-        cache.reserve(&mut store, 4).unwrap();
-        assert_eq!(
-            cache.blocks_needed_for(&store, 4),
-            0,
-            "a reserved block is already held"
-        );
-        assert_eq!(cache.blocks_needed_for(&store, 5), 1);
-    }
-
-    /// A group takes one block from every layer, and gives them all
-    /// back together.
-    ///
-    /// All-or-nothing is the point: a group holding blocks in some
-    /// layers and not others cannot answer "which block holds position
-    /// p in layer l", which is the only question it exists for.
-    #[test]
-    fn a_group_takes_one_block_from_every_layer_and_returns_them_together() {
-        let kv = SharedPagedKv::new(3, 2, 4, 1, 1);
-        assert_eq!(kv.free_groups(), 4);
-
-        let g = kv.acquire_group().expect("4 groups available");
-        let blocks = kv.group_blocks(g);
-        assert_eq!(blocks.len(), 3, "one block per layer");
-        for l in 0..3 {
-            assert_eq!(kv.free_blocks(l), 3, "layer {l} gave up exactly one");
-        }
-        assert_eq!(kv.free_groups(), 3);
-
-        assert!(kv.release_group(g), "sole holder, so this frees it");
-        for l in 0..3 {
-            assert_eq!(kv.free_blocks(l), 4, "layer {l} got its block back");
-        }
-        assert_eq!(kv.free_groups(), 4);
-    }
-
-    /// A group survives until its LAST holder releases it.
-    ///
-    /// This is what makes prefix sharing safe. Two sequences off one
-    /// system prompt hold the same pages; if the first to finish freed
-    /// them, the second would keep attending over blocks the store had
-    /// already handed to somebody else -- surfacing as another
-    /// conversation's tokens, not as a crash.
-    #[test]
-    fn a_group_shared_by_two_holders_survives_the_first_release() {
-        let kv = SharedPagedKv::new(2, 2, 2, 1, 1);
-        let g = kv.acquire_group().unwrap();
-        let blocks = kv.group_blocks(g);
-        kv.retain_group(g);
-        assert_eq!(kv.group_refs(g), 2);
-
-        assert!(
-            !kv.release_group(g),
-            "one holder remains, so nothing is freed"
-        );
-        assert_eq!(kv.group_refs(g), 1);
-        assert_eq!(kv.free_blocks(0), 1, "the blocks are still held");
-        assert_eq!(kv.group_blocks(g), blocks, "and still name the same blocks");
-
-        assert!(kv.release_group(g), "last holder frees it");
-        assert_eq!(kv.group_refs(g), 0);
-        assert_eq!(kv.free_blocks(0), 2);
-    }
-
-    /// Exhaustion is per group, bounded by the tightest layer.
-    ///
-    /// A layer with one block left caps the whole pool at one more
-    /// group however much room the others have, because a group needs
-    /// one block from each.
-    #[test]
-    fn group_capacity_is_bounded_by_the_layer_with_the_fewest_blocks() {
-        let kv = SharedPagedKv::from_stores(vec![
-            PagedKvStore::new(2, 5, 1, 1),
-            PagedKvStore::new(2, 1, 1, 1),
-        ]);
-        assert_eq!(kv.free_groups(), 1, "layer 1 has only one block");
-
-        let g = kv.acquire_group().expect("one group fits");
-        assert_eq!(kv.free_groups(), 0);
-        assert!(
-            kv.acquire_group().is_none(),
-            "layer 1 is empty, so no group can be formed"
-        );
-        // The refused attempt must not have taken layer 0's block.
-        assert_eq!(kv.free_blocks(0), 4, "a refused group leaks nothing");
-        kv.release_group(g);
-        assert_eq!(kv.free_blocks(0), 5);
-    }
-
-    /// A released id is reused, with a refcount that starts over.
-    #[test]
-    fn a_released_group_id_is_reused_with_a_fresh_refcount() {
-        let kv = SharedPagedKv::new(1, 2, 2, 1, 1);
-        let first = kv.acquire_group().unwrap();
-        kv.retain_group(first);
-        assert_eq!(kv.group_refs(first), 2);
-        kv.release_group(first);
-        kv.release_group(first);
-        assert_eq!(kv.group_refs(first), 0, "gone, not merely decremented");
-
-        let second = kv.acquire_group().unwrap();
-        assert_eq!(second, first, "the id is reused");
-        assert_eq!(
-            kv.group_refs(second),
-            1,
-            "a reused id must not inherit the old count"
-        );
-        assert_eq!(kv.group_blocks(second).len(), 1);
-        assert_eq!(kv.free_blocks(0), 1);
-    }
-
-    /// Reading a group after its last holder released it PANICS rather
-    /// than answering with stale blocks.
-    ///
-    /// This is the observable half of clearing the entry on release,
-    /// and the reason it is `take` rather than `clone`: a caller still
-    /// holding a `PageGroup` after releasing it is exactly the bug
-    /// refcounting exists to prevent, and blocks that now belong to
-    /// somebody else are the worst possible answer -- the caller reads
-    /// another sequence's KV and nothing says so.
-    ///
-    /// Written after sabotage showed the previous test here passed with
-    /// `clone` in place of `take`: `insert` overwrites the entry on
-    /// reuse, so a stale entry was never reachable through the path
-    /// that test took. This one reaches it.
-    #[test]
-    #[should_panic(expected = "already released")]
-    fn reading_a_released_group_panics_rather_than_returning_stale_blocks() {
-        let kv = SharedPagedKv::new(2, 2, 2, 1, 1);
-        let g = kv.acquire_group().unwrap();
-        assert!(kv.release_group(g));
-        let _ = kv.group_blocks(g);
-    }
-
-    /// Releasing a group nobody holds is a bug, not a no-op.
-    ///
-    /// Silently ignoring it would let a double release return the same
-    /// blocks to the store twice, after which two sequences are handed
-    /// the same page and both write it.
-    #[test]
-    #[should_panic(expected = "double free of group")]
-    fn releasing_a_group_twice_panics_rather_than_freeing_it_twice() {
-        let kv = SharedPagedKv::new(1, 2, 2, 1, 1);
-        let g = kv.acquire_group().unwrap();
-        assert!(kv.release_group(g));
-        kv.release_group(g);
-    }
-
-    /// A recycled block backs a later position without the store ever
-    /// being asked for another one, and the later position's writes are
-    /// what a read at that position returns.
-    ///
-    /// This is the whole sliding-window mechanism in miniature. Blocks
-    /// of two, four positions, and only two blocks in the store: without
-    /// recycling, position 2 has nowhere to go.
-    #[test]
-    fn a_recycled_block_backs_a_later_position_without_touching_the_store() {
-        let mut store = PagedKvStore::new(2, 2, 1, 2);
-        let mut cache = PagedKvCache::new();
-        cache.push(&mut store, &[1.0, 1.0], &[1.0, 1.0]).unwrap();
-        cache.push(&mut store, &[2.0, 2.0], &[2.0, 2.0]).unwrap();
-        assert_eq!(store.free_block_count(), 1, "one block per position pair");
-
-        // Positions 0..2 have fallen behind a window of two. Their block
-        // backs positions 2..4 instead, and the store is untouched.
-        let recycled = cache.block_table()[0];
-        cache.append_block(recycled);
-        assert_eq!(
-            store.free_block_count(),
-            1,
-            "recycling must not take a block from the store"
-        );
-        cache.push(&mut store, &[3.0, 3.0], &[3.0, 3.0]).unwrap();
-        assert_eq!(cache.seq_len(), 3);
-        assert_eq!(
-            cache.block_table(),
-            &[recycled, recycled],
-            "the same block at the stale index and the live one"
-        );
-
-        // Reading position 2 sees the new row. Position 0's row is gone,
-        // which is exactly what "behind the window" means -- the kernel
-        // never indexes it.
-        let flat = cache.to_contiguous(&store);
-        assert_eq!(
-            &flat.k.as_f32().unwrap()[4..6],
-            &[3.0, 3.0],
-            "position 2 reads its own row"
-        );
-        assert_eq!(
-            &flat.k.as_f32().unwrap()[0..2],
-            &[3.0, 3.0],
-            "position 0 now reads the recycled row, and nothing may read it"
-        );
-    }
-
-    /// Releasing an aliased table hands each block back ONCE.
-    ///
-    /// Per index instead of per distinct block would put the recycled id
-    /// on the free list twice, and the next two acquisitions would hand
-    /// two sequences the same memory -- which does not fail, it
-    /// interleaves two conversations' KV.
-    #[test]
-    fn releasing_a_recycled_table_gives_each_block_back_once() {
-        // Exactly one block in the store, so "handed back twice" is
-        // observable as a second acquisition succeeding.
-        let mut store = PagedKvStore::new(2, 1, 1, 2);
-        let mut cache = PagedKvCache::new();
-        cache.push(&mut store, &[1.0, 1.0], &[1.0, 1.0]).unwrap();
-        let held = cache.block_table()[0];
-        cache.append_block(held);
-        cache.append_block(held);
-
-        let free_before = store.free_block_count();
-        cache.release(&mut store);
-        assert_eq!(
-            store.free_block_count(),
-            free_before + 1,
-            "three table entries naming one block are one block back"
-        );
-        // And the store agrees: it can hand out that block once.
-        assert!(store.acquire_block().is_some());
-        assert!(store.acquire_block().is_none());
-    }
-
-    #[test]
-    fn a_gathered_sequence_round_trips_through_the_store() {
-        let mut store = PagedKvStore::new(2, 8, 2, 2);
-        let mut cache = PagedKvCache::new();
-        // Five positions over blocks of two: the tail block is half
-        // full, which is where an off-by-one in the gather shows up.
-        let rows: Vec<[f32; 4]> = (0..5)
-            .map(|i| {
-                let b = i as f32 * 10.0;
-                [b + 1.0, b + 2.0, b + 3.0, b + 4.0]
-            })
-            .collect();
-        for r in &rows {
-            cache.push(&mut store, r, r).unwrap();
-        }
-
-        let flat = cache.to_contiguous(&store);
-        assert_eq!(flat.positions(), 5);
-        assert_eq!(flat.k.len(), 5 * 4);
-        for (i, r) in rows.iter().enumerate() {
-            assert_eq!(
-                &flat.k.as_f32().unwrap()[i * 4..(i + 1) * 4],
-                r,
-                "position {i} k"
-            );
-            assert_eq!(
-                &flat.v.as_f32().unwrap()[i * 4..(i + 1) * 4],
-                r,
-                "position {i} v"
-            );
-        }
-
-        // And appending those same rows back onto a fresh sequence
-        // reproduces the store's view of them exactly.
-        let mut rebuilt = PagedKvCache::new();
-        let mut store2 = PagedKvStore::new(2, 8, 2, 2);
-        rebuilt
-            .append_contiguous(&mut store2, &flat.k, &flat.v, 5)
-            .unwrap();
-        let again = rebuilt.to_contiguous(&store2);
-        assert_eq!(again.k.to_f32_vec(), flat.k.to_f32_vec());
-        assert_eq!(again.v.to_f32_vec(), flat.v.to_f32_vec());
-        assert_eq!(again.positions(), flat.positions());
-    }
-
-    #[test]
-    fn push_grows_seq_len_and_stores_values() {
-        let mut cache = KvCache::new(2, 2);
-        cache
-            .push(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0])
-            .unwrap();
-        assert_eq!(cache.positions(), 1);
-        cache
-            .push(&[9.0, 10.0, 11.0, 12.0], &[13.0, 14.0, 15.0, 16.0])
-            .unwrap();
-        assert_eq!(cache.positions(), 2);
-        assert_eq!(cache.k.len(), 2 * 2 * 2);
-        assert_eq!(cache.k.as_f32().unwrap()[4], 9.0);
-    }
-
-    #[test]
-    #[should_panic]
-    fn push_wrong_size_panics() {
-        let mut cache = KvCache::new(2, 2);
-        let _ = cache.push(&[1.0, 2.0], &[1.0, 2.0]); // too short
-    }
-
-    #[test]
-    fn clear_resets_state() {
-        let mut cache = KvCache::new(1, 1);
-        cache.push(&[1.0], &[2.0]).unwrap();
-        cache.clear();
-        assert_eq!(cache.positions(), 0);
-        assert!(cache.k.is_empty());
-    }
-
-    #[test]
-    fn truncate_rolls_back_to_exact_length_preserving_earlier_data() {
-        let mut cache = KvCache::new(2, 2);
-        cache
-            .push(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0])
-            .unwrap();
-        cache
-            .push(&[5.0, 6.0, 7.0, 8.0], &[50.0, 60.0, 70.0, 80.0])
-            .unwrap();
-        cache
-            .push(&[9.0, 9.0, 9.0, 9.0], &[90.0, 90.0, 90.0, 90.0])
-            .unwrap();
-        assert_eq!(cache.positions(), 3);
-
-        cache.truncate(1);
-        assert_eq!(cache.positions(), 1);
-        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(cache.v.to_f32_vec(), vec![10.0, 20.0, 30.0, 40.0]);
-    }
-
-    #[test]
-    fn truncate_to_current_length_is_a_no_op() {
-        let mut cache = KvCache::new(1, 2);
-        cache.push(&[1.0, 2.0], &[3.0, 4.0]).unwrap();
-        cache.truncate(1);
-        assert_eq!(cache.positions(), 1);
-        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0]);
-    }
-
-    #[test]
-    fn truncate_to_zero_empties_the_cache() {
-        let mut cache = KvCache::new(1, 2);
-        cache.push(&[1.0, 2.0], &[3.0, 4.0]).unwrap();
-        cache.truncate(0);
-        assert_eq!(cache.positions(), 0);
-        assert!(cache.k.is_empty());
-        assert!(cache.v.is_empty());
-    }
-
-    #[test]
-    #[should_panic]
-    fn truncate_beyond_current_length_panics() {
-        let mut cache = KvCache::new(1, 2);
-        cache.push(&[1.0, 2.0], &[3.0, 4.0]).unwrap();
-        cache.truncate(5);
-    }
-
-    #[test]
-    fn push_after_truncate_continues_correctly() {
-        let mut cache = KvCache::new(1, 1);
-        cache.push(&[1.0], &[10.0]).unwrap();
-        cache.push(&[2.0], &[20.0]).unwrap();
-        cache.push(&[3.0], &[30.0]).unwrap(); // this one will be "rejected"
-        cache.truncate(2);
-        cache.push(&[99.0], &[990.0]).unwrap(); // real continuation after rejection
-        assert_eq!(cache.positions(), 3);
-        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0, 99.0]);
-        assert_eq!(cache.v.to_f32_vec(), vec![10.0, 20.0, 990.0]);
-    }
-
-    #[test]
-    fn with_capacity_preallocates_and_never_reallocates_within_plan() {
-        let n_kv_heads = 4;
-        let head_dim = 8;
-        let max_seq_len = 16;
-        let mut cache = KvCache::with_capacity(n_kv_heads, head_dim, max_seq_len);
-
-        let expected_elems = max_seq_len * n_kv_heads * head_dim;
-        assert!(cache.k.capacity() >= expected_elems);
-        assert!(cache.v.capacity() >= expected_elems);
-
-        let step = vec![0.5f32; n_kv_heads * head_dim];
-        let k_ptr_before = cache.k.as_f32().unwrap().as_ptr();
-        for _ in 0..max_seq_len {
-            cache.push(&step, &step).unwrap();
-        }
-        let k_ptr_after = cache.k.as_f32().unwrap().as_ptr();
-        assert_eq!(
-            k_ptr_before, k_ptr_after,
-            "pushing exactly up to the planned capacity must not reallocate"
-        );
-        assert!(cache.is_within_planned_capacity());
-    }
-
-    #[test]
-    fn allocated_bytes_reflects_preallocated_capacity_not_just_used_length() {
-        let cache = KvCache::with_capacity(4, 8, 100);
-        // 100 positions * 4 kv_heads * 8 head_dim * 2 (k+v) * 4 bytes/f32
-        let expected_min = 100 * 4 * 8 * 2 * 4;
-        assert!(
-            cache.allocated_bytes() >= expected_min,
-            "allocated_bytes={} expected_min={expected_min}",
-            cache.allocated_bytes()
-        );
-        // Nothing has been pushed yet, but the memory is already reserved.
-        assert_eq!(cache.positions(), 0);
-    }
-
-    #[test]
-    fn grow_as_you_go_cache_reports_not_within_planned_capacity() {
-        let mut cache = KvCache::new(2, 2);
-        cache
-            .push(&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0])
-            .unwrap();
-        assert!(
-            !cache.is_within_planned_capacity(),
-            "a cache built with `new` has no plan to be within"
-        );
-    }
-
-    #[test]
-    fn with_pool_acquires_one_block_and_reports_it_in_free_blocks() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 10)));
-        let cache = KvCache::with_pool(2, 2, pool.clone(), 0).unwrap();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 9);
-        assert_eq!(cache.positions(), 0);
-    }
-
-    #[test]
-    fn with_pool_fails_without_mutating_the_pool_when_exhausted() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 0)));
-        let result = KvCache::with_pool(2, 2, pool.clone(), 0);
-        assert!(result.is_err());
-        assert_eq!(pool.lock().unwrap().free_blocks(), 0);
-    }
-
-    #[test]
-    fn push_acquires_additional_blocks_as_the_cache_crosses_block_boundaries() {
-        let block_size = 2;
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(block_size, 10)));
-        let mut cache = KvCache::with_pool(1, 1, pool.clone(), 0).unwrap();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 9);
-
-        // First block holds `block_size` = 2 positions; pushing them
-        // must not need a second block.
-        cache.push(&[1.0], &[1.0]).unwrap();
-        cache.push(&[2.0], &[2.0]).unwrap();
-        assert_eq!(
-            pool.lock().unwrap().free_blocks(),
-            9,
-            "filling exactly the first block must not acquire a second one"
-        );
-
-        // The third position crosses into a second block.
-        cache.push(&[3.0], &[3.0]).unwrap();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 8);
-        assert_eq!(cache.positions(), 3);
-        assert_eq!(cache.k.to_f32_vec(), vec![1.0, 2.0, 3.0]);
-    }
-
-    #[test]
-    fn push_returns_pool_exhausted_and_leaves_state_unchanged_when_no_blocks_remain() {
-        let block_size = 1;
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(block_size, 1)));
-        let mut cache = KvCache::with_pool(1, 1, pool.clone(), 0).unwrap();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 0);
-
-        cache.push(&[1.0], &[1.0]).unwrap(); // fills the one held block
-
-        let before_k = cache.k.clone();
-        let result = cache.push(&[2.0], &[2.0]);
-        assert_eq!(result, Err(KvPoolExhausted));
-        assert_eq!(
-            cache.positions(),
-            1,
-            "a failed push must not change seq_len"
-        );
-        assert_eq!(
-            cache.k.to_f32_vec(),
-            before_k.to_f32_vec(),
-            "a failed push must not append data"
-        );
-    }
-
-    #[test]
-    fn dropping_a_pooled_cache_returns_its_blocks_to_the_pool() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(1, 2)));
-        {
-            let mut cache = KvCache::with_pool(1, 1, pool.clone(), 0).unwrap();
-            cache.push(&[1.0], &[1.0]).unwrap(); // fills the first (only held) block
-            cache.push(&[2.0], &[2.0]).unwrap(); // crosses into a second block
-            assert_eq!(pool.lock().unwrap().free_blocks(), 0);
-        }
-        assert_eq!(
-            pool.lock().unwrap().free_blocks(),
-            2,
-            "both blocks held by the dropped cache must return to the pool"
-        );
-    }
-
-    #[test]
-    fn release_to_pool_is_explicit_and_idempotent() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 5)));
-        let mut cache = KvCache::with_pool(1, 1, pool.clone(), 0).unwrap();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 4);
-
-        cache.release_to_pool();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 5);
-
-        cache.release_to_pool(); // no-op, must not over-release
-        assert_eq!(pool.lock().unwrap().free_blocks(), 5);
-
-        drop(cache); // must not release again either
-        assert_eq!(pool.lock().unwrap().free_blocks(), 5);
-    }
-
-    #[test]
-    fn two_pooled_caches_share_one_bounded_budget() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(1, 1)));
-        let cache_a = KvCache::with_pool(1, 1, pool.clone(), 0).unwrap();
-        let cache_b = KvCache::with_pool(1, 1, pool.clone(), 0);
-        assert!(
-            cache_b.is_err(),
-            "a second concurrent request must not be admitted when the shared budget is full"
-        );
-
-        drop(cache_a);
-        let cache_c = KvCache::with_pool(1, 1, pool, 0);
-        assert!(
-            cache_c.is_ok(),
-            "once the first request's cache is dropped, its budget must become available again"
-        );
-    }
-
-    #[test]
-    fn cloning_a_pooled_cache_detaches_the_clone_from_pool_accounting() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 3)));
-        let original = KvCache::with_pool(1, 1, pool.clone(), 0).unwrap();
-        assert_eq!(pool.lock().unwrap().free_blocks(), 2);
-
-        let clone = original.clone();
-        assert_eq!(
-            pool.lock().unwrap().free_blocks(),
-            2,
-            "cloning must not acquire additional blocks"
-        );
-        assert_eq!(clone.k.to_f32_vec(), original.k.to_f32_vec());
-
-        drop(clone);
-        assert_eq!(
-            pool.lock().unwrap().free_blocks(),
-            2,
-            "dropping a detached clone must not release the original's blocks"
-        );
-
-        drop(original);
-        assert_eq!(
-            pool.lock().unwrap().free_blocks(),
-            3,
-            "dropping the original must release its blocks exactly once"
-        );
-    }
-
-    /// A resize is arithmetic, and the one rule that is not: shrinking
-    /// past what is held is refused, and the pool is left exactly as it
-    /// was.
-    ///
-    /// Clamping to zero instead would silently over-promise -- the
-    /// caches holding those blocks do not give them back, so every
-    /// later acquire would decide against a budget that does not
-    /// describe the memory in use. This test fails under that clamp.
-    #[test]
-    fn a_pool_refuses_to_shrink_below_what_is_already_held() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 10)));
-        let held = KvCache::with_pool(2, 4, Arc::clone(&pool), 24).expect("blocks");
-        let in_use = {
-            let p = pool.lock().unwrap();
-            p.total_blocks() - p.free_blocks()
-        };
-        assert!(in_use > 0, "the fixture must actually hold blocks");
-
-        let mut p = pool.lock().unwrap();
-        assert_eq!(p.resize(in_use - 1), Err(in_use));
-        assert_eq!(p.total_blocks(), 10, "a refused resize changes nothing");
-        assert_eq!(p.free_blocks(), 10 - in_use);
-
-        // Down to exactly what is held is legal, and leaves nothing free.
-        assert_eq!(p.resize(in_use), Ok(()));
-        assert_eq!(p.free_blocks(), 0);
-        drop(p);
-        drop(held);
-    }
-
-    /// Growing hands the new blocks to the free list without disturbing
-    /// what is held, which is the whole point of a live re-split.
-    #[test]
-    fn growing_a_pool_adds_to_what_is_free_and_not_to_what_is_held() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 8)));
-        let held = KvCache::with_pool(2, 4, Arc::clone(&pool), 16).expect("blocks");
-        let mut p = pool.lock().unwrap();
-        let in_use = p.total_blocks() - p.free_blocks();
-
-        assert_eq!(p.resize(32), Ok(()));
-        assert_eq!(p.total_blocks(), 32);
-        assert_eq!(p.free_blocks(), 32 - in_use);
-        drop(p);
-        drop(held);
-    }
-
-    /// Positions and rows agree for every store that does not evict,
-    /// and this pins that they are DERIVED separately rather than one
-    /// being an alias for the other.
-    ///
-    /// The point of the split is #61: a windowed layer will drop rows
-    /// behind its window while its position count keeps climbing. Until
-    /// then the two are equal, so this test cannot prove much about
-    /// eviction. What it CAN prove, and what matters, is that `rows`
-    /// reads the buffer rather than the counter: set the counter to a
-    /// lie and `rows` still reports the truth.
-    #[test]
-    fn rows_is_read_from_the_buffer_and_positions_from_the_counter() {
-        let mut cache = KvCache::new(2, 4);
-        for i in 0..5 {
-            let step = vec![i as f32; 8];
-            cache.push(&step, &step).expect("unbounded growth");
-        }
-        assert_eq!(cache.positions(), 5);
-        assert_eq!(cache.rows(), 5, "nothing evicts, so they agree");
-
-        // The counter lies; the buffer does not.
-        cache.force_positions_for_test(99);
-        assert_eq!(cache.positions(), 99);
-        assert_eq!(
-            cache.rows(),
-            5,
-            "rows must come from k/v, or it is just a second name for the counter"
-        );
-    }
-
-    /// `truncate` is measured in POSITIONS, and it moves both, because
-    /// nothing evicts yet. Written down because it is the first thing
-    /// eviction changes: a truncate target will stop being a row index.
-    #[test]
-    fn truncate_moves_positions_and_rows_together_while_nothing_evicts() {
-        let mut cache = KvCache::new(1, 2);
-        for i in 0..4 {
-            let step = vec![i as f32; 2];
-            cache.push(&step, &step).expect("unbounded growth");
-        }
-        cache.truncate(2);
-        assert_eq!(cache.positions(), 2);
-        assert_eq!(cache.rows(), 2);
-        assert_eq!(cache.k.len(), 4, "two positions of two elements each");
-    }
-
-    /// The store's rule must be *the* rule, not a second copy of it.
-    ///
-    /// `KvWindow::rows_after` is what `frink_models::kv_budget` prices
-    /// against. If the store drained to anything else the budget would
-    /// be describing a cache that does not exist, which is #33 again.
-    #[test]
-    fn a_windowed_cache_holds_exactly_what_the_rule_says_it_holds() {
-        let window = KvWindow::new(8, 3).expect("positive window");
-        let mut cache = KvCache::new(2, 4);
-        cache.arm_window(window);
-        let step = vec![1.0f32; 8];
-        for p in 1..=200usize {
-            cache.push(&step, &step).expect("unbounded growth");
-            cache.evict_behind_window();
-            assert_eq!(cache.positions(), p);
-            assert_eq!(
-                cache.rows(),
-                window.rows_after(p),
-                "at {p} positions the store and the rule disagree"
-            );
-        }
-    }
-
-    /// The point of the issue: positions keep counting, rows do not.
-    #[test]
-    fn a_windowed_layers_resident_rows_stop_growing() {
-        let window = KvWindow::with_default_slack(16).expect("positive window");
-        let mut cache = KvCache::new(2, 4);
-        cache.arm_window(window);
-        let step = vec![0.5f32; 8];
-        for _ in 0..2000 {
-            cache.push(&step, &step).expect("unbounded growth");
-            cache.evict_behind_window();
-        }
-        assert_eq!(cache.positions(), 2000);
-        assert!(
-            cache.rows() <= window.max_rows(),
-            "{} rows resident after 2000 positions",
-            cache.rows()
-        );
-        // And the bytes really went back, not just the length: `drain`
-        // frees nothing, and memory is the whole point.
-        assert!(
-            cache.allocated_bytes() <= window.max_rows() * 8 * 2 * 4 * 2,
-            "capacity was never handed back: {} bytes",
-            cache.allocated_bytes()
-        );
-    }
-
-    /// **The correctness argument, measured.**
-    ///
-    /// Eviction is only allowed to be token-identical because the rows a
-    /// windowed kernel reads -- the last `window` of them -- are the
-    /// same bytes whether or not anything behind them was dropped. This
-    /// pushes distinguishable rows into an evicting cache and a plain
-    /// one and compares exactly that slice.
-    #[test]
-    fn the_rows_a_windowed_kernel_reads_are_identical_with_and_without_eviction() {
-        let window = KvWindow::new(6, 2).expect("positive window");
-        let (n_kv_heads, head_dim) = (2usize, 4usize);
-        let per = n_kv_heads * head_dim;
-        let mut evicting = KvCache::new(n_kv_heads, head_dim);
-        evicting.arm_window(window);
-        let mut plain = KvCache::new(n_kv_heads, head_dim);
-
-        for p in 0..120usize {
-            // A row nothing else could produce, so a misplaced row is
-            // not merely a different number but an identifiable one.
-            let k: Vec<f32> = (0..per).map(|i| (p * 100 + i) as f32).collect();
-            let v: Vec<f32> = k.iter().map(|x| -x).collect();
-            evicting.push(&k, &v).expect("unbounded growth");
-            evicting.evict_behind_window();
-            plain.push(&k, &v).expect("unbounded growth");
-
-            let read = window.window().min(p + 1);
-            let e_start = (evicting.rows() - read) * per;
-            let p_start = (plain.rows() - read) * per;
-            assert_eq!(
-                &evicting.k.as_f32().unwrap()[e_start..],
-                &plain.k.as_f32().unwrap()[p_start..],
-                "K read set diverged at position {p}"
-            );
-            assert_eq!(
-                &evicting.v.as_f32().unwrap()[e_start..],
-                &plain.v.as_f32().unwrap()[p_start..],
-                "V read set diverged at position {p}"
-            );
-            assert_eq!(evicting.positions(), plain.positions());
-        }
-    }
-
-    /// An unarmed cache is the cache this engine has always had.
-    #[test]
-    fn an_unarmed_cache_never_drops_a_row() {
-        let mut cache = KvCache::new(2, 4);
-        let step = vec![1.0f32; 8];
-        for _ in 0..64 {
-            cache.push(&step, &step).expect("unbounded growth");
-            assert_eq!(cache.evict_behind_window(), 0);
-        }
-        assert_eq!(cache.rows(), 64);
-        assert_eq!(cache.positions(), 64);
-        assert!(cache.window().is_none());
-    }
-
-    /// Speculative decoding rolls the cache back by the number of
-    /// rejected draft tokens. That is representable while the target is
-    /// still resident.
-    #[test]
-    fn truncate_still_works_inside_the_resident_window() {
-        let window = KvWindow::new(8, 3).expect("positive window");
-        let mut cache = KvCache::new(1, 2);
-        cache.arm_window(window);
-        let step = vec![1.0f32; 2];
-        for _ in 0..50 {
-            cache.push(&step, &step).expect("unbounded growth");
-            cache.evict_behind_window();
-        }
-        let rows_before = cache.rows();
-        cache.truncate(46);
-        assert_eq!(cache.positions(), 46);
-        assert_eq!(cache.rows(), rows_before - 4);
-    }
-
-    /// ...and stops, loudly, when it is not. A cache that rolled back to
-    /// the oldest row it happened to have would answer the next token
-    /// out of a history with a hole in it.
-    #[test]
-    #[should_panic(expected = "rows are resident")]
-    fn truncate_refuses_to_roll_back_past_what_the_window_kept() {
-        let window = KvWindow::new(4, 1).expect("positive window");
-        let mut cache = KvCache::new(1, 2);
-        cache.arm_window(window);
-        let step = vec![1.0f32; 2];
-        for _ in 0..50 {
-            cache.push(&step, &step).expect("unbounded growth");
-            cache.evict_behind_window();
-        }
-        cache.truncate(3);
-    }
-
-    /// A clone of an evicting cache is still an evicting cache. Reset
-    /// the window on clone and `positions` becomes a row count again in
-    /// whatever reads the clone.
-    #[test]
-    fn a_clone_carries_the_window() {
-        let window = KvWindow::new(4, 1).expect("positive window");
-        let mut cache = KvCache::new(1, 2);
-        cache.arm_window(window);
-        let step = vec![1.0f32; 2];
-        for _ in 0..20 {
-            cache.push(&step, &step).expect("unbounded growth");
-            cache.evict_behind_window();
-        }
-        let copy = cache.clone();
-        assert_eq!(copy.window(), Some(window));
-        assert_eq!(copy.rows(), cache.rows());
-        assert_eq!(copy.positions(), cache.positions());
-    }
-
-    /// A pool-backed cache grows when its BUFFER is full, not when its
-    /// position counter reaches the buffer's size. Those are the same
-    /// number until something evicts, and an evicting pooled cache keyed
-    /// on positions would acquire a block per token forever and exhaust
-    /// the pool.
-    #[test]
-    fn a_pooled_windowed_cache_stops_acquiring_blocks() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(4, 8)));
-        let mut cache =
-            KvCache::with_pool(1, 2, Arc::clone(&pool), 8).expect("the pool was sized for this");
-        cache.arm_window(KvWindow::new(4, 1).expect("positive window"));
-        let step = vec![1.0f32; 2];
-        for _ in 0..64 {
-            cache
-                .push(&step, &step)
-                .expect("the buffer never fills again");
-            cache.evict_behind_window();
-        }
-        assert_eq!(cache.positions(), 64);
-        assert!(cache.rows() <= 5);
-    }
-
-    /// **The sibling above passes for the wrong reason on its own
-    /// sizing, so this is the same property where the trap is armed.**
-    ///
-    /// Eviction hands surplus CAPACITY back with `shrink_to`, which is
-    /// where its memory saving actually comes from. For a pool-backed
-    /// cache that is a bug rather than a saving: the pool has already
-    /// promised these blocks and does not take them back, while `push`
-    /// decides it needs another block by comparing rows against
-    /// `k.capacity()`. Shrink that capacity to a window and the
-    /// condition is true again every `slack + 1` tokens, forever -- so
-    /// the cache draws a fresh block from the shared pool on a cadence,
-    /// never releases one, and runs the pool dry underneath every OTHER
-    /// request in the process. It surfaces where `push` is documented
-    /// infallible, so the caller panics mid-answer.
-    ///
-    /// The sibling's cache is 8 positions against a 5-row ceiling,
-    /// which is under the 2x threshold `shrink_to` is gated on, so it
-    /// never reaches the shrink at all. This one is 64 positions
-    /// against the same ceiling, and the pool is given spare blocks so
-    /// the leak shows up as blocks quietly gone rather than only as the
-    /// error at the end of them.
-    #[test]
-    fn an_evicting_pooled_cache_never_hands_its_capacity_back_to_reacquire_it() {
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(8, 24)));
-        let mut cache =
-            KvCache::with_pool(1, 2, Arc::clone(&pool), 64).expect("8 of the 24 blocks");
-        let free_after_construction = pool.lock().unwrap().free_blocks();
-        assert_eq!(free_after_construction, 16, "8 blocks cover 64 positions");
-
-        cache.arm_window(KvWindow::new(4, 1).expect("positive window"));
-        let step = vec![1.0f32; 2];
-        for _ in 0..512 {
-            cache
-                .push(&step, &step)
-                .expect("a reservation made up front must not be re-made per token");
-            cache.evict_behind_window();
-        }
-
-        assert_eq!(
-            pool.lock().unwrap().free_blocks(),
-            free_after_construction,
-            "the cache drew more blocks from the shared pool while evicting"
-        );
-        assert_eq!(cache.positions(), 512);
-        assert!(cache.rows() <= 5);
-    }
-}
+mod tests;

@@ -71,6 +71,16 @@ as `{id}_{backend}.json`. A run that fails leaves the previous receipt
 in place instead of overwriting it. `--render` rewrites the engine table
 in `RESULTS.md` between HTML markers and leaves the Open notes alone.
 
+A gap is a ratio against one llama.cpp build, so each engine receipt
+(schema 3) names the build behind its `llama_tps` in a `llama_cpp`
+field, read from `llama-bench -o json`: `build_commit`, `build_number`,
+`backends`, `cpu_info`, `gpu_info` and the command that ran. A receipt
+with a llama.cpp number and no reported commit or backends is refused
+at write time. `--render` groups rows by machine and llama.cpp build,
+and two builds never share a table or a summary row. Schema-2 receipts
+predate the field and render with the llama.cpp build marked
+**unknown**.
+
 ## Batched throughput (`frink batched-bench`)
 
 `frink bench` is one sequence. `frink batched-bench` is

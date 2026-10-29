@@ -145,6 +145,26 @@ pub mod op {
     pub const ENGINE_PREFILL_BATCH: &str = "engine.prefill_batch";
 }
 
+/// The names of the host paths an accelerator miss lands on. A
+/// fallback named here leaves the device; any other fallback name stays
+/// on it (the per-position matvec loops). The kernel coverage matrix
+/// (`crate::kernel_matrix`) reads that split from here, and its tests
+/// hold every backend's `GEMM_FALLBACK` to it, so a new host path
+/// cannot be counted as staying on the GPU.
+pub mod host_fallback {
+    /// A matvec with no accelerator kernel: `WeightMatrix::apply_cpu`.
+    pub const MATVEC: &str = "CPU apply_cpu";
+    /// A batched matmul with no accelerator path at all.
+    pub const BATCH: &str = "CPU apply_batch";
+    /// Every name above.
+    pub const ALL: &[&str] = &[MATVEC, BATCH];
+
+    /// Whether a fallback named `name` runs on the host.
+    pub fn is_host(name: &str) -> bool {
+        ALL.contains(&name)
+    }
+}
+
 /// The identity of one lookup. Deduplicated on this; a repeated lookup
 /// bumps [`Entry::count`] instead of adding a row.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

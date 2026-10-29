@@ -78,8 +78,18 @@ mod colour {
     /// Decided once: the answer cannot change inside a run, and
     /// probing the terminal per line would be both slower and a second
     /// place for the decision to live.
+    static ON: OnceLock<bool> = OnceLock::new();
+
+    /// `-co on` / `-co off`, before anything is printed. `None` (`auto`)
+    /// leaves the decision to [`enabled`]. A second call cannot change a
+    /// decision already taken, which is what the `OnceLock` is for.
+    pub fn force(on: Option<bool>) {
+        if let Some(on) = on {
+            let _ = ON.set(on);
+        }
+    }
+
     pub fn enabled() -> bool {
-        static ON: OnceLock<bool> = OnceLock::new();
         *ON.get_or_init(|| {
             if std::env::var_os("NO_COLOR").is_some() {
                 return false;
@@ -93,6 +103,24 @@ mod colour {
 }
 
 use colour::{enabled as colour_enabled, BOLD_CYAN, GREEN, MAGENTA, RESET};
+
+/// `-co` / `--color`: `Some(true)` on, `Some(false)` off, `None` auto.
+pub fn set_colour(on: Option<bool>) {
+    colour::force(on);
+}
+
+static SHOW_TIMINGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// `--show-timings` / `--no-show-timings`. Read by [`Timings::print`]
+/// and [`show_timings`], so every engine path obeys one setting.
+pub fn set_show_timings(on: bool) {
+    SHOW_TIMINGS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether timing lines are printed (`--no-show-timings` turns them off).
+pub fn show_timings() -> bool {
+    SHOW_TIMINGS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// `text` wrapped in `code`, or unchanged when colour is off.
 fn paint(code: &str, text: &str) -> String {
@@ -114,7 +142,13 @@ fn paint(code: &str, text: &str) -> String {
 /// Token 0 (`BOS` on every vocabulary this engine loads) rather than a
 /// sampled one, because the point is to touch the kernels, not to
 /// produce anything.
-pub fn warm_up(decoder: &Decoder) {
+///
+/// `enabled` is `--warmup` / `--no-warmup`, taken here rather than
+/// tested at each call site so no engine path can skip the question.
+pub fn warm_up(decoder: &Decoder, enabled: bool) {
+    if !enabled {
+        return;
+    }
     let mut scratch = decoder.config.new_kv_caches_with_capacity(1);
     let _ = decoder.forward_token(0, 0, &mut scratch);
 }
@@ -127,7 +161,10 @@ pub fn warm_up(decoder: &Decoder) {
 /// scratch sequence and `forward_token` to touch the kernels, so a
 /// fourth engine gets warmed the day it is added and not the day
 /// somebody notices its prompt figure is wrong.
-pub fn warm_up_engine<E: Engine>(engine: &E) {
+pub fn warm_up_engine<E: Engine>(engine: &E, enabled: bool) {
+    if !enabled {
+        return;
+    }
     let mut scratch = engine.new_state();
     let _ = engine.forward_token(0, 0, &mut scratch);
 }
@@ -179,7 +216,11 @@ impl Timings {
         )
     }
 
+    /// Prints [`Self::line`], unless `--no-show-timings` said not to.
     pub fn print(&self, w: &mut impl Write) -> std::io::Result<()> {
+        if !show_timings() {
+            return Ok(());
+        }
         writeln!(w, "\n{}", paint(MAGENTA, &self.line()))
     }
 }

@@ -30,14 +30,14 @@
 
 use std::borrow::Cow;
 
-/// Architectures whose graph multiplies the routing weight into the
-/// routed expert's INPUT, with the line.
-pub const ROUTED_WEIGHT_BEFORE_FFN: &[(&str, &str)] =
-    &[("llama4", "src/llama-graph.cpp:1947,2086-2090")];
-
 /// `true` when `arch` weights the input (module doc).
+///
+/// A row of the architecture's `crate::models` definition: `llama4`
+/// (`llama-graph.cpp:1947,2086-2090`) is the one graph with it.
 pub fn weight_before_ffn(arch: &str) -> bool {
-    ROUTED_WEIGHT_BEFORE_FFN.iter().any(|(a, _)| *a == arch)
+    crate::models::ArchFacts::of(arch)
+        .moe
+        .routed_weight_before_ffn
 }
 
 /// One slot's expert input and the weight its output carries: `(x, w)`

@@ -16,11 +16,10 @@ become ADRs and the plan moves to `archive/`
 
 ## Design docs
 
-- **[`model-layer-reorg.md`](model-layer-reorg.md)**, making an
-  architecture a new file. The decoration audit and the shared
-  `attn_block` have landed, and `decoder.rs` (8050 lines) and
-  `loader.rs` (6024) were split into modules on 2026-10-28 (#390);
-  `LayerPlan` and the per-architecture trait are still open.
+- **[`arch-registry-migration.md`](arch-registry-migration.md)**, one
+  file per architecture (#403, ADR 0003): the flow of architecture
+  identity today, the target types, and 16 steps that each change no
+  behaviour. Supersedes `archive/model-layer-reorg.md`.
 - **[`out-of-core-moe.md`](out-of-core-moe.md)**, running a 155 GB model
   on a 32 GB machine. Streamed experts reach the fused Metal top-k
   decode now; nothing executes the residency policy yet.
@@ -108,16 +107,21 @@ held 166 of 166 by `tests/arch_coverage.rs`).
 
 | Outcome | Count | Source |
 |---|---|---|
-| Runs on the generic path **with a libllama golden** | **100** | `capability::AUDITED_GENERIC_GQA` |
+| Runs on the generic path **with a libllama golden** | **101** | `capability::AUDITED_GENERIC_GQA` |
 | Dedicated engines | 4 | `Mla` and `Gemma4` have cross-engine evidence; `Glm52` and `Kimi` have none |
-| Text generation, refused as unaudited and triaged | 11 | `tests/unaudited_triage.rs`: 0 fixture-away, 2 one match arm (`kolibri1`, `lfm3`), 8 new code, 1 unknown |
+| Text generation, refused as unaudited and triaged | 10 | `tests/unaudited_triage.rs`: 0 fixture-away, 0 one match arm, 9 new code, 1 unknown |
 | Deferred scopes | 31 | `frink archs`: 13 encoder/embedding, 11 multimodal, 4 diffusion, 3 audio |
 | **Loads and is WRONG** | **closed** | the generic path is opt-in |
 
 The refusing count rose from 4 to 11 when the pin moved, because nine of
 the thirteen new upstream names are text generation
-([`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)). The two
-one-match-arm rows are the next cheapest work in the tree. The audit
+([`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)), and fell
+to 10 the same day: of the two one-match-arm rows, `lfm3` closed on a
+libllama golden and a 32-step greedy decode, and `kolibri1` turned out
+to need a router that adds its selection bias before the sigmoid
+(`kolibri1.cpp:138`), so it was new code until 2026-10-29, when it
+closed on that rule (`frink_moe::SelectionRule`) and the count fell to
+9. The audit
 also found three served architectures whose upstream behaviour had
 changed (`mellum`, `nemotron`, `lfm2`), and all three are fixed or
 refused by name.
@@ -150,7 +154,7 @@ fork's 11.46 tok/s (97.5%), flat with context; prefill 43.1 against
   at every step on four decode bodies, closing the hole that let Metal
   produce fluent nonsense while `frink parity` read MATCH.
 - **`decoder.rs` and `loader.rs` split**, so an architecture is added
-  in a small file ([`model-layer-reorg.md`](model-layer-reorg.md)).
+  in a small file ([`arch-registry-migration.md`](arch-registry-migration.md)).
 
 **Still open, in north-star order:** the CUDA gap
 ([#259](https://github.com/antonellof/frink/issues/259),

@@ -82,6 +82,17 @@ pub trait Engine: Sync {
         state: &mut Self::State,
     ) -> Vec<f32>;
 
+    /// Multiply-accumulates of the widest matvec inside one layer, LM
+    /// head excluded, when the engine knows it.
+    ///
+    /// `Some` lets [`Engine::forward_token`] commit the whole step to
+    /// one CPU scheduler ([`frink_core::par::decode_step`]); `None`, the
+    /// default, keeps the per-operation rule. Only engines whose decode
+    /// step has been counted under the per-step rule say `Some`.
+    fn widest_layer_macs(&self) -> Option<usize> {
+        None
+    }
+
     /// One decode step for `token_id` at position `pos`.
     ///
     /// Enters the CPU worker pool once for the whole call, so every
@@ -96,7 +107,9 @@ pub trait Engine: Sync {
     /// free function could not be spelled `engine.forward_token(..)` by
     /// the generation loops that already spell it that way.
     fn forward_token(&self, token_id: usize, pos: usize, state: &mut Self::State) -> Vec<f32> {
-        par::on_workers(move || self.forward_token_on_worker(token_id, pos, state))
+        par::decode_step(self.widest_layer_macs(), move || {
+            self.forward_token_on_worker(token_id, pos, state)
+        })
     }
 }
 

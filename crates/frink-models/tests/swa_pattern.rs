@@ -70,6 +70,13 @@ const LLAMA_SWA_DEFAULTS: &[(&str, usize, bool, &str)] = &[
     ("laguna", 4, true, "src/models/laguna.cpp:39-41"),
     ("cohere2moe", 4, true, "src/models/cohere2moe.cpp:31-33"),
     ("modern-bert", 3, true, "src/models/modern-bert.cpp:8-10"),
+    (
+        "gemma-embedding2",
+        6,
+        false,
+        "src/models/gemma-embedding2.cpp:5",
+    ),
+    ("muse-glimmer", 4, false, "src/models/muse-glimmer.cpp:13"),
 ];
 
 /// llama.cpp's `llama_hparams::set_swa_pattern` (`src/llama-hparams.cpp:8-22`).

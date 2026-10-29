@@ -1,0 +1,221 @@
+fixture: crates/frink-models/tests/fixtures/minicpm_tiny.gguf
+config: ModelConfig {
+    name: "frink-minicpm-fixture",
+    kv_dtype: F32,
+    n_layers: 8,
+    n_mtp_blocks: 0,
+    hidden_dim: 24,
+    n_heads: 4,
+    n_kv_heads: 2,
+    head_dim: 6,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 24,
+        expert_ffn_dim: 40,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        selection: BiasAfterGating,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: None,
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Norm,
+    qk_norm_style: WholeVector,
+    swa_layers: All,
+    rope_layers: All,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: Some(
+        12.0,
+    ),
+    residual_scale: Some(
+        0.49497473,
+    ),
+    normed_residual_scale: None,
+    logit_multiplier: Some(
+        0.09375,
+    ),
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: None,
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "none -- every field above was read directly from this file's own GGUF metadata",
+    ],
+}
+cfg.layer[0].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(10000.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (2, 6, 6)
+cfg.layer[1].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(10000.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 6, 6)
+cfg.layer[2].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[2].rotates: true
+cfg.layer[2].rope_theta: Some(10000.0)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (2, 6, 6)
+cfg.layer[3].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[3].rotates: true
+cfg.layer[3].rope_theta: Some(10000.0)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (2, 6, 6)
+cfg.layer[4].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[4].rotates: true
+cfg.layer[4].rope_theta: Some(10000.0)
+cfg.layer[4].attention_kind: Gqa
+cfg.layer[4].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[4].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[4].kv_dtype: F32
+cfg.layer[4].cache_geometry: (2, 6, 6)
+cfg.layer[5].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[5].rotates: true
+cfg.layer[5].rope_theta: Some(10000.0)
+cfg.layer[5].attention_kind: Gqa
+cfg.layer[5].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[5].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[5].kv_dtype: F32
+cfg.layer[5].cache_geometry: (2, 6, 6)
+cfg.layer[6].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[6].rotates: true
+cfg.layer[6].rope_theta: Some(10000.0)
+cfg.layer[6].attention_kind: Gqa
+cfg.layer[6].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[6].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[6].kv_dtype: F32
+cfg.layer[6].cache_geometry: (2, 6, 6)
+cfg.layer[7].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[7].rotates: true
+cfg.layer[7].rope_theta: Some(10000.0)
+cfg.layer[7].attention_kind: Gqa
+cfg.layer[7].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 40 }
+cfg.layer[7].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[7].kv_dtype: F32
+cfg.layer[7].cache_geometry: (2, 6, 6)
+decoder: LOADED
+dec.embedding: 48x24 F32 None
+dec.final_norm: Rms(len=24 sum=-0.5500923991203308 fnv=293255d7082e4f91)
+dec.output_head: 48x24 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Norm, qk_norm: WholeVector, ffn_activation: Swiglu, memory: MemoryPlan { kind: KvGqa, swa_layers: All, sliding_window: None }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: Some(12.0), attention_scale: None, rope_theta_swa: None, attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 8
+dec.layer[0].attn.q_proj: 24x24 F32 None
+dec.layer[0].attn.k_proj: 12x24 F32 None
+dec.layer[0].attn.v_proj: 12x24 F32 None
+dec.layer[0].attn.o_proj: 24x24 F32 None
+dec.layer[0].attn.norm_weight: Rms(len=24 sum=0.1566906590014696 fnv=419e39e208336ea0)
+dec.layer[0].moe.router: 1x24 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[0].moe.norm_weight: Rms(len=24 sum=-0.012340305373072624 fnv=30086a3d3ab5fbf6)
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 24x24 F32 None
+dec.layer[1].attn.k_proj: 12x24 F32 None
+dec.layer[1].attn.v_proj: 12x24 F32 None
+dec.layer[1].attn.o_proj: 24x24 F32 None
+dec.layer[1].attn.norm_weight: Rms(len=24 sum=-0.5321743041276932 fnv=213f6db24c455745)
+dec.layer[1].moe.router: 1x24 F32 None
+dec.layer[1].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[1].moe.norm_weight: Rms(len=24 sum=0.508462707977742 fnv=07b8142c2e6ef749)
+dec.layer[1].moe.activation_counts: len=1
+dec.layer[2].attn.q_proj: 24x24 F32 None
+dec.layer[2].attn.k_proj: 12x24 F32 None
+dec.layer[2].attn.v_proj: 12x24 F32 None
+dec.layer[2].attn.o_proj: 24x24 F32 None
+dec.layer[2].attn.norm_weight: Rms(len=24 sum=1.6349618500098586 fnv=439212822266f266)
+dec.layer[2].moe.router: 1x24 F32 None
+dec.layer[2].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[2].moe.norm_weight: Rms(len=24 sum=-0.3105005733668804 fnv=ba0aa5a523506e02)
+dec.layer[2].moe.activation_counts: len=1
+dec.layer[3].attn.q_proj: 24x24 F32 None
+dec.layer[3].attn.k_proj: 12x24 F32 None
+dec.layer[3].attn.v_proj: 12x24 F32 None
+dec.layer[3].attn.o_proj: 24x24 F32 None
+dec.layer[3].attn.norm_weight: Rms(len=24 sum=-1.4027528525330126 fnv=b361362212b0bb2b)
+dec.layer[3].moe.router: 1x24 F32 None
+dec.layer[3].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[3].moe.norm_weight: Rms(len=24 sum=-1.225847590714693 fnv=b204112b520de2ae)
+dec.layer[3].moe.activation_counts: len=1
+dec.layer[4].attn.q_proj: 24x24 F32 None
+dec.layer[4].attn.k_proj: 12x24 F32 None
+dec.layer[4].attn.v_proj: 12x24 F32 None
+dec.layer[4].attn.o_proj: 24x24 F32 None
+dec.layer[4].attn.norm_weight: Rms(len=24 sum=-1.1683015646412969 fnv=08a3ceed705eebef)
+dec.layer[4].moe.router: 1x24 F32 None
+dec.layer[4].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[4].moe.norm_weight: Rms(len=24 sum=2.5658164973719977 fnv=7eaf2b3ed4ce24a8)
+dec.layer[4].moe.activation_counts: len=1
+dec.layer[5].attn.q_proj: 24x24 F32 None
+dec.layer[5].attn.k_proj: 12x24 F32 None
+dec.layer[5].attn.v_proj: 12x24 F32 None
+dec.layer[5].attn.o_proj: 24x24 F32 None
+dec.layer[5].attn.norm_weight: Rms(len=24 sum=-0.48376944847404957 fnv=9e99d413d2cc5c28)
+dec.layer[5].moe.router: 1x24 F32 None
+dec.layer[5].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[5].moe.norm_weight: Rms(len=24 sum=0.3223534617573023 fnv=a2f356d827034640)
+dec.layer[5].moe.activation_counts: len=1
+dec.layer[6].attn.q_proj: 24x24 F32 None
+dec.layer[6].attn.k_proj: 12x24 F32 None
+dec.layer[6].attn.v_proj: 12x24 F32 None
+dec.layer[6].attn.o_proj: 24x24 F32 None
+dec.layer[6].attn.norm_weight: Rms(len=24 sum=0.4217585069127381 fnv=df33298bd170c6f7)
+dec.layer[6].moe.router: 1x24 F32 None
+dec.layer[6].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[6].moe.norm_weight: Rms(len=24 sum=0.2184486109763384 fnv=c872ebd0a31fa9dd)
+dec.layer[6].moe.activation_counts: len=1
+dec.layer[7].attn.q_proj: 24x24 F32 None
+dec.layer[7].attn.k_proj: 12x24 F32 None
+dec.layer[7].attn.v_proj: 12x24 F32 None
+dec.layer[7].attn.o_proj: 24x24 F32 None
+dec.layer[7].attn.norm_weight: Rms(len=24 sum=-1.091703299432993 fnv=f06027cea814db6c)
+dec.layer[7].moe.router: 1x24 F32 None
+dec.layer[7].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[7].moe.norm_weight: Rms(len=24 sum=2.5691355620510876 fnv=96aa6d4b253088ed)
+dec.layer[7].moe.activation_counts: len=1

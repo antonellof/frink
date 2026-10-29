@@ -166,7 +166,7 @@ frink: `decoder.rs` + `engine_factory.rs` + 4 dedicated engines:
 - **124 of 140** llama.cpp graphs have no audited frink path
 - **41** refuse as unaudited (triaged queue in `capability.rs`)
 - **58 dedicated** + **32 deferred** refuse by name
-- Prerequisite: [`model-layer-reorg.md`](../model-layer-reorg.md) — split `decoder.rs` so adding an arch is a new file, not a 6700-line edit
+- Prerequisite: [`model-layer-reorg.md`](model-layer-reorg.md) — split `decoder.rs` so adding an arch is a new file, not a 6700-line edit
 
 ### 2.3 Backend gaps (P0–P1)
 
@@ -287,7 +287,7 @@ For each of the 9 fixture-away architectures in `unaudited_triage.rs`:
 4. `frink parity` on fixture
 
 ### Slice D: "Model layer reorg phase 1" (2–3 weeks)
-Per [`model-layer-reorg.md`](../model-layer-reorg.md):
+Per [`model-layer-reorg.md`](model-layer-reorg.md):
 1. Extract shared block vocabulary (`AttnBlock`, `FfnBlock`, norm slots)
 2. One architecture (`olmo2` — post-norm wiring) as proof
 3. Gate: no edit to `decoder.rs` for new archs after phase 2

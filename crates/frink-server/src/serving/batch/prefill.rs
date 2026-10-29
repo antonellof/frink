@@ -14,12 +14,10 @@ use std::sync::Arc;
 
 use crate::generate::{GenerationParams, PagedLease};
 
-use super::clock::RowClock;
+use super::answer::Answer;
 use super::config::BatcherEvent;
 use super::queue::AbortId;
 use super::row::{RowKv, Slot};
-use crate::sample_step::SampleState;
-use crate::stop::StopMatcher;
 
 /// One request's prefill as a resumable state machine.
 ///
@@ -210,9 +208,6 @@ impl PrefillState {
 /// once the prompt is through.
 pub(super) struct Prefill {
     pub(super) state: PrefillState,
-    /// The *real* prompt length, for `Usage`. Deliberately not
-    /// `state.tokens.len()`, which is 1 for an empty prompt.
-    pub(super) prompt_tokens: usize,
     pub(super) params: GenerationParams,
     pub(super) stop_tokens: StopTokens,
     pub(super) reply: Sender<BatcherEvent>,
@@ -220,45 +215,52 @@ pub(super) struct Prefill {
     /// Blocks reserved at admission; carried into the `Slot` so the
     /// reservation survives the prefill-to-decode handover.
     pub(super) blocks: usize,
-    /// Started when this row was admitted, and carried into the `Slot`
-    /// so one clock spans prefill AND decode. Two clocks handed over at
-    /// this seam would be two things that must agree about when prefill
-    /// ended.
-    pub(super) clock: RowClock,
-    /// Prompt positions adopted from the radix tree, captured where
-    /// the lease was taken. Carried through to the `Slot` so the one
-    /// `Usage` constructor can report it.
-    pub(super) cached_tokens: Option<usize>,
+    /// What this request has produced, carried into the `Slot` whole.
+    ///
+    /// Fresh for a new request. For one re-admitted after a preemption
+    /// it is the answer the evicted row held, and `state` is running
+    /// the prompt followed by `answer.generated_ids`.
+    ///
+    /// Its clock was started at FIRST admission and spans prefill AND
+    /// decode. Two clocks handed over at this seam would be two things
+    /// that must agree about when prefill ended.
+    pub(super) answer: Answer,
 }
 
 impl Prefill {
     pub(super) fn into_slot(self) -> Slot {
         let Prefill {
             state,
-            prompt_tokens,
             params,
             stop_tokens,
             reply,
             abort,
             blocks,
-            mut clock,
-            cached_tokens,
+            mut answer,
         } = self;
-        let (kv, logits, pos, prompt_ids) = state.into_decode_start();
+        let (kv, logits, pos, mut prompt_ids) = state.into_decode_start();
+        // A resumed prefill ran the prompt AND what the row had already
+        // generated. The row's prompt is the part before that, so the
+        // radix publish and the penalties window see the same split an
+        // un-preempted row would.
+        let prompt_len = prompt_ids.len() - answer.generated_ids.len();
+        debug_assert_eq!(
+            &prompt_ids[prompt_len..],
+            &answer.generated_ids[..],
+            "a resumed prefill must end with the tokens its row generated"
+        );
+        prompt_ids.truncate(prompt_len);
         // The handover IS the end of prefill, so it is marked here
         // rather than at the call site: every path from a prompt to a
-        // decode row goes through this function.
-        clock.prefill_finished();
+        // decode row goes through this function. Only the first one
+        // counts, so a re-admitted row keeps the TTFT it was served at.
+        answer.clock.prefill_finished();
         Slot {
             kv,
             pos,
             logits,
-            sample: SampleState::new(params.seed),
-            generated_ids: Vec::with_capacity(params.max_tokens),
+            answer,
             prompt_ids,
-            visible: String::new(),
-            stops: StopMatcher::new(&params.stop, &params.stop_token_ids),
-            prompt_tokens,
             max_tokens: params.max_tokens,
             stop_tokens,
             params,
@@ -267,9 +269,6 @@ impl Prefill {
             error: None,
             abort,
             blocks,
-            clock,
-            cached_tokens,
-            utf8: Default::default(),
         }
     }
 }

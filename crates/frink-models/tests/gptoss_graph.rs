@@ -114,7 +114,7 @@ const TOL: f32 = 1e-6;
 fn load() -> Decoder {
     let file = frink_gguf::GgufFile::open(FIXTURE).expect("fixture opens");
     let config = ModelConfig::from_gguf(&file).expect("fixture config parses");
-    Decoder::from_gguf(FIXTURE, config).expect("fixture loads")
+    common::load_decoder(FIXTURE, config)
 }
 
 /// The claim: frink's gpt-oss CPU graph agrees with llama.cpp's.
@@ -316,5 +316,25 @@ fn gpt_oss_golden_is_not_vacuous() {
             max_delta(&broken) > TOL * 10.0,
             "RoPE layout must matter; gpt-oss is NEOX"
         );
+    }
+}
+
+/// `openai-moe.cpp:6` reads `attention.sliding_window` REQUIRED: libllama
+/// does not load `gptoss_nowindow_tiny.gguf` (`key not found in model:
+/// gpt-oss.attention.sliding_window`, measured), and frink refuses it by
+/// name instead of attending the whole context on every layer (#458).
+#[test]
+fn a_gpt_oss_file_without_its_window_is_refused() {
+    let path = format!(
+        "{}/tests/fixtures/gptoss_nowindow_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    match ModelConfig::from_gguf(&file) {
+        Err(frink_models::LoadError::UnsupportedFeature(arch, msg)) => {
+            assert_eq!(arch, "gpt-oss");
+            assert!(msg.contains("openai-moe.cpp:6"), "{msg}");
+        }
+        other => panic!("a gpt-oss file without its window must be refused, got {other:?}"),
     }
 }

@@ -1180,6 +1180,27 @@ pub const AUDITED_GENERIC_GQA: &[&str] = &[
     // read by nothing in its hparams (the fixture declares 2.5 and the
     // golden is unscaled).
     "lfm2moe",
+    // tests/lfm3_graphs.rs: `lfm3` (LFM3-1.7B, the text tower of LFM3-VL
+    // and LFM3-Omni). LFM2's layers (`llm_build_lfm_base`) on four seams
+    // frink already served for other rows: the window ARRAY read with
+    // `get_arr` (`lfm3.cpp:13`, `crate::swa_layers`) with a REQUIRED
+    // `rope.freq_base_swa` (`:20`); a per-HEAD sigmoid attention gate
+    // (`:77,132-139`, `crate::attn_gate`); `rope_freqs` on the FULL
+    // layers only (`:79-82,113`, `swa_geometry::swa_layers_drop_rope_
+    // factors`), which the converter writes as a partial-RoPE mask; and
+    // optional sandwich post norms, both or neither (`:50-55`), that norm
+    // the CONV block's output too (`:178-181`). The final norm is plain
+    // `output_norm`. Two fixtures (with and without the post norms) and
+    // a 32-step greedy decode (tests/decode_step_graphs.rs). The
+    // non-causal d1 decision graph (`attention.causal = false`, `:22-25,
+    // 92-96`) is refused by name.
+    "lfm3",
+    // tests/kolibri1_graphs.rs: `kolibri1` (Aleph-Alpha Kolibri-1,
+    // 78B-A3.5B), the first row in `crate::models` that was never in the
+    // legacy tables. Its router ranks `logits + exp_probs_b` BEFORE the
+    // sigmoid (`kolibri1.cpp:138`), `frink_moe::SelectionRule::
+    // BiasBeforeGating`; the rest is rows the file states.
+    "kolibri1",
     // tests/pangu_embedded_graphs.rs: `pangu-embedded` (openPangu-
     // Embedded-1B / 7B), a decoder LLM that had been filed as an
     // embedding model from its name. `pangu-embed.cpp` is `llama.cpp`'s
@@ -1275,77 +1296,31 @@ pub fn is_audited_generic(arch: &str) -> bool {
     AUDITED_GENERIC_GQA.contains(&arch)
 }
 
-/// Architectures whose layers have **no pre-attention norm and no
-/// pre-FFN norm at all**: the post-norm-only residual topology.
-///
-/// ```text
-/// ffn_inp = x       + post_attn_norm(attn(x))
-/// out     = ffn_inp + post_ffn_norm(ffn(ffn_inp))
-/// ```
-///
-/// Not a family resemblance -- the two graphs were read side by side
-/// and are the same statement for statement. `src/models/olmo2.cpp`
-/// creates only `attn_q_norm`, `attn_k_norm`, `attn_post_norm` and
-/// `ffn_post_norm` per layer (:45-52) and reads the raw residual at
-/// both sublayers (`cur = inpL` at :92, `build_ffn(ffn_inp, ...)` at
-/// :169), norming each branch's OUTPUT before its residual add
-/// (:160-165, :177-182). `src/models/exaone4.cpp` is the same list
-/// (:60-67) and the same four lines (:118, :159, :152-155, :166-169).
-///
-/// Both are refused unless [`AUDITED_GENERIC_GQA`] names them, and
-/// `crate::norm::NormOp` is the one implementation they share.
-/// Adding a third name here means having read a third `*.cpp`: this
-/// list decides whether `loader.rs` demands `blk.N.attn_norm.weight`
-/// from a file, so a wrong entry is a load that fails or a norm that
-/// silently disappears.
-pub const POST_NORM_ONLY_ARCHITECTURES: &[&str] = &["olmo2", "exaone4"];
-
-/// Does this architecture read the raw residual at both sublayers?
-/// See [`POST_NORM_ONLY_ARCHITECTURES`].
+/// Does this architecture read the raw residual at both sublayers (no
+/// pre-attention and no pre-FFN norm)? Derived from its norm-site row:
+/// `olmo2` and `exaone4` state it in `crate::models` (#403 step 3).
 pub fn is_post_norm_only(arch: &str) -> bool {
-    POST_NORM_ONLY_ARCHITECTURES.contains(&arch)
+    let sites = crate::models::ArchFacts::of(arch).tensors.norm_sites;
+    sites.attn.is_none() && sites.ffn.is_none()
 }
 
-/// Architectures that normalise with a **non-parametric LayerNorm** --
-/// subtract the mean, divide by the standard deviation, no learned
-/// weight and no bias -- at every norm site.
-///
-/// `olmo` (OLMo-1), and llama.cpp has no second one. `olmo.cpp:27-35`
-/// creates Q/K/V, `attn_output` and gate/up/down and NOT ONE norm
-/// tensor, and its graph is `build_norm(x, NULL, NULL, LLM_NORM, il)`
-/// at :65-67 (pre-attention), :104-106 (pre-FFN) and :128-130 (final).
-///
-/// It is pre-norm like `llama`, so this is orthogonal to
-/// [`POST_NORM_ONLY_ARCHITECTURES`]: the difference is the norm
-/// FUNCTION, not the residual wiring, and a name cannot be on both
-/// lists (`loader.rs`'s
-/// `the_norm_slot_and_function_lists_cannot_contradict`).
-///
-/// **This list will not grow, and that is a measured claim rather than
-/// an expectation.** Every `build_norm` call in all of llama.cpp's
-/// `src/models/*.cpp` graphs was scanned for a null weight argument:
-/// three calls pass one to `LLM_NORM`, and all three are `olmo.cpp`.
-/// `talkie.cpp` passes a null weight to `LLM_NORM_RMS` at five sites,
-/// which is a non-parametric RMSNorm -- a different function, and a row
-/// this list does not serve.
-///
-/// The LayerNorm *function* with a learned weight is a different list,
-/// [`WEIGHTED_LAYER_NORM`], and it exists now because `dbrx` gave it a
-/// caller.
-pub const NON_PARAMETRIC_LAYER_NORM: &[&str] = &["olmo"];
-
-/// Does this architecture normalise without any learned parameters?
-/// See [`NON_PARAMETRIC_LAYER_NORM`].
+/// Does this architecture normalise with a non-parametric LayerNorm
+/// at every site? Derived from its norm-site row: `olmo` states it in
+/// `crate::models::olmo` (#403 step 3).
 pub fn uses_non_parametric_layer_norm(arch: &str) -> bool {
-    NON_PARAMETRIC_LAYER_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::LayerNormNoParams
 }
 
 /// Architectures that normalise with a **non-parametric RMSNorm** --
 /// `build_norm(x, nullptr, nullptr, LLM_NORM_RMS, il)` -- at every norm
 /// site: no `attn_norm`, `ffn_norm` or `output_norm` tensor in the file.
 ///
-/// The RMS twin of [`NON_PARAMETRIC_LAYER_NORM`], and measured the same
-/// way: every `build_norm` call with a null weight across all 155
+/// The RMS twin of `olmo`'s non-parametric LayerNorm
+/// (`crate::models::olmo`), and measured the same way: every `build_norm` call with a null weight across all 155
 /// graphs is `olmo.cpp` (three, `LLM_NORM`) and `talkie.cpp` (five,
 /// `LLM_NORM_RMS`: the embeddings at `:50`, `attn_norm` at `:68`, the K
 /// norm at `:90`, `ffn_norm` at `:110`, the final norm at `:137`).
@@ -1405,12 +1380,19 @@ pub fn uses_non_parametric_rms_norm(arch: &str) -> bool {
 /// (`crate::scalar_multipliers`); `tests/command_r_graphs.rs`. The
 /// third is `cohere2` (Command-R7B), the same graph with a window
 /// (`cohere2.cpp:78,147`); `tests/cohere2_graphs.rs`.
-pub const WEIGHTED_LAYER_NORM: &[&str] = &["dbrx", "command-r", "cohere2", "cohere2moe", "mpt"];
+///
+/// `dbrx` states its row in `crate::models::dbrx` (#403 step 6).
+pub const WEIGHTED_LAYER_NORM: &[&str] = &["command-r", "cohere2", "cohere2moe", "mpt"];
 
-/// Does this architecture normalise with a weighted LayerNorm?
-/// See [`WEIGHTED_LAYER_NORM`].
+/// Does this architecture normalise with a weighted LayerNorm? Its
+/// norm-site row's function, which is [`WEIGHTED_LAYER_NORM`] or its
+/// `crate::models` definition.
 pub fn uses_weighted_layer_norm(arch: &str) -> bool {
-    WEIGHTED_LAYER_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::LayerNorm
 }
 
 /// Architectures that normalise with a **LayerNorm with a learned
@@ -1479,20 +1461,15 @@ pub fn uses_biased_layer_norm(arch: &str) -> bool {
     BIASED_LAYER_NORM.contains(&arch)
 }
 
-/// Architectures that normalise with an **RMSNorm with a learned weight
-/// AND bias** -- `build_norm(x, w, b, LLM_NORM_RMS, il)` -- at every
-/// norm site, all REQUIRED: `phimoe` (Phi-3.5-MoE), whose tensors are
-/// `phimoe.cpp:20-21,28-29,35-36` and whose graph is `phi3`'s
-/// (`phi3.cpp:99-102,137-139,174-177` pass the bias; `phi3` never
-/// creates one). Measured: `grep -B3 LLM_NORM_RMS src/models/*.cpp |
-/// grep norm_b` is `phi3` (this row's graph), `chameleon` (passes NULL),
-/// and `deepseek32` / `glm-dsa` / `rwkv6qwen2` / `arwkv7` on other
-/// engines. [`crate::norm::NormOp::RmsBias`]; `tests/phimoe_graphs.rs`.
-pub const BIASED_RMS_NORM: &[&str] = &["phimoe"];
-
-/// See [`BIASED_RMS_NORM`].
+/// Does this architecture normalise with an RMSNorm with a learned
+/// weight AND bias? Derived from its norm-site row: `phimoe`, the one
+/// such graph, states it in `crate::models::phimoe` (#403 step 6).
 pub fn uses_biased_rms_norm(arch: &str) -> bool {
-    BIASED_RMS_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::RmsBias
 }
 
 /// How the generic `Decoder` / `ModelConfig::from_gguf` path treats a
@@ -1836,33 +1813,13 @@ const NEOX_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
     // 2026-10-28 against `604cc430` (see the NORM group). Each row is
     // a reading of the graph file AND of the generic builder it calls
     // (`maple`'s lesson); none has a fixture yet.
-    (
-        "kolibri1",
-        TriageClass::OneMatchArm,
-        "no new op, only table rows (Kolibri-1, Aleph-Alpha, 78B-A3.5B). \
-         `src/models/kolibri1.cpp:98` rotates only the sliding layers (`RopeLayers::\
-         SlidingOnly`, `cohere2`'s rule, one `crate::rope_layers` row); `:17` reads the \
-         window ARRAY with `get_arr` (`crate::swa_layers` honours it); `:41-51` are \
-         Gemma-2's sandwich norms (`attn_post_norm` / `ffn_post_norm`, served for `glm4`); \
-         per-head QK RMS; sigmoid routing whose selection adds `exp_probs_b` while the \
-         weights take the unbiased sigmoid (`:133-154`, the DeepSeek-V3 rule `build_moe_ffn` \
-         already applies, precomputed here through `selected_experts_in`) beside one shared \
-         expert. Every name has to be added to each table and a libllama golden built",
-    ),
-    (
-        "lfm3",
-        TriageClass::OneMatchArm,
-        "LFM2's layers with three served seams that each need a row (LFM3-1.7B). \
-         `src/models/lfm3.cpp:77,132-138` is a per-HEAD sigmoid attention gate \
-         (`{n_embd, n_head}`, `crate::attn_gate`'s `step35` corner); `:13-18` read the \
-         window ARRAY, which `crate::swa_layers` honours (where `lfm2`'s scalar window stays \
-         refused because it windows the attention layers alone); `:79-82,113` give a llama3 \
-         `rope_freqs` to the FULL layers only, which is the rule frink serves for `step35` \
-         alone; `:50-55` optional sandwich post norms, both or neither. The non-causal d1 \
-         variant (`:22-25`, `LLAMA_NON_CAUSAL_TYPE_DENSE_ONLY`, no memory at \
-         `llama-model.cpp:2808`) is a scorer, not a generator, and stays refused on \
-         `decision.block_count` / `attention.causal`",
-    ),
+    // `lfm3` was ONE MATCH ARM here and closed on 2026-10-28
+    // (`AUDITED_GENERIC_GQA`, tests/lfm3_graphs.rs).
+    //
+    // `kolibri1` was ONE MATCH ARM until the same day, then NEW CODE on
+    // its router, which ranks `logits + exp_probs_b` BEFORE the sigmoid
+    // (`kolibri1.cpp:138`). It closed on 2026-10-29 on
+    // `frink_moe::SelectionRule` (`crate::models::kolibri1`).
     (
         "flint",
         TriageClass::NewCode,
@@ -2640,6 +2597,19 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
             ArchPath::GenericGqa { rope: Neox },
             PerHead,
         ));
+        // `kolibri1` was NEW CODE in `NEOX_ROPE_TRIAGED` on its router
+        // and is audited now (`crate::models::kolibri1`). Per-head QK
+        // norm at `{head_dim}` (`kolibri1.cpp:47-48,85-86`), `iswa` KV
+        // (`:69`), NEOX (`llama-model.cpp:3667`).
+        v.push(prof(
+            "kolibri1",
+            TextGeneration,
+            StandardGqa,
+            KvIswa,
+            Neox,
+            ArchPath::GenericGqa { rope: Neox },
+            PerHead,
+        ));
         v.push(prof(
             "qwen3",
             TextGeneration,
@@ -3074,7 +3044,11 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
         // per-head QK norm (`lfm2.cpp:74-75`) and NEOX RoPE
         // (llama-model.cpp:2666). `lfm2moe` shares its graph
         // (`models.h:1899`) and followed on the same seam.
-        for n in ["lfm2", "lfm2moe"] {
+        // `lfm3` (2026-10-28) is the same layer stack (`llm_build_lfm_
+        // base`) with a per-head QK RMS norm (`lfm3.cpp:70-71`) and NEOX
+        // RoPE (`llama_model_rope_type` puts LLM_ARCH_LFM3 in the NEOX
+        // group, `tests/rope_layout.rs`).
+        for n in ["lfm2", "lfm2moe", "lfm3"] {
             v.push(prof(
                 n,
                 TextGeneration,
@@ -3463,17 +3437,19 @@ pub struct SwaPattern {
 ///
 /// `src/models/exaone4.cpp:4-14` wraps the ENTIRE SWA setup --
 /// `swa_type`, `n_swa`, `set_swa_pattern`, both SWA RoPE fields -- in
-/// `if (hparams.n_layer() == 64)`, and only then reads
-/// `LLM_KV_ATTENTION_SLIDING_WINDOW` at :16 into an `hparams.n_swa` no
-/// layer consults. So EXAONE-4 1.2B (30 layers) attends over the whole
-/// context on every layer no matter what its file declares, and
-/// EXAONE-4 32B (64) does not.
+/// `if (hparams.n_layer() == 64)` (the TRUNK: the common loader has
+/// already subtracted `nextn_predict_layers`, `llama-model.cpp:1411`),
+/// and only then reads `LLM_KV_ATTENTION_SLIDING_WINDOW` at :14 into an
+/// `hparams.n_swa` no layer consults. So EXAONE-4 1.2B (30 layers)
+/// attends over the whole context on every layer no matter what its
+/// file declares, and EXAONE-4 32B (64) slides, at 4096 when the file
+/// declares no window (`:6`, [`SwaWindowOverride::Seed`]).
 ///
 /// It is the same QUESTION as `phi3`'s -- "does this file get a window
 /// at all" -- so it is the same predicate rather than a second one
 /// beside it. `crate::rope_layers::rope_layers` takes this function's
 /// answer, not the raw presence of the key, and getting that wrong
-/// would rope the 1.2B as if it were the 32B: `exaone4.cpp:116` gates
+/// would rope the 1.2B as if it were the 32B: `exaone4.cpp:111` gates
 /// rotation on `is_swa(il)`, so a spurious window would silently stop
 /// three layers in four from rotating.
 pub fn swa_disabled_by_arch(arch: &str, n_layers: usize) -> bool {
@@ -3484,10 +3460,10 @@ pub fn swa_disabled_by_arch(arch: &str, n_layers: usize) -> bool {
 /// file declares, for the architectures whose `load_arch_hparams` does
 /// not simply honour it.
 ///
-/// Three answers, one table: HONOUR (every architecture not named),
-/// DROP (the two [`swa_disabled_by_arch`] rows -- no layer slides), and
+/// Four answers, one table: HONOUR (every architecture not named),
+/// DROP (the two [`swa_disabled_by_arch`] rows -- no layer slides),
 /// PIN (the window is replaced by a literal, and the layers still
-/// slide). [`swa_disabled_by_arch`] is DERIVED from this so the two
+/// slide), and SEED (a literal when the file declares none). [`swa_disabled_by_arch`] is DERIVED from this so the two
 /// cannot disagree about which rows decline the file's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwaWindowOverride {
@@ -3497,6 +3473,11 @@ pub enum SwaWindowOverride {
     Drop,
     /// This window, whatever the file says.
     Pin(usize),
+    /// This window when the file declares none, else the file's: the
+    /// graph seeds `n_swa` and then reads the key as OPTIONAL
+    /// (`exaone4.cpp:6,14`). A declared ZERO overwrites the seed with a
+    /// window that masks every key, which the loader refuses.
+    Seed(usize),
 }
 
 /// The third case's one row: `src/models/smallthinker.cpp:4-8` reads
@@ -3521,17 +3502,15 @@ pub const SMALLTHINKER_PINNED_WINDOW: usize = 4096;
 
 /// See [`SwaWindowOverride`].
 pub fn swa_window_override(arch: &str, n_layers: usize) -> SwaWindowOverride {
+    (crate::models::ArchFacts::of(arch).rules.swa_window_override)(arch, n_layers)
+}
+
+/// [`swa_window_override`] from this table alone, for
+/// `HparamRules::LEGACY`. `exaone4`'s layer-count gate is
+/// `crate::models::exaone4`'s rule.
+pub fn swa_window_override_from_table(arch: &str, _n_layers: usize) -> SwaWindowOverride {
     match arch {
         "phi3" => SwaWindowOverride::Drop,
-        // phimoe.cpp:3-10 read no window key at all, so `swa_type` stays
-        // NONE and the key `conversion/phi.py:171` writes for every
-        // export is dead metadata: libllama reports `n_swa = 0` for a
-        // file declaring one (measured, tests/phimoe_graphs.rs).
-        "phimoe" => SwaWindowOverride::Drop,
-        // exaone4.cpp:4. NOT `>= 64` and not a range: llama.cpp tests
-        // equality, so a hypothetical 63- or 65-layer EXAONE-4 gets no
-        // window there either.
-        "exaone4" if n_layers != 64 => SwaWindowOverride::Drop,
         // smallthinker.cpp:8.
         "smallthinker" => SwaWindowOverride::Pin(SMALLTHINKER_PINNED_WINDOW),
         _ => SwaWindowOverride::Honour,
@@ -3561,6 +3540,12 @@ pub fn swa_window_override(arch: &str, n_layers: usize) -> SwaWindowOverride {
 /// listed. The Gemma lineage is GELU too and stays on the family rule,
 /// because every Gemma row IS `GemmaFamily`.
 pub fn uses_geglu(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch).ffn.geglu
+}
+
+/// [`uses_geglu`] from this list alone (`grok` is in
+/// `crate::models::grok`).
+pub(crate) fn uses_geglu_from_table(arch: &str) -> bool {
     // `spark2_5` joined on 2026-09-19 with the pin move:
     // `src/models/spark2-5.cpp:124` passes `LLM_FFN_GELU` under
     // `LLM_FFN_PAR` to `build_ffn`, i.e. a GATED GELU, and the row is
@@ -3568,7 +3553,7 @@ pub fn uses_geglu(arch: &str) -> bool {
     // it SwiGLU and a different FFN on every layer. Its golden
     // (`tests/gated_attention_graphs.rs`) holds at the same GeGLU
     // tolerance llama.cpp's f16 GELU table forces.
-    matches!(arch, "grok" | "spark2_5")
+    matches!(arch, "spark2_5")
 }
 
 /// Architectures whose FFN is the UNGATED ReLU-squared MLP:
@@ -3665,6 +3650,12 @@ pub fn uses_reglu(arch: &str) -> bool {
 }
 
 pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
+    crate::models::ArchFacts::of(arch).swa.default_layout
+}
+
+/// [`default_swa_layout`] from this table alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
     let last_dense = |period| {
         Some(SwaPattern {
             period,
@@ -3678,8 +3669,6 @@ pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
         })
     };
     match arch {
-        // src/models/openai-moe.cpp:9
-        "gpt-oss" => last_dense(2),
         // src/models/gemma2.cpp:6
         "gemma2" => last_dense(2),
         // src/models/gemma3.cpp:7
@@ -3691,8 +3680,13 @@ pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
         // src/models/gemma-embedding.cpp:5. Deferred (embedding scope),
         // so latent rather than live.
         "gemma-embedding" => last_dense(6),
-        // src/models/cohere2.cpp:5, exaone4.cpp:7, olmo2.cpp:9
-        "cohere2" | "exaone4" | "olmo2" => last_dense(4),
+        // src/models/gemma-embedding2.cpp:5 and muse-glimmer.cpp:13,
+        // the two `load_swa_pattern` callers this table missed (#420).
+        "gemma-embedding2" => last_dense(6),
+        "muse-glimmer" => last_dense(4),
+        // src/models/cohere2.cpp:5 (`exaone4` and `olmo2`, the same
+        // period, state it in `crate::models`)
+        "cohere2" => last_dense(4),
         // Added after an audit found this table covered 6 architectures
         // where llama.cpp hardcodes a period for 17. A MISSING entry is
         // not neutral: with no period, every layer gets windowed, so a
@@ -3715,10 +3709,6 @@ pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
         // narrower than the prompt, so both the period override and
         // this phase are exercised end to end against libllama.
         "plamo3" => last_dense(8),
-        // src/models/llama4.cpp:19 ("pattern: 3 chunked - 1 full").
-        // LIVE: the chunked window is `crate::chunked_swa`, and
-        // tests/llama4_graphs.rs drives a period of 2 from the file.
-        "llama4" => last_dense(4),
         // --- dense_first = true -----------------------------------
         //
         // These four put the full-attention layer at `il % p == 0`, not
@@ -3755,8 +3745,16 @@ pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
 /// `hparams.rope_freq_base_train_swa = hparams.rope_freq_base_train;`
 /// before letting `rope.freq_base_swa` override it. frink applied the
 /// Gemma default to everything, which rotates a gpt-oss SWA layer at
-/// theta 10000 instead of its real 150000.
+/// theta 10000 instead of its real 150000. Answers through the registry.
 pub fn swa_rope_base_follows_model(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .swa
+        .rope_base_follows_model
+}
+
+/// [`swa_rope_base_follows_model`] from this list alone (`exaone4` and
+/// `olmo2` are in `crate::models`).
+pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
         "afmoe"
@@ -3764,13 +3762,10 @@ pub fn swa_rope_base_follows_model(arch: &str) -> bool {
             | "cohere2moe"
             | "dflash"
             | "exaone-moe"
-            | "exaone4"
             | "gemma2"
             | "laguna"
-            | "llama4"
+            | "maple"
             | "mellum"
-            | "olmo2"
-            | "gpt-oss"
             | "smallthinker"
     )
 }
@@ -3800,7 +3795,16 @@ pub fn swa_rope_base_follows_model(arch: &str) -> bool {
 ///
 /// Every name here is a `hparams.rope_freq_scale_train_swa =
 /// hparams.rope_freq_scale_train;` in `src/models/`, at the line given.
+/// Answers through the registry.
 pub fn swa_rope_scale_follows_model(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .swa
+        .rope_scale_follows_model
+}
+
+/// [`swa_rope_scale_follows_model`] from this list alone (`exaone4` is
+/// in `crate::models`).
+pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
         "afmoe"          // afmoe.cpp:22
@@ -3808,11 +3812,9 @@ pub fn swa_rope_scale_follows_model(arch: &str) -> bool {
             | "cohere2moe"  // cohere2moe.cpp:39
             | "dflash"      // dflash.cpp:59, :71
             | "exaone-moe"  // exaone-moe.cpp:10
-            | "exaone4"     // exaone4.cpp:12
             | "gemma2"      // gemma2.cpp:11
-            | "llama4"      // llama4.cpp:24
+            | "maple"       // maple.cpp:13
             | "mellum"      // mellum.cpp:20
-            | "gpt-oss"     // openai-moe.cpp:14
             | "smallthinker" // smallthinker.cpp:14
     )
 }
@@ -3906,212 +3908,27 @@ pub fn attention_scale_override(
 /// logit softcaps frink implements -- `attn_logit_softcapping` on the
 /// attention scores and `final_logit_softcapping` after the lm_head.
 ///
-/// `grok`: `llama-graph.cpp:2572-2582` applies
-/// `30 * tanh(kq * f_attn_out_scale / 30)` before the softmax, which is
-/// frink's `attn_logit_softcap` over a Q pre-scaled by
-/// `ModelConfig::attention_scale`; `grok.cpp:214-218` applies the final
-/// softcap when the file declares one (default 0, off). The converter
-/// (`conversion/grok.py:34`) writes `attn_logit_softcapping` for EVERY
-/// Grok export, so without this list no real Grok file could load.
+/// `grok` states its row in `crate::models::grok` (#403 step 6).
 ///
 /// The Gemma family is not here because it is exempted as a family
 /// below; a name here is one whose graph was read for both softcaps.
-pub const LOGIT_SOFTCAP_ARCHITECTURES: &[&str] = &["grok", "muse-glimmer"];
+pub const LOGIT_SOFTCAP_ARCHITECTURES: &[&str] = &["muse-glimmer"];
 
 /// Metadata keys that, when present with a nonzero value, require math
 /// frink's generic decoder does not implement *unless* the architecture
 /// profile opts into those features (Gemma family), or the architecture
-/// is named in [`LOGIT_SOFTCAP_ARCHITECTURES`] for the softcaps.
+/// is named in [`LOGIT_SOFTCAP_ARCHITECTURES`] for the softcaps. Derived
+/// from the facts: [`crate::models::ArchFacts::unsupported_feature_keys`].
 pub fn unsupported_feature_keys(arch: &str) -> Vec<(String, &'static str)> {
-    let profile = resolve_profile(arch);
-    // Gemma family implements softcap + SWA pattern; others still refuse.
-    if matches!(profile.map(|p| p.family), Some(DecoderFamily::GemmaFamily)) {
-        return Vec::new();
-    }
-    let key = |suffix: &str| format!("{arch}.{suffix}");
-    let mut out = Vec::new();
-    if !LOGIT_SOFTCAP_ARCHITECTURES.contains(&arch) {
-        out.push((
-            key("attention.logit_softcapping"),
-            "attention logit soft-capping (Gemma 2+); not implemented in the generic decoder",
-        ));
-        // The spelling llama.cpp's converters ACTUALLY write
-        // (`llama-arch.cpp:213` is `%s.attn_logit_softcapping`). The
-        // line above is a spelling no converter emits, so this gate has
-        // never fired for any non-Gemma architecture -- while
-        // `loader.rs` reads BOTH spellings and applies the value.
-        //
-        // A checkpoint declaring an attention softcap was therefore not
-        // refused; it ran with the generic formula. For `grok` that is a
-        // wrong answer rather than an approximation: `grok.cpp` folds
-        // the real attention scale INTO the softcap and passes
-        // `kq_scale = 1.0f`, which the generic path does not do.
-        //
-        // A gate that cannot fire is not a gate, and it looked exactly
-        // like one.
-        out.push((
-            key("attn_logit_softcapping"),
-            "attention logit soft-capping (Gemma 2+); not implemented in the generic decoder",
-        ));
-        out.push((
-            key("final_logit_softcapping"),
-            "final logit soft-capping (Gemma 2+); not implemented in the generic decoder",
-        ));
-    }
-    // `{arch}.nextn_predict_layers` WAS refused here, for every
-    // architecture, with the reason that frink's `n_layers` IS
-    // `block_count` and it would run the MTP head as decoder layers.
-    // `crate::mtp_blocks::trunk_layers` subtracts the blocks now for
-    // exactly the seventeen graphs whose `load_arch_hparams` reads the
-    // key (`NEXTN_READERS`, measured) and still refuses a nonzero value
-    // on any other -- where llama.cpp itself would run every block and
-    // then fail on the unread `nextn.*` tensors. One place decides both
-    // halves, so the reader table and the refusal cannot drift apart.
-    // `{arch}.attention.sliding_window_pattern` WAS refused here,
-    // with the reason "not implemented in the generic decoder".
-    // That reason was false, and had been for some time: the
-    // alternating pattern lives in `ModelConfig::layer_sliding_window`,
-    // which implements BOTH phases and which `gpt-oss` -- a
-    // `StandardGqa` row, not a Gemma one -- has relied on since it
-    // was audited against libllama.
-    //
-    // What the gate really did was make the loader's own read of
-    // that key (`swa_pattern`) unreachable for every non-Gemma
-    // architecture: llama.cpp lets the file override the
-    // architecture's hardcoded period, frink refused any file that
-    // tried. `plamo3` is the case that proves it -- its converter
-    // writes the key verbatim (`conversion/plamo.py:178`) -- and
-    // `tests/fixture_away_graphs.rs` now drives a period of 2 out of
-    // a plamo3 fixture and compares against llama.cpp's own graph on
-    // all three forward paths, with the phase and the window
-    // sabotaged separately.
-    //
-    // The real gap the key could hide was NOT the pattern: it was
-    // that llama.cpp accepts the value as a scalar OR an n_layer-long
-    // ARRAY (`ml.get_key_or_arr`), and frink carried one scalar
-    // period. The array is `crate::swa_layers` now, read the way each
-    // graph reads it -- ignored, honoured, or broadcast -- so neither
-    // shape is refused here or anywhere else.
-    //
-    // `{arch}.moe_latent_size` (`LLM_KV_MOE_LATENT_SIZE`,
-    // `nemotron-h.cpp:21,36,82-85,206-208`): the routed experts run in a
-    // LATENT width the layer projects into with `ffn_latent_down` and
-    // out of with `ffn_latent_up`, while the router and the shared
-    // expert read the unprojected input. Nemotron-3 Nano writes no such
-    // key; Nemotron-3 Super does. The generic MoE bodies run their
-    // experts at `hidden_dim`, so a nonzero value stops here, by name.
-    out.push((
-        key("moe_latent_size"),
-        "a latent MoE (nemotron-h.cpp:206-208: the experts read `ffn_latent_down(x)` and \
-         their sum is `ffn_latent_up`ed back), which the generic MoE bodies, which run \
-         the experts at hidden_dim, do not have",
-    ));
-    // `{arch}.decision.block_count` (`LLM_KV_DECISION_BLOCK_COUNT`, new at
-    // the `604cc430` pin): the file's LAST blocks are a decision head, not
-    // decoder layers. `lfm2.cpp` (an architecture frink serves) reads it
-    // at `load_arch_hparams`, requires `attention.causal = false` beside
-    // it, builds no memory (`llama-model.cpp:2808`) and runs the trunk
-    // bidirectionally into a biased-LayerNorm scorer that emits three
-    // scores per token and no logits; `conversion/lfm2.py:258` writes it
-    // for every LFM2-d1-omni export. The generic decoder would run those
-    // head blocks as causal layers and sample from an LM head the file
-    // does not have. `decision.type` ALONE is not refused: the
-    // `lfm2-d1` / `openjev` kinds read the ordinary LM logits of a
-    // causal model, which this path computes.
-    out.push((
-        key("decision.block_count"),
-        "a DECISION head (lfm2.cpp: `decision.block_count` trailing blocks run as a \
-         non-causal scorer that emits scores instead of logits, with no KV memory); frink \
-         serves the causal trunk only",
-    ));
-    out
+    crate::models::ArchFacts::of(arch).unsupported_feature_keys(arch)
 }
 
-/// Scalar multipliers a checkpoint can declare in **metadata** that the
+/// Scalar multipliers a checkpoint can declare in metadata that the
 /// generic decoder does not apply, with the value that means "no-op".
-///
-/// These are the blind spot left by
-/// [`crate::loader::assert_every_tensor_consumed`]: that gate catches a
-/// missing *tensor*, but Granite / MiniCPM / Command-R style multipliers
-/// are hparams, not weights, so a checkpoint carrying them loads
-/// cleanly, runs at full speed, and computes a graph scaled differently
-/// from the one the checkpoint was trained as. Nothing says so.
-///
-/// llama.cpp key names (`llama-arch.cpp`):
-/// `%s.logit_scale` (`LLM_KV_LOGIT_SCALE`), `%s.residual_scale`,
-/// `%s.embedding_scale`, `%s.attention.scale`. Granite reads all four
-/// (`src/models/granite.cpp::load_arch_hparams`); MiniCPM and
-/// Command-R/Cohere2 read the subset they use.
-///
-/// **This list is DERIVED, never restated.** Which of the four an
-/// architecture applies lives in
-/// [`crate::scalar_multipliers::multiplier_support`], and this function
-/// is exactly its complement: a key appears here if and only if that
-/// table says the graph does not apply it. Two hand-written lists is the
-/// shape that once let this repo refuse a key it implemented and
-/// implement a key it refused, and the Gemma family used to be exempted
-/// from ALL FOUR of these wholesale on the strength of implementing two,
-/// so a hand-written `gemma3.residual_scale` would have loaded and been
-/// ignored.
-///
-/// `residual_scale` is the one that reaches furthest: it multiplies the
-/// attention and FFN branch outputs before every residual add, so on an
-/// architecture that does not implement it a declared value would have
-/// to be dropped by every CPU decode/prefill/multi-seq path *and* by the
-/// fused Metal kernels that fold the residual in.
-///
-/// The no-op value differs by key: the three `*_scale` multipliers are
-/// `1.0`, while llama.cpp's `f_attention_scale` uses `0.0` as its
-/// "unset, use 1/sqrt(head_dim)" sentinel.
+/// Derived from [`crate::scalar_multipliers::multiplier_support`]: see
+/// [`crate::models::ArchFacts::unsupported_scaling_keys`].
 pub fn unsupported_scaling_keys(arch: &str) -> Vec<(String, &'static str, f32)> {
-    use crate::scalar_multipliers::{AttentionScaleKey, LogitScaleUse, ResidualScaleUse};
-    let support = crate::scalar_multipliers::multiplier_support(arch);
-    let key = |suffix: &str| format!("{arch}.{suffix}");
-    let mut out = Vec::new();
-    if support.logit == LogitScaleUse::NotApplied {
-        out.push((
-            key("logit_scale"),
-            "logit multiplier (Granite / Command-R `logits_scaling`); not applied by the generic decoder",
-            1.0,
-        ));
-    }
-    if support.residual == ResidualScaleUse::NotRead {
-        out.push((
-            key("residual_scale"),
-            "residual multiplier (Granite `residual_multiplier`); not applied by the generic decoder",
-            1.0,
-        ));
-    }
-    if !support.embedding {
-        out.push((
-            key("embedding_scale"),
-            "embedding multiplier (Granite / MiniCPM `embedding_multiplier`); the generic decoder only scales embeddings for the Gemma and Granite families",
-            1.0,
-        ));
-    }
-    // Two spellings of one slot, and an architecture reads at most one
-    // of them: the OTHER stays refused. `grok` reads `output_scale` and
-    // never `scale`; Granite the reverse; everyone else neither.
-    if support.attention != AttentionScaleKey::Scale {
-        out.push((
-            key("attention.scale"),
-            "explicit attention score scale (Granite `attention_multiplier`); the generic decoder always uses 1/sqrt(head_dim)",
-            0.0,
-        ));
-    }
-    if support.attention != AttentionScaleKey::OutputScale {
-        // Applied as-is by the one graph that reads it (`grok.cpp`, no
-        // sentinel), so there is no value that means "off" -- the
-        // no-op here is the kernels' own scale expressed as a key, which
-        // no converter writes for a non-Grok architecture. A file
-        // declaring ANY other value is refused.
-        out.push((
-            key("attention.output_scale"),
-            "attention output scale (Grok `attn_output_multiplier`, applied inside its tanh softcap); the generic decoder always uses 1/sqrt(head_dim)",
-            0.0,
-        ));
-    }
-    out
+    crate::models::ArchFacts::of(arch).unsupported_scaling_keys(arch)
 }
 
 /// Markdown coverage table for docs / CI drift checks.
@@ -4337,7 +4154,7 @@ mod audit_tests {
             }
         }
         assert!(
-            seen == 11,
+            seen == 9,
             "every unaudited generic architecture is triaged; found {seen}. \
              It was 47 until the triage found `minicpm3` was an MLA model on the \
              generic-GQA row and it moved to DedicatedOnly, 46 until five ONE MATCH ARM \
@@ -4486,7 +4303,13 @@ mod audit_tests {
              `muse-spark` NEW CODE on a scaled residual, a latent MoE, a grouped RMS norm \
              with value experts, and a norm-preserving residual -- two are `dedicated` \
              (`deepseek41`, `glm5-next`) and four are deferred (`gemma-embedding2`, \
-             `clef`, `vllm-decision2`, `sensenova_u1`)"
+             `clef`, `vllm-decision2`, `sensenova_u1`). And 10 the same day: `lfm3` \
+             closed on exactly the rows its verdict named (tests/lfm3_graphs.rs), and \
+             `kolibri1` moved to NEW CODE when wiring it showed its router ranks \
+             `logits + exp_probs_b` BEFORE the sigmoid (`kolibri1.cpp:138`), where every \
+             router here adds the bias after it. And 9 on 2026-10-29, when that became \
+             `frink_moe::SelectionRule::BiasBeforeGating` and `kolibri1` closed on it \
+             (tests/kolibri1_graphs.rs)"
         );
     }
 

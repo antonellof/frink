@@ -65,7 +65,24 @@ pub fn uses_per_head_layer_norm_qk(arch: &str) -> bool {
 /// LayerNorm; `None` when it carries neither or the architecture's QK
 /// norm is an RMSNorm.
 pub fn per_head_layer_norm_refusal(arch: &str, l: usize, has_q_or_k_norm: bool) -> Option<String> {
-    let (_, _, lines) = PER_HEAD_LAYER_NORM_QK.iter().find(|(n, _, _)| *n == arch)?;
+    per_head_layer_norm_refusal_for(per_head_layer_norm_lines(arch), l, has_q_or_k_norm)
+}
+
+/// `arch`'s [`PER_HEAD_LAYER_NORM_QK`] row: the llama.cpp lines.
+pub fn per_head_layer_norm_lines(arch: &str) -> Option<&'static str> {
+    PER_HEAD_LAYER_NORM_QK
+        .iter()
+        .find(|(n, _, _)| *n == arch)
+        .map(|(_, _, lines)| *lines)
+}
+
+/// [`per_head_layer_norm_refusal`] given the row (`ArchFacts`).
+pub fn per_head_layer_norm_refusal_for(
+    row: Option<&str>,
+    l: usize,
+    has_q_or_k_norm: bool,
+) -> Option<String> {
+    let lines = row?;
     if !has_q_or_k_norm {
         return None;
     }

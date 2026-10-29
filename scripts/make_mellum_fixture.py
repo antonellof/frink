@@ -49,11 +49,25 @@ other half is measured rather than assumed:
     `n_ff / n_expert_used`
   * a sliding window NARROWER than the six-token prompt (:6)
 
+**`--mtp`** appends ONE NextN/MTP block (`blk.4`: a whole Mellum block
+plus the `nextn.*` head, `mellum.cpp:78-89`) and writes
+`nextn_predict_layers = 1`, with the window array at `block_count`
+(the MTP entry false). The common loader subtracts the block before
+any graph runs (`llama-model.cpp:1411`, `n_layer()` is the trunk) and
+the tensor loader creates it `TENSOR_SKIP` (`nextn_flags`, :35-37), so
+libllama's logits are the four-layer file's (#441). The block is drawn
+after every other tensor, so the trunk is byte-identical.
+
+**`--no-pattern`** drops `attention.sliding_window_pattern`.
+`mellum.cpp:16` reads it through `load_swa_pattern(ml, 4)`
+(`llama-model.cpp:3952-3959`), where neither read is required, so the
+file runs on the seeded period 4 [T, T, T, F] (#420).
+
 Weights are pseudo-random from a fixed seed so the file is byte-stable.
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \\
-        python3 scripts/make_mellum_fixture.py OUT.gguf
+        python3 scripts/make_mellum_fixture.py OUT.gguf [--mtp] [--no-pattern]
 
 The golden values that go with it are produced by llama.cpp itself
 (see `scripts/gptoss_reference_logits.cpp`), not by this script.
@@ -86,7 +100,7 @@ RMS_EPS = 1e-6
 SWA_LAYERS = [True, True, False, True]
 
 
-def main(out_path: str) -> None:
+def main(out_path: str, mtp: bool = False, pattern: bool = True) -> None:
     rng = np.random.default_rng(0x3E11)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -94,7 +108,9 @@ def main(out_path: str) -> None:
 
     w = gguf.GGUFWriter(out_path, ARCH)
     w.add_name("frink-mellum-fixture")
-    w.add_block_count(N_LAYER)
+    w.add_block_count(N_LAYER + (1 if mtp else 0))
+    if mtp:
+        w.add_nextn_predict_layers(1)
     w.add_context_length(CTX)
     w.add_embedding_length(N_EMBD)
     w.add_feed_forward_length(N_FF)
@@ -107,7 +123,8 @@ def main(out_path: str) -> None:
     w.add_rope_dimension_count(HEAD_DIM)
     w.add_sliding_window(SWA_WINDOW)
     # mellum.py:28, verbatim: a bool per layer.
-    w.add_sliding_window_pattern(SWA_LAYERS)
+    if pattern:
+        w.add_sliding_window_pattern(SWA_LAYERS + ([False] if mtp else []))
     w.add_expert_count(N_EXPERT)
     w.add_expert_used_count(N_EXPERT_USED)
     w.add_expert_feed_forward_length(N_FF_EXP)
@@ -153,6 +170,25 @@ def main(out_path: str) -> None:
     w.add_tensor("output_norm.weight", rnd(N_EMBD))
     w.add_tensor("output.weight", rnd(N_VOCAB, N_EMBD))
 
+    if mtp:
+        p = f"blk.{N_LAYER}."
+        w.add_tensor(p + "attn_norm.weight", rnd(N_EMBD))
+        w.add_tensor(p + "attn_q.weight", rnd(n_embd_q, N_EMBD))
+        w.add_tensor(p + "attn_k.weight", rnd(n_embd_kv, N_EMBD))
+        w.add_tensor(p + "attn_v.weight", rnd(n_embd_kv, N_EMBD))
+        w.add_tensor(p + "attn_q_norm.weight", rnd(HEAD_DIM) + 1.0)
+        w.add_tensor(p + "attn_k_norm.weight", rnd(HEAD_DIM) + 1.0)
+        w.add_tensor(p + "attn_output.weight", rnd(N_EMBD, n_embd_q))
+        w.add_tensor(p + "ffn_norm.weight", rnd(N_EMBD))
+        w.add_tensor(p + "ffn_gate_inp.weight", rnd(N_EXPERT, N_EMBD))
+        w.add_tensor(p + "ffn_gate_exps.weight", rnd(N_EXPERT, N_FF_EXP, N_EMBD))
+        w.add_tensor(p + "ffn_up_exps.weight", rnd(N_EXPERT, N_FF_EXP, N_EMBD))
+        w.add_tensor(p + "ffn_down_exps.weight", rnd(N_EXPERT, N_EMBD, N_FF_EXP))
+        w.add_tensor(p + "nextn.eh_proj.weight", rnd(N_EMBD, 2 * N_EMBD))
+        w.add_tensor(p + "nextn.enorm.weight", rnd(N_EMBD) + 1.0)
+        w.add_tensor(p + "nextn.hnorm.weight", rnd(N_EMBD) + 1.0)
+        w.add_tensor(p + "nextn.shared_head_norm.weight", rnd(N_EMBD) + 1.0)
+
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -161,4 +197,10 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "mellum-fixture.gguf")
+    flags = ("--mtp", "--no-pattern")
+    args = [a for a in sys.argv[1:] if a not in flags]
+    main(
+        args[0] if args else "mellum-fixture.gguf",
+        "--mtp" in sys.argv[1:],
+        "--no-pattern" not in sys.argv[1:],
+    )

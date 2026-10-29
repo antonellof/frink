@@ -91,7 +91,10 @@ fn resident_in<T: DeviceRepr + Unpin + Clone>(
 ) -> Result<Arc<ResidentCuda<T>>, CudaError> {
     let key = (data.as_ptr() as usize, data.len());
     let fingerprint = WeightFingerprint::of(bytes);
-    let mut guard = map.lock().unwrap();
+    // A panic elsewhere while holding the lock leaves the map whole
+    // (every edit is one insert or remove), so a poisoned lock is still
+    // a usable cache.
+    let mut guard = map.lock().unwrap_or_else(|p| p.into_inner());
     let cache = guard.get_or_insert_with(HashMap::new);
     if let Some(cached) = cache.get(&key) {
         if cached.fingerprint == fingerprint {

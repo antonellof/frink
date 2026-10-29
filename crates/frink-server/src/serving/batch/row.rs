@@ -13,14 +13,11 @@ use frink_core::cache::KvCache;
 use frink_models::tokenizer::StopTokens;
 
 use crate::generate::{DecodeError, FinishReason, GenerationParams, PagedLease};
-use crate::sample_step::SampleState;
-use crate::stop::StopMatcher;
 
+use super::answer::Answer;
 use super::block_budget::BlockBudget;
-use super::clock::RowClock;
-use super::config::{send_finished, BatcherEvent};
+use super::config::BatcherEvent;
 use super::queue::AbortId;
-use crate::utf8_stream::Utf8Stream;
 
 /// Where one batched row keeps its KV.
 ///
@@ -84,6 +81,18 @@ pub(super) struct Job {
     /// the queue is mutated in four places and a parallel deque would
     /// have to agree with all four.
     pub(super) skips: u32,
+    /// Admission passes this job has waited through, for the
+    /// preemption bound (`super::preempt`). Zero whenever the job is
+    /// put back in the queue.
+    pub(super) waited: u32,
+    /// `Some` for a request that was admitted, produced output, and was
+    /// preempted back into the queue: what it had produced, carried
+    /// whole so re-admission continues it rather than restarting it.
+    /// Its `prompt_tokens` is then the prompt AS RUN (`Slot::prompt_ids`),
+    /// and re-admission prefills that followed by the answer's tokens.
+    ///
+    /// Boxed: a queue of fresh jobs should not pay for a sampler each.
+    pub(super) answer: Option<Box<Answer>>,
 }
 
 /// Stable identity for one in-flight request, handed out once at
@@ -170,9 +179,9 @@ impl Rows {
             .iter()
             .copied()
             .filter(|uid| {
-                self.state
-                    .get(uid)
-                    .is_some_and(|s| s.finish.is_none() && s.generated_ids.len() < s.max_tokens)
+                self.state.get(uid).is_some_and(|s| {
+                    s.finish.is_none() && s.answer.generated_ids.len() < s.max_tokens
+                })
             })
             .collect()
     }
@@ -201,12 +210,7 @@ impl Rows {
                 // after it. The private generate loop published all
                 // along; only the batcher did not, because the prompt
                 // ids were dropped at the prefill-to-decode handover.
-                if let RowKv::Paged(lease) = &mut slot.kv {
-                    let mut seq = std::mem::take(&mut slot.prompt_ids);
-                    seq.extend_from_slice(&slot.generated_ids);
-                    let bs = lease.block_size();
-                    crate::generate::publish_to_radix(lease, &seq, bs);
-                }
+                publish_row(&mut slot.kv, &slot.prompt_ids, &slot.answer.generated_ids);
                 reply_finished(slot);
             }
         }
@@ -217,22 +221,16 @@ pub(super) struct Slot {
     pub(super) kv: RowKv,
     pub(super) pos: usize,
     pub(super) logits: Vec<f32>,
-    /// The seeded sampler AND this row's live grammar parse, in one
-    /// value: a row that could hold the first without the second is a
-    /// row that can sample a token its grammar forbids. See
-    /// [`crate::sample_step`].
-    pub(super) sample: SampleState,
-    pub(super) generated_ids: Vec<usize>,
+    /// Everything this row has produced that cannot be recomputed from
+    /// its tokens: sampler, grammar, stop hold-back, UTF-8 tail, text
+    /// already streamed, clock. One value so a preempted row carries it
+    /// whole; see [`super::answer`].
+    pub(super) answer: Answer,
     /// The prompt this row ran, kept so a finished paged row can
-    /// PUBLISH its prefix to the radix tree. Without it the batched
-    /// path adopted prefixes and never contributed one.
+    /// PUBLISH its prefix to the radix tree, and so a preempted row can
+    /// be prefilled again. Without it the batched path adopted prefixes
+    /// and never contributed one.
     pub(super) prompt_ids: Vec<usize>,
-    /// Detokenized text already safe to expose (past the stop
-    /// hold-back).
-    pub(super) visible: String,
-    /// Both stop layers for this row.
-    pub(super) stops: StopMatcher,
-    pub(super) prompt_tokens: usize,
     pub(super) max_tokens: usize,
     pub(super) stop_tokens: StopTokens,
     pub(super) params: GenerationParams,
@@ -248,21 +246,18 @@ pub(super) struct Slot {
     pub(super) abort: AbortId,
     /// KV blocks this row reserved at admission, returned when it ends.
     pub(super) blocks: usize,
-    /// The row's own clock, started at admission. Owns the only path
-    /// from a finished row to its `Usage`.
-    pub(super) clock: RowClock,
-    /// Prompt positions this row adopted from the radix tree, read off
-    /// the lease at admission rather than at the end: a finished row
-    /// has already published its own prefix, so asking the lease then
-    /// would count this request's own contribution as its reuse.
-    ///
-    /// `None` when no radix tree is configured, which is the same
-    /// distinction `usage.cached_tokens` carries everywhere else.
-    pub(super) cached_tokens: Option<usize>,
-    /// This row's half-finished character, if a token ended inside one.
-    /// Per row: rows interleave, and one shared buffer would splice one
-    /// answer's bytes into another's.
-    pub(super) utf8: Utf8Stream,
+}
+
+/// A row taken apart at the seam preemption cuts along.
+///
+/// `kv` is the only part that is thrown away; `job` is the request as
+/// the queue holds it, carrying the row's [`Answer`]; `finish` and
+/// `error` say whether it had already ended.
+pub(super) struct SlotParts {
+    pub(super) kv: RowKv,
+    pub(super) job: Job,
+    pub(super) finish: Option<FinishReason>,
+    pub(super) error: Option<DecodeError>,
 }
 
 impl Slot {
@@ -278,43 +273,80 @@ impl Slot {
         self.finish = Some(FinishReason::Stop);
         self.error = Some(error);
     }
+
+    /// Splits this row into what is recomputed and what is carried.
+    ///
+    /// The destructure has no `..` ON PURPOSE. Every field of `Slot` is
+    /// named here and either carried into the [`Job`] or dropped with a
+    /// reason, so a field added to `Slot` does not compile until
+    /// somebody decides whether a preempted row keeps it. A preemption
+    /// path that copied row state field by field would lose the new one
+    /// silently, which is the bug shape this repo keeps shipping.
+    pub(super) fn into_parts(self) -> SlotParts {
+        let Slot {
+            kv,
+            // Both recomputed by the re-prefill: the position is read
+            // back off the KV, and the logits are the last prefill
+            // token's.
+            pos: _,
+            logits: _,
+            answer,
+            prompt_ids,
+            // Derived from `params.max_tokens` in `Prefill::into_slot`.
+            max_tokens: _,
+            stop_tokens,
+            params,
+            reply,
+            finish,
+            error,
+            abort,
+            blocks,
+        } = self;
+        SlotParts {
+            kv,
+            job: Job {
+                prompt_tokens: prompt_ids,
+                params,
+                stop_tokens,
+                reply,
+                abort,
+                blocks,
+                skips: 0,
+                waited: 0,
+                answer: Some(Box::new(answer)),
+            },
+            finish,
+            error,
+        }
+    }
+}
+
+/// Publishes a paged row's computed prefix to the radix tree, so the
+/// next request sharing it -- or this one, prefilled again after a
+/// preemption -- adopts it instead of recomputing.
+///
+/// One function for both callers. It must run before the lease drops:
+/// the lease is what holds the pages until the tree has retained them.
+pub(super) fn publish_row(kv: &mut RowKv, prompt_ids: &[usize], generated_ids: &[usize]) {
+    if let RowKv::Paged(lease) = kv {
+        let mut seq = Vec::with_capacity(prompt_ids.len() + generated_ids.len());
+        seq.extend_from_slice(prompt_ids);
+        seq.extend_from_slice(generated_ids);
+        let bs = lease.block_size();
+        crate::generate::publish_to_radix(lease, &seq, bs);
+    }
 }
 
 /// Sends one finished row's result to its own waiting caller. Takes the
 /// `Slot` by value, so a row's reply channel travels with its state and
 /// cannot be paired with another row's output.
-pub(super) fn reply_finished(mut slot: Slot) {
-    // A row that failed reports the failure, not the partial text it
-    // had produced: the caller asked for output under a constraint, and
-    // text that stops short of satisfying it is not a shorter answer to
-    // that question.
-    if let Some(error) = slot.error {
-        send_finished(&slot.reply, Err(error));
-        return;
-    }
-    let finish = slot.finish.expect("only a finished row is replied to");
-    // Text withheld against a stop that never arrived is ordinary
-    // output; dropping it would truncate every answer whose tail looks
-    // like the start of a stop string.
-    // A row cut off mid-character cannot finish it, so the held bytes
-    // surface as U+FFFD instead of vanishing -- through the stop
-    // matcher, like any other text this row produced.
-    let partial = slot.utf8.flush();
-    if !partial.is_empty() {
-        slot.stops.push(&partial);
-    }
-    let tail = slot.stops.flush();
-    if !tail.is_empty() {
-        slot.visible.push_str(&tail);
-        let _ = slot.reply.send(BatcherEvent::Chunk(tail));
-    }
-    let usage = slot.clock.usage(
-        slot.prompt_tokens,
-        slot.generated_ids.len(),
-        slot.cached_tokens,
-    );
-    send_finished(
-        &slot.reply,
-        Ok((finish, slot.generated_ids, slot.visible, usage)),
-    );
+pub(super) fn reply_finished(slot: Slot) {
+    let SlotParts {
+        job, finish, error, ..
+    } = slot.into_parts();
+    let finish = finish.expect("only a finished row is replied to");
+    let answer = job
+        .answer
+        .expect("an admitted row always carries its answer");
+    answer.reply(&job.reply, finish, error);
 }

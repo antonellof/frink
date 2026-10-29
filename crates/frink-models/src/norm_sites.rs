@@ -41,7 +41,7 @@
 //! that every name is a row this loader can reach.
 
 use crate::loader::load_f32_vec;
-use crate::norm::{norm_function, NormFunction, NormOp, NormParam};
+use crate::norm::{NormFunction, NormOp, NormParam};
 use crate::LoadError;
 use frink_gguf::{GgufError, TensorSource};
 
@@ -69,42 +69,10 @@ use frink_gguf::{GgufError, TensorSource};
 /// tensors (sinks, biases, the SwiGLU clamp), and widening it would have
 /// handed `seed_oss` attention sinks it does not have. Two facts, two
 /// predicates.
-pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] = &[
-    "gpt-oss",
-    "seed_oss",
-    "glm4moe",
-    "qwen35",
-    "qwen35moe",
-    "qwen3next",
-];
-
-/// Architectures that store their **pre-FFN** norm under
-/// `blk.N.attn_output_norm.weight` (`LLM_TENSOR_ATTN_OUT_NORM`) and carry
-/// no `blk.N.ffn_norm`.
 ///
-/// `dbrx`: `dbrx.cpp:34` creates `attn_out_norm` and no `ffn_norm`, and
-/// `:110-113` norms `ffn_inp` -- the post-attention residual -- with it,
-/// which is the same slot `gpt-oss` keeps under the other name. Its
-/// norm FUNCTION is a weighted LayerNorm
-/// (`capability::WEIGHTED_LAYER_NORM`); that is [`NormFunction`]'s
-/// business, not this list's.
-pub const PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM: &[&str] = &["dbrx"];
-
-/// Architectures whose **post-attention** norm (Gemma-2's
-/// `post_attention_norm` slot) is stored as `blk.N.attn_output_norm` and
-/// whose **post-FFN** norm is `blk.N.layer_output_norm`
-/// (`LLM_TENSOR_LAYER_OUT_NORM`, `llama-arch.cpp:421`) with
-/// `post_ffw_norm` as the fallback spelling -- both REQUIRED.
-///
-/// `grok`: `grok.cpp:62` creates `attn_out_norm` as required and
-/// `:143-146` applies it to the attention output BEFORE the residual
-/// add (`ffn_inp = add(cur, inpSA)` at :148), which is the post-norm
-/// slot and not `dbrx`'s pre-FFN one -- `grok` has its own `ffn_norm`
-/// at :64. `:75-78` create `ffn_post_norm` from `LAYER_OUT_NORM` when
-/// present (`conversion/grok.py`'s Grok-1 mapping, `rms_norm_3`) and
-/// from `FFN_POST_NORM` otherwise (Grok-2's `post_moe_norm`), required
-/// either way, and `:185-188` apply it before the FFN residual add.
-pub const POST_NORMS_UNDER_GROK_NAMES: &[&str] = &["grok"];
+/// `gpt-oss` states its row in `crate::models::gpt_oss` (#403 step 6b).
+pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] =
+    &["seed_oss", "glm4moe", "qwen35", "qwen35moe", "qwen3next"];
 
 /// Architectures whose OPTIONAL second pre-norm `blk.N.attn_norm_2`
 /// feeds ATTENTION when present, with `attn_norm` moving to the FFN.
@@ -177,6 +145,58 @@ pub fn weightless_embedding_norm(arch: &str) -> bool {
 /// (`lfm2moe.cpp:31`).
 pub const OUTPUT_NORM_UNDER_EMBEDDING_NAME: &[&str] = &["lfm2", "lfm2moe"];
 
+/// Architectures whose two OPTIONAL post norms must be present together
+/// or not at all, with the line that refuses a file carrying one. The
+/// default row loads each independently, so without this a file with
+/// one would be served where llama.cpp throws.
+pub const POST_NORMS_BOTH_OR_NEITHER: &[(&str, &str)] = &[("lfm3", "lfm3.cpp:53-55")];
+
+/// `arch`'s [`POST_NORMS_BOTH_OR_NEITHER`] row: the llama.cpp line.
+pub fn post_norms_both_or_neither(arch: &str) -> Option<&'static str> {
+    POST_NORMS_BOTH_OR_NEITHER
+        .iter()
+        .find(|(a, _)| *a == arch)
+        .map(|(_, line)| *line)
+}
+
+/// Why layer `layer`'s post norms cannot be served, or `None`.
+pub fn post_norm_pairing_refusal(
+    arch: &str,
+    layer: usize,
+    post_attn: bool,
+    post_ffn: bool,
+) -> Option<String> {
+    post_norm_pairing_refusal_for(
+        arch,
+        post_norms_both_or_neither(arch),
+        layer,
+        post_attn,
+        post_ffn,
+    )
+}
+
+/// [`post_norm_pairing_refusal`] given the row (`ArchFacts`).
+pub fn post_norm_pairing_refusal_for(
+    arch: &str,
+    row: Option<&str>,
+    layer: usize,
+    post_attn: bool,
+    post_ffn: bool,
+) -> Option<String> {
+    let line = row?;
+    let (has, lacks) = if post_attn {
+        ("post_attention_norm", "post_ffw_norm")
+    } else {
+        ("post_ffw_norm", "post_attention_norm")
+    };
+    (post_attn != post_ffn).then(|| {
+        format!(
+            "blk.{layer} carries {has} without {lacks}: llama.cpp requires both post norms or \
+             neither for `{arch}` (src/models/{line})"
+        )
+    })
+}
+
 /// Architectures with ONE norm per layer, `attn_norm`, whatever the
 /// layer's block is: `nemotron-h.cpp:52` ("all blocks use the attn
 /// norm"), `:145`. Every Nemotron-H layer is a single block with a
@@ -221,7 +241,7 @@ pub struct StoredNorm {
 }
 
 impl StoredNorm {
-    const fn required(names: &'static [&'static str]) -> Self {
+    pub(crate) const fn required(names: &'static [&'static str]) -> Self {
         Self {
             names,
             required: true,
@@ -330,52 +350,56 @@ pub struct NormSites {
 }
 
 impl NormSites {
-    /// The table row for `arch`, with the architecture's own norm
-    /// function.
+    /// The row for `arch`, with the architecture's own norm function:
+    /// its `crate::models` definition, else the legacy tables.
     pub fn for_arch(arch: &str) -> Self {
-        Self::with_function(arch, norm_function(arch))
+        crate::models::ArchFacts::of(arch).tensors.norm_sites
     }
 
-    /// The table row for `arch` under `function`: the loader's entry,
-    /// which has read the file (`crate::norm::norm_function_for_file`).
+    /// The row of an architecture no norm table names: RMSNorm, the
+    /// four layer sites under their usual names, `output_norm`, and no
+    /// embedding norm.
+    pub const GENERIC: Self = Self {
+        function: NormFunction::Rms,
+        attn: Some(StoredNorm::required(&["attn_norm"])),
+        ffn: Some(StoredNorm::required(&["ffn_norm"])),
+        post_attn: Some(StoredNorm::optional(&["post_attention_norm"])),
+        post_ffn: Some(StoredNorm::optional(&["post_ffw_norm"])),
+        output: Some(StoredNorm::required(&["output_norm"])),
+        embedding: None,
+    };
+
+    /// The post-norm-only topology (`olmo2.cpp`, `exaone4.cpp`): no
+    /// pre-attention and no pre-FFN norm, each branch's output normed
+    /// before its residual add. One constant for the rows that share it.
+    pub const POST_NORM_ONLY: Self = Self {
+        attn: None,
+        ffn: None,
+        ..Self::GENERIC
+    };
+
+    /// The legacy tables' row for `arch` under `function`, for
+    /// `ArchFacts::from_tables`; a `crate::models` architecture states
+    /// its row there instead.
     pub fn with_function(arch: &str, function: NormFunction) -> Self {
         let mut sites = Self {
             function,
-            attn: Some(StoredNorm::required(&["attn_norm"])),
-            ffn: Some(StoredNorm::required(&["ffn_norm"])),
-            post_attn: Some(StoredNorm::optional(&["post_attention_norm"])),
-            post_ffn: Some(StoredNorm::optional(&["post_ffw_norm"])),
-            output: if NO_OUTPUT_NORM.contains(&arch) {
-                None
-            } else if OUTPUT_NORM_UNDER_EMBEDDING_NAME.contains(&arch) {
-                Some(StoredNorm::required(&["token_embd_norm"]))
-            } else {
-                Some(StoredNorm::required(&["output_norm"]))
-            },
-            embedding: EMBEDDING_NORM_ARCHITECTURES
-                .contains(&arch)
-                .then_some(StoredNorm::required(&["token_embd_norm"])),
+            ..Self::GENERIC
         };
-        if crate::capability::is_post_norm_only(arch) {
-            sites.attn = None;
-            sites.ffn = None;
+        if NO_OUTPUT_NORM.contains(&arch) {
+            sites.output = None;
+        } else if OUTPUT_NORM_UNDER_EMBEDDING_NAME.contains(&arch) {
+            sites.output = Some(StoredNorm::required(&["token_embd_norm"]));
+        }
+        if EMBEDDING_NORM_ARCHITECTURES.contains(&arch) {
+            sites.embedding = Some(StoredNorm::required(&["token_embd_norm"]));
         }
         if PRE_FFN_NORM_IS_POST_ATTENTION_NORM.contains(&arch) {
             sites.ffn = Some(StoredNorm::required(&["post_attention_norm"]));
             sites.post_attn = None;
         }
-        if PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM.contains(&arch) {
-            sites.ffn = Some(StoredNorm::required(&["attn_output_norm"]));
-        }
         if ONE_NORM_PER_LAYER.contains(&arch) {
             sites.ffn = Some(StoredNorm::required(&["attn_norm"]));
-        }
-        if POST_NORMS_UNDER_GROK_NAMES.contains(&arch) {
-            sites.post_attn = Some(StoredNorm::required(&["attn_output_norm"]));
-            sites.post_ffn = Some(StoredNorm::required(&[
-                "layer_output_norm",
-                "post_ffw_norm",
-            ]));
         }
         sites
     }
@@ -456,6 +480,24 @@ mod tests {
         // The name alone does nothing on another architecture.
         let llama = NormSites::for_arch("llama");
         assert_eq!(llama.for_layer("llama", &forty_b, 1), llama);
+    }
+
+    /// `lfm3.cpp:53-55` throws on a layer with one post norm; the
+    /// default row would serve it, so the pairing table refuses it, and
+    /// only for the architectures it names.
+    #[test]
+    fn one_post_norm_without_the_other_is_refused_where_upstream_throws() {
+        assert_eq!(post_norm_pairing_refusal("lfm3", 0, true, true), None);
+        assert_eq!(post_norm_pairing_refusal("lfm3", 0, false, false), None);
+        let msg = post_norm_pairing_refusal("lfm3", 2, true, false).expect("refused");
+        assert!(
+            msg.contains("blk.2 carries post_attention_norm without post_ffw_norm")
+                && msg.contains("lfm3.cpp:53-55"),
+            "{msg}"
+        );
+        assert!(post_norm_pairing_refusal("lfm3", 1, false, true)
+            .is_some_and(|m| m.contains("post_ffw_norm without post_attention_norm")));
+        assert_eq!(post_norm_pairing_refusal("gemma2", 0, true, false), None);
     }
 
     /// The default row is the plain pre-norm layer with both post-norms

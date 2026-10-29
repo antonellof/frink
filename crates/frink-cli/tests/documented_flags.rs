@@ -70,7 +70,7 @@ fn long_flags(source: &str) -> Vec<String> {
 
 #[test]
 fn every_run_flag_is_documented() {
-    let flags = long_flags(&read("crates/frink-cli/src/run.rs"));
+    let flags = long_flags(&read("crates/frink-cli/src/run/args.rs"));
     assert!(flags.len() > 30, "only {} flags parsed", flags.len());
     let docs = read("docs/CLI.md");
     let missing: Vec<&String> = flags.iter().filter(|f| !documents(&docs, f)).collect();
@@ -82,7 +82,7 @@ fn every_run_flag_is_documented() {
 
 #[test]
 fn every_server_flag_is_documented() {
-    let flags = long_flags(&read("crates/frink-server/src/cli.rs"));
+    let flags = long_flags(&read("crates/frink-server/src/cli/mod.rs"));
     assert!(flags.len() > 20, "only {} flags parsed", flags.len());
     // The server's surface is split across the CLI, API and config
     // pages; which page is a judgement call, being written down at all

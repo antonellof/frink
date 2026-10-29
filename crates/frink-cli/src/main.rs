@@ -1,14 +1,18 @@
 //! frink CLI, llama.cpp-style GGUF completion (`-m`/`-p`/`-n`/…) plus
 //! inspect / presets / smoke / Kimi helpers. See `docs/CLI.md`.
 
+mod argv;
 mod batched_bench;
 mod bench_bw;
 mod bench_client;
+mod bench_cmd;
 mod bench_contract;
 mod bench_guard;
+mod bench_llama;
 mod bench_model;
 mod bench_render;
 mod bench_suite;
+mod caps;
 mod chat;
 mod cli_output;
 mod download;
@@ -18,6 +22,8 @@ mod host_state;
 mod http;
 mod imatrix;
 mod layer_divergence;
+#[cfg(test)]
+mod llama_flags;
 mod parity;
 mod perplexity;
 mod pull;
@@ -38,7 +44,12 @@ use frink_models::{
 };
 
 #[derive(Parser)]
-#[command(name = "frink", version, about = "Pure-Rust MoE inference engine")]
+#[command(
+    name = "frink",
+    version,
+    propagate_version = true,
+    about = "Pure-Rust MoE inference engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -52,6 +63,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// Parsed once per process, so the size of the largest variant costs
+// nothing worth a `Box`. Only the build without `serve` trips it, where
+// the `Serve` stub is small beside `Run`.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// GGUF completion (llama.cpp-style `-m`/`-p`/`-n`/…).
     ///
@@ -197,7 +212,17 @@ enum Commands {
     /// RAM, SIMD flags, and CUDA device info if built with --features
     /// cuda). See frink-cuda's docs for exactly what is and isn't
     /// verified about the CUDA fields.
-    Caps,
+    ///
+    /// --kernels prints the kernel coverage matrix instead: for every
+    /// quant kind, backend and op, whether a kernel runs it or it falls
+    /// back to the host. Derived from the dispatch tables, not this
+    /// host. --write PATH writes it to a file (docs/KERNELS.md).
+    Caps {
+        #[arg(long)]
+        kernels: bool,
+        #[arg(long)]
+        write: Option<String>,
+    },
     /// Run a tiny synthetic forward-pass smoke test for a preset
     /// (random weights, small dims) to prove the pipeline executes.
     Smoke {
@@ -221,11 +246,6 @@ enum Commands {
         #[arg(long, default_value = "dense")]
         fixture: String,
     },
-    /// Benchmark: fused quantized matvec vs. dequant-then-matmul, at a
-    /// realistic single-expert-FFN matrix size, measuring both wall
-    /// time and resident memory. Also benchmarks end-to-end decode
-    /// throughput (tokens/sec) for each preset at synthetic-but-full-
-    /// scale-shape dimensions.
     /// Check that a GPU backend agrees with the CPU reference.
     ///
     /// Greedy-decodes the same prompt on both and compares token ids.
@@ -299,6 +319,16 @@ enum Commands {
         /// each other answer that, with no frink in the comparison.
         #[arg(long)]
         dump_logits: Option<String>,
+        /// Token ids to compare on, comma separated, instead of
+        /// tokenizing `--prompt`. Skips the tokenizer half: libllama's
+        /// tokenizer cannot load a synthetic fixture's vocabulary.
+        #[arg(long, value_delimiter = ',')]
+        tokens: Option<Vec<u32>>,
+        /// Also compare a greedy decode of this many steps, each frink
+        /// step fed llama.cpp's own previous token. Prefill parity alone
+        /// cannot see a defect that shows only once decode starts.
+        #[arg(long, default_value_t = 0)]
+        decode_steps: usize,
     },
     /// Corpus perplexity, llama.cpp's `perplexity` tool.
     ///
@@ -391,77 +421,8 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
-    Bench {
-        /// Real GGUF to benchmark. With this set, `bench` becomes a
-        /// `llama-bench` work-alike (pp/tg on real weights) and the
-        /// synthetic matvec microbenchmark below is skipped.
-        #[arg(short = 'm', long)]
-        model: Option<String>,
-        /// Prompt tokens for the `pp<N>` batched-prefill row (`0` skips).
-        #[arg(short = 'p', long = "n-prompt", default_value_t = 512)]
-        n_prompt: usize,
-        /// Decode steps for the `tg<N>` row (`0` skips).
-        #[arg(short = 'n', long = "n-gen", default_value_t = 128)]
-        n_gen: usize,
-        /// Timed repetitions per row; one extra warmup is discarded.
-        #[arg(short = 'r', long = "repetitions", default_value_t = 3)]
-        reps: usize,
-        /// CPU threads (`0` = performance-core default)
-        #[arg(short = 't', long, default_value_t = 0)]
-        threads: usize,
-        /// GPU layers: `0` forces CPU, anything else offloads
-        #[arg(long = "n-gpu-layers", default_value_t = 0)]
-        n_gpu_layers: usize,
-        /// Context size (`0` = GGUF default)
-        #[arg(short = 'c', long, default_value_t = 0)]
-        ctx_size: usize,
-        #[arg(long, default_value_t = 4096)]
-        hidden: usize,
-        #[arg(long, default_value_t = 14336)]
-        ffn_dim: usize,
-        #[arg(long, default_value_t = 20)]
-        iters: usize,
-        /// Also run `llama-bench` on the same GGUF and print the gap.
-        #[arg(long)]
-        compare: bool,
-        /// Run every entry in `benchmarks/suite.json` (each in a fresh
-        /// child process), write engine receipts, then re-render the
-        /// engine table in `benchmarks/RESULTS.md`.
-        #[arg(long)]
-        suite: bool,
-        /// Re-render the engine table from existing receipts only.
-        #[arg(long)]
-        render: bool,
-        /// Restrict `--suite` to one suite id.
-        #[arg(long)]
-        id: Option<String>,
-        /// Restrict `--suite` to one backend.
-        #[arg(long)]
-        backend: Option<String>,
-        /// Skip suite entries whose estimated RAM exceeds ~75% of host RAM.
-        #[arg(long)]
-        fit_host: bool,
-        /// Skip suite entries whose GGUF is not present.
-        #[arg(long)]
-        skip_missing: bool,
-        /// benchmarks/ directory.
-        #[arg(long, default_value = "benchmarks")]
-        bench_dir: String,
-        /// Internal (`--suite` children): suite id to record in the receipt.
-        #[arg(long)]
-        suite_id: Option<String>,
-        /// Internal (`--suite` children): backend label for the receipt.
-        #[arg(long, default_value = "cpu")]
-        backend_label: String,
-        /// Write a JSON receipt to this path.
-        #[arg(long)]
-        receipt: Option<String>,
-        /// Refuse to start a timed run when the host's 1-minute load
-        /// average is at or above this. `0` disables the check and
-        /// marks the receipt as not quiet-host.
-        #[arg(long, default_value_t = host_state::DEFAULT_MAX_LOAD)]
-        max_load: f64,
-    },
+    /// Benchmark a GGUF like `llama-bench`, or the synthetic kernels.
+    Bench(bench_cmd::BenchCmd),
     /// Demonstrate prompt-lookup speculative decoding on a repetitive
     /// prompt, reporting forward_batch call count vs. tokens produced.
     /// Uses synthetic (random) weights -- see the printed caveat about
@@ -558,53 +519,6 @@ Rebuild with it:  cargo install frink-cli   (serve is on by default)
 Or run the standalone binary:  frink-server -m model.gguf
 (This only happens in a build that passed --no-default-features.)";
 
-/// Every subcommand `Commands` declares, as clap will name it.
-///
-/// This list is what tells [`rewrite_llama_style_argv`] that `frink
-/// serve …` is a subcommand and not llama.cpp-style top-level flags.
-/// A subcommand missing from here does not fail loudly -- it is silently
-/// rewritten into `frink run …` and starts a *completion*. Adding a
-/// variant to `Commands` therefore means adding it here too, which
-/// `every_clap_subcommand_survives_the_argv_rewriter` enforces against
-/// clap's own subcommand list.
-const SUBCOMMANDS: &[&str] = &[
-    "run",
-    // llama.cpp's launcher spells `run` as `cli`, and the two
-    // informational commands it offers beside it. All three have to be
-    // here or the rewriter turns `frink version` into a completion
-    // whose prompt is the word "version".
-    "cli",
-    "version",
-    "licenses",
-    "pull",
-    "download",
-    "chat",
-    "serve",
-    "serve-bench",
-    "bench-bw",
-    "inspect",
-    "inspect-plan",
-    "presets",
-    "archs",
-    "caps",
-    "smoke",
-    "run-real",
-    "bench",
-    "batched-bench",
-    "verify",
-    "layer-divergence",
-    "quant-sensitivity",
-    "quantize",
-    "imatrix",
-    "gguf-split",
-    "splice-pooler",
-    "parity",
-    "perplexity",
-    "speculative",
-    "run-kimi",
-    "help",
-];
-
 // A backend feature on `frink` has to reach the server it links, or one
 // binary answers two different ways: `frink run --device metal` uses the
 // GPU and `frink serve --device metal` refuses with "built without
@@ -623,80 +537,6 @@ const _: () = assert!(
     "frink-cli's `cuda` feature must forward to frink-server: \
      cuda = [.., \"frink-server?/cuda\"]"
 );
-
-/// Root flags that take no value and may legally appear *before* a
-/// subcommand, because clap declares them `global = true`.
-const GLOBAL_FLAGS: &[&str] = &["--allow-multiple-instances"];
-
-/// Rewrite `frink -m …` into `frink run -m …` so llama.cpp-style
-/// top-level flags work without typing the `run` subcommand.
-fn rewrite_llama_style_argv(args: Vec<String>) -> Vec<String> {
-    let args: Vec<String> = args
-        .into_iter()
-        .map(|arg| match arg.as_str() {
-            "-ngl" => "--n-gpu-layers".into(),
-            "-dev" => "--device".into(),
-            // llama.cpp's parser is hand-written, so `-hf` is ONE
-            // token. clap reads it as `-h` plus `f` and prints help,
-            // which is what `frink serve -hf repo:Q4_K_M` did: it
-            // looked like the flag did not exist.
-            "-hf" => "--hf-repo".into(),
-            "-hff" => "--hf-file".into(),
-            // `llama-batched-bench`'s own spellings, for `batched-bench`.
-            "-npp" => "--n-pp".into(),
-            "-ntg" => "--n-tg".into(),
-            "-npl" => "--n-pl".into(),
-            "-pps" => "--pp-shared".into(),
-            "-tgs" => "--tg-separate".into(),
-            "-ub" => "--ubatch-size".into(),
-            "-kvu" => "--kv-unified".into(),
-            "-fa" => "--flash-attn".into(),
-            "-tb" => "--threads-batch".into(),
-            // llama.cpp 0.4's `-st` / `--single-turn`. Like `-hf` it is
-            // one token to its hand-written parser and two short flags
-            // to clap, and `-s` is already `--seed` here, so it cannot
-            // be a clap short at all.
-            //
-            // It does NOT mean `--no-cnv`: `-st` runs the conversation
-            // for one turn with the chat template applied, where
-            // `--no-cnv` skips the template entirely. An early version
-            // of this row mapped them together and changed the answer.
-            "-st" => "--single-turn".into(),
-            _ => arg,
-        })
-        .collect();
-    if args.len() < 2 {
-        return args;
-    }
-    // A `global = true` flag is allowed to precede the subcommand it
-    // applies to, so `frink --allow-multiple-instances serve` has to
-    // find `serve` at position 2. Without this skip the rewriter sees a
-    // flag, assumes llama.cpp style, and produces `frink run
-    // --allow-multiple-instances serve …`, which dies on "unexpected
-    // argument 'serve'". Only value-less root flags belong in this list
-    // -- one that took a value would make position 2 its value, not a
-    // subcommand.
-    let first_word = args
-        .iter()
-        .skip(1)
-        .position(|a| !GLOBAL_FLAGS.contains(&a.as_str()))
-        .map(|offset| offset + 1)
-        .unwrap_or(1);
-    let first = args[first_word].as_str();
-    if SUBCOMMANDS.contains(&first)
-        || first == "-h"
-        || first == "--help"
-        || first == "-V"
-        || first == "--version"
-    {
-        return args;
-    }
-    let mut out = Vec::with_capacity(args.len() + 1);
-    out.push(args[0].clone());
-    out.push("run".into());
-    out.extend(args.into_iter().skip(1));
-    out
-}
 
 /// Registers this process in the instance registry when the command is
 /// about to load a model, and refuses to start if another live frink
@@ -741,16 +581,11 @@ fn instance_target(command: &Commands) -> Option<(&'static str, Option<String>)>
         // not a timing, so `--allow-multiple-instances` costs nothing but
         // the words.
         Commands::Perplexity { model, .. } => Some(("perplexity", Some(model.clone()))),
-        Commands::Bench {
-            model,
-            suite,
-            render,
-            ..
-        } => {
-            if *suite || *render || model.is_none() {
+        Commands::Bench(args) => {
+            if args.suite || args.render || args.list_devices || args.model.is_none() {
                 return None;
             }
-            Some(("bench", model.clone()))
+            Some(("bench", args.model.clone()))
         }
         Commands::BatchedBench(args) => Some(("batched-bench", Some(args.model.clone()))),
         Commands::Smoke { preset, .. } => Some(("smoke", Some(preset.clone()))),
@@ -787,7 +622,12 @@ fn claim_instance(cli: &Cli) -> anyhow::Result<Option<frink_core::instance::Inst
 fn main() -> anyhow::Result<()> {
     init_rayon_threads();
     tracing_subscriber::fmt::init();
-    let cli = Cli::parse_from(rewrite_llama_style_argv(std::env::args().collect()));
+    let argv = argv::rewrite_llama_style_argv(std::env::args().collect()).unwrap_or_else(|e| {
+        argv::built_cli()
+            .error(clap::error::ErrorKind::UnknownArgument, e)
+            .exit()
+    });
+    let cli = argv::parse(argv).unwrap_or_else(|e| e.exit());
 
     // BEFORE `claim_instance`, and that ordering is the whole point.
     //
@@ -801,25 +641,21 @@ fn main() -> anyhow::Result<()> {
     // "Metal"` next to `backend: "cpu"` without anything comparing the
     // two (#126).
     match &cli.command {
-        Commands::Bench {
-            threads,
-            n_gpu_layers,
-            suite,
-            render,
-            ..
-        } => {
+        Commands::Bench(args) => {
             // `--suite` and `--render` do not benchmark in THIS process:
             // the suite spawns a child per entry and render only reads
             // receipts, so applying a backend here would pin the parent
             // to one backend for children that each want their own.
-            if !suite && !render {
-                bench_model::apply_env(*threads, *n_gpu_layers)?;
+            if !args.suite && !args.render && !args.list_devices {
+                bench_model::apply_env(args.threads, args.n_gpu_layers, args.model.as_deref())?;
             }
         }
         // Same ordering constraint, same function: the batched bench
         // writes the same kind of receipt and is refused the same way
         // when the label and the backend disagree.
-        Commands::BatchedBench(args) => bench_model::apply_env(args.threads, args.n_gpu_layers)?,
+        Commands::BatchedBench(args) => {
+            bench_model::apply_env(args.threads, args.n_gpu_layers, Some(&args.model))?
+        }
         _ => {}
     }
 
@@ -910,6 +746,15 @@ fn main() -> anyhow::Result<()> {
             let fit = report.auto_context(ctx_cap);
             println!("  {fit}");
             println!("  {}", budget.caveat());
+            if let Ok(file) = ShardedGguf::open(&path) {
+                let tensors: Vec<_> = file
+                    .tensors()
+                    .map(|(_, t)| (t.name.as_str(), t.dtype))
+                    .collect();
+                for line in caps::plan_lines(&tensors, backend) {
+                    println!("{line}");
+                }
+            }
             if strict {
                 if let Err(e) = report.check_strict() {
                     eprintln!("{e}");
@@ -944,40 +789,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{report}");
             }
         }
-        Commands::Caps => {
-            let profile = frink_cuda::HardwareProfile::detect();
-            println!("Hardware capabilities (detected, not assumed):");
-            println!("  CPU logical cores : {}", profile.cpu_logical_cores);
-            if profile.host_ram_total_bytes > 0 {
-                println!(
-                    "  Host RAM total    : {:.2} GiB",
-                    profile.host_ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-            } else {
-                println!("  Host RAM total    : could not detect (non-Linux host?)");
-            }
-            println!("  SIMD              : {}", profile.simd.label());
-            println!(
-                "    avx2={} avx512f={} fma={} neon={}",
-                profile.simd.avx2, profile.simd.avx512f, profile.simd.fma, profile.simd.neon
-            );
-            if profile.cuda_available {
-                println!(
-                    "  CUDA              : {} device(s), first = {:?}, {:.2} GiB VRAM",
-                    profile.cuda_device_count,
-                    profile.cuda_device_name,
-                    profile.cuda_vram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-            } else {
-                println!("  CUDA              : not available (no device found, or built without --features cuda)");
-            }
-            let metal = frink_metal::MetalProfile::detect();
-            if metal.available {
-                println!("  Metal             : {:?}", metal.device_name);
-            } else {
-                println!("  Metal             : not available (no device found, or built without --features metal)");
-            }
-        }
+        Commands::Caps { kernels, write } => caps::run(kernels, write)?,
         Commands::Smoke { preset, steps } => {
             let base_cfg = preset_by_name(&preset)?;
             println!(
@@ -1087,6 +899,8 @@ fn main() -> anyhow::Result<()> {
             top_k,
             dumper,
             dump_logits,
+            tokens,
+            decode_steps,
         } => {
             return parity::run(parity::ParityArgs {
                 model,
@@ -1095,6 +909,8 @@ fn main() -> anyhow::Result<()> {
                 top_k,
                 dumper,
                 dump_logits,
+                tokens,
+                decode_steps,
             });
         }
         Commands::Perplexity {
@@ -1149,314 +965,7 @@ fn main() -> anyhow::Result<()> {
                 top,
             });
         }
-        Commands::Bench {
-            model,
-            n_prompt,
-            n_gen,
-            reps,
-            threads,
-            n_gpu_layers,
-            ctx_size,
-            hidden,
-            ffn_dim,
-            iters,
-            compare,
-            suite,
-            render,
-            id,
-            backend,
-            fit_host,
-            skip_missing,
-            bench_dir,
-            suite_id,
-            backend_label,
-            receipt,
-            max_load,
-        } => {
-            if render {
-                return bench_render::render(std::path::Path::new(&bench_dir));
-            }
-            if suite {
-                return bench_suite::run_suite(bench_suite::SuiteArgs {
-                    bench_dir: bench_dir.into(),
-                    n_prompt,
-                    n_gen,
-                    reps,
-                    only_id: id,
-                    only_backend: backend,
-                    fit_host,
-                    skip_missing,
-                    max_load,
-                });
-            }
-            if let Some(model) = model {
-                // Already applied above, before `claim_instance` could
-                // freeze the backend. Kept as a no-op call rather than
-                // deleted so a future caller of this arm cannot get an
-                // unconfigured process.
-                bench_model::apply_env(threads, n_gpu_layers)?;
-                return bench_model::run(bench_model::BenchArgs {
-                    model,
-                    n_prompt,
-                    n_gen,
-                    reps,
-                    ctx_size,
-                    compare,
-                    backend: backend_label,
-                    receipt: receipt.map(Into::into),
-                    id: suite_id,
-                    max_load,
-                });
-            }
-            use frink_core::weight_matrix::{QuantKind, WeightBytes, WeightMatrix};
-            use std::time::Instant;
-
-            println!(
-                "=== matvec microbenchmark: [{ffn_dim} x {hidden}] weight, {iters} iterations ==="
-            );
-
-            let mut rng_state: u64 = 12345;
-            let mut next = || {
-                rng_state ^= rng_state << 13;
-                rng_state ^= rng_state >> 7;
-                rng_state ^= rng_state << 17;
-                ((rng_state >> 40) as f32 / (1u64 << 24) as f32) - 0.5
-            };
-            let weights: Vec<f32> = (0..ffn_dim * hidden).map(|_| next() * 0.1).collect();
-            let x: Vec<f32> = (0..hidden).map(|_| next() * 0.1).collect();
-
-            let f32_matrix = WeightMatrix::F32(frink_core::tensor::Tensor::new(
-                weights.clone(),
-                vec![ffn_dim, hidden],
-            ));
-            let mut packed = Vec::new();
-            for row in weights.chunks(hidden) {
-                packed.extend(frink_quant::quantize_q8_0(row));
-            }
-            let packed_for_scalar_bench = packed.clone();
-            let quant_matrix = WeightMatrix::Quantized {
-                data: WeightBytes::Owned(packed),
-                rows: ffn_dim,
-                cols: hidden,
-                kind: QuantKind::Q8_0,
-            };
-
-            // warm-up
-            let _ = f32_matrix.apply(&x);
-            let _ = quant_matrix.apply(&x);
-
-            let t0 = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(f32_matrix.apply(&x));
-            }
-            let f32_elapsed = t0.elapsed();
-
-            let t1 = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(quant_matrix.apply(&x));
-            }
-            let quant_elapsed = t1.elapsed();
-
-            // This isolates the *scalar* kernel cost as a single-
-            // threaded direct loop, to compare against "dispatched"
-            // below (which goes through WeightMatrix::apply, i.e. both
-            // rayon row-parallelism AND AVX2/FMA SIMD dispatch if the
-            // host supports it). On an AVX2-capable x86_64 host, most
-            // of that gap is genuinely SIMD; on an ARM host without a
-            // NEON kernel for this format, the "dispatched" path
-            // silently falls back to the same scalar kernel per row,
-            // so the entire gap here is multi-core parallelism, not
-            // SIMD -- confirmed by comparing this against the explicit
-            // 1-thread-vs-all-cores section below, which isolates
-            // parallelism on its own. Don't read this ratio as "SIMD
-            // speedup" without checking which case you're in.
-            let row_bytes =
-                (hidden / frink_quant::Q8_0_BLOCK_ELEMS) * frink_quant::Q8_0_BLOCK_BYTES;
-            let scalar_rows: Vec<&[u8]> = packed_for_scalar_bench.chunks_exact(row_bytes).collect();
-            let t2 = Instant::now();
-            for _ in 0..iters {
-                let mut acc = 0f32;
-                for row in &scalar_rows {
-                    acc += frink_quant::dot_q8_0_f32_scalar(row, &x);
-                }
-                std::hint::black_box(acc);
-            }
-            let scalar_elapsed = t2.elapsed();
-
-            let f32_bytes = f32_matrix.resident_bytes();
-            let quant_bytes = quant_matrix.resident_bytes();
-
-            println!(
-                "  f32 dequant-resident matmul : {:>8.3} ms/call  ({} bytes resident)",
-                f32_elapsed.as_secs_f64() * 1000.0 / iters as f64,
-                f32_bytes
-            );
-            println!(
-                "  fused Q8_0 (scalar, no SIMD, single-threaded) : {:>8.3} ms/call",
-                scalar_elapsed.as_secs_f64() * 1000.0 / iters as f64
-            );
-            println!(
-                "  fused Q8_0 (dispatched, row-parallel)          : {:>8.3} ms/call  ({} bytes resident)  <- rayon row parallelism + AVX2/FMA (x86_64) or NEON (aarch64) if host supports it",
-                quant_elapsed.as_secs_f64() * 1000.0 / iters as f64,
-                quant_bytes
-            );
-            println!(
-                "  dispatched is {:.2}x the single-threaded scalar path's time (see \"multi-core scaling\" below to separate the SIMD and parallelism contributions to this number)",
-                quant_elapsed.as_secs_f64() / scalar_elapsed.as_secs_f64()
-            );
-            println!(
-                "  memory reduction: {:.2}x smaller resident",
-                f32_bytes as f64 / quant_bytes as f64
-            );
-            println!(
-                "  speed ratio: fused Q8_0 (dispatched) is {:.2}x the f32 path's time (<1.0 = fused is faster; with AVX2+FMA this is usually both faster AND smaller, not a memory-for-speed tradeoff)",
-                quant_elapsed.as_secs_f64() / f32_elapsed.as_secs_f64()
-            );
-
-            println!("\n=== Q4_0 matvec microbenchmark: [{ffn_dim} x {hidden}] weight, {iters} iterations ===");
-            let q4_row_bytes =
-                (hidden / frink_quant::Q4_0_BLOCK_ELEMS) * frink_quant::Q4_0_BLOCK_BYTES;
-            let mut q4_packed = Vec::with_capacity(ffn_dim * q4_row_bytes);
-            for row in weights.chunks(hidden) {
-                for block in row.chunks(frink_quant::Q4_0_BLOCK_ELEMS) {
-                    let amax = block.iter().fold(0f32, |a, &b| a.max(b.abs()));
-                    let scale = if amax == 0.0 { 1.0 } else { amax / 7.0 };
-                    q4_packed.extend_from_slice(&half::f16::from_f32(scale).to_le_bytes());
-                    for i in 0..16 {
-                        let lo = ((block.get(i).copied().unwrap_or(0.0) / scale)
-                            .round()
-                            .clamp(-8.0, 7.0) as i32
-                            + 8) as u8;
-                        let hi = ((block.get(i + 16).copied().unwrap_or(0.0) / scale)
-                            .round()
-                            .clamp(-8.0, 7.0) as i32
-                            + 8) as u8;
-                        q4_packed.push(lo | (hi << 4));
-                    }
-                }
-            }
-            let q4_rows: Vec<&[u8]> = q4_packed.chunks_exact(q4_row_bytes).collect();
-
-            let t3 = Instant::now();
-            for _ in 0..iters {
-                let mut acc = 0f32;
-                for row in &q4_rows {
-                    acc += frink_quant::dot_q4_0_f32_scalar(row, &x);
-                }
-                std::hint::black_box(acc);
-            }
-            let q4_scalar_elapsed = t3.elapsed();
-
-            // Route through WeightMatrix::apply, not a direct
-            // dot_q4_0_f32 loop -- same rayon row-parallel dispatch the
-            // Q8_0 "dispatched" number above uses. An earlier version of
-            // this benchmark called dot_q4_0_f32 directly in a plain
-            // sequential loop here, which meant it never exercised
-            // multi-core parallelism at all and wasn't measuring the
-            // same thing as the Q8_0 number above -- caught by actually
-            // comparing RAYON_NUM_THREADS=1 vs default on real multi-
-            // core hardware and finding the two numbers didn't move
-            // together the way they should have.
-            let q4_quant_matrix = WeightMatrix::Quantized {
-                data: WeightBytes::Owned(q4_packed.clone()),
-                rows: ffn_dim,
-                cols: hidden,
-                kind: QuantKind::Q4_0,
-            };
-            let _ = q4_quant_matrix.apply(&x); // warm-up
-            let t4 = Instant::now();
-            for _ in 0..iters {
-                std::hint::black_box(q4_quant_matrix.apply(&x));
-            }
-            let q4_dispatched_elapsed = t4.elapsed();
-
-            println!(
-                "  Q4_0 (scalar, no SIMD, single-threaded) : {:>8.3} ms/call  ({} bytes resident)",
-                q4_scalar_elapsed.as_secs_f64() * 1000.0 / iters as f64,
-                q4_packed.len()
-            );
-            println!(
-                "  Q4_0 (dispatched, row-parallel)          : {:>8.3} ms/call  <- rayon row parallelism + AVX2/FMA (x86_64) or NEON (aarch64) if host supports it",
-                q4_dispatched_elapsed.as_secs_f64() * 1000.0 / iters as f64
-            );
-            println!(
-                "  Q4_0 dispatched is {:.2}x the single-threaded scalar path's time",
-                q4_dispatched_elapsed.as_secs_f64() / q4_scalar_elapsed.as_secs_f64()
-            );
-            println!(
-                "  Q4_0 memory reduction vs f32: {:.2}x smaller resident",
-                f32_bytes as f64 / q4_packed.len() as f64
-            );
-
-            println!("\n=== multi-core scaling: fused Q8_0 matvec, [{ffn_dim} x {hidden}], {iters} iterations ===");
-            let available_cores = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            let single_thread_pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build()
-                .expect("building a 1-thread rayon pool must not fail");
-            let t5 = Instant::now();
-            single_thread_pool.install(|| {
-                for _ in 0..iters {
-                    std::hint::black_box(quant_matrix.apply(&x));
-                }
-            });
-            let single_thread_elapsed = t5.elapsed();
-            let single_thread_ms = single_thread_elapsed.as_secs_f64() * 1000.0 / iters as f64;
-            let all_cores_ms = quant_elapsed.as_secs_f64() * 1000.0 / iters as f64;
-            println!("  available cores (std::thread::available_parallelism): {available_cores}");
-            println!("  1 thread            : {single_thread_ms:>8.3} ms/call");
-            println!("  {available_cores} threads (default) : {all_cores_ms:>8.3} ms/call");
-            println!(
-                "  measured speedup: {:.2}x (ideal linear speedup would be {:.2}x for {} cores)",
-                single_thread_ms / all_cores_ms,
-                available_cores,
-                available_cores
-            );
-
-            println!("\n=== end-to-end decode throughput (synthetic weights, capped layer count for sandbox runtime) ===");
-            for (name, preset) in [
-                ("glm-5.2", glm_5_2()),
-                ("deepseek-v4-pro", deepseek_v4_pro()),
-                ("kimi-k3", kimi_k3()),
-            ] {
-                let mut cfg = preset;
-                cfg.hidden_dim = 512;
-                cfg.n_heads = 8;
-                cfg.n_kv_heads = 2;
-                cfg.head_dim = 64;
-                cfg.moe.hidden_dim = 512;
-                cfg.moe.n_experts = cfg.moe.n_experts.min(32);
-                cfg.moe.expert_ffn_dim = 512;
-                let n_layers = 4;
-                let vocab = 256;
-
-                let decoder = Decoder::new_random_small(cfg, n_layers, vocab);
-                let mut caches: Vec<frink_core::cache::KvCache> = decoder.config.new_kv_caches();
-
-                let n_tokens = 32;
-                let t0 = Instant::now();
-                for pos in 0..n_tokens {
-                    std::hint::black_box(decoder.forward_token(pos % vocab, pos, &mut caches));
-                }
-                let elapsed = t0.elapsed();
-                let toks_per_sec = n_tokens as f64 / elapsed.as_secs_f64();
-                println!(
-                    "  {name:<16} {n_layers} layers, hidden=512, {} experts ({} active): {:>7.1} tok/s ({:.2} ms/token, CPU reference, single thread pool)",
-                    decoder.config.moe.n_experts,
-                    decoder.config.moe.n_experts_active,
-                    toks_per_sec,
-                    elapsed.as_secs_f64() * 1000.0 / n_tokens as f64
-                );
-            }
-            println!(
-                "\nNote: these are CPU-reference numbers on this sandbox's vCPUs, not GPU numbers."
-            );
-            println!("They demonstrate the pipeline's relative cost structure (attention vs MoE FFN, memory");
-            println!("footprint of quantized vs f32 weights), not absolute performance on target hardware");
-            println!("like a DGX Spark. See benchmarks/RESULTS.md for methodology and caveats.");
-        }
+        Commands::Bench(args) => return args.run(),
         Commands::Speculative {
             preset,
             prompt,
@@ -1653,388 +1162,4 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod cli_tests {
-    use super::{rewrite_llama_style_argv, SUBCOMMANDS};
-
-    fn rewrite(argv: &[&str]) -> Vec<String> {
-        rewrite_llama_style_argv(argv.iter().copied().map(String::from).collect())
-    }
-
-    /// `try_parse_from`, not `parse_from`: clap's non-`try` parser exits
-    /// the *process* on a parse error, which takes the whole test binary
-    /// down with it and reports as "test exited abnormally" instead of
-    /// naming the test that broke.
-    fn parse_cli(argv: Vec<String>) -> super::Cli {
-        use clap::Parser;
-        super::Cli::try_parse_from(&argv)
-            .unwrap_or_else(|e| panic!("`{}` did not parse: {e}", argv.join(" ")))
-    }
-
-    /// Every subcommand clap knows about has to be in `SUBCOMMANDS`, or
-    /// the rewriter turns it into an implicit `run` and the user gets a
-    /// completion instead of the command they typed. This is a silent
-    /// failure -- no error, no clue -- so it is asserted structurally
-    /// against clap's own list rather than against a second hand-written
-    /// one that can drift the same way.
-    #[test]
-    fn every_clap_subcommand_survives_the_argv_rewriter() {
-        use clap::CommandFactory;
-        for sub in super::Cli::command().get_subcommands() {
-            let name = sub.get_name().to_string();
-            assert!(
-                SUBCOMMANDS.contains(&name.as_str()),
-                "subcommand `{name}` is missing from SUBCOMMANDS: `frink {name} …` would be \
-                 rewritten into an implicit `run`"
-            );
-            let rewritten = rewrite(&["frink", &name, "-m", "model.gguf"]);
-            assert_eq!(
-                rewritten[1], name,
-                "`frink {name}` must reach clap as `{name}`, not as `{}`",
-                rewritten[1]
-            );
-        }
-    }
-
-    /// `frink quantize --help` and `Target::ALL` are two structures that
-    /// must agree about which targets write, and for three PRs they did
-    /// not: the help said "Q8_0, plus Q4_K_S / Q4_K_M with --pure" while
-    /// the code wrote six targets, mixes included. So the help is checked
-    /// against the table: every target the policy accepts is named in
-    /// the subcommand's long help, and `--imatrix` is mentioned because
-    /// the encoders take one.
-    #[test]
-    fn the_quantize_help_names_every_target_the_policy_accepts() {
-        use clap::CommandFactory;
-        let cmd = super::Cli::command();
-        let quantize = cmd
-            .get_subcommands()
-            .find(|c| c.get_name() == "quantize")
-            .expect("quantize subcommand");
-        let help = quantize
-            .get_long_about()
-            .map(|s| s.to_string())
-            .expect("quantize has a long help");
-        for target in crate::quantize::policy::Target::ALL {
-            assert!(
-                help.contains(target.name()),
-                "quantize's help does not mention {}, which `--type` accepts",
-                target.name()
-            );
-        }
-        assert!(
-            help.contains("--imatrix"),
-            "quantize's help does not mention --imatrix"
-        );
-        assert!(
-            !help.contains("with `--pure`"),
-            "quantize's help still ties the K-quants to --pure"
-        );
-    }
-
-    /// The named case of the above, kept explicit because `serve` is the
-    /// one that would start a *completion* while the user waited for an
-    /// HTTP server: it prints tokens and exits 0, so a supervisor
-    /// watching for the `frink.server.ready` line just hangs.
-    #[test]
-    fn serve_is_not_rewritten_into_an_implicit_run() {
-        assert_eq!(
-            rewrite(&["frink", "serve", "-m", "model.gguf", "--port", "0"]),
-            ["frink", "serve", "-m", "model.gguf", "--port", "0"]
-        );
-    }
-
-    /// The rewriter still has to translate llama.cpp's multi-character
-    /// short options *inside* a `serve` invocation -- `frink-server`
-    /// accepted `-ngl`/`-dev`, so `frink serve` has to as well.
-    #[test]
-    fn serve_keeps_the_llama_style_short_options() {
-        assert_eq!(
-            rewrite(&["frink", "serve", "-ngl", "all", "-dev", "metal"]),
-            [
-                "frink",
-                "serve",
-                "--n-gpu-layers",
-                "all",
-                "--device",
-                "metal"
-            ]
-        );
-    }
-
-    /// `serve` must not claim a registry slot from here: the server
-    /// claims its own as `"server"`, and a second guard on the same pid
-    /// would deregister the live server when it dropped.
-    #[test]
-    fn serve_does_not_claim_the_instance_registry_from_the_cli_side() {
-        let cli = parse_cli(rewrite(&["frink", "serve", "-m", "model.gguf"]));
-        assert!(
-            super::instance_target(&cli.command).is_none(),
-            "`frink serve` must leave the registry to frink_server::run_server"
-        );
-
-        // The other half of the invariant: a completion run still
-        // registers, so this test fails if `instance_target` were
-        // "fixed" by making it return None for everything.
-        let cli = parse_cli(rewrite(&["frink", "-m", "model.gguf"]));
-        assert_eq!(
-            super::instance_target(&cli.command).map(|(c, _)| c),
-            Some("run")
-        );
-    }
-
-    /// Flag parity with the standalone binary, asserted against
-    /// `ServerArgs` itself rather than against the documented subset:
-    /// `docs/CLI.md` lists eight of the eleven flags and reads as
-    /// exhaustive, so a `serve` written from the docs would ship a
-    /// downgrade nobody noticed.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn serve_exposes_every_flag_frink_server_has() {
-        use clap::CommandFactory;
-        let ids = |cmd: &clap::Command| -> std::collections::BTreeSet<String> {
-            cmd.get_arguments()
-                .map(|a| a.get_id().to_string())
-                .filter(|id| id != "help" && id != "version")
-                .collect()
-        };
-        let standalone = ids(&frink_server::ServerArgs::command());
-        let root = super::Cli::command();
-        let serve = ids(root.find_subcommand("serve").expect("serve subcommand"));
-        assert!(
-            standalone.is_subset(&serve),
-            "`frink serve` is missing flags `frink-server` accepts: {:?}",
-            standalone.difference(&serve).collect::<Vec<_>>()
-        );
-    }
-
-    /// Parity of *values*, not just of flag names: every flag has to
-    /// land in the same field with the same value it would have reached
-    /// through `frink-server`'s own argv path. `--port 0` is in here on
-    /// purpose -- it is a request for a kernel-assigned port, and a
-    /// front end that dropped it would silently serve on 8383.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn serve_parses_the_same_command_line_as_frink_server() {
-        use clap::Parser;
-        let flags = [
-            "-m",
-            "model.gguf",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "0",
-            "-t",
-            "4",
-            "--device",
-            "metal",
-            "--n-gpu-layers",
-            "all",
-            "--mcp-config",
-            "mcp.json",
-            "--exit-on-stdin-close",
-            "--allow-multiple-instances",
-        ];
-
-        let standalone =
-            frink_server::ServerArgs::try_parse_from(std::iter::once("frink-server").chain(flags))
-                .expect("frink-server accepts this command line");
-
-        let mut argv = vec!["frink".to_string(), "serve".to_string()];
-        argv.extend(flags.iter().map(|f| f.to_string()));
-        let cli = parse_cli(rewrite_llama_style_argv(argv));
-        let super::Commands::Serve(via_cli) = cli.command else {
-            panic!("`frink serve …` did not parse as the serve subcommand");
-        };
-
-        assert_eq!(via_cli, standalone);
-    }
-
-    /// `--allow-multiple-instances` is declared `global = true`, so both
-    /// sides of the subcommand are legal places to type it and both have
-    /// to reach the server -- if the leading form silently did nothing,
-    /// the server would refuse to start on a host where the operator
-    /// had already said a second instance was fine.
-    ///
-    /// Two mechanisms make it work, one of them not ours: the argv
-    /// rewriter must not mistake the leading flag for llama.cpp-style
-    /// argv (it used to, see the test below), and clap propagates the
-    /// root global's *value* into the subcommand's own flag because both
-    /// carry the id `allow_multiple_instances`. That second half is
-    /// clap's behaviour, not a guarantee we wrote, which is exactly why
-    /// it is pinned here: rename either side and this test fails while
-    /// nothing else would.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn allow_multiple_instances_reaches_serve_from_either_side_of_the_subcommand() {
-        use clap::Parser;
-        let expected = frink_server::ServerArgs::try_parse_from([
-            "frink-server",
-            "-m",
-            "model.gguf",
-            "--allow-multiple-instances",
-        ])
-        .unwrap();
-
-        for argv in [
-            &[
-                "frink",
-                "serve",
-                "-m",
-                "model.gguf",
-                "--allow-multiple-instances",
-            ][..],
-            &[
-                "frink",
-                "--allow-multiple-instances",
-                "serve",
-                "-m",
-                "model.gguf",
-            ][..],
-        ] {
-            let cli = parse_cli(rewrite(argv));
-            assert!(
-                cli.allow_multiple_instances,
-                "`{}` did not set the root flag",
-                argv.join(" ")
-            );
-            let super::Commands::Serve(args) = cli.command else {
-                panic!("`{}` did not parse as the serve subcommand", argv.join(" "));
-            };
-            assert_eq!(
-                args,
-                expected,
-                "`{}` did not reach the server as an opt-in",
-                argv.join(" ")
-            );
-        }
-    }
-
-    /// The rewriter half of the above, stated on its own: a global flag
-    /// before the subcommand must not turn the subcommand into an
-    /// argument of an implicit `run`.
-    #[test]
-    fn a_global_flag_before_a_subcommand_does_not_trigger_the_run_rewrite() {
-        assert_eq!(
-            rewrite(&[
-                "frink",
-                "--allow-multiple-instances",
-                "serve",
-                "-m",
-                "x.gguf"
-            ]),
-            [
-                "frink",
-                "--allow-multiple-instances",
-                "serve",
-                "-m",
-                "x.gguf"
-            ]
-        );
-        // …and llama.cpp-style argv behind the same flag still gets it.
-        assert_eq!(
-            rewrite(&["frink", "--allow-multiple-instances", "-m", "x.gguf"]),
-            ["frink", "run", "--allow-multiple-instances", "-m", "x.gguf"]
-        );
-    }
-
-    /// `--list-devices` is the flag that is easiest to lose, because it
-    /// exits before anything is served and so no smoke test covers it.
-    #[cfg(feature = "serve")]
-    #[test]
-    fn serve_accepts_list_devices_on_its_own() {
-        use clap::Parser;
-        let cli = parse_cli(rewrite(&["frink", "serve", "--list-devices"]));
-        let super::Commands::Serve(args) = cli.command else {
-            panic!("not the serve subcommand");
-        };
-        assert_eq!(
-            args,
-            frink_server::ServerArgs::try_parse_from(["frink-server", "--list-devices"]).unwrap()
-        );
-    }
-
-    /// Without the feature the subcommand still exists and still
-    /// swallows the server's flags, so the user gets the sentence that
-    /// names the fix instead of clap's "unrecognized subcommand".
-    #[cfg(not(feature = "serve"))]
-    #[test]
-    fn serve_without_the_feature_explains_itself_instead_of_erroring_out_of_clap() {
-        let cli = parse_cli(rewrite(&["frink", "serve", "-m", "model.gguf"]));
-        let super::Commands::Serve { args } = cli.command else {
-            panic!("`frink serve …` did not parse as the serve subcommand");
-        };
-        assert_eq!(args, ["-m", "model.gguf"]);
-        assert!(super::SERVE_FEATURE_MISSING.contains("serve is on by default"));
-    }
-
-    #[test]
-    fn rewrites_llama_multi_character_short_options() {
-        let args = ["frink", "-m", "model.gguf", "-dev", "none", "-ngl", "0"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert_eq!(
-            rewrite_llama_style_argv(args),
-            [
-                "frink",
-                "run",
-                "-m",
-                "model.gguf",
-                "--device",
-                "none",
-                "--n-gpu-layers",
-                "0"
-            ]
-        );
-    }
-
-    /// **`-st` is not `--no-cnv`.**
-    ///
-    /// llama.cpp 0.4 dropped `--no-cnv` and offers `-st` /
-    /// `--single-turn`, and the two are easy to read as synonyms.
-    /// They are not: `-st` runs the CONVERSATION for one turn, with
-    /// the chat template applied, where `--no-cnv` skips the template
-    /// entirely.
-    ///
-    /// An early version of that rewriter row mapped them together,
-    /// and it changed the answer -- measured on the same prompt and
-    /// the same file, the templated reply is "The capital of France
-    /// is Paris." and the raw one continues " Paris\nThe capital city
-    /// of France is...". Nothing would have caught that but reading
-    /// two outputs side by side, which is why it is a test now.
-    #[test]
-    fn single_turn_keeps_the_chat_template() {
-        let out = rewrite(&["frink", "-m", "model.gguf", "-p", "hi", "-st"]);
-        assert!(
-            out.contains(&"--single-turn".to_string()),
-            "-st must reach the single-turn flag: {out:?}"
-        );
-        assert!(
-            !out.contains(&"--no-cnv".to_string()),
-            "-st must NOT become --no-cnv: it keeps the chat template, \
-             and mapping the two together changes the generated text: {out:?}"
-        );
-    }
-
-    /// And the two flags stay distinct at the clap layer, so neither
-    /// is an alias of the other.
-    #[test]
-    fn single_turn_and_no_cnv_are_separate_flags() {
-        use clap::CommandFactory;
-        let run = crate::Cli::command();
-        let run = run
-            .get_subcommands()
-            .find(|c| c.get_name() == "run")
-            .expect("run subcommand");
-        let names: Vec<&str> = run
-            .get_arguments()
-            .filter_map(|a| a.get_long())
-            .filter(|l| *l == "no-cnv" || *l == "single-turn")
-            .collect();
-        assert_eq!(
-            names.len(),
-            2,
-            "both flags must exist independently, found {names:?}"
-        );
-    }
-}
+mod cli_tests;

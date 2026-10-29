@@ -61,17 +61,11 @@
 /// [`crate::rope_finetuned::ROPE_GATED_ON_FINETUNED`] follows for
 /// `granitehybrid` still applies: a row this list does not serve is
 /// not listed.
-pub const CLAMPED_QKV_ARCHITECTURES: &[&str] = &["olmo", "dbrx", "mpt"];
-
-/// The subset of [`CLAMPED_QKV_ARCHITECTURES`] whose loader reads the
-/// key as REQUIRED.
 ///
-/// `dbrx.cpp:5` is `ml.get_key(LLM_KV_ATTENTION_CLAMP_KQV,
-/// hparams.f_clamp_kqv)` with no `required = false`, so llama.cpp throws
-/// on a DBRX file that omits it. `olmo.cpp:5` passes `false`. Refusing
-/// the same file llama.cpp refuses is the honest answer; defaulting it
-/// to "no clamp" would run a graph the reference cannot.
-pub const CLAMP_KQV_REQUIRED: &[&str] = &["dbrx"];
+/// `olmo` and `dbrx` (whose key is REQUIRED, `dbrx.cpp:5`) state their
+/// rows in `crate::models` (#403 steps 3 and 6). Every row left here
+/// reads the key optional.
+pub const CLAMPED_QKV_ARCHITECTURES: &[&str] = &["mpt"];
 
 /// Why a file's clamp declaration cannot be honoured.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,10 +96,28 @@ impl ClampError {
 /// zero and a negative value both mean "no clamp" there and must mean
 /// it here. Reading zero as a clamp would zero every projection.
 pub fn resolve_clamp(arch: &str, declared: Option<f32>) -> Result<Option<f32>, ClampError> {
-    if !CLAMPED_QKV_ARCHITECTURES.contains(&arch) {
+    resolve_clamp_for(
+        crate::models::ArchFacts::of(arch).scaling.clamp_kqv,
+        declared,
+    )
+}
+
+/// The row: `None` where the graph reads no clamp, `Some(required)`
+/// where it does, from [`CLAMPED_QKV_ARCHITECTURES`] alone
+/// (`ArchFacts::from_tables`).
+pub(crate) fn clamp_row_from_table(arch: &str) -> Option<bool> {
+    CLAMPED_QKV_ARCHITECTURES.contains(&arch).then_some(false)
+}
+
+/// [`resolve_clamp`] given the row (`ArchFacts`).
+pub fn resolve_clamp_for(
+    row: Option<bool>,
+    declared: Option<f32>,
+) -> Result<Option<f32>, ClampError> {
+    let Some(required) = row else {
         return Ok(None);
-    }
-    if declared.is_none() && CLAMP_KQV_REQUIRED.contains(&arch) {
+    };
+    if declared.is_none() && required {
         return Err(ClampError::MissingRequired);
     }
     Ok(declared.filter(|v| *v > 0.0))

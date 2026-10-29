@@ -47,7 +47,7 @@
 //!   extended `k`/`v` for every position, so a plain or pool-backed
 //!   cache held the whole sequence in every layer. This is what the CLI
 //!   allocates and what the server allocates on its non-paged paths, and
-//!   it is still what they do unless `FRINK_KV_WINDOW` is on -- see the
+//!   it is still what they do with `FRINK_KV_WINDOW=0` -- see the
 //!   section after next.
 //! - The paged store *can* recycle pages behind a window, but only for a
 //!   model whose every layer shares one window
@@ -70,8 +70,9 @@
 //! # ...unless the store evicts, which it now can
 //!
 //! #61 step 2 taught the contiguous `KvCache` to drop rows behind a
-//! layer's sliding window, behind `FRINK_KV_WINDOW`. So the paragraph
-//! above is still the default and no longer the only case, and the
+//! layer's sliding window, and that is now the default
+//! (`FRINK_KV_WINDOW=0` turns it off). So the paragraph above is the
+//! paged and pooled stores' case and no longer the only one, and the
 //! difference is expressed the way #33 said it had to be: **the number
 //! the store keeps belongs to the store.** [`KvResidency`] carries the
 //! per-layer windows, [`KvShape::resident_kv_bytes_for_tokens`] prices
@@ -336,8 +337,9 @@ impl KvLayout {
 /// How big one position is, times how many layers. How many positions
 /// each of those layers still HOLDS is [`KvResidency`], and it is a
 /// separate value because it is a property of the run rather than of
-/// the model: by default every layer keeps every position, and behind
-/// `FRINK_KV_WINDOW` a windowed layer does not (#61).
+/// the model: on the contiguous store a windowed layer stops growing at
+/// its window by default, and with `FRINK_KV_WINDOW=0` every layer keeps
+/// every position (#61).
 ///
 /// That is a statement about the STORES this engine allocates, not
 /// about the architectures it runs -- see the module doc, and the two
@@ -572,7 +574,7 @@ impl KvShape {
 /// [`KvShape`] answers "how big is one position, times how many layers".
 /// This answers "how many positions does each of those layers still
 /// hold", which used to be "all of them" for every layer of every model
-/// and now depends on whether `FRINK_KV_WINDOW` is on (#61).
+/// and now depends on whether the run evicts (`FRINK_KV_WINDOW`, #61).
 ///
 /// **Deliberately not a field on `KvShape`.** `KvShape` is `Copy`, is
 /// built by struct literal in more than one crate, and is the thing
@@ -734,10 +736,10 @@ pub struct KvBudget {
     pub shape: KvShape,
     /// What the stores this run allocates will really keep, per layer.
     ///
-    /// [`KvResidency::keeps_everything`] is the engine's default and
+    /// [`KvResidency::keeps_everything`] is the non-evicting engine and
     /// reproduces every number this type produced before #61.
     /// [`KvResidency::from_config`] with a live [`KvWindowPolicy`] is
-    /// what a run with `FRINK_KV_WINDOW` on must be priced against --
+    /// what an evicting run (the default) must be priced against --
     /// otherwise the store takes a saving the admission check refuses
     /// to spend, which is #33 read backwards: a context that would have
     /// fit, turned away.
@@ -920,7 +922,7 @@ pub struct ContextFit {
     /// the fit was actually decided on.
     pub kv_bytes: u64,
     /// How many layers stop growing at their window. Zero for every
-    /// model unless `FRINK_KV_WINDOW` is on, and the reason the
+    /// model with `FRINK_KV_WINDOW=0`, and the reason the
     /// division in [`Display`] stops being the whole story when it is
     /// not.
     ///
@@ -1236,8 +1238,8 @@ mod tests {
 
     /// **The same property, measured again, now that a store evicts.**
     ///
-    /// The sibling above is the default and stays the default. This is
-    /// the `FRINK_KV_WINDOW` case, and it is asserted the same way for
+    /// The sibling above is the non-evicting store. This is the
+    /// evicting one, the default, and it is asserted the same way for
     /// the same reason: by pushing real positions into real
     /// `frink_core::cache::KvCache`s, evicting them the way
     /// `Decoder::evict_layer_kv` does, and comparing the bytes they hold
@@ -1349,14 +1351,15 @@ mod tests {
         // shows up as a memory number moving rather than as nothing.
         // 5 of the 34 layers are full attention (`swa_pattern` 6) and
         // still hold every position; at 1.34 GB they are most of what is
-        // left. The 29 windowed ones hold 1475 rows each instead of
-        // 32768.
-        assert_eq!(resting, 1_692_590_080, "5.4x less than the 9.13 GB above");
+        // left. The 29 windowed ones hold 1414 rows each instead of
+        // 32768: the drain cycles between `window + reserve` (1280) and
+        // `window + slack` (1536), and 32768 lands 134 rows into it.
+        assert_eq!(resting, 1_678_098_432, "5.4x less than the 9.13 GB above");
         // The admission number prices each windowed layer at the top of
         // its cycle (`KvWindow::max_rows`, 1536 here) rather than at the
         // instantaneous `rows_after`, because `max_context` searches
         // this function and a search needs it not to fall. That costs
-        // 13,991,936 bytes -- 0.7% -- against a term that already
+        // 28,983,296 bytes, 1.5%, against a term that already
         // carries a whole layer's prompt.
         assert_eq!(
             peak, 1_962_934_272,
@@ -1585,7 +1588,8 @@ mod tests {
     /// because with eviction there is no single divisor. A search is
     /// free to be subtly wrong in a way a division cannot be, so the
     /// division stays here as the oracle: for a run where nothing
-    /// evicts -- which is every run unless `FRINK_KV_WINDOW` is on --
+    /// evicts (every run with `FRINK_KV_WINDOW=0`, and every model
+    /// with no sliding layer)
     /// the searched answer must be exactly
     /// `available / per_token_kv`, at every budget, not just at the
     /// round ones.
@@ -1660,7 +1664,7 @@ mod tests {
     ///
     /// #61 step 2 taught the store to evict and left the budget
     /// pricing every layer at every position, so a Gemma-3-shaped model
-    /// with `FRINK_KV_WINDOW` on kept 5x less KV than `-c auto` was
+    /// evicting kept 5x less KV than `-c auto` was
     /// dividing by, and the context it could really carry was refused.
     /// The two arms here differ ONLY in the policy the residency was
     /// built from.

@@ -57,7 +57,9 @@
 //!    a `rope_freqs.weight` (Step-3.5-Flash's llama3 scaling) reaches
 //!    the full layers only, and the sliding layers divide by nothing.
 //!    Measured: `grep -l "is_swa ? nullptr" src/models/*.cpp` is
-//!    `step35.cpp` and `gemma4-assistant.cpp` (its own engine).
+//!    `step35.cpp` and `gemma4-assistant.cpp` (its own engine); at the
+//!    `604cc430` pin `lfm3.cpp:113` spells the same rule as
+//!    `hparams.is_swa(il) ? nullptr : model.layers[il].rope_freqs`.
 //!    [`swa_layers_drop_rope_factors`] is the table, and the loader
 //!    sizes `RopeFreqs::full` to the full layers' width and
 //!    `RopeFreqs::swa` to all ones at the sliding layers' width for it.
@@ -70,8 +72,13 @@
 /// scaling switched off, or `None` when its sliding layers inherit the
 /// model's scaling like everyone else's.
 pub fn swa_layers_unscaled_rope(arch: &str) -> Option<&'static str> {
+    crate::models::ArchFacts::of(arch).swa.layers_unscaled_rope
+}
+
+/// [`swa_layers_unscaled_rope`] from this table alone (`olmo2` is in
+/// `crate::models::olmo2`).
+pub(crate) fn swa_layers_unscaled_rope_from_table(arch: &str) -> Option<&'static str> {
     match arch {
-        "olmo2" => Some("olmo2.cpp:120-134"),
         "mellum" => Some("mellum.cpp:128-142"),
         "laguna" => Some("laguna.cpp:48,181-193"),
         _ => None,
@@ -97,12 +104,35 @@ pub fn full_layers_rotate_half(arch: &str) -> Option<&'static str> {
 /// (`crate::rope_layers::RopeLayers::SlidingOnly` with nothing sliding),
 /// which is a different graph from the one llama.cpp refuses to build.
 /// Measured: `grep -n "LLM_KV_ATTENTION_SLIDING_WINDOW," src/models/*.cpp`
-/// without a trailing `false` on the generic path.
+/// without a trailing `false` on the generic path. Answers through the
+/// registry (`kolibri1` lives in `crate::models`).
 pub fn window_required(arch: &str) -> Option<&'static str> {
+    crate::models::ArchFacts::of(arch).swa.window_required
+}
+
+/// The legacy table behind [`window_required`], for
+/// `ArchFacts::from_tables`.
+pub(crate) fn window_required_from_table(arch: &str) -> Option<&'static str> {
     match arch {
         "cohere2" => Some("cohere2.cpp:13"),
         "cohere2moe" => Some("cohere2moe.cpp:13"),
         "exaone-moe" => Some("exaone-moe.cpp:13"),
+        "lfm3" => Some("lfm3.cpp:18"),
+        _ => None,
+    }
+}
+
+/// The llama.cpp line where `arch` reads `rope.freq_base_swa` as a
+/// REQUIRED key, or `None` where the key is optional (and the sliding
+/// layers' base falls back as `capability::swa_rope_base_follows_model`
+/// says). A file without it fails to load upstream; here it would have
+/// rotated the sliding layers at the fallback base. Measured: `grep -n
+/// "LLM_KV_ROPE_FREQ_BASE_SWA" src/models/*.cpp` without a trailing
+/// `false` is `dots3note.cpp:33`, `lfm3.cpp:20` and `muse-spark.cpp:7`,
+/// and only `lfm3` is on the generic path.
+pub fn swa_rope_base_required(arch: &str) -> Option<&'static str> {
+    match arch {
+        "lfm3" => Some("lfm3.cpp:20"),
         _ => None,
     }
 }
@@ -113,6 +143,12 @@ pub fn window_required(arch: &str) -> Option<&'static str> {
 pub fn swa_layers_drop_rope_factors(arch: &str) -> Option<&'static str> {
     match arch {
         "step35" => Some("step35.cpp:247"),
+        // `rope_factors = hparams.is_swa(il) ? nullptr : rope_freqs`,
+        // landed after the 2026-09-19 pin. The converter writes the
+        // tensor as the FULL layers' partial-RoPE mask
+        // (`conversion/lfm3.py:101-111`), so a sliding layer that took
+        // it would rotate a fraction of its head.
+        "lfm3" => Some("lfm3.cpp:113"),
         _ => None,
     }
 }
@@ -354,6 +390,15 @@ mod tests {
         for arch in ["laguna", "gemma3", "llama", "mimo2"] {
             assert_eq!(full_layers_rotate_half(arch), None, "{arch}");
             assert_eq!(swa_layers_drop_rope_factors(arch), None, "{arch}");
+        }
+        // `lfm3` drops the factors without halving the width, and is
+        // the one generic-path graph that requires the sliding base.
+        assert_eq!(swa_layers_drop_rope_factors("lfm3"), Some("lfm3.cpp:113"));
+        assert_eq!(full_layers_rotate_half("lfm3"), None);
+        assert_eq!(swa_rope_base_required("lfm3"), Some("lfm3.cpp:20"));
+        assert_eq!(window_required("lfm3"), Some("lfm3.cpp:18"));
+        for arch in ["gemma3", "step35", "lfm2", "cohere2"] {
+            assert_eq!(swa_rope_base_required(arch), None, "{arch}");
         }
     }
 }

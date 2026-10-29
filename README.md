@@ -49,7 +49,7 @@ in Rust.
   `batched-bench` are ports. Tokenization is verified against libllama
   on twenty checkpoints under both special-token settings, and every
   engine number in [the speed table](benchmarks/RESULTS.md) was measured
-  against llama.cpp on the same host with the same file. 100
+  against llama.cpp on the same host with the same file. 102
   architectures run with a logit comparison behind them. Any other
   architecture stops with an error that says what is missing.
 - The server is OpenAI-compatible. On Metal, concurrent clients share

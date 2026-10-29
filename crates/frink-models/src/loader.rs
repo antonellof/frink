@@ -22,14 +22,15 @@
 //! for the dense (single-expert) case, and against real OLMoE / Qwen2-MoE
 //! checkpoints for the multi-expert 3D-packed-tensor path.
 
-mod arch_tables;
+pub(crate) mod arch_tables;
 mod decoder_from_gguf;
 mod expert_source;
+mod expert_store_build;
 mod layer_parts;
 mod model_config;
 #[cfg(feature = "metal")]
 mod moe_planes;
-mod rope_scaling;
+pub(crate) mod rope_scaling;
 mod sampling_metadata;
 mod tensor_audit;
 mod tensors;

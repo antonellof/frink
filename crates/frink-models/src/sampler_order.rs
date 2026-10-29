@@ -48,12 +48,13 @@ use std::str::FromStr;
 /// Generates the name table: the enum, `ALL`, the canonical spelling of
 /// each variant, and the parser -- from ONE list of rows.
 ///
-/// Each row is `Variant => "canonical" | "alias" | ...`. The aliases are
-/// llama.cpp's own (`common_sampler_type_from_name`'s
+/// Each row is `Variant => 'c', "canonical" | "alias" | ...`. The
+/// aliases are llama.cpp's own (`common_sampler_type_from_name`'s
 /// `sampler_alt_name_map`), so a command line that works upstream parses
-/// here.
+/// here, and the character is `common_sampler_type_to_chr`'s, the
+/// spelling `--sampler-seq` takes (`'?'` where upstream has none).
 macro_rules! sampler_names {
-    ($($variant:ident => $canonical:literal $(| $alias:literal)* ),+ $(,)?) => {
+    ($($variant:ident => $chr:literal, $canonical:literal $(| $alias:literal)* ),+ $(,)?) => {
         /// Every sampler name llama.cpp's `--samplers` accepts.
         ///
         /// Membership here says the name is REAL, not that frink
@@ -85,22 +86,34 @@ macro_rules! sampler_names {
                     _ => None,
                 }
             }
+
+            /// One `--sampler-seq` character (`common/sampling.cpp`,
+            /// `common_sampler_type_to_chr`).
+            pub fn from_chr(c: char) -> Option<Self> {
+                if c == '?' {
+                    return None;
+                }
+                $(if c == $chr {
+                    return Some(SamplerName::$variant);
+                })+
+                None
+            }
         }
     };
 }
 
 sampler_names! {
-    Penalties   => "penalties",
-    Dry         => "dry",
-    TopNSigma   => "top_n_sigma" | "top-n-sigma",
-    TopK        => "top_k" | "top-k",
-    TypP        => "typ_p" | "typ-p" | "typ" | "typical" | "typical_p" | "typical-p",
-    TopP        => "top_p" | "top-p" | "nucleus",
-    MinP        => "min_p" | "min-p",
-    Xtc         => "xtc",
-    Temperature => "temperature" | "temp",
-    Mirostat    => "mirostat",
-    Infill      => "infill",
+    Penalties   => 'e', "penalties",
+    Dry         => 'd', "dry",
+    TopNSigma   => 's', "top_n_sigma" | "top-n-sigma",
+    TopK        => 'k', "top_k" | "top-k",
+    TypP        => 'y', "typ_p" | "typ-p" | "typ" | "typical" | "typical_p" | "typical-p",
+    TopP        => 'p', "top_p" | "top-p" | "nucleus",
+    MinP        => 'm', "min_p" | "min-p",
+    Xtc         => 'x', "xtc",
+    Temperature => 't', "temperature" | "temp",
+    Mirostat    => '?', "mirostat",
+    Infill      => 'i', "infill",
 }
 
 /// A step the frink chain can actually run.
@@ -396,6 +409,27 @@ impl SamplerOrder {
             return Err(SamplerOrderError::TemperatureMissing);
         }
         Ok(SamplerOrder { steps, len })
+    }
+}
+
+impl SamplerOrder {
+    /// llama.cpp's `--sampler-seq`: one character per sampler
+    /// (`edskypmxt`), the same chain `--samplers` spells by name.
+    ///
+    /// An unknown character is an ERROR here where upstream logs a
+    /// warning and drops it, because a chain silently missing the step
+    /// the caller typed is the failure this module exists to prevent.
+    pub fn from_chars(chars: &str) -> Result<Self, SamplerOrderError> {
+        let names = chars
+            .trim()
+            .chars()
+            .map(|c| {
+                SamplerName::from_chr(c)
+                    .map(SamplerName::as_str)
+                    .ok_or_else(|| SamplerOrderError::Unknown(c.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        SamplerOrder::from_names(names)
     }
 }
 
@@ -730,6 +764,29 @@ mod tests {
         assert_eq!(
             default.to_string().parse::<SamplerOrder>().unwrap(),
             default
+        );
+    }
+
+    /// `--sampler-seq` used to be an alias of `--samplers`, so llama.cpp's
+    /// own default `edskypmxt` was refused as one unknown sampler name.
+    /// The characters are `common_sampler_type_to_chr`'s.
+    #[test]
+    fn sampler_seq_characters_spell_the_same_chain_as_the_names() {
+        assert_eq!(
+            SamplerOrder::from_chars("ekpmt").unwrap(),
+            "penalties;top_k;top_p;min_p;temperature".parse().unwrap()
+        );
+        assert!(matches!(
+            SamplerOrder::from_chars("kq"),
+            Err(SamplerOrderError::Unknown(c)) if c == "q"
+        ));
+        assert!(
+            SamplerOrder::from_chars("kdt").is_ok(),
+            "dry is implemented"
+        );
+        assert!(
+            SamplerOrder::from_chars("kit").is_err(),
+            "infill is refused by name"
         );
     }
 }

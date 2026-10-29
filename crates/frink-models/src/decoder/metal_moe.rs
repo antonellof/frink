@@ -19,107 +19,44 @@ impl Decoder {
         if decision.expert_ids.is_empty() {
             return Some(vec![0f32; normed2.len()]);
         }
-        // Build launches while holding each expert briefly; collect owned
-        // weight refs via with_expert into temporary MatvecLaunch list.
-        let mut launches: Vec<frink_metal::gpu::MoeExpertLaunch<'_>> =
-            Vec::with_capacity(decision.expert_ids.len());
-        // Lifetime: MatvecLaunch borrows WeightMatrix bytes that live in
-        // layer.moe for the duration of this call. Collect via a scoped
-        // approach — we need all launches alive together.
-        // Use indices + rebuild inside a single with_experts loop.
-        struct Pending {
-            eid: usize,
-            weight: f32,
-        }
-        let pending: Vec<Pending> = decision
-            .expert_ids
-            .iter()
-            .zip(decision.weights.iter())
-            .map(|(&eid, &w)| Pending { eid, weight: w })
-            .collect();
-
-        // Validate all experts have Metal launches first.
-        for p in &pending {
-            let ok = layer.moe.with_expert(p.eid, |ex| {
-                Self::metal_matvec_launch(&ex.gate).is_some()
-                    && Self::metal_matvec_launch(&ex.up).is_some()
-                    && Self::metal_matvec_launch(&ex.down).is_some()
-            });
-            if !ok {
-                return None;
-            }
-        }
-
         // A `MatvecLaunch` borrows the expert's bytes, so every expert
         // in the batch has to stay alive until the command buffer is
-        // encoded. Resident experts live in a `Vec` and can simply be
-        // indexed. Streamed experts used to fall back to the CPU here,
-        // on the reasoning that `with_expert` lends one at a time so
-        // all of top-k could not be held at once.
+        // encoded and has completed (`launch_moe_topk_swiglu` waits).
+        // Resident experts live in a `Vec` and are indexed. Streamed ones
+        // are materialised by `MoeWeights::stored_experts`: one
+        // `acquire_many` pins the whole top-k, and each owned view's
+        // `WeightBytes::Shared` carries its pin, so the vector that
+        // outlives the launches is what keeps the store from reusing a
+        // slot the GPU is reading. With a Metal slot slab those views are
+        // slices of one Shared `MTLBuffer` and bind it in place.
         //
-        // That was true of `with_expert` and not of the store beneath
-        // it: `StoredExpertLayout::materialize` returns an OWNED
-        // `ExpertWeights` whose `WeightBytes::Shared` clones the
-        // lease's `Arc`, so each one carries its own pin and the store
-        // cannot evict it while the view is alive. Materialising all of
-        // top-k into a vector that outlives the launches is therefore
-        // sound, and the vector is what holds the pins.
-        //
-        // The fallback was not a small loss. Expert streaming is how a
-        // model larger than memory runs at all, so refusing the fused
-        // path here meant that turning streaming on silently disabled
-        // the Metal MoE kernels: exactly the configuration where the
-        // GPU matters most ran on the CPU instead.
+        // A `?` on any expert without a launch drops the batch and falls
+        // back. There used to be a validation pass here that lent each
+        // expert once before this one lent them again: for a streamed
+        // layer that was a second store acquire per expert, a read on a
+        // miss, for nothing.
         let streamed: Vec<ExpertWeights>;
-        match &layer.moe.experts {
-            ExpertBacking::Resident(experts) => {
-                for p in &pending {
-                    let ex = &experts[p.eid];
-                    launches.push(frink_metal::gpu::MoeExpertLaunch {
-                        gate: Self::metal_matvec_launch(&ex.gate)?,
-                        up: Self::metal_matvec_launch(&ex.up)?,
-                        down: Self::metal_matvec_launch(&ex.down)?,
-                        weight: p.weight,
-                    });
-                }
+        let experts: Vec<&ExpertWeights> = match &layer.moe.experts {
+            ExpertBacking::Resident(experts) => decision
+                .expert_ids
+                .iter()
+                .map(|&eid| &experts[eid])
+                .collect(),
+            ExpertBacking::Stored { .. } => {
+                // A read failure is not fatal here: the host path reads
+                // the same bytes and reports it.
+                streamed = layer.moe.stored_experts(&decision.expert_ids).ok()?;
+                streamed.iter().collect()
             }
-            ExpertBacking::Stored {
-                store,
-                layouts,
-                layer: layer_idx,
-            } => {
-                // Ask for the whole batch before touching any of it, so
-                // a miss on the last expert cannot evict the first: the
-                // store is bounded, and top-k reads are what compete
-                // for it.
-                let keys: Vec<_> = pending
-                    .iter()
-                    .map(|p| frink_core::expert_store::ExpertKey {
-                        layer: *layer_idx,
-                        expert: p.eid as u32,
-                    })
-                    .collect();
-                store.prefetch(&keys);
-
-                let mut held = Vec::with_capacity(pending.len());
-                for (p, key) in pending.iter().zip(keys) {
-                    // A read failure here is not fatal: the CPU path
-                    // reads the same bytes and will report it. Falling
-                    // back beats panicking mid-decode.
-                    let lease = store.acquire(key).ok()?;
-                    held.push(layouts[p.eid].materialize(&lease));
-                }
-                streamed = held;
-
-                for (p, ex) in pending.iter().zip(streamed.iter()) {
-                    launches.push(frink_metal::gpu::MoeExpertLaunch {
-                        gate: Self::metal_matvec_launch(&ex.gate)?,
-                        up: Self::metal_matvec_launch(&ex.up)?,
-                        down: Self::metal_matvec_launch(&ex.down)?,
-                        weight: p.weight,
-                    });
-                }
-            }
+        };
+        let mut launches = Vec::with_capacity(experts.len());
+        for (ex, &weight) in experts.iter().zip(decision.weights.iter()) {
+            launches.push(frink_metal::gpu::MoeExpertLaunch {
+                gate: Self::metal_matvec_launch(&ex.gate)?,
+                up: Self::metal_matvec_launch(&ex.up)?,
+                down: Self::metal_matvec_launch(&ex.down)?,
+                weight,
+            });
         }
 
         match frink_metal::gpu::launch_moe_topk_swiglu(normed2, &launches) {
@@ -159,14 +96,7 @@ impl Decoder {
         let ExpertBacking::Resident(_) = &layer.moe.experts else {
             return None;
         };
-        let packed = Self::moe_packed_q4(&layer.moe)?;
-        if !frink_metal::gpu::moe_packed_mul_mv_id_supported(
-            packed.gate_kind,
-            packed.up_kind,
-            packed.down_kind,
-        ) {
-            return None;
-        }
+        let packed = Self::moe_packed_id(&layer.moe)?;
         let top_k = config.moe.n_experts_active;
         if top_k == 0 || top_k > 8 || packed.hidden_rows != hidden_dim {
             return None;

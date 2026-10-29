@@ -29,6 +29,18 @@
 //! [`frink_core::par::cold_regions`] is how a test says so without a
 //! stopwatch.
 //!
+//! # Single-token decode picks one scheduler for the whole step
+//!
+//! [`Decoder::forward_token`] and [`Decoder::forward_token_paged`] go
+//! through [`frink_core::par::decode_step`] rather than bare
+//! `on_workers`, handing it [`Decoder::widest_layer_macs`]. On the CPU
+//! that commits every region of the step to ONE scheduler, the
+//! persistent pool for a model whose layers are over the crossover and
+//! rayon otherwise, instead of choosing per operation and alternating
+//! at every layer (#27; the counts are in `frink_core::par::policy`).
+//! The batched entry points keep the per-operation rule: nothing in a
+//! prefill publishes a matvec shape, so it already forks throughout.
+//!
 //! # The invariant this file exists to hold
 //!
 //! No other file of the decoder module declares a `pub fn forward_*`
@@ -56,7 +68,42 @@ impl Decoder {
         pos: usize,
         kv_caches: &mut [KvCache],
     ) -> Vec<f32> {
-        par::on_workers(move || self.forward_token_on_worker(token_id, pos, kv_caches))
+        par::decode_step(Some(self.widest_layer_macs()), move || {
+            self.forward_token_on_worker(token_id, pos, kv_caches)
+        })
+    }
+
+    /// Multiply-accumulates of the widest matvec inside one layer: the
+    /// attention projections and the FFN (or one routed expert), never
+    /// the LM head. [`frink_core::par::decode_backend`] says why the
+    /// head is left out.
+    ///
+    /// Read from the weights as loaded rather than restated from the
+    /// config, so a model whose layers differ in width answers with its
+    /// widest one. One pass over the layers per decode step, against a
+    /// step that reads every weight in them.
+    pub fn widest_layer_macs(&self) -> usize {
+        let mac = |w: &frink_core::weight_matrix::WeightMatrix| w.rows().saturating_mul(w.cols());
+        let attn = self
+            .layers
+            .iter()
+            .flat_map(|l| {
+                [
+                    &l.attn.q_proj,
+                    &l.attn.k_proj,
+                    &l.attn.v_proj,
+                    &l.attn.o_proj,
+                ]
+            })
+            .map(mac)
+            .max()
+            .unwrap_or(0);
+        let ffn = self
+            .config
+            .moe
+            .hidden_dim
+            .saturating_mul(self.config.moe.expert_ffn_dim);
+        attn.max(ffn)
     }
 
     /// Same computation as `forward_token`, but each layer's K/V cache
@@ -87,7 +134,7 @@ impl Decoder {
         kv_caches: &mut [PagedKvCache],
         stores: &SharedPagedKv,
     ) -> Result<Vec<f32>, PagedStoreExhausted> {
-        par::on_workers(move || {
+        par::decode_step(Some(self.widest_layer_macs()), move || {
             self.forward_token_paged_on_worker(token_id, pos, kv_caches, stores)
         })
     }

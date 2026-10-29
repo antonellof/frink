@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/gptoss_nowindow_tiny.gguf
+config: REFUSED: architecture 'gpt-oss' requires unimplemented feature: `gpt-oss.attention.sliding_window` is absent or zero, and llama.cpp reads it as a REQUIRED key for this architecture (src/models/openai-moe.cpp:6); every real export writes it, and a file without it does not load upstream

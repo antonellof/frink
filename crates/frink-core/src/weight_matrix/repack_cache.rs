@@ -662,7 +662,9 @@ mod tests {
         let owned = WeightBytes::Owned(q8_0_matrix_bytes(4, 32, 9));
         assert!(owned.map_id().is_none(), "an owned Vec's address is reused");
 
-        let buf = Arc::new(q8_0_matrix_bytes(4, 32, 13));
+        let buf = Arc::new(crate::expert_store::ExpertBytes::from(q8_0_matrix_bytes(
+            4, 32, 13,
+        )));
         let leased = WeightBytes::Shared {
             buf,
             range: 0..34 * 4,

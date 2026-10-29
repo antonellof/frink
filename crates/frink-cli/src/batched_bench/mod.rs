@@ -61,31 +61,46 @@ pub enum OutputFormat {
     Jsonl,
 }
 
-/// `llama-batched-bench`'s flags, under llama.cpp's spellings where
-/// `main.rs` rewrites them (`-npp`, `-ntg`, `-npl`, `-pps`, `-tgs`,
-/// `-ub`, `-ngl`) and clap's long forms otherwise.
+/// `llama-batched-bench`'s flags. Its single-dash spellings (`-npp`,
+/// `-ntg`, `-npl`, `-pps`, `-tgs`, `-ub`, `-ngl`, `-kvu`, `-fa`, `-tb`)
+/// are the aliases below, which `crate::argv` reads them through.
 #[derive(Parser, Debug)]
 pub struct BatchedBenchArgs {
     /// GGUF to benchmark.
     #[arg(short = 'm', long)]
     pub model: String,
     /// Prompt lengths to sweep (`-npp 128,256,512`).
-    #[arg(long = "n-pp", value_delimiter = ',', required = true)]
+    #[arg(
+        long = "n-pp",
+        visible_alias = "npp",
+        value_delimiter = ',',
+        required = true
+    )]
     pub n_pp: Vec<usize>,
     /// Generation lengths to sweep (`-ntg 128,256`).
-    #[arg(long = "n-tg", value_delimiter = ',', required = true)]
+    #[arg(
+        long = "n-tg",
+        visible_alias = "ntg",
+        value_delimiter = ',',
+        required = true
+    )]
     pub n_tg: Vec<usize>,
     /// Parallel sequence counts to sweep (`-npl 1,2,4,8`).
-    #[arg(long = "n-pl", value_delimiter = ',', required = true)]
+    #[arg(
+        long = "n-pl",
+        visible_alias = "npl",
+        value_delimiter = ',',
+        required = true
+    )]
     pub n_pl: Vec<usize>,
     /// `-pps`: one prompt shared by every sequence (prefilled once,
     /// then copied) instead of one prompt per sequence.
-    #[arg(long = "pp-shared")]
+    #[arg(long = "pp-shared", visible_alias = "pps")]
     pub pp_shared: bool,
     /// `-tgs`: decode each sequence to completion in turn
     /// (`0 0 0 ... 1 1 1 ...`) instead of one step across all of them
     /// per call (`0123 0123 ...`).
-    #[arg(long = "tg-separate")]
+    #[arg(long = "tg-separate", visible_alias = "tgs")]
     pub tg_separate: bool,
     /// `n_kv_max`: combinations needing more positions than this are
     /// skipped, as upstream does. `0` = the GGUF's own context length.
@@ -93,13 +108,14 @@ pub struct BatchedBenchArgs {
     pub ctx_size: usize,
     /// `-ub`: prompt tokens per forward call. Each sequence's prompt
     /// is fed in chunks of this size, the physical batch upstream.
-    #[arg(long = "ubatch-size", default_value_t = 512)]
+    #[arg(long = "ubatch-size", visible_alias = "ub", default_value_t = 512)]
     pub ubatch_size: usize,
     /// CPU threads (`0` = performance-core default).
     #[arg(short = 't', long, default_value_t = 0)]
     pub threads: usize,
-    /// GPU layers: `0` forces CPU, anything else offloads.
-    #[arg(long = "n-gpu-layers", default_value_t = 0)]
+    /// GPU layers: `0` forces CPU, the model's layer count or more
+    /// offloads all of them, and a partial count is refused.
+    #[arg(long = "n-gpu-layers", visible_alias = "ngl", default_value_t = 0)]
     pub n_gpu_layers: usize,
     #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Md)]
     pub output_format: OutputFormat,
@@ -124,13 +140,13 @@ pub struct BatchedBenchArgs {
     /// REFUSED. `-kvu` shares one KV buffer across sequences; this
     /// tool gives every sequence its own cache, so `N_KV` is always
     /// `B*(PP+TG)`.
-    #[arg(long = "kv-unified", hide_short_help = true)]
+    #[arg(long = "kv-unified", alias = "kvu", hide_short_help = true)]
     pub kv_unified: bool,
     /// REFUSED. frink has no flash-attention switch to honour.
-    #[arg(long = "flash-attn", hide_short_help = true)]
+    #[arg(long = "flash-attn", alias = "fa", hide_short_help = true)]
     pub flash_attn: Option<String>,
     /// REFUSED. frink has one thread pool for prefill and decode.
-    #[arg(long = "threads-batch", hide_short_help = true)]
+    #[arg(long = "threads-batch", alias = "tb", hide_short_help = true)]
     pub threads_batch: Option<usize>,
 }
 

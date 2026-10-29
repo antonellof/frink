@@ -233,7 +233,11 @@ pub struct MoeWeights {
     /// placeholder -- feeds `placement_plan` below, which is what
     /// `PlacementPlan::from_budget` needs to prioritize actually-hot
     /// experts for GPU residency instead of guessing by index.
-    pub activation_counts: Vec<AtomicU64>,
+    ///
+    /// Shared (`Arc`) because a streamed layer's expert store ranks
+    /// eviction by these same counters (`loader::expert_store_build`),
+    /// and a second tally kept by the store could disagree with them.
+    pub activation_counts: std::sync::Arc<[AtomicU64]>,
     /// Verified-at-load contiguous expert planes for Metal MoE
     /// (`mul_mm_sg` gather/id). Built in `loader` when every routed expert
     /// is mmap-backed with a simdgroup-GEMM quant (Q4_0 / Q4_K / Q8_0 / …)
@@ -298,6 +302,17 @@ impl MoePackedQ4Planes {
         }
     }
 
+    /// The same planes, every role labelled `kind`. No loader builds a
+    /// pack in a kind the id kernels lack, so this is how a test reaches
+    /// the decoder's fallback for one (#448); nothing else calls it.
+    #[doc(hidden)]
+    pub fn relabelled(mut self, kind: &'static str) -> Self {
+        self.gate_kind = kind;
+        self.up_kind = kind;
+        self.down_kind = kind;
+        self
+    }
+
     pub fn view(&self) -> frink_metal::gpu::MoePackedQ4<'_> {
         frink_metal::gpu::MoePackedQ4 {
             gate: self.gate.as_slice(),
@@ -355,45 +370,58 @@ impl MoeWeights {
     /// answered differently in the last bits. The backing should decide
     /// where the bytes come from and nothing else.
     ///
-    /// A stored layer asks for the whole batch before touching any of
-    /// it, so a miss on the last expert cannot evict the first; each
-    /// materialised view clones its lease's `Arc` (`WeightBytes::Shared`)
-    /// and so pins its entry until `f` returns.
+    /// A stored layer pins the whole batch in one `acquire_many` before
+    /// touching any of it, so a miss on the last expert cannot evict the
+    /// first; each materialised view clones its lease's `Arc`
+    /// (`WeightBytes::Shared`) and so pins its entry until `f` returns.
     pub fn with_experts<R>(&self, eids: &[usize], f: impl FnOnce(&[&ExpertWeights]) -> R) -> R {
         match &self.experts {
             ExpertBacking::Resident(v) => {
                 let refs: Vec<&ExpertWeights> = eids.iter().map(|&e| &v[e]).collect();
                 f(&refs)
             }
-            ExpertBacking::Stored {
-                store,
-                layouts,
-                layer,
-            } => {
-                let key = |e: usize| frink_core::expert_store::ExpertKey {
-                    layer: *layer,
-                    expert: e as u32,
-                };
-                if eids.len() > 1 {
-                    let keys: Vec<_> = eids.iter().map(|&e| key(e)).collect();
-                    store.prefetch(&keys);
-                }
-                let held: Vec<ExpertWeights> = eids
-                    .iter()
-                    .map(|&e| {
-                        let lease = store.acquire(key(e)).unwrap_or_else(|err| {
-                            panic!(
-                                "expert store read failed for layer {layer} expert {e}: {err} \
-                                 (checkpoint file unreadable mid-decode)"
-                            )
-                        });
-                        layouts[e].materialize(&lease)
-                    })
-                    .collect();
+            ExpertBacking::Stored { .. } => {
+                let held = self.stored_experts(eids).unwrap_or_else(|err| {
+                    panic!(
+                        "expert store read failed for {eids:?}: {err} \
+                         (checkpoint file unreadable mid-decode)"
+                    )
+                });
                 let refs: Vec<&ExpertWeights> = held.iter().collect();
                 f(&refs)
             }
         }
+    }
+
+    /// Owned views of `eids` from a stored layer, all pinned by ONE
+    /// `acquire_many`, `out[i]` being expert `eids[i]`. Each view's
+    /// `WeightBytes::Shared` carries its lease, so the store cannot
+    /// reuse an expert's memory while its view lives. The one place a
+    /// stored layer's experts are lent, for the host bodies
+    /// ([`Self::with_experts`]) and the Metal top-k alike. Panics on a
+    /// resident layer, which has nothing to acquire.
+    pub(crate) fn stored_experts(&self, eids: &[usize]) -> std::io::Result<Vec<ExpertWeights>> {
+        let ExpertBacking::Stored {
+            store,
+            layouts,
+            layer,
+        } = &self.experts
+        else {
+            panic!("stored_experts called on a resident layer");
+        };
+        let keys: Vec<_> = eids
+            .iter()
+            .map(|&e| frink_core::expert_store::ExpertKey {
+                layer: *layer,
+                expert: e as u32,
+            })
+            .collect();
+        let leases = store.acquire_many(&keys)?;
+        Ok(eids
+            .iter()
+            .zip(&leases)
+            .map(|(&e, lease)| layouts[e].materialize(lease))
+            .collect())
     }
 
     /// The one expert a DENSE layer runs, recorded as the host body

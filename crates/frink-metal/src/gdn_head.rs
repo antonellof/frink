@@ -224,7 +224,8 @@ pub fn encode_l2_norm_heads(
         let mut e = eps;
         encoder.setBytes_length_atIndex(NonNull::new(&mut e as *mut f32 as *mut _).unwrap(), 4, 2);
     }
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+    crate::dispatch::dispatch_counted(
+        encoder,
         MTLSize {
             width: n_heads,
             height: 1,
@@ -275,7 +276,8 @@ fn dispatch_1d(
 ) {
     use objc2_metal::MTLComputePipelineState;
     let tg = pipe.maxTotalThreadsPerThreadgroup().clamp(1, 256);
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+    crate::dispatch::dispatch_counted(
+        encoder,
         MTLSize {
             width: n.div_ceil(tg),
             height: 1,

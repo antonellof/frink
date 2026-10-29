@@ -51,8 +51,8 @@ quoted string): it yields the same 166 as the regex above.
 
 | arch | graph | catalog answer | what decides it |
 |---|---|---|---|
-| `kolibri1` | `kolibri1.cpp` (184) | ONE MATCH ARM | no new op: RoPE on sliding layers only (`:98`, `RopeLayers::SlidingOnly`), the window array (`:17`), Gemma-2 sandwich norms (`:42,51`), per-head QK RMS, sigmoid routing with `exp_probs_b` precomputed into `selected_experts_in` (`:133-155`), one shared expert |
-| `lfm3` | `lfm3.cpp` (217) | ONE MATCH ARM | LFM2's layers plus a per-head sigmoid attention gate (`:77,132-138`), the window array (`:13-18`), `rope_freqs` on full layers only (`:79-82,113`, `step35`'s rule), optional sandwich norms. Its d1 variant is non-causal and refused |
+| `kolibri1` | `kolibri1.cpp` (184) | AUDITED 2026-10-29 (`tests/kolibri1_graphs.rs`, a 32-step decode in `tests/decode_step_graphs.rs`; was NEW CODE, before that ONE MATCH ARM) | the router ranks `logits + exp_probs_b` BEFORE the sigmoid (`:138`) and hands the ids to `build_moe_ffn` as `selected_experts_in`, while the DeepSeek-V3 rule frink has adds the bias after the gating (`llama-graph.cpp:2279`); found when wiring it. The rest was read as table rows: RoPE on sliding layers only (`:98`, `RopeLayers::SlidingOnly`), the window array (`:17`), Gemma-2 sandwich norms (`:42,51`), per-head QK RMS, sigmoid routing with `exp_probs_b` precomputed into `selected_experts_in` (`:133-155`), one shared expert |
+| `lfm3` | `lfm3.cpp` (217) | AUDITED (`tests/lfm3_graphs.rs`, a 32-step decode in `tests/decode_step_graphs.rs`) | LFM2's layers plus a per-head sigmoid attention gate (`:77,132-138`), the window array (`:13-18`), `rope_freqs` on full layers only (`:79-82,113`, `step35`'s rule), optional sandwich norms. Its d1 variant is non-causal and refused |
 | `flint` | `flint.cpp` (194) | NEW CODE (tokenizer) | the graph is served seams (`attention.rope_pattern`, the second reader of 169; window array; REQUIRED sinks; shared expert). Its `flint` pre-tokenizer is a sequence of two regexes (`llama-vocab.cpp:285-290`), which `tokenizer::pretokenize` cannot express |
 | `beam` | `beam.cpp` (261) | NEW CODE | the residual is `h / sqrt(i) + r * sqrt((i - 1) / i)` (`:109-113`); a POWER-form attention temperature (`attn_temp_pow`, `:51`; `llama-graph.cpp:221-227`) on its NoPE layers |
 | `maion-coder` | `maion-coder.cpp` (149) | NEW CODE | a latent MoE (`:7,54-58,122-134`), the shape frink refuses by name for Nemotron-3 Super |
@@ -271,10 +271,16 @@ graphs only, except for the rows in section 2.
    the `domyn-small` / five other pre-tokenizers, LFM2's decision head),
    the YaRN-beta reader table, `glm5` on the `LLAMA3` arm, and thirteen
    catalog rows.
-2. **`kolibri1` and `lfm3`**, the two ONE MATCH ARM rows. Each is table
-   rows on seams that are served and evidenced, plus a libllama golden;
-   the 2026-09-19 lesson is that such a row costs a fixture and an hour
-   and should not sit in a table for a week.
+2. **`kolibri1` and `lfm3`**, the two ONE MATCH ARM rows. `lfm3` closed
+   the same day on exactly its rows plus four refusals: one post norm
+   without the other and no sliding layer at all (both throw upstream),
+   `attention.causal = false` (the d1 graph), and a conv layer marked
+   sliding (ignored upstream, but here it would evict the conv history). `kolibri1` did not: its selection adds
+   the bias to the RAW logits (`kolibri1.cpp:138`), which no frink
+   router does, so it is NEW CODE, one selection operand in
+   `frink_moe`. It closed on 2026-10-29 on exactly that
+   (`frink_moe::SelectionRule::BiasBeforeGating`), as the first new
+   file in `crate::models` (`models/kolibri1.rs`).
 3. **The pre-tokenizer sequence.** `flint`, `soprano`, and the older
    `deepseek-*`, `superbpe`, `minerva` / `mellum2`, `tiny_aya`, `poro`,
    `viking` arms all need `regex_for` to return a SEQUENCE of patterns.

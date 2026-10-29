@@ -11,11 +11,6 @@ use frink_moe::{GatingFunction, MoeLayerConfig};
 
 use crate::config::ModelConfig;
 
-use super::arch_tables::{
-    EXPERT_WEIGHTS_NORM_READERS, EXPERT_WEIGHTS_SCALE_READERS, FFN_LENGTH_COUNTS_GATE_AND_UP,
-    GATING_LITERAL_ARCHITECTURES, LEADING_DENSE_KEY_IS_INERT, NO_TOPK_RENORMALIZE_ARCHITECTURES,
-    SIGMOID_GATING_ARCHITECTURES,
-};
 use super::rope_scaling::{linear_scaling_from_gguf, yarn_scaling_from_gguf};
 use super::tensors::load_f32_vec_optional;
 use super::LoadError;
@@ -48,7 +43,12 @@ impl ModelConfig {
             .metadata_str("general.architecture")
             .ok_or_else(|| LoadError::MissingHparam("general.architecture".to_string()))?
             .to_string();
-        let arch_profile = crate::capability::resolve_profile(&arch)
+        // Every table row this function reads, resolved once from the
+        // RAW name (`crate::models::facts`); the order of the reads
+        // below is unchanged.
+        let facts = crate::models::ArchFacts::of(&arch);
+        let arch_profile = facts
+            .profile
             .ok_or_else(|| LoadError::UnsupportedArchitecture(arch.clone()))?;
         let rope_layout = match arch_profile.path {
             crate::capability::ArchPath::GenericGqa { rope }
@@ -72,7 +72,7 @@ impl ModelConfig {
         if let Some(reason) = crate::mrope::mrope_refusal(file, &arch) {
             return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
         }
-        for (meta_key, feature) in crate::capability::unsupported_feature_keys(&arch) {
+        for (meta_key, feature) in facts.unsupported_feature_keys(&arch) {
             if let Some(v) = metadata_f32_any(file, std::slice::from_ref(&meta_key)) {
                 if v > 0.0 {
                     return Err(LoadError::UnsupportedFeature(
@@ -90,12 +90,30 @@ impl ModelConfig {
                 }
             }
         }
+        // `{arch}.attention.causal = false`. llama.cpp reads it for EVERY
+        // architecture (`llama-model.cpp:1400`, optional, default true)
+        // and a graph built with it attends both ways; `lfm3.cpp:22-25,
+        // 92-96` is the case a converter really writes (the d1 decision
+        // checkpoints, `conversion/lfm3.py:167`), with no memory at all
+        // (`llama-model.cpp:2808`). Every body on this path masks
+        // causally, so such a file would compute a different graph.
+        if file.metadata_bool(&format!("{arch}.attention.causal")) == Some(false) {
+            return Err(LoadError::UnsupportedFeature(
+                arch.clone(),
+                format!(
+                    "`{arch}.attention.causal` is false: the file's graph attends to the whole \
+                     prompt both ways (llama-model.cpp:1400; for lfm3 the d1 decision graph, \
+                     lfm3.cpp:22-25,92-96, which keeps no memory, llama-model.cpp:2808), and \
+                     the generic decoder only masks causally"
+                ),
+            ));
+        }
         // Metadata-declared multipliers the generic decoder does not
         // apply. Unlike the tensor-consumption gate, nothing about these
         // is visible in the weights, so a Granite checkpoint would load
         // and answer at the wrong scale. See
-        // `capability::unsupported_scaling_keys`.
-        for (meta_key, feature, no_op) in crate::capability::unsupported_scaling_keys(&arch) {
+        // `ArchFacts::unsupported_scaling_keys`.
+        for (meta_key, feature, no_op) in facts.unsupported_scaling_keys(&arch) {
             if let Some(v) = metadata_f32_any(file, std::slice::from_ref(&meta_key)) {
                 if (v - no_op).abs() > 1e-6 {
                     return Err(LoadError::UnsupportedFeature(
@@ -118,12 +136,11 @@ impl ModelConfig {
             file.metadata_u64(&key("block_count"))
                 .ok_or_else(|| LoadError::MissingHparam(key("block_count")))? as usize;
         // llama.cpp's `n_layer()` is `block_count` MINUS the NextN/MTP
-        // blocks the converter appended inside it, for the graphs that
-        // read `nextn_predict_layers` (`crate::mtp_blocks`). `n_layers`
-        // is the trunk from here on; `block_count` is handed ONLY to the
-        // two things llama.cpp decides before it has read the key --
-        // `exaone4.cpp:4`'s layer-count gate and the per-layer array
-        // lengths -- and nowhere else.
+        // blocks the converter appended inside it (`crate::mtp_blocks`:
+        // subtracted for every architecture, loadable only where the
+        // tensor loader creates them). `n_layers` is the trunk from here
+        // on; `block_count` is handed ONLY to the per-layer array
+        // lengths, which llama.cpp reads at `n_layer_all`.
         let trunk = crate::mtp_blocks::trunk_layers(file, &arch, block_count)?;
         // Nanbeige's `num_loops`: the trunk is the PHYSICAL count and
         // `n_layers` the logical one from here on (`crate::layer_loops`);
@@ -187,7 +204,7 @@ impl ModelConfig {
                 // A pure recurrent model has no heads and no head width
                 // (`layer_shapes::PURE_RECURRENT`); nothing reads one.
                 match hidden_dim.checked_div(h0) {
-                    _ if h0 == 0 && crate::layer_shapes::pure_recurrent_block(&arch).is_some() => 0,
+                    _ if h0 == 0 && facts.topology.pure_recurrent_block.is_some() => 0,
                     None => {
                         return Err(LoadError::MissingHparam(format!(
                             "{} (layer 0 declares head_count 0, so it cannot be derived as \
@@ -252,13 +269,12 @@ impl ModelConfig {
         // llama.cpp's "absent", so it is dropped before the epsilon
         // itself is read below.
         let declared_rms_eps = metadata_f32_any(file, &[key("attention.layer_norm_rms_epsilon")])
-            .filter(|eps| {
-                *eps != 0.0
-                    || !crate::norm::NORM_BY_RMS_EPS_KEY
-                        .iter()
-                        .any(|(a, _)| *a == arch)
-            });
-        let norm_function = crate::norm::norm_function_for_file(&arch, declared_rms_eps);
+            .filter(|eps| *eps != 0.0 || !facts.norm.norm_by_rms_eps_key);
+        let norm_function = crate::norm::file_norm_function(
+            facts.norm.norm_by_rms_eps_key,
+            facts.tensors.norm_sites.function,
+            declared_rms_eps,
+        );
         let rms_norm_eps = declared_rms_eps
             .or_else(|| metadata_f32_any(file, &[key("attention.layer_norm_epsilon")]))
             .unwrap_or_else(|| {
@@ -288,8 +304,7 @@ impl ModelConfig {
                 &key("expert_used_count"),
                 // `n_layer_all`, i.e. `block_count` including any MTP
                 // blocks, which is the length llama.cpp asks for at
-                // `llama-model.cpp:1266` -- BEFORE `n_layer()` drops
-                // them.
+                // `llama-model.cpp:1415`.
                 block_count,
             )? {
                 Some(per_layer) => {
@@ -322,7 +337,7 @@ impl ModelConfig {
         // Read here, ahead of the shared-expert inference below, because
         // the tensor that inference probes lives on the first MoE
         // layer, not on layer 0.
-        let n_dense_leading_layers = if LEADING_DENSE_KEY_IS_INERT.contains(&arch.as_str()) {
+        let n_dense_leading_layers = if facts.moe.leading_dense_key_is_inert {
             0
         } else {
             metadata_u64_any(file, &[key("leading_dense_block_count")]).unwrap_or(0) as usize
@@ -344,8 +359,9 @@ impl ModelConfig {
         // The interleave step the loader honours (`crate::moe_interleave`,
         // `llama4.cpp:64`), read here because the shared-expert probe
         // below needs the first layer it makes MoE.
-        let moe_interleave_step = crate::moe_interleave::interleave_step(
+        let moe_interleave_step = crate::moe_interleave::interleave_step_for(
             &arch,
+            facts.moe.interleave_step_honoured,
             metadata_u64_any(file, &[key("interleave_moe_layer_step")]),
             n_experts,
         )
@@ -375,7 +391,7 @@ impl ModelConfig {
                 // Qwen-1 declares gate and up as one number; see
                 // `FFN_LENGTH_COUNTS_GATE_AND_UP`.
                 .map(|v| {
-                    if FFN_LENGTH_COUNTS_GATE_AND_UP.contains(&arch.as_str()) {
+                    if facts.ffn.length_counts_gate_and_up {
                         v.into_iter().map(|ff| ff / 2).collect()
                     } else {
                         v
@@ -434,17 +450,16 @@ impl ModelConfig {
         // architecture and only `granite-swa.cpp:43` reads it back --
         // so honouring it elsewhere would answer differently from
         // upstream on a file that carries it as dead metadata.
-        let rope_pattern: Option<std::sync::Arc<[bool]>> =
-            if crate::rope_layers::reads_rope_pattern(&arch) {
-                crate::layer_shapes::read_u64_per_layer(
-                    file,
-                    &key("attention.rope_pattern"),
-                    block_count,
-                )?
-                .map(|v| v.into_iter().map(|x| x != 0).collect())
-            } else {
-                None
-            };
+        let rope_pattern: Option<std::sync::Arc<[bool]>> = if facts.topology.reads_rope_pattern {
+            crate::layer_shapes::read_u64_per_layer(
+                file,
+                &key("attention.rope_pattern"),
+                block_count,
+            )?
+            .map(|v| v.into_iter().map(|x| x != 0).collect())
+        } else {
+            None
+        };
 
         // Qwen3.5's recurrent layers come from two keys, not from the
         // head counts (`crate::gdn::recurrent_layers`).
@@ -476,8 +491,9 @@ impl ModelConfig {
         // records what building the fixture found: llama.cpp cannot load
         // such a file either, because its own tensor loader has no step
         // in it.
-        if let Some(reason) = crate::moe_interleave::interleave_step_refusal(
+        if let Some(reason) = crate::moe_interleave::interleave_step_refusal_for(
             &arch,
+            facts.moe.interleave_step_honoured,
             metadata_u64_any(file, &[key("interleave_moe_layer_step")]),
         ) {
             return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
@@ -488,19 +504,15 @@ impl ModelConfig {
         // carries it; otherwise fall back to the same architecture-name
         // convention the hand-written presets in config.rs use (see
         // docs/MODELS.md for the citations behind that list).
-        let gating_literal = GATING_LITERAL_ARCHITECTURES
-            .iter()
-            .find(|(name, _)| *name == arch)
-            .map(|(_, g)| *g);
         let gating = match (
-            gating_literal,
+            facts.moe.gating_literal,
             metadata_u64_any(file, &[key("expert_gating_func")]),
         ) {
             (Some(literal), _) => literal,
             (None, Some(2)) => GatingFunction::Sigmoid,
             (None, Some(1)) => GatingFunction::Softmax,
             (None, _) => {
-                if SIGMOID_GATING_ARCHITECTURES.contains(&arch.as_str()) {
+                if facts.moe.sigmoid_by_default {
                     GatingFunction::Sigmoid
                 } else {
                     if is_moe {
@@ -522,7 +534,7 @@ impl ModelConfig {
         // The key only where llama.cpp reads it (`EXPERT_WEIGHTS_NORM_READERS`);
         // everywhere else the graph's literal, which the table below
         // transcribes, whatever the file says.
-        let norm_key = if EXPERT_WEIGHTS_NORM_READERS.contains(&arch.as_str()) {
+        let norm_key = if facts.moe.reads_expert_weights_norm {
             file.metadata_bool(&key("expert_weights_norm"))
         } else {
             None
@@ -538,7 +550,7 @@ impl ModelConfig {
                         "moe.norm_topk_prob (no expert_weights_norm key; defaulted by architecture-name lookup against NO_TOPK_RENORMALIZE_ARCHITECTURES)",
                     );
                 }
-                !NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&arch.as_str())
+                !facts.moe.no_topk_renormalize
             }
         };
 
@@ -546,7 +558,7 @@ impl ModelConfig {
         // llama.cpp's `build_moe_ffn` skips the multiply for both 0.0 and
         // 1.0, so both mean "no scaling" and both land on 1.0 here.
         // And only where llama.cpp reads it (`EXPERT_WEIGHTS_SCALE_READERS`).
-        let expert_weights_scale = if EXPERT_WEIGHTS_SCALE_READERS.contains(&arch.as_str()) {
+        let expert_weights_scale = if facts.moe.reads_expert_weights_scale {
             metadata_f32_any(file, &[key("expert_weights_scale")])
                 .filter(|s| *s != 0.0)
                 .unwrap_or(1.0)
@@ -564,45 +576,59 @@ impl ModelConfig {
         // is that a window of 0 means "unused," so only a real nonzero
         // value here is treated as active.
         let declared_window = metadata_u64_any(file, &[key("attention.sliding_window")]);
-        let sliding_window = declared_window
-            .map(|v| v as usize)
-            .filter(|&w| w > 0)
-            // `phi3` declares a window that llama.cpp deliberately does
-            // NOT honour -- see `capability::swa_disabled_by_arch`. This
-            // has to drop the window rather than pick a period, because
-            // upstream is declining to use the file's value, not
-            // choosing a different one.
-            //
-            // `block_count`, NOT `n_layers`: `exaone4.cpp:4` tests
-            // `n_layer() == 64` at a point where `n_layer_nextn` has not
-            // been read yet (`:18`), so a 64-trunk EXAONE-4 with an MTP
-            // block appended sees 65 there and gets no window.
-            //
-            // `smallthinker` declares a window that llama.cpp REPLACES:
-            // `smallthinker.cpp:8` assigns `n_swa = 4096` on the branch
-            // the file's nonzero value selected. One table decides all
-            // three answers (`capability::swa_window_override`), so a
-            // row cannot be dropped by one reader and pinned by another.
-            .and_then(
-                |w| match crate::capability::swa_window_override(&arch, trunk.block_count) {
-                    crate::capability::SwaWindowOverride::Honour => Some(w),
+        // `phi3` declares a window that llama.cpp deliberately does NOT
+        // honour -- see `capability::swa_disabled_by_arch`. This has to
+        // drop the window rather than pick a period, because upstream is
+        // declining to use the file's value, not choosing a different one.
+        //
+        // `smallthinker` declares a window that llama.cpp REPLACES:
+        // `smallthinker.cpp:8` assigns `n_swa = 4096` on the branch the
+        // file's nonzero value selected. `exaone4`'s 64-layer graph SEEDS
+        // 4096 and lets the key override it (`exaone4.cpp:6,14`). One
+        // table decides every answer (`capability::swa_window_override`),
+        // so a row cannot be dropped by one reader and pinned by another.
+        //
+        // `n_layers`, the TRUNK: llama.cpp reads `nextn_predict_layers`
+        // in the common loader before any `load_arch_hparams`
+        // (`llama-model.cpp:1411,1571`), so `exaone4.cpp:4`'s
+        // `n_layer() == 64` already excludes an appended MTP block.
+        let window_override = (facts.rules.swa_window_override)(&arch, trunk.n_layers);
+        let sliding_window = match (declared_window, window_override) {
+            (Some(0), crate::capability::SwaWindowOverride::Seed(_)) => {
+                return Err(LoadError::UnsupportedFeature(
+                    arch.clone(),
+                    format!(
+                        "`{arch}.attention.sliding_window` is 0, which llama.cpp reads over the \
+                         window this graph seeds and then masks every key with \
+                         (`p1 - p0 >= n_swa`, llama-hparams.h:529)"
+                    ),
+                ));
+            }
+            (None, crate::capability::SwaWindowOverride::Seed(seeded)) => Some(seeded),
+            (declared, rule) => declared
+                .map(|v| v as usize)
+                .filter(|&w| w > 0)
+                .and_then(|w| match rule {
+                    crate::capability::SwaWindowOverride::Honour
+                    | crate::capability::SwaWindowOverride::Seed(_) => Some(w),
                     crate::capability::SwaWindowOverride::Drop => None,
                     crate::capability::SwaWindowOverride::Pin(pinned) => Some(pinned),
-                },
-            );
+                }),
+        };
 
         // A CHUNKED window (`crate::chunked_swa`): the literal chunk on
         // the branch the file takes, whatever nonzero value it declares
         // and whether it declares one at all; a declared ZERO is the
         // branch libllama aborts on, refused there by name.
-        let swa_chunked = crate::chunked_swa::chunked_window(&arch, declared_window)?;
+        let swa_chunked =
+            crate::chunked_swa::chunked_window_for(&arch, facts.swa.chunked, declared_window)?;
         let sliding_window = swa_chunked.or(sliding_window);
         let swa_chunked = swa_chunked.is_some();
 
         // A window llama.cpp REQUIRES (`crate::swa_geometry::
         // window_required`): without it the file does not load upstream,
         // and here it would run with no layer rotated.
-        if let (None, Some(line)) = (sliding_window, crate::swa_geometry::window_required(&arch)) {
+        if let (None, Some(line)) = (sliding_window, facts.swa.window_required) {
             return Err(LoadError::UnsupportedFeature(
                 arch.clone(),
                 format!(
@@ -613,25 +639,21 @@ impl ModelConfig {
             ));
         }
 
-        // A window on a short-conv architecture: `lfm2.cpp:24-29`
-        // honours it on the ATTENTION layers alone (`is_swa_impl[il] =
-        // !is_recr_impl[il]`), a per-layer answer `crate::swa_layers`
-        // has no variant for, and one that would also arm eviction
-        // against the history the conv indexes by row
-        // (`crate::shortconv`). No published export writes the key.
-        if let (Some(w), true) = (
-            sliding_window,
-            crate::shortconv::is_shortconv_architecture(&arch),
-        ) {
-            return Err(LoadError::UnsupportedFeature(
-                arch.clone(),
-                format!(
-                    "`{arch}.attention.sliding_window` {w}: lfm2.cpp:24-29 windows the attention \
-                     layers and not the conv layers, which `swa_layers` cannot yet spell, and a \
-                     window on a conv layer would evict the history its convolution reads \
-                     (`crate::shortconv`); no published LFM2 export writes the key"
-                ),
-            ));
+        // A sliding-layer RoPE base llama.cpp REQUIRES
+        // (`crate::swa_geometry::swa_rope_base_required`): without it the
+        // file does not load upstream, and here the sliding layers would
+        // rotate at a fallback base.
+        if let Some(line) = facts.swa.rope_base_required {
+            if metadata_f32_any(file, &[key("rope.freq_base_swa")]).is_none() {
+                return Err(LoadError::UnsupportedFeature(
+                    arch.clone(),
+                    format!(
+                        "`{arch}.rope.freq_base_swa` is absent, and llama.cpp reads it as a \
+                         REQUIRED key for this architecture (src/models/{line}); a file without \
+                         it does not load upstream"
+                    ),
+                ));
+            }
         }
 
         // Three graphs rope their SLIDING layers with the scaling
@@ -647,10 +669,7 @@ impl ModelConfig {
         // A window with NO scaling is not this case and is not refused:
         // both branches then reduce to the same plain RoPE, and the
         // difference is masking alone, which frink implements.
-        if let (Some(lines), true) = (
-            crate::swa_geometry::swa_layers_unscaled_rope(&arch),
-            sliding_window.is_some(),
-        ) {
+        if let (Some(lines), true) = (facts.swa.layers_unscaled_rope, sliding_window.is_some()) {
             let scaling_type = file
                 .metadata_str(&key("rope.scaling.type"))
                 .unwrap_or("none")
@@ -690,7 +709,7 @@ impl ModelConfig {
         // for every architecture, which stopped every real EXAONE-4
         // 32B, EXAONE-MoE and Olmo-3 export at the door over a value
         // llama.cpp never reads for them.
-        let swa_seed = crate::capability::default_swa_layout(&arch).or(match arch_profile.family {
+        let swa_seed = facts.swa.default_layout.or(match arch_profile.family {
             crate::capability::DecoderFamily::GemmaFamily => Some(crate::capability::SwaPattern {
                 period: 6,
                 dense_first: false,
@@ -709,6 +728,19 @@ impl ModelConfig {
                 swa_seed,
             )?,
         };
+        // A window on a short-conv architecture, read the way its
+        // generation's graph reads it (`crate::shortconv`'s module doc):
+        // lfm2's scalar is refused, lfm3's array is served unless it
+        // marks a conv layer or no layer at all.
+        if let Some(reason) = crate::shortconv::shortconv_window_refusal(
+            &arch,
+            sliding_window,
+            trunk.n_layers,
+            |il| swa_layers.slides(il),
+            &kv_heads_per_layer,
+        ) {
+            return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
+        }
 
         // The metadata-declared scalar multipliers, resolved once for
         // whichever subset this architecture's reference graph applies.
@@ -717,7 +749,7 @@ impl ModelConfig {
         // same table. Read first because its `defaults` also seed the
         // softcap below: `grok.cpp:5-12` assigns all of them in one
         // place, and so does this.
-        let multiplier_support = crate::scalar_multipliers::multiplier_support(&arch);
+        let multiplier_support = facts.scaling.multipliers;
 
         // The file's softcap, then the architecture's default for a
         // file that declares none (`grok.cpp:9`), then llama.cpp's own
@@ -768,12 +800,11 @@ impl ModelConfig {
         // `embedding_scale` at all -- so it comes from the table and a
         // file declaring the key on one of them is refused above rather
         // than honoured. Granite's comes out of `{arch}.embedding_scale`.
-        let embedding_scale =
-            if crate::capability::embeddings_scaled_by_sqrt_n_embd(&arch, arch_profile.family) {
-                Some((hidden_dim as f32).sqrt())
-            } else {
-                multipliers.embedding_scale
-            };
+        let embedding_scale = if facts.scaling.embeddings_scaled_by_sqrt_n_embd {
+            Some((hidden_dim as f32).sqrt())
+        } else {
+            multipliers.embedding_scale
+        };
 
         // llama.cpp's `f_attention_scale`, and ONLY where it differs from
         // the `1/sqrt(head_dim)` frink's attention kernels already
@@ -796,18 +827,17 @@ impl ModelConfig {
         // `scalar_multipliers` the ones that READ it, and no llama.cpp
         // architecture does both. `.or` rather than a match because the
         // computed one is the one that cannot be turned off by a file.
-        let attention_scale = crate::capability::attention_scale_override(
-            &arch, n_layers, hidden_dim, n_heads, head_dim,
-        )
-        .or(multipliers.attention_scale);
+        let attention_scale =
+            (facts.rules.attention_scale_override)(&arch, n_layers, hidden_dim, n_heads, head_dim)
+                .or(multipliers.attention_scale);
 
         // Granite reads `{arch}.rope.scaling.finetuned` as a switch for
         // RoPE itself, not as a note about the scaling: a file declaring
         // it false runs UNROTATED in llama.cpp (every Granite-4.0 hybrid
         // export), which is `RopeLayers::Never` below
         // (`crate::rope_finetuned`).
-        let rope_switched_off = crate::rope_finetuned::unrotated(
-            &arch,
+        let rope_switched_off = crate::rope_finetuned::unrotated_for(
+            facts.topology.rope_gated_on_finetuned,
             file.metadata(&key("rope.scaling.finetuned"))
                 .and_then(GgufValue::as_bool),
         );
@@ -819,8 +849,8 @@ impl ModelConfig {
         // every host body shares (`decoder/qkv_bias.rs`). See
         // `crate::clamp_kqv`, which also records that both converters
         // really write this key.
-        let clamp_kqv = crate::clamp_kqv::resolve_clamp(
-            &arch,
+        let clamp_kqv = crate::clamp_kqv::resolve_clamp_for(
+            facts.scaling.clamp_kqv,
             metadata_f32_any(file, &[key("attention.clamp_kqv")]),
         )
         .map_err(|e| LoadError::UnsupportedFeature(arch.clone(), e.message(&arch)))?;
@@ -829,19 +859,20 @@ impl ModelConfig {
         // the Gemma-3 lineage relies on that default; the architectures
         // in `swa_rope_base_follows_model` instead seed it from the
         // model's own base before the key can override.
+        // A graph that seeds the base and reads no key
+        // (`SwaFacts::rope_base_key_unread`) leaves a file's key dead.
         let rope_theta_swa = if sliding_window.is_some() {
-            let fallback = if crate::capability::swa_rope_base_follows_model(&arch) {
+            let fallback = if facts.swa.rope_base_follows_model {
                 rope_theta
             } else {
                 10_000.0
             };
-            Some(
-                metadata_f32_any(
-                    file,
-                    &[key("rope.freq_base_swa"), key("rope_freq_base_swa")],
-                )
-                .unwrap_or(fallback),
+            let declared = metadata_f32_any(
+                file,
+                &[key("rope.freq_base_swa"), key("rope_freq_base_swa")],
             )
+            .filter(|_| facts.swa.rope_base_key_unread.is_none());
+            Some(declared.unwrap_or(fallback))
         } else {
             None
         };
@@ -850,22 +881,20 @@ impl ModelConfig {
             // Per-ARCHITECTURE first, because llama.cpp's choice is per
             // architecture and the family partition does not match it:
             // `grok` is StandardGqa and passes `LLM_FFN_GELU`.
-            _ if crate::capability::uses_geglu(&arch) => crate::config::FfnActivation::Gelu,
-            _ if crate::capability::uses_relu_sqr(&arch) => crate::config::FfnActivation::ReluSqr,
-            _ if crate::capability::uses_gelu_ungated(&arch) => {
-                crate::config::FfnActivation::GeluUngated
-            }
+            _ if facts.ffn.geglu => crate::config::FfnActivation::Gelu,
+            _ if facts.ffn.relu_sqr => crate::config::FfnActivation::ReluSqr,
+            _ if facts.ffn.gelu_ungated => crate::config::FfnActivation::GeluUngated,
             // The GATED ReLU (`ggml_reglu_split`), a real gate tensor:
             // NOT the row above, which aliases gate to up.
-            _ if crate::capability::uses_reglu(&arch) => crate::config::FfnActivation::Reglu,
+            _ if facts.ffn.reglu => crate::config::FfnActivation::Reglu,
             // The four per-layer arrays travel IN the variant, read as
             // `apertus.cpp:6-9` reads them (`crate::act_layers`).
-            _ if crate::act_layers::uses_xielu(&arch) => crate::config::FfnActivation::Xielu(
+            _ if facts.ffn.xielu => crate::config::FfnActivation::Xielu(
                 crate::act_layers::read_xielu_layers(file, trunk.n_layers)?,
             ),
             // The two clamp arrays, read as `step35.cpp:28-29` read them
             // (optional; a file with neither is plain SwiGLU).
-            _ if crate::act_layers::reads_swiglu_clamps(&arch) => {
+            _ if facts.ffn.reads_swiglu_clamps => {
                 match crate::act_layers::read_swiglu_clamps(file, &arch, &trunk)? {
                     Some(clamps) => crate::config::FfnActivation::SwigluClamped(clamps),
                     None => crate::config::FfnActivation::Swiglu,
@@ -908,8 +937,9 @@ impl ModelConfig {
         // that value rather than the key. Before this existed the key
         // loaded and was silently dropped on the one generic-path
         // architecture whose graph applies it.
-        let attn_temperature = crate::attn_temperature::resolve_attn_temperature(
+        let attn_temperature = crate::attn_temperature::resolve_attn_temperature_for(
             &arch,
+            facts.scaling.attn_temperature_literal,
             crate::attn_temperature::DeclaredTemperature {
                 scale: metadata_f32_any(file, &[key("attention.temperature_scale")]),
                 length: metadata_u64_any(file, &[key("attention.temperature_length")]),
@@ -972,9 +1002,7 @@ impl ModelConfig {
             rope_dim_full: rope_dim_seeded as u64,
             head_dim: head_dim as u64,
         };
-        let widths = if sliding_window.is_some()
-            || crate::swa_geometry::full_layers_rotate_half(&arch).is_some()
-        {
+        let widths = if sliding_window.is_some() || facts.swa.full_layers_rotate_half.is_some() {
             if let Some(reason) = crate::swa_geometry::swa_geometry_refusal(&arch, geometry) {
                 return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
             }
@@ -1168,10 +1196,17 @@ impl ModelConfig {
                         swa: Some(vec![1.0; swa_width / 2]),
                     });
                 }
+                // One width: the sliding layers take the file's own
+                // factors unscaled, or NONE where the graph passes them
+                // nothing (`lfm3.cpp:113`, the same table as above).
+                let drops = facts.swa.layers_drop_rope_factors.is_some();
                 let swa = (sliding_window.is_some()
-                    && !crate::capability::swa_rope_scale_follows_model(&arch))
-                .then(|| rope_freqs_unscaled.unwrap_or_else(|| vec![1.0; full.len()]))
-                .filter(|swa| *swa != full);
+                    && (drops || !facts.swa.rope_scale_follows_model))
+                    .then(|| match rope_freqs_unscaled {
+                        Some(own) if !drops => own,
+                        _ => vec![1.0; full.len()],
+                    })
+                    .filter(|swa| *swa != full);
                 Ok(crate::config::RopeFreqs { full, swa })
             })
             .transpose()?;
@@ -1184,6 +1219,12 @@ impl ModelConfig {
             best_effort_fields.push(
                 "none -- every field above was read directly from this file's own GGUF metadata",
             );
+        }
+
+        // The architecture's own `load_arch_hparams` / `load_arch_tensors`
+        // throws that no table states (`HparamRules::load_checks`).
+        if let Some(reason) = (facts.rules.load_checks)(file, &arch, n_layers) {
+            return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
         }
 
         // LAST, deliberately. The generic path is a GUESS, so it has to
@@ -1199,7 +1240,7 @@ impl ModelConfig {
         if matches!(
             arch_profile.path,
             crate::capability::ArchPath::GenericGqa { .. }
-        ) && !crate::capability::is_audited_generic(&arch)
+        ) && !facts.audited
             && !matches!(
                 std::env::var("FRINK_ALLOW_UNAUDITED_ARCH").ok().as_deref(),
                 Some("1") | Some("true") | Some("on")
@@ -1218,10 +1259,10 @@ impl ModelConfig {
             n_layers,
             n_mtp_blocks: trunk.n_mtp_blocks,
             layer_loops,
-            skip_stream: crate::skip_stream::has_skip_stream(&arch),
-            parallel_ssm: crate::mamba2::parallel_with_attention(&arch),
+            skip_stream: facts.topology.skip_stream,
+            parallel_ssm: facts.topology.parallel_ssm,
             swa_chunked,
-            weightless_qk_norm: crate::weightless_qk_norm::weightless_qk_norm(&arch, n_experts),
+            weightless_qk_norm: (facts.rules.weightless_qk_norm)(&arch, n_experts),
             hidden_dim,
             n_heads,
             n_kv_heads,
@@ -1250,19 +1291,19 @@ impl ModelConfig {
                 // reads the key (`rope_layers::ROPE_PATTERN_READERS`).
                 crate::rope_layers::RopeLayers::FileMask(mask)
             } else {
-                crate::rope_layers::rope_layers(
+                (facts.rules.rope_layers)(
                     &arch,
                     n_layers,
                     sliding_window.is_some(),
                     n_dense_leading_layers,
                 )
             },
-            router_input: crate::router_input::router_input(&arch),
-            block_sub_norms: crate::sub_norms::block_sub_norms(&arch),
+            router_input: facts.moe.router_input,
+            block_sub_norms: facts.norm.block_sub_norms,
             parallel_residual: crate::parallel_residual::model_has_parallel_layer(
                 file, &arch, n_layers,
             ),
-            learned_positions: crate::position_embd::learned_positions(&arch),
+            learned_positions: facts.topology.learned_positions,
             attn_value_scale: crate::attn_value_scale::resolve_attn_value_scale(
                 &arch,
                 file.metadata_f32(&key("attention.value_scale")),
@@ -1287,8 +1328,9 @@ impl ModelConfig {
                 expert_group_used_count: metadata_u64_any(file, &[key("expert_group_used_count")])
                     .map(|v| v as usize)
                     .filter(|&c| c > 0),
+                selection: facts.moe.selection,
                 expert_weights_scale,
-                routed_weight_before_ffn: crate::routed_weight_site::weight_before_ffn(&arch),
+                routed_weight_before_ffn: facts.moe.routed_weight_before_ffn,
             },
             n_dense_leading_layers,
             moe_interleave_step,

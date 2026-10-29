@@ -46,7 +46,11 @@ CTX = 64
 LN_EPS = 1e-5
 
 
-def main(out_path: str, starcoder: bool) -> None:
+def main(out_path: str, starcoder: bool, split: bool = False) -> None:
+    # `split` (`--split`) stores Q/K/V as `attn_{q,k,v}.weight` / `.bias`:
+    # refusal evidence for #461. `gpt2.cpp:37-38` creates ONLY the fused
+    # tensors, so libllama fails on the file (`wrong number of
+    # tensors`), and frink refuses it by name.
     arch = "starcoder" if starcoder else "gpt2"
     n_head_kv = 1 if starcoder else N_HEAD
     rng = np.random.default_rng(0x6972 if starcoder else 0x6902)
@@ -98,8 +102,17 @@ def main(out_path: str, starcoder: bool) -> None:
         q = rnd(n_embd_q, N_EMBD) * 2.0
         k = rnd(n_embd_kv, N_EMBD) * 2.0
         v = rnd(n_embd_kv, N_EMBD)
-        w.add_tensor(p + "attn_qkv.weight", np.concatenate([q, k, v], axis=0))
-        w.add_tensor(p + "attn_qkv.bias", rnd(n_embd_q + 2 * n_embd_kv))
+        b = rnd(n_embd_q + 2 * n_embd_kv)
+        if split:
+            w.add_tensor(p + "attn_q.weight", q)
+            w.add_tensor(p + "attn_k.weight", k)
+            w.add_tensor(p + "attn_v.weight", v)
+            w.add_tensor(p + "attn_q.bias", b[:n_embd_q])
+            w.add_tensor(p + "attn_k.bias", b[n_embd_q : n_embd_q + n_embd_kv])
+            w.add_tensor(p + "attn_v.bias", b[n_embd_q + n_embd_kv :])
+        else:
+            w.add_tensor(p + "attn_qkv.weight", np.concatenate([q, k, v], axis=0))
+            w.add_tensor(p + "attn_qkv.bias", b)
         w.add_tensor(p + "attn_output.weight", rnd(N_EMBD, n_embd_q))
         w.add_tensor(p + "attn_output.bias", rnd(N_EMBD))
         w.add_tensor(p + "ffn_norm.weight", norm_w(N_EMBD))
@@ -124,5 +137,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("out", nargs="?", default="gpt2-fixture.gguf")
     ap.add_argument("--starcoder", action="store_true")
+    ap.add_argument("--split", action="store_true")
     args = ap.parse_args()
-    main(args.out, args.starcoder)
+    main(args.out, args.starcoder, args.split)

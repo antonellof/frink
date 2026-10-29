@@ -526,8 +526,20 @@ fn emit(model: &str, prompt: &str, prompt_tokens: Option<usize>) -> anyhow::Resu
     Ok(())
 }
 
+/// Caches that keep every row, whatever the layer's window.
+///
+/// This tool reads each layer's K/V over EVERY prompt position and
+/// compares two backends' readings. A windowed layer evicts behind its
+/// window by default on the host store (#61) and not on a device one,
+/// so a long `--prompt-tokens` run would compare the host's last
+/// `window + slack` rows against the device's whole prompt and report
+/// a divergence that is only a difference in what was kept.
 fn fresh_caches(decoder: &frink_models::decoder::Decoder) -> Vec<KvCache> {
-    decoder.config.new_kv_caches()
+    let mut caches = decoder.config.new_kv_caches();
+    for c in &mut caches {
+        c.forbid_eviction();
+    }
+    caches
 }
 
 /// Sum of squares, used only to ask whether a buffer holds anything at

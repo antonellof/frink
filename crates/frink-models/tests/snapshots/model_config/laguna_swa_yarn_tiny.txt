@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/laguna_swa_yarn_tiny.gguf
+config: REFUSED: architecture 'laguna' requires unimplemented feature: this laguna checkpoint declares BOTH a sliding window and rope.scaling.type = "yarn". llama.cpp ropes the sliding layers with the scaling switched off (freq_scale = 1, ext_factor = 0, attn_factor = 1; laguna.cpp:48,181-193) and the full-attention layers with it on, and frink carries one RoPE scaling for the whole model. A laguna file with a window and no scaling, or with scaling and no window, is unaffected

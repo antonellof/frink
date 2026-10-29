@@ -128,15 +128,13 @@ const LLAMA_REQUIRED_BIASES: &[(&str, &[&str], &str)] = &[
         &[
             "output_norm.bias",
             "attn_norm.bias",
-            "attn_q.bias",
-            "attn_k.bias",
-            "attn_v.bias",
             "attn_output.bias",
             "ffn_norm.bias",
             "ffn_up.bias",
             "ffn_down.bias",
         ],
-        "src/models/jais2.cpp:20,30,38,39,40,41,44,48,50",
+        // Q/K/V through `create_tensor_qkv` (`:32`), every bias optional.
+        "src/models/jais2.cpp:20,30,35,38,42,44",
     ),
     (
         "jina-bert-v2",
@@ -257,14 +255,14 @@ const PROJECTION_BIASES: &[&str] = &[
 ];
 
 fn creates_projection_bias(arch: &str, bias: &str) -> bool {
-    use frink_models::proj_bias::{
-        ATTN_OUT_BIAS_CREATORS, FFN_BIAS_CREATORS, OUTPUT_BIAS_CREATORS,
-    };
+    // The lookups, not the tables: `llama` and the Granite rows live in
+    // `frink_models::models` now.
+    use frink_models::proj_bias::{attn_out_presence, ffn_presence, output_presence};
     match bias {
-        "output.bias" => OUTPUT_BIAS_CREATORS.iter().any(|(n, _)| *n == arch),
-        "attn_output.bias" => ATTN_OUT_BIAS_CREATORS.iter().any(|(n, _)| *n == arch),
-        "ffn_up.bias" | "ffn_down.bias" => FFN_BIAS_CREATORS.iter().any(|(n, _, _)| *n == arch),
-        "ffn_gate.bias" => FFN_BIAS_CREATORS.iter().any(|(n, _, g)| *n == arch && *g),
+        "output.bias" => output_presence(arch).is_some(),
+        "attn_output.bias" => attn_out_presence(arch).is_some(),
+        "ffn_up.bias" | "ffn_down.bias" => ffn_presence(arch).is_some(),
+        "ffn_gate.bias" => ffn_presence(arch).is_some_and(|(_, gate)| gate),
         _ => false,
     }
 }
@@ -470,4 +468,105 @@ fn the_bias_transcription_is_complete_enough_to_be_worth_pinning() {
             .any(|&(_, b, _)| b.iter().any(|x| GENERIC_DECODER_APPLIES.contains(x))),
         "no row exercises the supported-bias branch"
     );
+}
+
+/// The required-bias transcription above and the loader's Q/K/V bias
+/// row agree (#447): every row that requires `attn_qkv.bias` is
+/// `QkvTensors::Fused(Required)` in the facts the loader reads, and no
+/// other generic row is. One table could otherwise say REQUIRED while
+/// the loader went on treating the bias as optional, which is what
+/// `qwen` did.
+#[test]
+fn every_required_fused_qkv_bias_is_required_by_the_loader() {
+    use frink_models::proj_bias::Presence;
+    use frink_models::qkv_fused::{QkvTensors, QKV_TENSOR_CREATORS};
+    let required = |arch: &str| {
+        frink_models::models::ArchFacts::of(arch)
+            .tensors
+            .qkv_tensors
+            == QkvTensors::Fused(Some(Presence::Required))
+    };
+    for (arch, biases, _) in LLAMA_REQUIRED_BIASES {
+        assert_eq!(
+            biases.contains(&"attn_qkv.bias"),
+            required(arch),
+            "{arch}: the transcription and the loader's row disagree"
+        );
+        // A required SPLIT bias has no row to say so: there is none at
+        // the pin (`create_tensor_qkv` creates them optional).
+        assert!(!biases.contains(&"attn_q.bias"), "{arch}");
+    }
+    for (arch, rule, _) in QKV_TENSOR_CREATORS {
+        if *rule == QkvTensors::Fused(Some(Presence::Required)) {
+            assert!(
+                LLAMA_REQUIRED_BIASES.iter().any(|(a, ..)| a == arch),
+                "{arch} is required by the loader but not transcribed"
+            );
+        }
+    }
+}
+
+/// `qwen.cpp:28` creates the fused bias REQUIRED: libllama does not load
+/// `qwen_nobias_tiny.gguf` (`check_tensor_dims: tensor
+/// 'blk.0.attn_qkv.bias' not found`, measured), and frink refuses it by
+/// name instead of running three unbiased projections (#447).
+#[test]
+fn a_qwen_file_without_its_fused_qkv_bias_is_refused() {
+    let path = format!(
+        "{}/tests/fixtures/qwen_nobias_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    let config = frink_models::ModelConfig::from_gguf(&file).expect("config parses");
+    match frink_models::Decoder::from_gguf(&path, config) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("blk.0.attn_qkv.bias is absent"), "{msg}");
+            assert!(msg.contains("REQUIRED"), "{msg}");
+        }
+        Ok(_) => panic!("a qwen file without attn_qkv.bias must be refused"),
+    }
+}
+
+/// `falcon.cpp:38` creates the fused weight and NO bias, so libllama
+/// fails on `falcon_qkvbias_tiny.gguf`'s extra tensors (`wrong number of
+/// tensors; expected 25, got 22`, measured). frink leaves them unread and
+/// refuses the file, where it used to apply them (#447).
+#[test]
+fn a_falcon_file_with_a_fused_qkv_bias_is_refused() {
+    let path = format!(
+        "{}/tests/fixtures/falcon_qkvbias_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    let config = frink_models::ModelConfig::from_gguf(&file).expect("config parses");
+    match frink_models::Decoder::from_gguf(&path, config) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("attn_qkv.bias"), "{msg}");
+        }
+        Ok(_) => panic!("a falcon file carrying attn_qkv.bias must be refused"),
+    }
+}
+
+/// `gpt2.cpp:37-38` creates ONLY the fused `attn_qkv`: libllama does not
+/// load `gpt2_split_tiny.gguf` (`check_tensor_dims: tensor
+/// 'blk.0.attn_qkv.weight' not found`, measured), and frink refuses it
+/// by name where it used to run the split weights (#461).
+#[test]
+fn a_gpt2_file_with_split_qkv_weights_is_refused() {
+    let path = format!(
+        "{}/tests/fixtures/gpt2_split_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    let config = frink_models::ModelConfig::from_gguf(&file).expect("config parses");
+    match frink_models::Decoder::from_gguf(&path, config) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("split attn_{q,k,v}.weight"), "{msg}");
+            assert!(msg.contains("only attn_qkv.weight"), "{msg}");
+        }
+        Ok(_) => panic!("a gpt2 file with split Q/K/V must be refused"),
+    }
 }

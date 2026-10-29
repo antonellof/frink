@@ -1647,15 +1647,8 @@ impl MetalGraph {
         for launch in launches {
             warm_mul_mm_sg_pipeline(device, launch.fn_name)?;
             mark(launch.fn_name);
-            let f16_static: &'static str = match launch.fn_name {
-                "q4_k_mul_mm_sg" => "q4_k_mul_mm_sg_f16",
-                "q5_k_mul_mm_sg" => "q5_k_mul_mm_sg_f16",
-                "q6_k_mul_mm_sg" => "q6_k_mul_mm_sg_f16",
-                "q8_0_mul_mm_sg" => "q8_0_mul_mm_sg_f16",
-                "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
-                "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
-                "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
-                _ => continue,
+            let Some(f16_static) = crate::gpu::mul_mm_sg_f16_fn(launch.fn_name) else {
+                continue;
             };
             warm_mul_mm_sg_pipeline(device, f16_static)?;
             mark(f16_static);
@@ -3721,6 +3714,17 @@ pub fn launch_moe_decode_stack(
     assert!(!layers.is_empty());
     assert_eq!(layers.len(), kvs.len());
     assert!(top_k > 0 && top_k <= 8);
+    // Every layer's experts need an id kernel, checked before anything
+    // is encoded: an encode that failed halfway used to leave the
+    // command buffer half-built and return a bare `CommandFailed` (#448).
+    for layer in layers {
+        let p = &layer.packed;
+        if let Some(kind) =
+            crate::gpu::moe_packed_mul_mv_id_missing(p.gate_kind, p.up_kind, p.down_kind)
+        {
+            return Err(MetalError::NoMoeIdKernel(kind));
+        }
+    }
     let hidden_dim = layers[0].packed.hidden_rows;
     let head_dim = kvs[0].head_dim;
     let n_kv_heads = kvs[0].n_kv_heads;

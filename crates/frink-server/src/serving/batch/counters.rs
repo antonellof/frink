@@ -19,6 +19,8 @@ pub(super) struct Counters {
     /// would be a gauge that reports the invariant instead of checking
     /// it.
     pub(super) peak_blocks: AtomicUsize,
+    /// Decoding rows evicted back to the queue to admit a waiting job.
+    pub(super) preempted: AtomicU64,
 }
 
 /// A snapshot of the worker's counters.
@@ -53,6 +55,11 @@ pub struct BatcherStats {
     /// Requests the scheduler actually stopped because they were
     /// cancelled.
     pub aborted: u64,
+    /// Decoding rows preempted back to the queue to admit a waiting
+    /// job (`FRINK_CB_PREEMPT_AFTER_TICKS`). Each one costs a
+    /// re-prefill, so a rising count is a budget too small for the
+    /// load rather than free fairness.
+    pub preempted: u64,
     /// The configured cap on in-flight sequences (llama.cpp `-np` /
     /// `FRINK_CB_MAX_SEQS`), or 0 when unlimited.
     ///

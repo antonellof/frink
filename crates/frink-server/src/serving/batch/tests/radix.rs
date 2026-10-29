@@ -61,6 +61,8 @@ fn paged_job(prompt: Vec<usize>, max_tokens: usize) -> (Job, mpsc::Receiver<Batc
             abort: AbortId(0),
             blocks: 1,
             skips: 0,
+            waited: 0,
+            answer: None,
         },
         rx,
     )
@@ -601,11 +603,12 @@ fn an_already_computed_prompt_is_admitted_ahead_of_a_cold_one() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &batcher_config,
         &queue,
         &budget,
         Some(&config),
+        &Counters::default(),
     );
 
     assert_eq!(
@@ -614,7 +617,7 @@ fn an_already_computed_prompt_is_admitted_ahead_of_a_cold_one() {
         "max_seqs is 1, so exactly one is admitted"
     );
     assert_eq!(
-        prefills[0].prompt_tokens,
+        prefills[0].answer.prompt_tokens,
         shared.len(),
         "the job whose prompt is already computed must be admitted first, not the front \
          of the queue"
@@ -648,14 +651,17 @@ fn a_batched_row_reports_the_prefix_it_reused() {
     let prompt = vec![1usize, 2, 3, 4, 5, 6, 7, 8];
 
     let (cold, cold_rx) = admit_prefilled(&decoder, &config, prompt.clone(), 2).expect("admitted");
-    let cold_adopted = cold.cached_tokens;
+    let cold_adopted = cold.answer.cached_tokens;
     finish_row(cold);
     let cold_usage = finished_result(cold_rx.recv().expect("a reply"))
         .expect("the cold row finished")
         .3;
 
     let (warm, warm_rx) = admit_prefilled(&decoder, &config, prompt.clone(), 2).expect("admitted");
-    let warm_adopted = warm.cached_tokens.expect("a radix tree is configured");
+    let warm_adopted = warm
+        .answer
+        .cached_tokens
+        .expect("a radix tree is configured");
     finish_row(warm);
     let warm_usage = finished_result(warm_rx.recv().expect("a reply"))
         .expect("the warm row finished")

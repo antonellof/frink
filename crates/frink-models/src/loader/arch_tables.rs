@@ -25,7 +25,7 @@ use frink_moe::GatingFunction;
 /// one, where the GGUF carries no key to correct it. Nothing is live
 /// today -- all three are `NewCode` for other reasons and refuse before
 /// reaching here -- but the list is what a later admission would trust.
-pub(super) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
+pub(crate) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
     "afmoe",
     // cohere2moe.cpp:27-29: the key read optional, SIGMOID when absent.
     "cohere2moe",
@@ -60,20 +60,17 @@ pub(super) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
 /// seeded SOFTMAX (`mellum.cpp:9,11,206`): on a file without the key
 /// the answer is unchanged, and on one with it this loader already
 /// read the key. No row is added or removed.
-pub(super) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
+pub(crate) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
     ("mimo2", GatingFunction::Sigmoid),
     // `nemotron-h.cpp:218`: the SIGMOID literal; the converter writes no
     // `expert_gating_func` (`conversion/nemotron.py:238-250`).
     ("nemotron_h_moe", GatingFunction::Sigmoid),
-    // `llama4.cpp:230`: the SIGMOID literal, with `norm_w = false` at
-    // `:228` (`NO_TOPK_RENORMALIZE_ARCHITECTURES`); the converter
-    // writes no key (`conversion/llama.py:374-394`).
-    ("llama4", GatingFunction::Sigmoid),
+    // `llama4` is in `crate::models::llama4` (#403 step 6b).
 ];
 
 /// The names alone, for the cross-table test.
 #[cfg(test)]
-pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe", "llama4"];
+pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe"];
 
 /// Architectures whose `load_arch_hparams` reads
 /// `{arch}.expert_weights_scale` (`LLM_KV_EXPERT_WEIGHTS_SCALE`) -- and
@@ -95,14 +92,14 @@ pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe", "l
 /// files (24 at `5b59b83` with this spelling of the command), and the
 /// five it gained are all NEW graphs (`beam`, `flint`, `glm5-next`,
 /// `k2-horizon`, `muse-spark`), every one refused, so no row is added.
-pub(super) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
+pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
     "bailingmoe2",
     // `cohere2moe.cpp:19-20` read both the norm and the scale.
     "cohere2moe",
     "deepseek",
-    "dots1",
+    // `dots1` is in `crate::models::dots1` (#403 step 6).
     "exaone-moe",
     // `glm4-moe.cpp:13-14` read both the scale and the norm.
     "glm4moe",
@@ -129,12 +126,12 @@ pub(super) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
 /// is what this loader already did for it). Without the row a Mellum
 /// file declaring `false` would have been renormalised here and not
 /// upstream. The other six are new graphs, all refused.
-pub(super) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
+pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
     "bailingmoe2",
     "cohere2moe",
-    "dots1",
+    // `dots1` is in `crate::models::dots1` (#403 step 6).
     "exaone-moe",
     "glm4moe",
     "laguna",
@@ -208,31 +205,9 @@ pub(super) const DEDICATED_OWNS_ITS_BEHAVIOUR: &[(&str, &str)] = &[
 // `llama4.cpp:228` passes `false` beside its SIGMOID literal
 // (`GATING_LITERAL_ARCHITECTURES`): the top-k sigmoid scores weight
 // the experts unrenormalised.
-pub(super) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] =
-    &["deepseek", "jamba", "llama4", "olmoe", "qwen2moe"];
-
-/// Architectures whose `{arch}.feed_forward_length` counts the gate and
-/// the up projection TOGETHER, so each FFN matrix is half as wide as the
-/// key says.
-///
-/// Qwen-1 (`QWenLMHeadModel`, GGUF string `qwen` -- not `qwen2` and not
-/// `qwen3`) is the only one. HF's `QWenMLP` sets
-/// `ff_dim_in = config.intermediate_size // 2` and builds `w1` and `w2`
-/// at that width; `conversion/qwen.py`'s `QwenModel` inherits the base
-/// `set_gguf_parameters`, which writes `intermediate_size` through
-/// unchanged (`conversion/base.py:1206`); and `src/models/qwen.cpp:33-35`
-/// therefore creates `ffn_gate`, `ffn_up` and `ffn_down` at `n_ff / 2`.
-///
-/// **This costs no logits and is still worth fixing.** frink loads the
-/// dense FFN by tensor NAME and uses each matrix's own shape, so the
-/// forward pass was always right; what was wrong was `expert_ffn_dim`,
-/// which is what every memory estimate and `frink inspect-plan` row
-/// prices the FFN from. That is this repo's dominant bug shape --
-/// `ModelConfig` and the weights disagreeing about one number with
-/// nothing comparing them -- so
-/// `the_declared_ffn_width_matches_the_matrices_that_load`
-/// (tests/one_match_arm_graphs.rs) now compares them.
-pub(super) const FFN_LENGTH_COUNTS_GATE_AND_UP: &[&str] = &["qwen"];
+// `qwen2moe` and `olmoe` state their rows in `crate::models` (#403
+// steps 4 and 6).
+pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] = &["deepseek", "jamba"];
 
 /// Architectures whose checkpoints carry `{arch}.leading_dense_block_count`
 /// while their reference graph never branches on it: **every** layer is
@@ -257,7 +232,7 @@ pub(super) const FFN_LENGTH_COUNTS_GATE_AND_UP: &[&str] = &["qwen"];
 /// `dots1`, `glm4moe` and every other leading-dense architecture the key
 /// is load-bearing and must be honoured. Membership here is a statement
 /// about ONE architecture's graph, checked in that graph.
-pub(super) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
+pub(crate) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
 
 /// Architectures whose reference graph applies `attn_q_norm` /
 /// `attn_k_norm` AFTER `ggml_rope_ext`, not before it.
@@ -282,5 +257,5 @@ pub(super) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
 /// The audited majority is the other way round -- `qwen3moe.cpp:99,108`
 /// and `bailingmoe2.cpp:123-135` both norm first -- which is why the
 /// decoder's default is "before" and this list is the exception.
-pub(super) const QK_NORM_AFTER_ROPE_ARCHITECTURES: &[&str] =
+pub(crate) const QK_NORM_AFTER_ROPE_ARCHITECTURES: &[&str] =
     &["hunyuan-dense", "hunyuan-moe", "maincoder", "talkie"];

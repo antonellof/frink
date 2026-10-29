@@ -30,6 +30,8 @@ fn a_prefill_line_counts_the_tokens_the_batch_is_about_to_compute() {
             abort: AbortId(0),
             blocks: 1,
             skips: 0,
+            waited: 0,
+            answer: None,
         });
     }
 
@@ -37,11 +39,12 @@ fn a_prefill_line_counts_the_tokens_the_batch_is_about_to_compute() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &BatcherConfig::default(),
         &queue,
         &budget,
         None,
+        &Counters::default(),
     );
     assert_eq!(snapshot.new_seqs, 2);
     assert_eq!(
@@ -55,11 +58,12 @@ fn a_prefill_line_counts_the_tokens_the_batch_is_about_to_compute() {
         &decoder,
         &mut waiting,
         &mut prefills,
-        0,
+        &mut Rows::default(),
         &BatcherConfig::default(),
         &queue,
         &budget,
         None,
+        &Counters::default(),
     );
     assert_eq!(idle, PrefillSnapshot::default());
 }

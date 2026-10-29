@@ -101,35 +101,47 @@ mod tests {
     /// rather than a wrong number in a PR body.
     #[test]
     fn no_encode_site_bypasses_the_counter() {
-        // Every `.rs` in this crate, read at compile time so a new file
-        // that is not listed here also fails to compile this test.
-        let sources: &[(&str, &str)] = &[
-            ("attn.rs", include_str!("attn.rs")),
-            ("capability.rs", include_str!("capability.rs")),
-            ("decode_dense.rs", include_str!("decode_dense.rs")),
-            ("dispatch.rs", include_str!("dispatch.rs")),
-            ("elem.rs", include_str!("elem.rs")),
-            ("embd.rs", include_str!("embd.rs")),
-            ("fa_vec_decode.rs", include_str!("fa_vec_decode.rs")),
-            ("gpu.rs", include_str!("gpu.rs")),
-            ("kernel_bench.rs", include_str!("kernel_bench.rs")),
-            ("kernel_timing.rs", include_str!("kernel_timing.rs")),
-            ("lib.rs", include_str!("lib.rs")),
-            ("mem_ranges.rs", include_str!("mem_ranges.rs")),
-            ("moe_ids.rs", include_str!("moe_ids.rs")),
-            ("norm.rs", include_str!("norm.rs")),
-            ("rope.rs", include_str!("rope.rs")),
-            ("timing.rs", include_str!("timing.rs")),
-        ];
+        // Every `.rs` in this crate, found by walking `src/` rather than
+        // listed by hand. The hand list this replaced named 16 of the 27
+        // files, and six raw dispatches in the four it missed (`gdn.rs`,
+        // `gdn_chunk.rs`, `gdn_head.rs`, `hadamard.rs`) were invisible to
+        // the counter, which is the counter frink-models reads to prove
+        // a CPU-pinned process encoded no Metal work at all.
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut sources: Vec<(String, String)> = Vec::new();
+        let mut dirs = vec![src_dir.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("src/ is readable") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    let name = path
+                        .strip_prefix(&src_dir)
+                        .expect("under src/")
+                        .to_string_lossy()
+                        .into_owned();
+                    let text = std::fs::read_to_string(&path).expect("source is readable");
+                    sources.push((name, text));
+                }
+            }
+        }
+        assert!(
+            sources.iter().any(|(n, _)| n == "gpu.rs") && sources.len() > 20,
+            "the walk found {} files; it is not reading this crate",
+            sources.len()
+        );
         // This file holds the wrapper (the one legitimate caller of the
         // raw dispatch method) and the patterns this test searches for,
         // so it is not itself a subject.
-        let subjects = || sources.iter().filter(|(name, _)| *name != "dispatch.rs");
+        let subjects = || sources.iter().filter(|(name, _)| name != "dispatch.rs");
 
         let mut raw = Vec::new();
         for (name, src) in subjects() {
             for (i, line) in src.lines().enumerate() {
-                if line.contains(".dispatchThreadgroups_threadsPerThreadgroup(") {
+                if line.contains(".dispatchThreadgroups_threadsPerThreadgroup(")
+                    || line.contains(".dispatchThreads_threadsPerThreadgroup(")
+                {
                     raw.push(format!("{name}:{}: {}", i + 1, line.trim()));
                 }
             }
@@ -149,7 +161,7 @@ mod tests {
                 if !line.contains(".memoryBarrierWith") {
                     continue;
                 }
-                let inside_the_primitive = *name == "gpu.rs"
+                let inside_the_primitive = name == "gpu.rs"
                     && (line.contains("encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers)")
                         || line.contains("encoder.memoryBarrierWithResources_count("));
                 if !inside_the_primitive {
