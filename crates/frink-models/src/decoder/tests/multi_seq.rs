@@ -38,7 +38,7 @@ fn a_paged_multi_seq_step_is_bit_identical_to_the_contiguous_one() {
         },
     ] {
         let n_layers = 2;
-        let decoder = Decoder::new_random_small(cfg, n_layers, 10);
+        let decoder = host_decoder(cfg, n_layers, 10);
         let histories: [&[usize]; 3] = [&[1, 3, 5], &[2, 7], &[4, 4, 4, 6]];
         let next = [6usize, 1, 2];
 
@@ -110,7 +110,7 @@ fn forward_multi_seq_matches_independent_forward_token_per_sequence() {
     // same position when batched together.
     let seq_histories: [&[usize]; 3] = [&[1, 3, 5], &[2, 7], &[4, 4, 4, 6]];
 
-    let decoder_a = Decoder::new_random_small(cfg.clone(), 2, vocab);
+    let decoder_a = host_decoder(cfg.clone(), 2, vocab);
     let mut independent_logits: Vec<Vec<f32>> = Vec::new();
     for history in seq_histories.iter() {
         let mut caches: Vec<KvCache> = decoder_a.config.new_kv_caches();
@@ -123,7 +123,7 @@ fn forward_multi_seq_matches_independent_forward_token_per_sequence() {
 
     // Same seed -> identical weights, fresh caches for a fair
     // comparison (mirrors forward_batch_matches_sequential_forward_token_exactly).
-    let decoder_b = Decoder::new_random_small(cfg, 2, vocab);
+    let decoder_b = host_decoder(cfg, 2, vocab);
     let mut per_seq_caches: Vec<Vec<KvCache>> = seq_histories
         .iter()
         .map(|_| decoder_b.config.new_kv_caches())
@@ -203,7 +203,7 @@ fn the_multi_seq_path_applies_attention_scale_like_the_contiguous_one() {
     // Builds every sequence's history with `forward_token`, then
     // takes the next step either per sequence or as one batch.
     let run = |cfg: ModelConfig, batched: bool| -> Vec<Vec<f32>> {
-        let decoder = Decoder::new_random_small(cfg, n_layers, vocab);
+        let decoder = host_decoder(cfg, n_layers, vocab);
         let mut per_seq: Vec<Vec<KvCache>> = histories
             .iter()
             .map(|h| {

@@ -16,6 +16,17 @@ use super::{Decoder, LayerWeights};
 #[cfg(feature = "metal")]
 use super::{ExpertBacking, MoePackedQ4Planes, MoeWeights};
 
+/// Whether the fused Metal attention block is switched on in this
+/// process: dense Metal AND `FRINK_METAL_ATTN`. ONE spelling for every
+/// site that asks. `KvWindowPolicy::from_env` once read the second half
+/// alone, so `FRINK_METAL=0 FRINK_METAL_ATTN=1` (or a host-pinned test)
+/// turned the host's KV window eviction off for a device path that
+/// could not run.
+#[cfg(feature = "metal")]
+pub(crate) fn metal_attn_switched_on() -> bool {
+    frink_core::metal_dense_enabled() && frink_metal::attn::metal_attn_enabled()
+}
+
 impl Decoder {
     /// Metal's launch description for `m`, or `None` when no kernel
     /// serves its storage. Delegates to `crate::metal_launch`, which is
@@ -266,10 +277,7 @@ impl Decoder {
         &self,
         use_metal_attn: bool,
     ) -> Option<frink_moe::ResidencyPlan> {
-        if frink_core::metal_dense_enabled()
-            && frink_metal::attn::metal_attn_enabled()
-            && !use_metal_attn
-        {
+        if metal_attn_switched_on() && !use_metal_attn {
             return None;
         }
         self.gpu_vram_budget_bytes.map(|b| self.residency_plan(b))

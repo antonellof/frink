@@ -114,7 +114,7 @@ const TOL: f32 = 1e-6;
 fn load() -> Decoder {
     let file = frink_gguf::GgufFile::open(FIXTURE).expect("fixture opens");
     let config = ModelConfig::from_gguf(&file).expect("fixture config parses");
-    Decoder::from_gguf(FIXTURE, config).expect("fixture loads")
+    common::load_decoder(FIXTURE, config)
 }
 
 /// The claim: frink's gpt-oss CPU graph agrees with llama.cpp's.

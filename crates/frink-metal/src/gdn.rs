@@ -304,7 +304,8 @@ pub fn encode_gated_norm(
     // A power of two so the reduction's halving loop covers the group,
     // and at most the 256 floats of scratch the kernel declares.
     let threads = head_dim.next_power_of_two().min(256);
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+    crate::dispatch::dispatch_counted(
+        encoder,
         MTLSize {
             width: n_heads,
             height: 1,
@@ -405,7 +406,8 @@ pub fn encode_delta_step_at(
     if threads > pipe.0.maxTotalThreadsPerThreadgroup() {
         return Err(MetalError::CommandFailed);
     }
-    encoder.dispatchThreadgroups_threadsPerThreadgroup(
+    crate::dispatch::dispatch_counted(
+        encoder,
         MTLSize {
             width: shape.n_v_heads * shape.head_dim,
             height: 1,

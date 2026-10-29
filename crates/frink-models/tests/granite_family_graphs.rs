@@ -92,7 +92,7 @@ use common::{
     assert_all_three_paths_match, graph_caches, graph_fixture_path, kl_vs_golden,
     load_graph_fixture, worst_vs, GRAPH_PROMPT, GRAPH_TOL,
 };
-use frink_models::{Decoder, LoadError, ModelConfig, RopeLayout};
+use frink_models::{LoadError, ModelConfig, RopeLayout};
 use frink_moe::GatingFunction;
 
 /// The rows this suite admits. `granite-moe` is here because it must be
@@ -603,7 +603,7 @@ fn assert_sabotage_is_visible(arch: &str, what: &str, mutate: impl FnOnce(&mut M
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     mutate(&mut config);
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = graph_caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),

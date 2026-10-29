@@ -80,8 +80,7 @@ impl Decoder {
         let skip_rows = self.config.skip_stream.then(|| hidden_batch.clone());
 
         #[cfg(feature = "metal")]
-        let use_metal_attn = frink_core::metal_dense_enabled()
-            && frink_metal::attn::metal_attn_enabled()
+        let use_metal_attn = crate::decoder::metal_eligibility::metal_attn_switched_on()
             && self
                 .layers
                 .iter()

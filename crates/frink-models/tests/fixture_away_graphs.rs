@@ -114,7 +114,7 @@ use common::{
 };
 use frink_models::capability::QkNormStyle;
 use frink_models::swa_layers::SwaLayers;
-use frink_models::{Decoder, ModelConfig, RopeLayout};
+use frink_models::{ModelConfig, RopeLayout};
 use frink_moe::GatingFunction;
 
 /// The rows whose llama.cpp graph has no QK-norm, no post-norms, no
@@ -747,7 +747,7 @@ fn dropping_gemmas_embedding_scale_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.embedding_scale = None;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = graph_caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
@@ -772,7 +772,7 @@ fn running_gemmas_ffn_as_swiglu_instead_of_geglu_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.ffn_activation = frink_models::config::FfnActivation::Swiglu;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = graph_caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
@@ -930,7 +930,7 @@ fn routing_bailingmoe2_through_softmax_instead_of_sigmoid_diverges_from_llama_cp
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.moe.gating = GatingFunction::Softmax;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = graph_caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
@@ -1160,7 +1160,7 @@ fn removing_plamo3s_sliding_window_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.sliding_window = None;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = graph_caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
@@ -1184,7 +1184,7 @@ fn inverting_plamo3s_swa_phase_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.swa_layers = SwaLayers::period(2, true);
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     assert_eq!(
         d.config.layer_sliding_window(0),
         None,
@@ -1273,7 +1273,7 @@ fn rotating_the_wrong_pairs_diverges_from_llama_cpp() {
             RopeLayout::Norm => RopeLayout::Neox,
             _ => RopeLayout::Norm,
         };
-        let d = Decoder::from_gguf(&path, config).expect("loads");
+        let d = common::load_decoder(&path, config);
         let mut kv = graph_caches(&d);
         let worst = worst_vs(&d.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv), golden);
         assert!(
