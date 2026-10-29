@@ -3,7 +3,7 @@
 //! `frink --list-devices` and `frink-server --list-devices` are the
 //! same llama.cpp-style flag and printed the same text from two
 //! byte-identical copies, one in `frink-cli/src/run.rs` and one in
-//! `frink-server/src/cli.rs`. A backend added to one would have been
+//! `frink-server/src/cli/mod.rs`. A backend added to one would have been
 //! missing from the other, silently, and the user-visible symptom
 //! would be two binaries of the same engine disagreeing about what
 //! hardware exists.

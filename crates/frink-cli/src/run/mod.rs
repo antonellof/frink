@@ -535,9 +535,10 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
         frink_models::devices::print_available_devices();
         return Ok(());
     }
+    let mut args = args;
+    args.apply_llama_flags()?;
     // `-hf` resolves to a local path before anything else looks at
     // `--model`, so the rest of this function sees one kind of input.
-    let mut args = args;
     if let Some(spec) = args.hf_repo.clone() {
         args.model = Some(crate::hf::resolve(&spec, args.hf_file.as_deref())?);
     }
@@ -732,6 +733,13 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
 
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
+    // Before the timer, never inside it: the first forward pass
+    // builds every pipeline and allocates every buffer, and that
+    // cost divided by a short prompt is what made this line read
+    // 12.64 t/s where llama.cpp reads 197.7 for the same file. Above
+    // the speculative branch, so `--warmup` means the same on it.
+    crate::cli_output::warm_up(&decoder, args.warmup_enabled());
+
     // Speculative decoding with a real draft model, when `-d` names
     // one. The verification rule lives in `frink_models::speculative`
     // and is lossless at every temperature; this is only the wiring.
@@ -750,11 +758,6 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
         );
     }
 
-    // Before the timer, never inside it: the first forward pass
-    // builds every pipeline and allocates every buffer, and that
-    // cost divided by a short prompt is what made this line read
-    // 12.64 t/s where llama.cpp reads 197.7 for the same file.
-    crate::cli_output::warm_up(&decoder);
     let prefill_t = Instant::now();
     let mut pos;
     let mut logits = if tokens.is_empty() {
@@ -938,6 +941,9 @@ fn run_infer_speculative(
     let decode_secs = decode_t.elapsed().as_secs_f64();
     writeln!(stdout)?;
 
+    if !crate::cli_output::show_timings() {
+        return Ok(());
+    }
     let tps = if decode_secs > 0.0 {
         emitted as f64 / decode_secs
     } else {

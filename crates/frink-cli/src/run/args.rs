@@ -118,6 +118,11 @@ pub struct InferArgs {
     #[arg(short = 'j', long = "json-schema")]
     pub json_schema: Option<String>,
 
+    /// Read the JSON Schema from a file, llama.cpp's `-jf` /
+    /// `--json-schema-file`. Exclusive with the other two grammar flags.
+    #[arg(long = "json-schema-file", visible_alias = "jf", value_name = "FILE")]
+    pub json_schema_file: Option<std::path::PathBuf>,
+
     /// Min-p sampling: drop every candidate less than this fraction as
     /// likely as the most likely one (`0.0` = disabled).
     ///
@@ -341,6 +346,84 @@ pub struct InferArgs {
     #[arg(long = "system", visible_aliases = ["sys", "system-prompt"])]
     pub system: Option<String>,
 
+    /// Read the system prompt from a file, llama.cpp's `-sysf` /
+    /// `--system-prompt-file`. One trailing newline is dropped, as
+    /// upstream drops it (`common/arg.cpp:1828`); the rest is verbatim.
+    #[arg(
+        long = "system-prompt-file",
+        visible_alias = "sysf",
+        value_name = "FNAME",
+        conflicts_with = "system"
+    )]
+    pub system_prompt_file: Option<std::path::PathBuf>,
+
+    /// Accepted and already what happens: frink renders the GGUF's own
+    /// `tokenizer.chat_template` with a Jinja engine, which is what
+    /// llama.cpp's `--jinja` turns on.
+    #[arg(long = "jinja", default_value_t = false)]
+    pub jinja: bool,
+
+    /// Refused: frink has no non-Jinja template matcher to fall back to.
+    /// `--no-cnv` is the raw completion.
+    #[arg(long = "no-jinja", default_value_t = false)]
+    pub no_jinja: bool,
+
+    /// Run one throwaway forward pass before the timed prompt, llama.cpp's
+    /// `--warmup` (the default, on both).
+    #[arg(long = "warmup", overrides_with = "no_warmup", default_value_t = false)]
+    pub warmup: bool,
+
+    /// Skip the throwaway forward pass, llama.cpp's `--no-warmup`. The
+    /// prompt rate then includes first-dispatch cost.
+    #[arg(long = "no-warmup", overrides_with = "warmup", default_value_t = false)]
+    pub no_warmup: bool,
+
+    /// Flash attention, llama.cpp's `-fa` (`on`, `off`, `auto`). `on`
+    /// and `auto` are what frink does wherever the backend has a fused
+    /// kernel; `off` is refused ([`frink_core::argv::check_flash_attn`]).
+    #[arg(
+        long = "flash-attn",
+        visible_alias = "fa",
+        value_name = "MODE",
+        num_args = 0..=1,
+        default_missing_value = "auto"
+    )]
+    pub flash_attn: Option<String>,
+
+    /// Hugging Face access token for `-hf`, llama.cpp's `-hft` /
+    /// `--hf-token`. Sets `HF_TOKEN`, the variable the downloader reads.
+    #[arg(long = "hf-token", visible_alias = "hft", value_name = "TOKEN")]
+    pub hf_token: Option<String>,
+
+    /// Print the timing lines after the answer, llama.cpp's
+    /// `--show-timings` (the default).
+    #[arg(
+        long = "show-timings",
+        overrides_with = "no_show_timings",
+        default_value_t = false
+    )]
+    pub show_timings: bool,
+
+    /// Do not print the timing lines, llama.cpp's `--no-show-timings`.
+    #[arg(
+        long = "no-show-timings",
+        overrides_with = "show_timings",
+        default_value_t = false
+    )]
+    pub no_show_timings: bool,
+
+    /// Colour the prompt echo and the timings on stderr, llama.cpp's
+    /// `-co` / `--color` (`on`, `off`, `auto`; `auto` is the default and
+    /// means "when stderr is a terminal"). A bare `-co` means `on`.
+    #[arg(
+        long = "color",
+        visible_alias = "co",
+        value_name = "on|off|auto",
+        num_args = 0..=1,
+        default_missing_value = "on"
+    )]
+    pub color: Option<String>,
+
     /// Raw prompt: skip chat-template wrap (llama.cpp `--no-cnv`).
     ///
     /// llama.cpp REMOVED `--no-cnv` in its 0.4 launcher and spells the
@@ -428,6 +511,76 @@ pub struct InferArgs {
 }
 
 impl InferArgs {
+    /// Whether the throwaway warm-up pass runs (`--warmup`, the default,
+    /// or `--no-warmup`, whichever came last).
+    pub fn warmup_enabled(&self) -> bool {
+        !self.no_warmup
+    }
+
+    /// The llama.cpp flags that are settled before anything is loaded,
+    /// once, for every engine path: refusals, `-sysf` read into
+    /// `--system`, `-hft` into `HF_TOKEN`, and the stderr presentation
+    /// (`-co`, `--no-show-timings`).
+    ///
+    /// Called at the top of `run_infer`, before the dispatch to the
+    /// dedicated engines, so no path can see the flags unapplied.
+    pub fn apply_llama_flags(&mut self) -> anyhow::Result<()> {
+        if self.no_jinja {
+            anyhow::bail!(
+                "--no-jinja: frink has no non-Jinja template mode. It renders the GGUF's own \
+                 tokenizer.chat_template, which is what llama.cpp's --jinja turns on, and has \
+                 no built-in template matcher to fall back to. Use --no-cnv for a raw completion"
+            );
+        }
+        if let Some(mode) = &self.flash_attn {
+            frink_core::argv::check_flash_attn(mode).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        if let Some(token) = &self.hf_token {
+            // SAFETY: single-threaded, before any worker or download.
+            unsafe { std::env::set_var("HF_TOKEN", token) };
+        }
+        self.read_system_prompt_file()?;
+        crate::cli_output::set_colour(self.colour_choice()?);
+        crate::cli_output::set_show_timings(self.show_timings_enabled());
+        Ok(())
+    }
+
+    /// `-sysf FILE` read into `--system`, dropping one trailing newline
+    /// as llama.cpp does (`common/arg.cpp`, `--system-prompt-file`).
+    pub(crate) fn read_system_prompt_file(&mut self) -> anyhow::Result<()> {
+        if let Some(path) = self.system_prompt_file.take() {
+            let mut text = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("--system-prompt-file {}: {e}", path.display()))?;
+            if text.ends_with('\n') {
+                text.pop();
+            }
+            self.system = Some(text);
+        }
+        Ok(())
+    }
+
+    /// `-co`: `Some(true)` on, `Some(false)` off, `None` for `auto` or
+    /// no flag (colour when stderr is a terminal). A value llama.cpp's
+    /// `--color` would throw on is refused.
+    pub(crate) fn colour_choice(&self) -> anyhow::Result<Option<bool>> {
+        use frink_core::argv::Switch;
+        let Some(value) = &self.color else {
+            return Ok(None);
+        };
+        match frink_core::argv::llama_switch(value.trim()) {
+            Some(Switch::On) => Ok(Some(true)),
+            Some(Switch::Off) => Ok(Some(false)),
+            Some(Switch::Auto) => Ok(None),
+            None => anyhow::bail!("--color {value}: expected on, off or auto"),
+        }
+    }
+
+    /// Whether timing lines print (`--show-timings`, the default, or
+    /// `--no-show-timings`, whichever came last).
+    pub fn show_timings_enabled(&self) -> bool {
+        !self.no_show_timings
+    }
+
     /// The grammar these flags describe, if any.
     ///
     /// The three spellings are llama.cpp's and are MUTUALLY EXCLUSIVE
@@ -439,15 +592,24 @@ impl InferArgs {
             self.grammar.is_some(),
             self.grammar_file.is_some(),
             self.json_schema.is_some(),
+            self.json_schema_file.is_some(),
         ]
         .iter()
         .filter(|b| **b)
         .count();
         if given > 1 {
             anyhow::bail!(
-                "--grammar, --grammar-file and --json-schema are mutually exclusive; \
-                 pass exactly one"
+                "--grammar, --grammar-file, --json-schema and --json-schema-file are mutually \
+                 exclusive; pass exactly one"
             );
+        }
+        if let Some(path) = &self.json_schema_file {
+            let schema = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("--json-schema-file {}: {e}", path.display()))?;
+            return Ok(Some(
+                frink_models::grammar::json_schema_to_grammar(&schema)
+                    .map_err(|e| anyhow::anyhow!("--json-schema-file: {e}"))?,
+            ));
         }
         if let Some(g) = &self.grammar {
             return Ok(Some(g.clone()));
