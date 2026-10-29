@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/eurobert_tiny.gguf
+config: REFUSED: architecture 'eurobert' requires unimplemented feature: architecture deferred from Frink text-generation scope: encoder/embedding; deferred

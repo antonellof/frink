@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/llama4_noswa_tiny.gguf
+config: REFUSED: architecture 'llama4' requires unimplemented feature: `llama4.attention.sliding_window` is 0: src/models/llama4.cpp:5-21 take the no-window branch, which leaves `f_attn_temp_scale` at 0 while the graph still builds the attention-temperature input, and libllama aborts on it (llama-graph.cpp:159, `GGML_ASSERT(f_attn_temp_scale != 0.0f)`; measured on scripts/make_llama4_fixture.py --noswa). frink refuses the file rather than answer where its reference cannot

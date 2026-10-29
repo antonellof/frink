@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/deepseek2_temp_tiny.gguf
+config: REFUSED: architecture 'deepseek2' cannot use the generic Decoder: DeepSeek-2 MLA needs the MLA engine, not generic GQA

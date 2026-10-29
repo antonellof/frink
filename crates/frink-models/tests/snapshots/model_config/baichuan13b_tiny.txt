@@ -1,0 +1,641 @@
+fixture: crates/frink-models/tests/fixtures/baichuan13b_tiny.gguf
+config: ModelConfig {
+    name: "ferrox-baichuan-fixture",
+    kv_dtype: F32,
+    n_layers: 40,
+    n_mtp_blocks: 0,
+    hidden_dim: 16,
+    n_heads: 2,
+    n_kv_heads: 2,
+    head_dim: 8,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-6,
+    post_norm_eps: 1e-6,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 16,
+        expert_ffn_dim: 32,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: None,
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Norm,
+    qk_norm_style: WholeVector,
+    swa_layers: All,
+    rope_layers: Never,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: Some(
+        8.0,
+    ),
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: None,
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "head_dim (no attention.key_length key; derived as hidden_dim / n_heads)",
+    ],
+}
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (2, 8, 8)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 8, 8)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (2, 8, 8)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (2, 8, 8)
+cfg.layer[4].attention_kind: Gqa
+cfg.layer[4].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[4].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[4].kv_dtype: F32
+cfg.layer[4].cache_geometry: (2, 8, 8)
+cfg.layer[5].attention_kind: Gqa
+cfg.layer[5].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[5].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[5].kv_dtype: F32
+cfg.layer[5].cache_geometry: (2, 8, 8)
+cfg.layer[6].attention_kind: Gqa
+cfg.layer[6].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[6].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[6].kv_dtype: F32
+cfg.layer[6].cache_geometry: (2, 8, 8)
+cfg.layer[7].attention_kind: Gqa
+cfg.layer[7].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[7].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[7].kv_dtype: F32
+cfg.layer[7].cache_geometry: (2, 8, 8)
+cfg.layer[8].attention_kind: Gqa
+cfg.layer[8].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[8].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[8].kv_dtype: F32
+cfg.layer[8].cache_geometry: (2, 8, 8)
+cfg.layer[9].attention_kind: Gqa
+cfg.layer[9].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[9].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[9].kv_dtype: F32
+cfg.layer[9].cache_geometry: (2, 8, 8)
+cfg.layer[10].attention_kind: Gqa
+cfg.layer[10].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[10].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[10].kv_dtype: F32
+cfg.layer[10].cache_geometry: (2, 8, 8)
+cfg.layer[11].attention_kind: Gqa
+cfg.layer[11].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[11].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[11].kv_dtype: F32
+cfg.layer[11].cache_geometry: (2, 8, 8)
+cfg.layer[12].attention_kind: Gqa
+cfg.layer[12].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[12].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[12].kv_dtype: F32
+cfg.layer[12].cache_geometry: (2, 8, 8)
+cfg.layer[13].attention_kind: Gqa
+cfg.layer[13].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[13].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[13].kv_dtype: F32
+cfg.layer[13].cache_geometry: (2, 8, 8)
+cfg.layer[14].attention_kind: Gqa
+cfg.layer[14].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[14].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[14].kv_dtype: F32
+cfg.layer[14].cache_geometry: (2, 8, 8)
+cfg.layer[15].attention_kind: Gqa
+cfg.layer[15].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[15].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[15].kv_dtype: F32
+cfg.layer[15].cache_geometry: (2, 8, 8)
+cfg.layer[16].attention_kind: Gqa
+cfg.layer[16].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[16].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[16].kv_dtype: F32
+cfg.layer[16].cache_geometry: (2, 8, 8)
+cfg.layer[17].attention_kind: Gqa
+cfg.layer[17].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[17].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[17].kv_dtype: F32
+cfg.layer[17].cache_geometry: (2, 8, 8)
+cfg.layer[18].attention_kind: Gqa
+cfg.layer[18].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[18].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[18].kv_dtype: F32
+cfg.layer[18].cache_geometry: (2, 8, 8)
+cfg.layer[19].attention_kind: Gqa
+cfg.layer[19].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[19].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[19].kv_dtype: F32
+cfg.layer[19].cache_geometry: (2, 8, 8)
+cfg.layer[20].attention_kind: Gqa
+cfg.layer[20].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[20].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[20].kv_dtype: F32
+cfg.layer[20].cache_geometry: (2, 8, 8)
+cfg.layer[21].attention_kind: Gqa
+cfg.layer[21].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[21].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[21].kv_dtype: F32
+cfg.layer[21].cache_geometry: (2, 8, 8)
+cfg.layer[22].attention_kind: Gqa
+cfg.layer[22].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[22].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[22].kv_dtype: F32
+cfg.layer[22].cache_geometry: (2, 8, 8)
+cfg.layer[23].attention_kind: Gqa
+cfg.layer[23].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[23].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[23].kv_dtype: F32
+cfg.layer[23].cache_geometry: (2, 8, 8)
+cfg.layer[24].attention_kind: Gqa
+cfg.layer[24].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[24].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[24].kv_dtype: F32
+cfg.layer[24].cache_geometry: (2, 8, 8)
+cfg.layer[25].attention_kind: Gqa
+cfg.layer[25].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[25].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[25].kv_dtype: F32
+cfg.layer[25].cache_geometry: (2, 8, 8)
+cfg.layer[26].attention_kind: Gqa
+cfg.layer[26].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[26].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[26].kv_dtype: F32
+cfg.layer[26].cache_geometry: (2, 8, 8)
+cfg.layer[27].attention_kind: Gqa
+cfg.layer[27].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[27].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[27].kv_dtype: F32
+cfg.layer[27].cache_geometry: (2, 8, 8)
+cfg.layer[28].attention_kind: Gqa
+cfg.layer[28].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[28].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[28].kv_dtype: F32
+cfg.layer[28].cache_geometry: (2, 8, 8)
+cfg.layer[29].attention_kind: Gqa
+cfg.layer[29].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[29].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[29].kv_dtype: F32
+cfg.layer[29].cache_geometry: (2, 8, 8)
+cfg.layer[30].attention_kind: Gqa
+cfg.layer[30].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[30].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[30].kv_dtype: F32
+cfg.layer[30].cache_geometry: (2, 8, 8)
+cfg.layer[31].attention_kind: Gqa
+cfg.layer[31].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[31].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[31].kv_dtype: F32
+cfg.layer[31].cache_geometry: (2, 8, 8)
+cfg.layer[32].attention_kind: Gqa
+cfg.layer[32].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[32].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[32].kv_dtype: F32
+cfg.layer[32].cache_geometry: (2, 8, 8)
+cfg.layer[33].attention_kind: Gqa
+cfg.layer[33].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[33].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[33].kv_dtype: F32
+cfg.layer[33].cache_geometry: (2, 8, 8)
+cfg.layer[34].attention_kind: Gqa
+cfg.layer[34].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[34].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[34].kv_dtype: F32
+cfg.layer[34].cache_geometry: (2, 8, 8)
+cfg.layer[35].attention_kind: Gqa
+cfg.layer[35].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[35].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[35].kv_dtype: F32
+cfg.layer[35].cache_geometry: (2, 8, 8)
+cfg.layer[36].attention_kind: Gqa
+cfg.layer[36].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[36].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[36].kv_dtype: F32
+cfg.layer[36].cache_geometry: (2, 8, 8)
+cfg.layer[37].attention_kind: Gqa
+cfg.layer[37].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[37].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[37].kv_dtype: F32
+cfg.layer[37].cache_geometry: (2, 8, 8)
+cfg.layer[38].attention_kind: Gqa
+cfg.layer[38].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[38].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[38].kv_dtype: F32
+cfg.layer[38].cache_geometry: (2, 8, 8)
+cfg.layer[39].attention_kind: Gqa
+cfg.layer[39].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 2 }, ffn_dim: 32 }
+cfg.layer[39].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[39].kv_dtype: F32
+cfg.layer[39].cache_geometry: (2, 8, 8)
+decoder: LOADED
+dec.embedding: 48x16 F32 None
+dec.final_norm: Rms(len=16 sum=17.340946674346924 fnv=3367e3c9b9b36900)
+dec.output_head: 48x16 F32 None
+dec.alibi_slopes: len=2 sum=0.06640625 fnv=2124d74326cfaae3
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Norm, qk_norm: WholeVector, ffn_activation: Swiglu, memory: MemoryPlan { kind: KvGqa, swa_layers: All, sliding_window: None }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: None, attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 40
+dec.layer[0].attn.q_proj: 16x16 F32 None
+dec.layer[0].attn.k_proj: 16x16 F32 None
+dec.layer[0].attn.v_proj: 16x16 F32 None
+dec.layer[0].attn.o_proj: 16x16 F32 None
+dec.layer[0].attn.norm_weight: Rms(len=16 sum=14.893923908472061 fnv=a38003cfd646690d)
+dec.layer[0].moe.router: 1x16 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[0].moe.norm_weight: Rms(len=16 sum=15.02267736196518 fnv=c4c6dfe4332b3cc4)
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 16x16 F32 None
+dec.layer[1].attn.k_proj: 16x16 F32 None
+dec.layer[1].attn.v_proj: 16x16 F32 None
+dec.layer[1].attn.o_proj: 16x16 F32 None
+dec.layer[1].attn.norm_weight: Rms(len=16 sum=13.5319165289402 fnv=f66a35c38b1778c5)
+dec.layer[1].moe.router: 1x16 F32 None
+dec.layer[1].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[1].moe.norm_weight: Rms(len=16 sum=14.788346946239471 fnv=c9f050dec1a932c7)
+dec.layer[1].moe.activation_counts: len=1
+dec.layer[2].attn.q_proj: 16x16 F32 None
+dec.layer[2].attn.k_proj: 16x16 F32 None
+dec.layer[2].attn.v_proj: 16x16 F32 None
+dec.layer[2].attn.o_proj: 16x16 F32 None
+dec.layer[2].attn.norm_weight: Rms(len=16 sum=16.111785531044006 fnv=e319b0a23db4c2f3)
+dec.layer[2].moe.router: 1x16 F32 None
+dec.layer[2].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[2].moe.norm_weight: Rms(len=16 sum=17.51979210972786 fnv=d76973a014f7c002)
+dec.layer[2].moe.activation_counts: len=1
+dec.layer[3].attn.q_proj: 16x16 F32 None
+dec.layer[3].attn.k_proj: 16x16 F32 None
+dec.layer[3].attn.v_proj: 16x16 F32 None
+dec.layer[3].attn.o_proj: 16x16 F32 None
+dec.layer[3].attn.norm_weight: Rms(len=16 sum=16.508048623800278 fnv=934a8338efb05fc6)
+dec.layer[3].moe.router: 1x16 F32 None
+dec.layer[3].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[3].moe.norm_weight: Rms(len=16 sum=18.480989038944244 fnv=e63920a0a3482a25)
+dec.layer[3].moe.activation_counts: len=1
+dec.layer[4].attn.q_proj: 16x16 F32 None
+dec.layer[4].attn.k_proj: 16x16 F32 None
+dec.layer[4].attn.v_proj: 16x16 F32 None
+dec.layer[4].attn.o_proj: 16x16 F32 None
+dec.layer[4].attn.norm_weight: Rms(len=16 sum=15.540799677371979 fnv=e1b89ba053b578ad)
+dec.layer[4].moe.router: 1x16 F32 None
+dec.layer[4].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[4].moe.norm_weight: Rms(len=16 sum=15.883351981639862 fnv=cc11e0dd2a247eb1)
+dec.layer[4].moe.activation_counts: len=1
+dec.layer[5].attn.q_proj: 16x16 F32 None
+dec.layer[5].attn.k_proj: 16x16 F32 None
+dec.layer[5].attn.v_proj: 16x16 F32 None
+dec.layer[5].attn.o_proj: 16x16 F32 None
+dec.layer[5].attn.norm_weight: Rms(len=16 sum=16.339924544095993 fnv=d9ce3b8f2473af81)
+dec.layer[5].moe.router: 1x16 F32 None
+dec.layer[5].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[5].moe.norm_weight: Rms(len=16 sum=15.018406227231026 fnv=4a3eaef4720d9005)
+dec.layer[5].moe.activation_counts: len=1
+dec.layer[6].attn.q_proj: 16x16 F32 None
+dec.layer[6].attn.k_proj: 16x16 F32 None
+dec.layer[6].attn.v_proj: 16x16 F32 None
+dec.layer[6].attn.o_proj: 16x16 F32 None
+dec.layer[6].attn.norm_weight: Rms(len=16 sum=15.892971947789192 fnv=c803e1dac872d80a)
+dec.layer[6].moe.router: 1x16 F32 None
+dec.layer[6].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[6].moe.norm_weight: Rms(len=16 sum=15.924514710903168 fnv=cbbd016df79e1a51)
+dec.layer[6].moe.activation_counts: len=1
+dec.layer[7].attn.q_proj: 16x16 F32 None
+dec.layer[7].attn.k_proj: 16x16 F32 None
+dec.layer[7].attn.v_proj: 16x16 F32 None
+dec.layer[7].attn.o_proj: 16x16 F32 None
+dec.layer[7].attn.norm_weight: Rms(len=16 sum=14.821510881185532 fnv=465669de8969feef)
+dec.layer[7].moe.router: 1x16 F32 None
+dec.layer[7].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[7].moe.norm_weight: Rms(len=16 sum=17.944299697875977 fnv=eee4fd78f8bec21d)
+dec.layer[7].moe.activation_counts: len=1
+dec.layer[8].attn.q_proj: 16x16 F32 None
+dec.layer[8].attn.k_proj: 16x16 F32 None
+dec.layer[8].attn.v_proj: 16x16 F32 None
+dec.layer[8].attn.o_proj: 16x16 F32 None
+dec.layer[8].attn.norm_weight: Rms(len=16 sum=15.421733275055885 fnv=d45427257356f9ab)
+dec.layer[8].moe.router: 1x16 F32 None
+dec.layer[8].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[8].moe.norm_weight: Rms(len=16 sum=16.19088912010193 fnv=ddd66a1a973f6451)
+dec.layer[8].moe.activation_counts: len=1
+dec.layer[9].attn.q_proj: 16x16 F32 None
+dec.layer[9].attn.k_proj: 16x16 F32 None
+dec.layer[9].attn.v_proj: 16x16 F32 None
+dec.layer[9].attn.o_proj: 16x16 F32 None
+dec.layer[9].attn.norm_weight: Rms(len=16 sum=16.465638369321823 fnv=aa6652954752155d)
+dec.layer[9].moe.router: 1x16 F32 None
+dec.layer[9].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[9].moe.norm_weight: Rms(len=16 sum=15.819659352302551 fnv=2e35bce2864c7062)
+dec.layer[9].moe.activation_counts: len=1
+dec.layer[10].attn.q_proj: 16x16 F32 None
+dec.layer[10].attn.k_proj: 16x16 F32 None
+dec.layer[10].attn.v_proj: 16x16 F32 None
+dec.layer[10].attn.o_proj: 16x16 F32 None
+dec.layer[10].attn.norm_weight: Rms(len=16 sum=14.126331746578217 fnv=e20b8ca3558234e3)
+dec.layer[10].moe.router: 1x16 F32 None
+dec.layer[10].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[10].moe.norm_weight: Rms(len=16 sum=17.308952510356903 fnv=7bf791b2d434864b)
+dec.layer[10].moe.activation_counts: len=1
+dec.layer[11].attn.q_proj: 16x16 F32 None
+dec.layer[11].attn.k_proj: 16x16 F32 None
+dec.layer[11].attn.v_proj: 16x16 F32 None
+dec.layer[11].attn.o_proj: 16x16 F32 None
+dec.layer[11].attn.norm_weight: Rms(len=16 sum=16.184955954551697 fnv=2af3392d190526a5)
+dec.layer[11].moe.router: 1x16 F32 None
+dec.layer[11].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[11].moe.norm_weight: Rms(len=16 sum=17.159757792949677 fnv=f0718aa2649b2924)
+dec.layer[11].moe.activation_counts: len=1
+dec.layer[12].attn.q_proj: 16x16 F32 None
+dec.layer[12].attn.k_proj: 16x16 F32 None
+dec.layer[12].attn.v_proj: 16x16 F32 None
+dec.layer[12].attn.o_proj: 16x16 F32 None
+dec.layer[12].attn.norm_weight: Rms(len=16 sum=14.273525327444077 fnv=8374a3df73cd468f)
+dec.layer[12].moe.router: 1x16 F32 None
+dec.layer[12].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[12].moe.norm_weight: Rms(len=16 sum=17.61571702361107 fnv=ca2eef703077fafe)
+dec.layer[12].moe.activation_counts: len=1
+dec.layer[13].attn.q_proj: 16x16 F32 None
+dec.layer[13].attn.k_proj: 16x16 F32 None
+dec.layer[13].attn.v_proj: 16x16 F32 None
+dec.layer[13].attn.o_proj: 16x16 F32 None
+dec.layer[13].attn.norm_weight: Rms(len=16 sum=13.970268189907074 fnv=685d808ab2f76bfc)
+dec.layer[13].moe.router: 1x16 F32 None
+dec.layer[13].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[13].moe.norm_weight: Rms(len=16 sum=16.783399999141693 fnv=09127708b9c101cf)
+dec.layer[13].moe.activation_counts: len=1
+dec.layer[14].attn.q_proj: 16x16 F32 None
+dec.layer[14].attn.k_proj: 16x16 F32 None
+dec.layer[14].attn.v_proj: 16x16 F32 None
+dec.layer[14].attn.o_proj: 16x16 F32 None
+dec.layer[14].attn.norm_weight: Rms(len=16 sum=15.664726436138153 fnv=63a4ab5256b9ade1)
+dec.layer[14].moe.router: 1x16 F32 None
+dec.layer[14].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[14].moe.norm_weight: Rms(len=16 sum=15.30889144539833 fnv=33286dc6a7dbbdf0)
+dec.layer[14].moe.activation_counts: len=1
+dec.layer[15].attn.q_proj: 16x16 F32 None
+dec.layer[15].attn.k_proj: 16x16 F32 None
+dec.layer[15].attn.v_proj: 16x16 F32 None
+dec.layer[15].attn.o_proj: 16x16 F32 None
+dec.layer[15].attn.norm_weight: Rms(len=16 sum=18.006243526935577 fnv=bf5110392f842113)
+dec.layer[15].moe.router: 1x16 F32 None
+dec.layer[15].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[15].moe.norm_weight: Rms(len=16 sum=16.20867621898651 fnv=533fe32b2b6a64e2)
+dec.layer[15].moe.activation_counts: len=1
+dec.layer[16].attn.q_proj: 16x16 F32 None
+dec.layer[16].attn.k_proj: 16x16 F32 None
+dec.layer[16].attn.v_proj: 16x16 F32 None
+dec.layer[16].attn.o_proj: 16x16 F32 None
+dec.layer[16].attn.norm_weight: Rms(len=16 sum=18.65340805053711 fnv=bd44b4e0973ca463)
+dec.layer[16].moe.router: 1x16 F32 None
+dec.layer[16].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[16].moe.norm_weight: Rms(len=16 sum=14.159119442105293 fnv=67ff70a723d6e1a6)
+dec.layer[16].moe.activation_counts: len=1
+dec.layer[17].attn.q_proj: 16x16 F32 None
+dec.layer[17].attn.k_proj: 16x16 F32 None
+dec.layer[17].attn.v_proj: 16x16 F32 None
+dec.layer[17].attn.o_proj: 16x16 F32 None
+dec.layer[17].attn.norm_weight: Rms(len=16 sum=16.87119996547699 fnv=1c47bda93c9c0e8f)
+dec.layer[17].moe.router: 1x16 F32 None
+dec.layer[17].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[17].moe.norm_weight: Rms(len=16 sum=16.363974928855896 fnv=383d7cbd1e2bd2b1)
+dec.layer[17].moe.activation_counts: len=1
+dec.layer[18].attn.q_proj: 16x16 F32 None
+dec.layer[18].attn.k_proj: 16x16 F32 None
+dec.layer[18].attn.v_proj: 16x16 F32 None
+dec.layer[18].attn.o_proj: 16x16 F32 None
+dec.layer[18].attn.norm_weight: Rms(len=16 sum=16.72964894771576 fnv=7114e84543d0c726)
+dec.layer[18].moe.router: 1x16 F32 None
+dec.layer[18].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[18].moe.norm_weight: Rms(len=16 sum=15.036711156368256 fnv=19101093284188ef)
+dec.layer[18].moe.activation_counts: len=1
+dec.layer[19].attn.q_proj: 16x16 F32 None
+dec.layer[19].attn.k_proj: 16x16 F32 None
+dec.layer[19].attn.v_proj: 16x16 F32 None
+dec.layer[19].attn.o_proj: 16x16 F32 None
+dec.layer[19].attn.norm_weight: Rms(len=16 sum=13.754232436418533 fnv=1782a0d21a11bc56)
+dec.layer[19].moe.router: 1x16 F32 None
+dec.layer[19].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[19].moe.norm_weight: Rms(len=16 sum=16.294534772634506 fnv=a1312190a4958ca2)
+dec.layer[19].moe.activation_counts: len=1
+dec.layer[20].attn.q_proj: 16x16 F32 None
+dec.layer[20].attn.k_proj: 16x16 F32 None
+dec.layer[20].attn.v_proj: 16x16 F32 None
+dec.layer[20].attn.o_proj: 16x16 F32 None
+dec.layer[20].attn.norm_weight: Rms(len=16 sum=16.02007406949997 fnv=d5f70d642b8f9330)
+dec.layer[20].moe.router: 1x16 F32 None
+dec.layer[20].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[20].moe.norm_weight: Rms(len=16 sum=14.451336741447449 fnv=75add760851c1079)
+dec.layer[20].moe.activation_counts: len=1
+dec.layer[21].attn.q_proj: 16x16 F32 None
+dec.layer[21].attn.k_proj: 16x16 F32 None
+dec.layer[21].attn.v_proj: 16x16 F32 None
+dec.layer[21].attn.o_proj: 16x16 F32 None
+dec.layer[21].attn.norm_weight: Rms(len=16 sum=17.049429953098297 fnv=4407013a21ae56a2)
+dec.layer[21].moe.router: 1x16 F32 None
+dec.layer[21].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[21].moe.norm_weight: Rms(len=16 sum=16.818062275648117 fnv=dca69a8eee4daa1b)
+dec.layer[21].moe.activation_counts: len=1
+dec.layer[22].attn.q_proj: 16x16 F32 None
+dec.layer[22].attn.k_proj: 16x16 F32 None
+dec.layer[22].attn.v_proj: 16x16 F32 None
+dec.layer[22].attn.o_proj: 16x16 F32 None
+dec.layer[22].attn.norm_weight: Rms(len=16 sum=15.007819205522537 fnv=ac54bbccc8357337)
+dec.layer[22].moe.router: 1x16 F32 None
+dec.layer[22].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[22].moe.norm_weight: Rms(len=16 sum=14.33139944076538 fnv=306c169efa78ee07)
+dec.layer[22].moe.activation_counts: len=1
+dec.layer[23].attn.q_proj: 16x16 F32 None
+dec.layer[23].attn.k_proj: 16x16 F32 None
+dec.layer[23].attn.v_proj: 16x16 F32 None
+dec.layer[23].attn.o_proj: 16x16 F32 None
+dec.layer[23].attn.norm_weight: Rms(len=16 sum=15.15309989452362 fnv=771e2a4824b22204)
+dec.layer[23].moe.router: 1x16 F32 None
+dec.layer[23].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[23].moe.norm_weight: Rms(len=16 sum=16.827397763729095 fnv=98c9a047f250b09a)
+dec.layer[23].moe.activation_counts: len=1
+dec.layer[24].attn.q_proj: 16x16 F32 None
+dec.layer[24].attn.k_proj: 16x16 F32 None
+dec.layer[24].attn.v_proj: 16x16 F32 None
+dec.layer[24].attn.o_proj: 16x16 F32 None
+dec.layer[24].attn.norm_weight: Rms(len=16 sum=14.878115713596344 fnv=986706fe9e2dcc9b)
+dec.layer[24].moe.router: 1x16 F32 None
+dec.layer[24].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[24].moe.norm_weight: Rms(len=16 sum=14.916882753372192 fnv=82cf9f2c1c578b18)
+dec.layer[24].moe.activation_counts: len=1
+dec.layer[25].attn.q_proj: 16x16 F32 None
+dec.layer[25].attn.k_proj: 16x16 F32 None
+dec.layer[25].attn.v_proj: 16x16 F32 None
+dec.layer[25].attn.o_proj: 16x16 F32 None
+dec.layer[25].attn.norm_weight: Rms(len=16 sum=15.689669251441956 fnv=9cd83c7319f2999f)
+dec.layer[25].moe.router: 1x16 F32 None
+dec.layer[25].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[25].moe.norm_weight: Rms(len=16 sum=16.282369032502174 fnv=e47a70c12b669f39)
+dec.layer[25].moe.activation_counts: len=1
+dec.layer[26].attn.q_proj: 16x16 F32 None
+dec.layer[26].attn.k_proj: 16x16 F32 None
+dec.layer[26].attn.v_proj: 16x16 F32 None
+dec.layer[26].attn.o_proj: 16x16 F32 None
+dec.layer[26].attn.norm_weight: Rms(len=16 sum=15.956169247627258 fnv=0be746a39ea66f49)
+dec.layer[26].moe.router: 1x16 F32 None
+dec.layer[26].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[26].moe.norm_weight: Rms(len=16 sum=16.78809744119644 fnv=9b65c371bb713ee0)
+dec.layer[26].moe.activation_counts: len=1
+dec.layer[27].attn.q_proj: 16x16 F32 None
+dec.layer[27].attn.k_proj: 16x16 F32 None
+dec.layer[27].attn.v_proj: 16x16 F32 None
+dec.layer[27].attn.o_proj: 16x16 F32 None
+dec.layer[27].attn.norm_weight: Rms(len=16 sum=15.38776870071888 fnv=9a16ebd1c643ddab)
+dec.layer[27].moe.router: 1x16 F32 None
+dec.layer[27].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[27].moe.norm_weight: Rms(len=16 sum=15.743123531341553 fnv=55e25f79c8f80cd0)
+dec.layer[27].moe.activation_counts: len=1
+dec.layer[28].attn.q_proj: 16x16 F32 None
+dec.layer[28].attn.k_proj: 16x16 F32 None
+dec.layer[28].attn.v_proj: 16x16 F32 None
+dec.layer[28].attn.o_proj: 16x16 F32 None
+dec.layer[28].attn.norm_weight: Rms(len=16 sum=15.057713061571121 fnv=64ee5e6c42330d06)
+dec.layer[28].moe.router: 1x16 F32 None
+dec.layer[28].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[28].moe.norm_weight: Rms(len=16 sum=17.6523340344429 fnv=5cd8297222eaea37)
+dec.layer[28].moe.activation_counts: len=1
+dec.layer[29].attn.q_proj: 16x16 F32 None
+dec.layer[29].attn.k_proj: 16x16 F32 None
+dec.layer[29].attn.v_proj: 16x16 F32 None
+dec.layer[29].attn.o_proj: 16x16 F32 None
+dec.layer[29].attn.norm_weight: Rms(len=16 sum=14.184367552399635 fnv=cadce472542bad9f)
+dec.layer[29].moe.router: 1x16 F32 None
+dec.layer[29].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[29].moe.norm_weight: Rms(len=16 sum=15.955500990152359 fnv=6838395922d334d9)
+dec.layer[29].moe.activation_counts: len=1
+dec.layer[30].attn.q_proj: 16x16 F32 None
+dec.layer[30].attn.k_proj: 16x16 F32 None
+dec.layer[30].attn.v_proj: 16x16 F32 None
+dec.layer[30].attn.o_proj: 16x16 F32 None
+dec.layer[30].attn.norm_weight: Rms(len=16 sum=15.178525447845459 fnv=e1822b533346f2bd)
+dec.layer[30].moe.router: 1x16 F32 None
+dec.layer[30].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[30].moe.norm_weight: Rms(len=16 sum=16.229141801595688 fnv=b63e40215027d235)
+dec.layer[30].moe.activation_counts: len=1
+dec.layer[31].attn.q_proj: 16x16 F32 None
+dec.layer[31].attn.k_proj: 16x16 F32 None
+dec.layer[31].attn.v_proj: 16x16 F32 None
+dec.layer[31].attn.o_proj: 16x16 F32 None
+dec.layer[31].attn.norm_weight: Rms(len=16 sum=15.426193326711655 fnv=a59cc4cc582bc5f0)
+dec.layer[31].moe.router: 1x16 F32 None
+dec.layer[31].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[31].moe.norm_weight: Rms(len=16 sum=17.055111274123192 fnv=17e2479c4e0ddcf7)
+dec.layer[31].moe.activation_counts: len=1
+dec.layer[32].attn.q_proj: 16x16 F32 None
+dec.layer[32].attn.k_proj: 16x16 F32 None
+dec.layer[32].attn.v_proj: 16x16 F32 None
+dec.layer[32].attn.o_proj: 16x16 F32 None
+dec.layer[32].attn.norm_weight: Rms(len=16 sum=17.02010875940323 fnv=c81c617f77ec58fd)
+dec.layer[32].moe.router: 1x16 F32 None
+dec.layer[32].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[32].moe.norm_weight: Rms(len=16 sum=16.076375901699066 fnv=2dfa2cf66200cd08)
+dec.layer[32].moe.activation_counts: len=1
+dec.layer[33].attn.q_proj: 16x16 F32 None
+dec.layer[33].attn.k_proj: 16x16 F32 None
+dec.layer[33].attn.v_proj: 16x16 F32 None
+dec.layer[33].attn.o_proj: 16x16 F32 None
+dec.layer[33].attn.norm_weight: Rms(len=16 sum=15.205417096614838 fnv=39b90a2bd3c5fb91)
+dec.layer[33].moe.router: 1x16 F32 None
+dec.layer[33].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[33].moe.norm_weight: Rms(len=16 sum=16.0758193731308 fnv=94a5ded93ad5eacd)
+dec.layer[33].moe.activation_counts: len=1
+dec.layer[34].attn.q_proj: 16x16 F32 None
+dec.layer[34].attn.k_proj: 16x16 F32 None
+dec.layer[34].attn.v_proj: 16x16 F32 None
+dec.layer[34].attn.o_proj: 16x16 F32 None
+dec.layer[34].attn.norm_weight: Rms(len=16 sum=17.67509937286377 fnv=864828d595ede75a)
+dec.layer[34].moe.router: 1x16 F32 None
+dec.layer[34].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[34].moe.norm_weight: Rms(len=16 sum=14.175752878189087 fnv=9ffa54c67ee6f9c4)
+dec.layer[34].moe.activation_counts: len=1
+dec.layer[35].attn.q_proj: 16x16 F32 None
+dec.layer[35].attn.k_proj: 16x16 F32 None
+dec.layer[35].attn.v_proj: 16x16 F32 None
+dec.layer[35].attn.o_proj: 16x16 F32 None
+dec.layer[35].attn.norm_weight: Rms(len=16 sum=16.398249715566635 fnv=25643983ce9649d2)
+dec.layer[35].moe.router: 1x16 F32 None
+dec.layer[35].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[35].moe.norm_weight: Rms(len=16 sum=17.618756890296936 fnv=0951173d4bb126b4)
+dec.layer[35].moe.activation_counts: len=1
+dec.layer[36].attn.q_proj: 16x16 F32 None
+dec.layer[36].attn.k_proj: 16x16 F32 None
+dec.layer[36].attn.v_proj: 16x16 F32 None
+dec.layer[36].attn.o_proj: 16x16 F32 None
+dec.layer[36].attn.norm_weight: Rms(len=16 sum=16.13767397403717 fnv=ed3079ea194a1e27)
+dec.layer[36].moe.router: 1x16 F32 None
+dec.layer[36].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[36].moe.norm_weight: Rms(len=16 sum=15.551832467317581 fnv=2d8ceac787648e4f)
+dec.layer[36].moe.activation_counts: len=1
+dec.layer[37].attn.q_proj: 16x16 F32 None
+dec.layer[37].attn.k_proj: 16x16 F32 None
+dec.layer[37].attn.v_proj: 16x16 F32 None
+dec.layer[37].attn.o_proj: 16x16 F32 None
+dec.layer[37].attn.norm_weight: Rms(len=16 sum=15.329885482788086 fnv=267127da6c1159a9)
+dec.layer[37].moe.router: 1x16 F32 None
+dec.layer[37].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[37].moe.norm_weight: Rms(len=16 sum=14.724063158035278 fnv=3f911a890fc46fc3)
+dec.layer[37].moe.activation_counts: len=1
+dec.layer[38].attn.q_proj: 16x16 F32 None
+dec.layer[38].attn.k_proj: 16x16 F32 None
+dec.layer[38].attn.v_proj: 16x16 F32 None
+dec.layer[38].attn.o_proj: 16x16 F32 None
+dec.layer[38].attn.norm_weight: Rms(len=16 sum=17.033941358327866 fnv=2a67819c5daca959)
+dec.layer[38].moe.router: 1x16 F32 None
+dec.layer[38].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[38].moe.norm_weight: Rms(len=16 sum=16.830895394086838 fnv=311a001c376797f5)
+dec.layer[38].moe.activation_counts: len=1
+dec.layer[39].attn.q_proj: 16x16 F32 None
+dec.layer[39].attn.k_proj: 16x16 F32 None
+dec.layer[39].attn.v_proj: 16x16 F32 None
+dec.layer[39].attn.o_proj: 16x16 F32 None
+dec.layer[39].attn.norm_weight: Rms(len=16 sum=17.738835752010345 fnv=21221cf598849b1b)
+dec.layer[39].moe.router: 1x16 F32 None
+dec.layer[39].moe.experts: Resident(n=1 [gate 32x16 F32 None up 32x16 F32 None down 16x32 F32 None])
+dec.layer[39].moe.norm_weight: Rms(len=16 sum=12.969419032335281 fnv=564a938cfb5ebb15)
+dec.layer[39].moe.activation_counts: len=1

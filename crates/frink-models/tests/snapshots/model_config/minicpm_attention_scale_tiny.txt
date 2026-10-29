@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/minicpm_attention_scale_tiny.gguf
+config: REFUSED: architecture 'minicpm' requires unimplemented feature: explicit attention score scale (Granite `attention_multiplier`); the generic decoder always uses 1/sqrt(head_dim) (metadata minicpm.attention.scale=0.9)

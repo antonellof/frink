@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/lfm3_non_causal_tiny.gguf
+config: REFUSED: architecture 'lfm3' requires unimplemented feature: `lfm3.attention.causal` is false: the file's graph attends to the whole prompt both ways (llama-model.cpp:1400; for lfm3 the d1 decision graph, lfm3.cpp:22-25,92-96, which keeps no memory, llama-model.cpp:2808), and the generic decoder only masks causally

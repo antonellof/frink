@@ -1,0 +1,622 @@
+fixture: crates/frink-models/tests/fixtures/baichuan_tiny.gguf
+config: ModelConfig {
+    name: "ferrox-baichuan-fixture",
+    kv_dtype: F32,
+    n_layers: 32,
+    n_mtp_blocks: 0,
+    hidden_dim: 16,
+    n_heads: 4,
+    n_kv_heads: 2,
+    head_dim: 4,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 16,
+        expert_ffn_dim: 24,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: None,
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Norm,
+    qk_norm_style: WholeVector,
+    swa_layers: All,
+    rope_layers: All,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: None,
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "none -- every field above was read directly from this file's own GGUF metadata",
+    ],
+}
+cfg.layer[0].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(10000.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (2, 4, 4)
+cfg.layer[1].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(10000.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 4, 4)
+cfg.layer[2].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[2].rotates: true
+cfg.layer[2].rope_theta: Some(10000.0)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (2, 4, 4)
+cfg.layer[3].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[3].rotates: true
+cfg.layer[3].rope_theta: Some(10000.0)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (2, 4, 4)
+cfg.layer[4].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[4].rotates: true
+cfg.layer[4].rope_theta: Some(10000.0)
+cfg.layer[4].attention_kind: Gqa
+cfg.layer[4].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[4].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[4].kv_dtype: F32
+cfg.layer[4].cache_geometry: (2, 4, 4)
+cfg.layer[5].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[5].rotates: true
+cfg.layer[5].rope_theta: Some(10000.0)
+cfg.layer[5].attention_kind: Gqa
+cfg.layer[5].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[5].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[5].kv_dtype: F32
+cfg.layer[5].cache_geometry: (2, 4, 4)
+cfg.layer[6].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[6].rotates: true
+cfg.layer[6].rope_theta: Some(10000.0)
+cfg.layer[6].attention_kind: Gqa
+cfg.layer[6].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[6].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[6].kv_dtype: F32
+cfg.layer[6].cache_geometry: (2, 4, 4)
+cfg.layer[7].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[7].rotates: true
+cfg.layer[7].rope_theta: Some(10000.0)
+cfg.layer[7].attention_kind: Gqa
+cfg.layer[7].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[7].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[7].kv_dtype: F32
+cfg.layer[7].cache_geometry: (2, 4, 4)
+cfg.layer[8].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[8].rotates: true
+cfg.layer[8].rope_theta: Some(10000.0)
+cfg.layer[8].attention_kind: Gqa
+cfg.layer[8].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[8].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[8].kv_dtype: F32
+cfg.layer[8].cache_geometry: (2, 4, 4)
+cfg.layer[9].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[9].rotates: true
+cfg.layer[9].rope_theta: Some(10000.0)
+cfg.layer[9].attention_kind: Gqa
+cfg.layer[9].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[9].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[9].kv_dtype: F32
+cfg.layer[9].cache_geometry: (2, 4, 4)
+cfg.layer[10].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[10].rotates: true
+cfg.layer[10].rope_theta: Some(10000.0)
+cfg.layer[10].attention_kind: Gqa
+cfg.layer[10].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[10].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[10].kv_dtype: F32
+cfg.layer[10].cache_geometry: (2, 4, 4)
+cfg.layer[11].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[11].rotates: true
+cfg.layer[11].rope_theta: Some(10000.0)
+cfg.layer[11].attention_kind: Gqa
+cfg.layer[11].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[11].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[11].kv_dtype: F32
+cfg.layer[11].cache_geometry: (2, 4, 4)
+cfg.layer[12].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[12].rotates: true
+cfg.layer[12].rope_theta: Some(10000.0)
+cfg.layer[12].attention_kind: Gqa
+cfg.layer[12].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[12].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[12].kv_dtype: F32
+cfg.layer[12].cache_geometry: (2, 4, 4)
+cfg.layer[13].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[13].rotates: true
+cfg.layer[13].rope_theta: Some(10000.0)
+cfg.layer[13].attention_kind: Gqa
+cfg.layer[13].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[13].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[13].kv_dtype: F32
+cfg.layer[13].cache_geometry: (2, 4, 4)
+cfg.layer[14].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[14].rotates: true
+cfg.layer[14].rope_theta: Some(10000.0)
+cfg.layer[14].attention_kind: Gqa
+cfg.layer[14].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[14].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[14].kv_dtype: F32
+cfg.layer[14].cache_geometry: (2, 4, 4)
+cfg.layer[15].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[15].rotates: true
+cfg.layer[15].rope_theta: Some(10000.0)
+cfg.layer[15].attention_kind: Gqa
+cfg.layer[15].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[15].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[15].kv_dtype: F32
+cfg.layer[15].cache_geometry: (2, 4, 4)
+cfg.layer[16].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[16].rotates: true
+cfg.layer[16].rope_theta: Some(10000.0)
+cfg.layer[16].attention_kind: Gqa
+cfg.layer[16].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[16].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[16].kv_dtype: F32
+cfg.layer[16].cache_geometry: (2, 4, 4)
+cfg.layer[17].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[17].rotates: true
+cfg.layer[17].rope_theta: Some(10000.0)
+cfg.layer[17].attention_kind: Gqa
+cfg.layer[17].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[17].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[17].kv_dtype: F32
+cfg.layer[17].cache_geometry: (2, 4, 4)
+cfg.layer[18].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[18].rotates: true
+cfg.layer[18].rope_theta: Some(10000.0)
+cfg.layer[18].attention_kind: Gqa
+cfg.layer[18].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[18].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[18].kv_dtype: F32
+cfg.layer[18].cache_geometry: (2, 4, 4)
+cfg.layer[19].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[19].rotates: true
+cfg.layer[19].rope_theta: Some(10000.0)
+cfg.layer[19].attention_kind: Gqa
+cfg.layer[19].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[19].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[19].kv_dtype: F32
+cfg.layer[19].cache_geometry: (2, 4, 4)
+cfg.layer[20].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[20].rotates: true
+cfg.layer[20].rope_theta: Some(10000.0)
+cfg.layer[20].attention_kind: Gqa
+cfg.layer[20].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[20].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[20].kv_dtype: F32
+cfg.layer[20].cache_geometry: (2, 4, 4)
+cfg.layer[21].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[21].rotates: true
+cfg.layer[21].rope_theta: Some(10000.0)
+cfg.layer[21].attention_kind: Gqa
+cfg.layer[21].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[21].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[21].kv_dtype: F32
+cfg.layer[21].cache_geometry: (2, 4, 4)
+cfg.layer[22].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[22].rotates: true
+cfg.layer[22].rope_theta: Some(10000.0)
+cfg.layer[22].attention_kind: Gqa
+cfg.layer[22].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[22].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[22].kv_dtype: F32
+cfg.layer[22].cache_geometry: (2, 4, 4)
+cfg.layer[23].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[23].rotates: true
+cfg.layer[23].rope_theta: Some(10000.0)
+cfg.layer[23].attention_kind: Gqa
+cfg.layer[23].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[23].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[23].kv_dtype: F32
+cfg.layer[23].cache_geometry: (2, 4, 4)
+cfg.layer[24].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[24].rotates: true
+cfg.layer[24].rope_theta: Some(10000.0)
+cfg.layer[24].attention_kind: Gqa
+cfg.layer[24].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[24].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[24].kv_dtype: F32
+cfg.layer[24].cache_geometry: (2, 4, 4)
+cfg.layer[25].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[25].rotates: true
+cfg.layer[25].rope_theta: Some(10000.0)
+cfg.layer[25].attention_kind: Gqa
+cfg.layer[25].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[25].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[25].kv_dtype: F32
+cfg.layer[25].cache_geometry: (2, 4, 4)
+cfg.layer[26].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[26].rotates: true
+cfg.layer[26].rope_theta: Some(10000.0)
+cfg.layer[26].attention_kind: Gqa
+cfg.layer[26].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[26].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[26].kv_dtype: F32
+cfg.layer[26].cache_geometry: (2, 4, 4)
+cfg.layer[27].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[27].rotates: true
+cfg.layer[27].rope_theta: Some(10000.0)
+cfg.layer[27].attention_kind: Gqa
+cfg.layer[27].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[27].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[27].kv_dtype: F32
+cfg.layer[27].cache_geometry: (2, 4, 4)
+cfg.layer[28].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[28].rotates: true
+cfg.layer[28].rope_theta: Some(10000.0)
+cfg.layer[28].attention_kind: Gqa
+cfg.layer[28].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[28].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[28].kv_dtype: F32
+cfg.layer[28].cache_geometry: (2, 4, 4)
+cfg.layer[29].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[29].rotates: true
+cfg.layer[29].rope_theta: Some(10000.0)
+cfg.layer[29].attention_kind: Gqa
+cfg.layer[29].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[29].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[29].kv_dtype: F32
+cfg.layer[29].cache_geometry: (2, 4, 4)
+cfg.layer[30].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[30].rotates: true
+cfg.layer[30].rope_theta: Some(10000.0)
+cfg.layer[30].attention_kind: Gqa
+cfg.layer[30].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[30].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[30].kv_dtype: F32
+cfg.layer[30].cache_geometry: (2, 4, 4)
+cfg.layer[31].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[31].rotates: true
+cfg.layer[31].rope_theta: Some(10000.0)
+cfg.layer[31].attention_kind: Gqa
+cfg.layer[31].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 24 }
+cfg.layer[31].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[31].kv_dtype: F32
+cfg.layer[31].cache_geometry: (2, 4, 4)
+decoder: LOADED
+dec.embedding: 48x16 F32 None
+dec.final_norm: Rms(len=16 sum=0.5259084664285183 fnv=c9b569b0fff6d144)
+dec.output_head: 48x16 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: StandardGqa, rope: Norm, qk_norm: WholeVector, ffn_activation: Swiglu, memory: MemoryPlan { kind: KvGqa, swa_layers: All, sliding_window: None }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: None, attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 32
+dec.layer[0].attn.q_proj: 16x16 F32 None
+dec.layer[0].attn.k_proj: 8x16 F32 None
+dec.layer[0].attn.v_proj: 8x16 F32 None
+dec.layer[0].attn.o_proj: 16x16 F32 None
+dec.layer[0].attn.norm_weight: Rms(len=16 sum=0.028036559000611305 fnv=6259f851f079853b)
+dec.layer[0].moe.router: 1x16 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[0].moe.norm_weight: Rms(len=16 sum=0.32813378795981407 fnv=e9a06e41d360ca22)
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 16x16 F32 None
+dec.layer[1].attn.k_proj: 8x16 F32 None
+dec.layer[1].attn.v_proj: 8x16 F32 None
+dec.layer[1].attn.o_proj: 16x16 F32 None
+dec.layer[1].attn.norm_weight: Rms(len=16 sum=-0.5512656427454203 fnv=546260d41c04fc84)
+dec.layer[1].moe.router: 1x16 F32 None
+dec.layer[1].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[1].moe.norm_weight: Rms(len=16 sum=0.10167937981896102 fnv=43f9e854b61c3c78)
+dec.layer[1].moe.activation_counts: len=1
+dec.layer[2].attn.q_proj: 16x16 F32 None
+dec.layer[2].attn.k_proj: 8x16 F32 None
+dec.layer[2].attn.v_proj: 8x16 F32 None
+dec.layer[2].attn.o_proj: 16x16 F32 None
+dec.layer[2].attn.norm_weight: Rms(len=16 sum=-0.2737465174868703 fnv=ea2e219922754866)
+dec.layer[2].moe.router: 1x16 F32 None
+dec.layer[2].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[2].moe.norm_weight: Rms(len=16 sum=0.43297009414527565 fnv=361b8e25aad9f14f)
+dec.layer[2].moe.activation_counts: len=1
+dec.layer[3].attn.q_proj: 16x16 F32 None
+dec.layer[3].attn.k_proj: 8x16 F32 None
+dec.layer[3].attn.v_proj: 8x16 F32 None
+dec.layer[3].attn.o_proj: 16x16 F32 None
+dec.layer[3].attn.norm_weight: Rms(len=16 sum=-0.1711593046784401 fnv=e6560edbf9675018)
+dec.layer[3].moe.router: 1x16 F32 None
+dec.layer[3].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[3].moe.norm_weight: Rms(len=16 sum=-0.5079635228030384 fnv=24cbac2606938772)
+dec.layer[3].moe.activation_counts: len=1
+dec.layer[4].attn.q_proj: 16x16 F32 None
+dec.layer[4].attn.k_proj: 8x16 F32 None
+dec.layer[4].attn.v_proj: 8x16 F32 None
+dec.layer[4].attn.o_proj: 16x16 F32 None
+dec.layer[4].attn.norm_weight: Rms(len=16 sum=0.661278978921473 fnv=0fe1abf4fb0e6731)
+dec.layer[4].moe.router: 1x16 F32 None
+dec.layer[4].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[4].moe.norm_weight: Rms(len=16 sum=-0.34643268771469593 fnv=83bd77c312c201a6)
+dec.layer[4].moe.activation_counts: len=1
+dec.layer[5].attn.q_proj: 16x16 F32 None
+dec.layer[5].attn.k_proj: 8x16 F32 None
+dec.layer[5].attn.v_proj: 8x16 F32 None
+dec.layer[5].attn.o_proj: 16x16 F32 None
+dec.layer[5].attn.norm_weight: Rms(len=16 sum=0.21205276437103748 fnv=2144bdfc29febbc7)
+dec.layer[5].moe.router: 1x16 F32 None
+dec.layer[5].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[5].moe.norm_weight: Rms(len=16 sum=-0.006268361583352089 fnv=4f6e6934775d3998)
+dec.layer[5].moe.activation_counts: len=1
+dec.layer[6].attn.q_proj: 16x16 F32 None
+dec.layer[6].attn.k_proj: 8x16 F32 None
+dec.layer[6].attn.v_proj: 8x16 F32 None
+dec.layer[6].attn.o_proj: 16x16 F32 None
+dec.layer[6].attn.norm_weight: Rms(len=16 sum=0.651702098082751 fnv=9d457dbefd7bbca9)
+dec.layer[6].moe.router: 1x16 F32 None
+dec.layer[6].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[6].moe.norm_weight: Rms(len=16 sum=0.624650901183486 fnv=d0cb7b4dbf55d8cd)
+dec.layer[6].moe.activation_counts: len=1
+dec.layer[7].attn.q_proj: 16x16 F32 None
+dec.layer[7].attn.k_proj: 8x16 F32 None
+dec.layer[7].attn.v_proj: 8x16 F32 None
+dec.layer[7].attn.o_proj: 16x16 F32 None
+dec.layer[7].attn.norm_weight: Rms(len=16 sum=-0.5710388623992912 fnv=ae09f0f6c7529333)
+dec.layer[7].moe.router: 1x16 F32 None
+dec.layer[7].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[7].moe.norm_weight: Rms(len=16 sum=0.25331741326954216 fnv=ba529164afc2b5b4)
+dec.layer[7].moe.activation_counts: len=1
+dec.layer[8].attn.q_proj: 16x16 F32 None
+dec.layer[8].attn.k_proj: 8x16 F32 None
+dec.layer[8].attn.v_proj: 8x16 F32 None
+dec.layer[8].attn.o_proj: 16x16 F32 None
+dec.layer[8].attn.norm_weight: Rms(len=16 sum=-0.2684727816376835 fnv=c92e6c63adbaef58)
+dec.layer[8].moe.router: 1x16 F32 None
+dec.layer[8].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[8].moe.norm_weight: Rms(len=16 sum=-1.1882409825921059 fnv=846891c758139107)
+dec.layer[8].moe.activation_counts: len=1
+dec.layer[9].attn.q_proj: 16x16 F32 None
+dec.layer[9].attn.k_proj: 8x16 F32 None
+dec.layer[9].attn.v_proj: 8x16 F32 None
+dec.layer[9].attn.o_proj: 16x16 F32 None
+dec.layer[9].attn.norm_weight: Rms(len=16 sum=0.09616862423717976 fnv=b8c4304b4d3c9842)
+dec.layer[9].moe.router: 1x16 F32 None
+dec.layer[9].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[9].moe.norm_weight: Rms(len=16 sum=-0.4521098914556205 fnv=929533740d786717)
+dec.layer[9].moe.activation_counts: len=1
+dec.layer[10].attn.q_proj: 16x16 F32 None
+dec.layer[10].attn.k_proj: 8x16 F32 None
+dec.layer[10].attn.v_proj: 8x16 F32 None
+dec.layer[10].attn.o_proj: 16x16 F32 None
+dec.layer[10].attn.norm_weight: Rms(len=16 sum=-0.0005014017224311829 fnv=1d49452dc876fa8e)
+dec.layer[10].moe.router: 1x16 F32 None
+dec.layer[10].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[10].moe.norm_weight: Rms(len=16 sum=0.04788649640977383 fnv=e35367976bac597d)
+dec.layer[10].moe.activation_counts: len=1
+dec.layer[11].attn.q_proj: 16x16 F32 None
+dec.layer[11].attn.k_proj: 8x16 F32 None
+dec.layer[11].attn.v_proj: 8x16 F32 None
+dec.layer[11].attn.o_proj: 16x16 F32 None
+dec.layer[11].attn.norm_weight: Rms(len=16 sum=0.2382334975991398 fnv=423f9821cf15c6e1)
+dec.layer[11].moe.router: 1x16 F32 None
+dec.layer[11].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[11].moe.norm_weight: Rms(len=16 sum=-0.5383922159671783 fnv=36fb5b7863c453fb)
+dec.layer[11].moe.activation_counts: len=1
+dec.layer[12].attn.q_proj: 16x16 F32 None
+dec.layer[12].attn.k_proj: 8x16 F32 None
+dec.layer[12].attn.v_proj: 8x16 F32 None
+dec.layer[12].attn.o_proj: 16x16 F32 None
+dec.layer[12].attn.norm_weight: Rms(len=16 sum=-0.004615139216184616 fnv=f97254fc917a4f2b)
+dec.layer[12].moe.router: 1x16 F32 None
+dec.layer[12].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[12].moe.norm_weight: Rms(len=16 sum=-1.2326219957321882 fnv=78737826c4a7b142)
+dec.layer[12].moe.activation_counts: len=1
+dec.layer[13].attn.q_proj: 16x16 F32 None
+dec.layer[13].attn.k_proj: 8x16 F32 None
+dec.layer[13].attn.v_proj: 8x16 F32 None
+dec.layer[13].attn.o_proj: 16x16 F32 None
+dec.layer[13].attn.norm_weight: Rms(len=16 sum=-0.5186926294118166 fnv=2cdeda022717d81f)
+dec.layer[13].moe.router: 1x16 F32 None
+dec.layer[13].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[13].moe.norm_weight: Rms(len=16 sum=0.6728170718997717 fnv=6c4a1b3ea0647dd9)
+dec.layer[13].moe.activation_counts: len=1
+dec.layer[14].attn.q_proj: 16x16 F32 None
+dec.layer[14].attn.k_proj: 8x16 F32 None
+dec.layer[14].attn.v_proj: 8x16 F32 None
+dec.layer[14].attn.o_proj: 16x16 F32 None
+dec.layer[14].attn.norm_weight: Rms(len=16 sum=-0.6843919660896063 fnv=25ec23e8b0417eed)
+dec.layer[14].moe.router: 1x16 F32 None
+dec.layer[14].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[14].moe.norm_weight: Rms(len=16 sum=-0.48211878072470427 fnv=c50fcc8a953ff260)
+dec.layer[14].moe.activation_counts: len=1
+dec.layer[15].attn.q_proj: 16x16 F32 None
+dec.layer[15].attn.k_proj: 8x16 F32 None
+dec.layer[15].attn.v_proj: 8x16 F32 None
+dec.layer[15].attn.o_proj: 16x16 F32 None
+dec.layer[15].attn.norm_weight: Rms(len=16 sum=-0.06877727201208472 fnv=88a1e71251733240)
+dec.layer[15].moe.router: 1x16 F32 None
+dec.layer[15].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[15].moe.norm_weight: Rms(len=16 sum=0.6112214454915375 fnv=99be9feb86d35850)
+dec.layer[15].moe.activation_counts: len=1
+dec.layer[16].attn.q_proj: 16x16 F32 None
+dec.layer[16].attn.k_proj: 8x16 F32 None
+dec.layer[16].attn.v_proj: 8x16 F32 None
+dec.layer[16].attn.o_proj: 16x16 F32 None
+dec.layer[16].attn.norm_weight: Rms(len=16 sum=1.126002475619316 fnv=e7a3e02dcb89325d)
+dec.layer[16].moe.router: 1x16 F32 None
+dec.layer[16].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[16].moe.norm_weight: Rms(len=16 sum=-0.45175181329250336 fnv=f3a5bb066edcf97d)
+dec.layer[16].moe.activation_counts: len=1
+dec.layer[17].attn.q_proj: 16x16 F32 None
+dec.layer[17].attn.k_proj: 8x16 F32 None
+dec.layer[17].attn.v_proj: 8x16 F32 None
+dec.layer[17].attn.o_proj: 16x16 F32 None
+dec.layer[17].attn.norm_weight: Rms(len=16 sum=-0.18855201546102762 fnv=01a19e4339a7a86d)
+dec.layer[17].moe.router: 1x16 F32 None
+dec.layer[17].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[17].moe.norm_weight: Rms(len=16 sum=-0.10644969902932644 fnv=7d40ded745ec0ee8)
+dec.layer[17].moe.activation_counts: len=1
+dec.layer[18].attn.q_proj: 16x16 F32 None
+dec.layer[18].attn.k_proj: 8x16 F32 None
+dec.layer[18].attn.v_proj: 8x16 F32 None
+dec.layer[18].attn.o_proj: 16x16 F32 None
+dec.layer[18].attn.norm_weight: Rms(len=16 sum=-1.0965898130089045 fnv=ce535adb9b21aeb0)
+dec.layer[18].moe.router: 1x16 F32 None
+dec.layer[18].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[18].moe.norm_weight: Rms(len=16 sum=-1.2867373432964087 fnv=f4159c5cc2171d72)
+dec.layer[18].moe.activation_counts: len=1
+dec.layer[19].attn.q_proj: 16x16 F32 None
+dec.layer[19].attn.k_proj: 8x16 F32 None
+dec.layer[19].attn.v_proj: 8x16 F32 None
+dec.layer[19].attn.o_proj: 16x16 F32 None
+dec.layer[19].attn.norm_weight: Rms(len=16 sum=0.6105232983827591 fnv=e8b7632792765795)
+dec.layer[19].moe.router: 1x16 F32 None
+dec.layer[19].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[19].moe.norm_weight: Rms(len=16 sum=-0.35309592564590275 fnv=99d64f83c58523b5)
+dec.layer[19].moe.activation_counts: len=1
+dec.layer[20].attn.q_proj: 16x16 F32 None
+dec.layer[20].attn.k_proj: 8x16 F32 None
+dec.layer[20].attn.v_proj: 8x16 F32 None
+dec.layer[20].attn.o_proj: 16x16 F32 None
+dec.layer[20].attn.norm_weight: Rms(len=16 sum=0.020119983702898026 fnv=99262af0a094a011)
+dec.layer[20].moe.router: 1x16 F32 None
+dec.layer[20].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[20].moe.norm_weight: Rms(len=16 sum=-0.5682988986372948 fnv=359ecb5ff33400de)
+dec.layer[20].moe.activation_counts: len=1
+dec.layer[21].attn.q_proj: 16x16 F32 None
+dec.layer[21].attn.k_proj: 8x16 F32 None
+dec.layer[21].attn.v_proj: 8x16 F32 None
+dec.layer[21].attn.o_proj: 16x16 F32 None
+dec.layer[21].attn.norm_weight: Rms(len=16 sum=-0.07365173101425171 fnv=a0e7a73ba0873150)
+dec.layer[21].moe.router: 1x16 F32 None
+dec.layer[21].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[21].moe.norm_weight: Rms(len=16 sum=-0.1187515901401639 fnv=af2519a58cfc64e7)
+dec.layer[21].moe.activation_counts: len=1
+dec.layer[22].attn.q_proj: 16x16 F32 None
+dec.layer[22].attn.k_proj: 8x16 F32 None
+dec.layer[22].attn.v_proj: 8x16 F32 None
+dec.layer[22].attn.o_proj: 16x16 F32 None
+dec.layer[22].attn.norm_weight: Rms(len=16 sum=0.2031138704624027 fnv=9d61345163678d09)
+dec.layer[22].moe.router: 1x16 F32 None
+dec.layer[22].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[22].moe.norm_weight: Rms(len=16 sum=-0.8053529821336269 fnv=7b82da09c7d0b98b)
+dec.layer[22].moe.activation_counts: len=1
+dec.layer[23].attn.q_proj: 16x16 F32 None
+dec.layer[23].attn.k_proj: 8x16 F32 None
+dec.layer[23].attn.v_proj: 8x16 F32 None
+dec.layer[23].attn.o_proj: 16x16 F32 None
+dec.layer[23].attn.norm_weight: Rms(len=16 sum=0.19362876028753817 fnv=83431614235bac78)
+dec.layer[23].moe.router: 1x16 F32 None
+dec.layer[23].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[23].moe.norm_weight: Rms(len=16 sum=-0.32153515238314867 fnv=736f7311b4077de2)
+dec.layer[23].moe.activation_counts: len=1
+dec.layer[24].attn.q_proj: 16x16 F32 None
+dec.layer[24].attn.k_proj: 8x16 F32 None
+dec.layer[24].attn.v_proj: 8x16 F32 None
+dec.layer[24].attn.o_proj: 16x16 F32 None
+dec.layer[24].attn.norm_weight: Rms(len=16 sum=0.17509421205613762 fnv=93f92f0c49bf18df)
+dec.layer[24].moe.router: 1x16 F32 None
+dec.layer[24].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[24].moe.norm_weight: Rms(len=16 sum=-0.015113172587007284 fnv=41f8cd93acdc06e9)
+dec.layer[24].moe.activation_counts: len=1
+dec.layer[25].attn.q_proj: 16x16 F32 None
+dec.layer[25].attn.k_proj: 8x16 F32 None
+dec.layer[25].attn.v_proj: 8x16 F32 None
+dec.layer[25].attn.o_proj: 16x16 F32 None
+dec.layer[25].attn.norm_weight: Rms(len=16 sum=1.001586243044585 fnv=5c60e37aaca255b3)
+dec.layer[25].moe.router: 1x16 F32 None
+dec.layer[25].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[25].moe.norm_weight: Rms(len=16 sum=0.06404614076018333 fnv=348e2044ae88f18d)
+dec.layer[25].moe.activation_counts: len=1
+dec.layer[26].attn.q_proj: 16x16 F32 None
+dec.layer[26].attn.k_proj: 8x16 F32 None
+dec.layer[26].attn.v_proj: 8x16 F32 None
+dec.layer[26].attn.o_proj: 16x16 F32 None
+dec.layer[26].attn.norm_weight: Rms(len=16 sum=0.5661675743758678 fnv=8091580f2ad6adb1)
+dec.layer[26].moe.router: 1x16 F32 None
+dec.layer[26].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[26].moe.norm_weight: Rms(len=16 sum=-0.46687893383204937 fnv=44ba3b93dcf48e44)
+dec.layer[26].moe.activation_counts: len=1
+dec.layer[27].attn.q_proj: 16x16 F32 None
+dec.layer[27].attn.k_proj: 8x16 F32 None
+dec.layer[27].attn.v_proj: 8x16 F32 None
+dec.layer[27].attn.o_proj: 16x16 F32 None
+dec.layer[27].attn.norm_weight: Rms(len=16 sum=-1.4081969164690236 fnv=16f45329faca7944)
+dec.layer[27].moe.router: 1x16 F32 None
+dec.layer[27].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[27].moe.norm_weight: Rms(len=16 sum=-0.31816483847796917 fnv=a9dae511b63c4dab)
+dec.layer[27].moe.activation_counts: len=1
+dec.layer[28].attn.q_proj: 16x16 F32 None
+dec.layer[28].attn.k_proj: 8x16 F32 None
+dec.layer[28].attn.v_proj: 8x16 F32 None
+dec.layer[28].attn.o_proj: 16x16 F32 None
+dec.layer[28].attn.norm_weight: Rms(len=16 sum=-0.508329976350069 fnv=86e26c53d0938093)
+dec.layer[28].moe.router: 1x16 F32 None
+dec.layer[28].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[28].moe.norm_weight: Rms(len=16 sum=-0.10220778919756413 fnv=2d8485932223f3f6)
+dec.layer[28].moe.activation_counts: len=1
+dec.layer[29].attn.q_proj: 16x16 F32 None
+dec.layer[29].attn.k_proj: 8x16 F32 None
+dec.layer[29].attn.v_proj: 8x16 F32 None
+dec.layer[29].attn.o_proj: 16x16 F32 None
+dec.layer[29].attn.norm_weight: Rms(len=16 sum=1.0124124973081052 fnv=231a4dee820b66c0)
+dec.layer[29].moe.router: 1x16 F32 None
+dec.layer[29].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[29].moe.norm_weight: Rms(len=16 sum=0.07887289673089981 fnv=f4c32f325dd441f6)
+dec.layer[29].moe.activation_counts: len=1
+dec.layer[30].attn.q_proj: 16x16 F32 None
+dec.layer[30].attn.k_proj: 8x16 F32 None
+dec.layer[30].attn.v_proj: 8x16 F32 None
+dec.layer[30].attn.o_proj: 16x16 F32 None
+dec.layer[30].attn.norm_weight: Rms(len=16 sum=0.008923761546611786 fnv=f3691f31379b2e29)
+dec.layer[30].moe.router: 1x16 F32 None
+dec.layer[30].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[30].moe.norm_weight: Rms(len=16 sum=-0.1201686040731147 fnv=4ce6bd9122f37f5e)
+dec.layer[30].moe.activation_counts: len=1
+dec.layer[31].attn.q_proj: 16x16 F32 None
+dec.layer[31].attn.k_proj: 8x16 F32 None
+dec.layer[31].attn.v_proj: 8x16 F32 None
+dec.layer[31].attn.o_proj: 16x16 F32 None
+dec.layer[31].attn.norm_weight: Rms(len=16 sum=0.41683629690669477 fnv=500ce2ef5fde47fd)
+dec.layer[31].moe.router: 1x16 F32 None
+dec.layer[31].moe.experts: Resident(n=1 [gate 24x16 F32 None up 24x16 F32 None down 16x24 F32 None])
+dec.layer[31].moe.norm_weight: Rms(len=16 sum=0.10847874451428652 fnv=1f68a4eafd7933b5)
+dec.layer[31].moe.activation_counts: len=1

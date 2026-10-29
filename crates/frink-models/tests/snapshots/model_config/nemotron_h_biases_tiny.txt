@@ -1,0 +1,156 @@
+fixture: crates/frink-models/tests/fixtures/nemotron_h_biases_tiny.gguf
+config: ModelConfig {
+    name: "ferrox-nemotron_h-fixture",
+    kv_dtype: F32,
+    n_layers: 4,
+    n_mtp_blocks: 0,
+    hidden_dim: 24,
+    n_heads: 4,
+    n_kv_heads: 2,
+    head_dim: 6,
+    v_head_dim: None,
+    vocab_size: 48,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 24,
+        expert_ffn_dim: 40,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: None,
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Neox,
+    qk_norm_style: WholeVector,
+    swa_layers: All,
+    rope_layers: Never,
+    layer_shapes: PerLayer(
+        [
+            LayerShape {
+                attention: Mamba2,
+                ffn_dim: 0,
+            },
+            LayerShape {
+                attention: Gqa {
+                    n_heads: 4,
+                    n_kv_heads: 2,
+                },
+                ffn_dim: 0,
+            },
+            LayerShape {
+                attention: Absent,
+                ffn_dim: 40,
+            },
+            LayerShape {
+                attention: Mamba2,
+                ffn_dim: 0,
+            },
+        ],
+    ),
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: None,
+    ffn_activation: ReluSqr,
+    best_effort_fields: [
+        "rope_theta (no rope.freq_base key; defaulted to 10000.0)",
+    ],
+}
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Mamba2, ffn_dim: 0 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: ReluSqr, dense: ReluSqr }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (0, 6, 6)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, ffn_dim: 0 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: ReluSqr, dense: ReluSqr }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (2, 6, 6)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Absent, ffn_dim: 40 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: ReluSqr, dense: ReluSqr }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (0, 6, 6)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Mamba2, ffn_dim: 0 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: ReluSqr, dense: ReluSqr }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (0, 6, 6)
+decoder: LOADED
+dec.embedding: 48x24 F32 None
+dec.final_norm: Rms(len=24 sum=25.220371782779694 fnv=75e882e3d2631e6e)
+dec.output_head: 48x24 F32 None
+dec.lora_adapters: 0
+dec.execution_plan: ExecutionPlan { family: Hybrid, rope: Neox, qk_norm: WholeVector, ffn_activation: ReluSqr, memory: MemoryPlan { kind: Hybrid, swa_layers: All, sliding_window: None }, fused: FusedOpCaps { metal_flash_attn: false, metal_swiglu: false, metal_matvec: false, cuda_gqa: false }, embedding_scale: None, attention_scale: None, rope_theta_swa: None, attn_logit_softcap: None, final_logit_softcap: None }
+dec.layers: 4
+dec.layer[0].attn.q_proj: 0x24 F32 None
+dec.layer[0].attn.k_proj: 0x24 F32 None
+dec.layer[0].attn.v_proj: 0x24 F32 None
+dec.layer[0].attn.o_proj: 0x0 F32 None
+dec.layer[0].attn.norm_weight: Rms(len=24 sum=23.974964201450348 fnv=127b56de66d07754)
+dec.layer[0].attn.ssm: Mamba2
+dec.layer[0].moe.router: 1x24 F32 None
+dec.layer[0].moe.experts: Resident(n=1 [gate 0x24 F32 None up 0x24 F32 None down 0x0 F32 None])
+dec.layer[0].moe.activation_counts: len=1
+dec.layer[1].attn.q_proj: 24x24 F32 None
+dec.layer[1].attn.k_proj: 12x24 F32 None
+dec.layer[1].attn.v_proj: 12x24 F32 None
+dec.layer[1].attn.o_proj: 24x24 F32 None
+dec.layer[1].attn.norm_weight: Rms(len=24 sum=26.168940722942352 fnv=016b1d2f96889291)
+dec.layer[1].attn.o_bias: len=24 sum=2.3027178440243006 fnv=43b970b28228561a
+dec.layer[1].moe.router: 1x24 F32 None
+dec.layer[1].moe.experts: Resident(n=1 [gate 0x24 F32 None up 0x24 F32 None down 0x0 F32 None])
+dec.layer[1].moe.activation_counts: len=1
+dec.layer[2].attn.q_proj: 0x24 F32 None
+dec.layer[2].attn.k_proj: 0x24 F32 None
+dec.layer[2].attn.v_proj: 0x24 F32 None
+dec.layer[2].attn.o_proj: 0x0 F32 None
+dec.layer[2].moe.router: 1x24 F32 None
+dec.layer[2].moe.experts: Resident(n=1 [gate 40x24 F32 None up 40x24 F32 None down 24x40 F32 None])
+dec.layer[2].moe.norm_weight: Rms(len=24 sum=23.550666570663452 fnv=009ba8af83a96da9)
+dec.layer[2].moe.dense_bias: Some(gate None up len=40 sum=-0.14410371985286474 fnv=4848195121697d7f down len=24 sum=1.4066990781575441 fnv=1451b64e357e3d9d)
+dec.layer[2].moe.activation_counts: len=1
+dec.layer[3].attn.q_proj: 0x24 F32 None
+dec.layer[3].attn.k_proj: 0x24 F32 None
+dec.layer[3].attn.v_proj: 0x24 F32 None
+dec.layer[3].attn.o_proj: 0x0 F32 None
+dec.layer[3].attn.norm_weight: Rms(len=24 sum=25.06905871629715 fnv=1096e2f82b07a73e)
+dec.layer[3].attn.ssm: Mamba2
+dec.layer[3].moe.router: 1x24 F32 None
+dec.layer[3].moe.experts: Resident(n=1 [gate 0x24 F32 None up 0x24 F32 None down 0x0 F32 None])
+dec.layer[3].moe.activation_counts: len=1

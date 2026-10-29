@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/deci_attn_ffnfree_tiny.gguf
+config: REFUSED: architecture 'deci' requires unimplemented feature: blk.1: feed_forward_length 0 on a layer WITH attention (head_count 4). deci.cpp:147-149 `continue`s before the residual add at :150-153, discarding the attention output that :115-137 computed, and frink will not reproduce a dropped branch as the reference. An FFN-free layer with head_count 0 is supported

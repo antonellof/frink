@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/plm_decoy_output_tiny.gguf
+config: REFUSED: architecture 'plm' cannot use the generic Decoder: PLM is DeepSeek-2 MLA attention on a dense model and runs on the MLA engine (`mla_gguf_loader`), not generic GQA

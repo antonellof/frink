@@ -1,0 +1,329 @@
+fixture: tests/fixtures/llama-spm-vocab.gguf
+config: ModelConfig {
+    name: "llama-spm",
+    kv_dtype: F32,
+    n_layers: 32,
+    n_mtp_blocks: 0,
+    hidden_dim: 4096,
+    n_heads: 32,
+    n_kv_heads: 32,
+    head_dim: 128,
+    v_head_dim: None,
+    vocab_size: 32000,
+    rope_theta: 10000.0,
+    rms_norm_eps: 1e-5,
+    post_norm_eps: 1e-5,
+    norm_function: Rms,
+    moe: MoeLayerConfig {
+        n_experts: 1,
+        n_experts_active: 1,
+        n_shared_experts: 0,
+        hidden_dim: 4096,
+        expert_ffn_dim: 11008,
+        gating: Softmax,
+        norm_topk_prob: true,
+        expert_group_count: None,
+        expert_group_used_count: None,
+        expert_weights_scale: 1.0,
+        routed_weight_before_ffn: false,
+    },
+    attention: Gqa,
+    sliding_window: None,
+    n_dense_leading_layers: 0,
+    moe_interleave_step: None,
+    rope_freqs: None,
+    rope_freqs_long: None,
+    rope_freqs_short: None,
+    rope_orig_ctx: None,
+    rope_dim: None,
+    rope_dim_swa: None,
+    rope_attn_factor: 1.0,
+    rope_layout: Norm,
+    qk_norm_style: WholeVector,
+    swa_layers: All,
+    rope_layers: All,
+    layer_shapes: Uniform,
+    attn_logit_softcap: None,
+    final_logit_softcap: None,
+    embedding_scale: None,
+    residual_scale: None,
+    normed_residual_scale: None,
+    logit_multiplier: None,
+    attention_scale: None,
+    clamp_kqv: None,
+    attn_temperature: None,
+    router_input: NormedFfnInput,
+    block_sub_norms: false,
+    parallel_residual: false,
+    learned_positions: false,
+    attn_value_scale: None,
+    alibi_max_bias: None,
+    layer_loops: None,
+    skip_stream: false,
+    parallel_ssm: false,
+    swa_chunked: false,
+    weightless_qk_norm: false,
+    rope_theta_swa: None,
+    ffn_activation: Swiglu,
+    best_effort_fields: [
+        "head_dim (no attention.key_length key; derived as hidden_dim / n_heads)",
+        "rope_theta (no rope.freq_base key; defaulted to 10000.0)",
+    ],
+}
+cfg.layer[0].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[0].rotates: true
+cfg.layer[0].rope_theta: Some(10000.0)
+cfg.layer[0].attention_kind: Gqa
+cfg.layer[0].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[0].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[0].kv_dtype: F32
+cfg.layer[0].cache_geometry: (32, 128, 128)
+cfg.layer[1].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[1].rotates: true
+cfg.layer[1].rope_theta: Some(10000.0)
+cfg.layer[1].attention_kind: Gqa
+cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[1].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[1].kv_dtype: F32
+cfg.layer[1].cache_geometry: (32, 128, 128)
+cfg.layer[2].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[2].rotates: true
+cfg.layer[2].rope_theta: Some(10000.0)
+cfg.layer[2].attention_kind: Gqa
+cfg.layer[2].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[2].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[2].kv_dtype: F32
+cfg.layer[2].cache_geometry: (32, 128, 128)
+cfg.layer[3].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[3].rotates: true
+cfg.layer[3].rope_theta: Some(10000.0)
+cfg.layer[3].attention_kind: Gqa
+cfg.layer[3].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[3].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[3].kv_dtype: F32
+cfg.layer[3].cache_geometry: (32, 128, 128)
+cfg.layer[4].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[4].rotates: true
+cfg.layer[4].rope_theta: Some(10000.0)
+cfg.layer[4].attention_kind: Gqa
+cfg.layer[4].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[4].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[4].kv_dtype: F32
+cfg.layer[4].cache_geometry: (32, 128, 128)
+cfg.layer[5].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[5].rotates: true
+cfg.layer[5].rope_theta: Some(10000.0)
+cfg.layer[5].attention_kind: Gqa
+cfg.layer[5].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[5].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[5].kv_dtype: F32
+cfg.layer[5].cache_geometry: (32, 128, 128)
+cfg.layer[6].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[6].rotates: true
+cfg.layer[6].rope_theta: Some(10000.0)
+cfg.layer[6].attention_kind: Gqa
+cfg.layer[6].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[6].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[6].kv_dtype: F32
+cfg.layer[6].cache_geometry: (32, 128, 128)
+cfg.layer[7].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[7].rotates: true
+cfg.layer[7].rope_theta: Some(10000.0)
+cfg.layer[7].attention_kind: Gqa
+cfg.layer[7].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[7].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[7].kv_dtype: F32
+cfg.layer[7].cache_geometry: (32, 128, 128)
+cfg.layer[8].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[8].rotates: true
+cfg.layer[8].rope_theta: Some(10000.0)
+cfg.layer[8].attention_kind: Gqa
+cfg.layer[8].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[8].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[8].kv_dtype: F32
+cfg.layer[8].cache_geometry: (32, 128, 128)
+cfg.layer[9].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[9].rotates: true
+cfg.layer[9].rope_theta: Some(10000.0)
+cfg.layer[9].attention_kind: Gqa
+cfg.layer[9].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[9].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[9].kv_dtype: F32
+cfg.layer[9].cache_geometry: (32, 128, 128)
+cfg.layer[10].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[10].rotates: true
+cfg.layer[10].rope_theta: Some(10000.0)
+cfg.layer[10].attention_kind: Gqa
+cfg.layer[10].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[10].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[10].kv_dtype: F32
+cfg.layer[10].cache_geometry: (32, 128, 128)
+cfg.layer[11].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[11].rotates: true
+cfg.layer[11].rope_theta: Some(10000.0)
+cfg.layer[11].attention_kind: Gqa
+cfg.layer[11].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[11].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[11].kv_dtype: F32
+cfg.layer[11].cache_geometry: (32, 128, 128)
+cfg.layer[12].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[12].rotates: true
+cfg.layer[12].rope_theta: Some(10000.0)
+cfg.layer[12].attention_kind: Gqa
+cfg.layer[12].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[12].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[12].kv_dtype: F32
+cfg.layer[12].cache_geometry: (32, 128, 128)
+cfg.layer[13].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[13].rotates: true
+cfg.layer[13].rope_theta: Some(10000.0)
+cfg.layer[13].attention_kind: Gqa
+cfg.layer[13].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[13].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[13].kv_dtype: F32
+cfg.layer[13].cache_geometry: (32, 128, 128)
+cfg.layer[14].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[14].rotates: true
+cfg.layer[14].rope_theta: Some(10000.0)
+cfg.layer[14].attention_kind: Gqa
+cfg.layer[14].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[14].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[14].kv_dtype: F32
+cfg.layer[14].cache_geometry: (32, 128, 128)
+cfg.layer[15].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[15].rotates: true
+cfg.layer[15].rope_theta: Some(10000.0)
+cfg.layer[15].attention_kind: Gqa
+cfg.layer[15].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[15].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[15].kv_dtype: F32
+cfg.layer[15].cache_geometry: (32, 128, 128)
+cfg.layer[16].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[16].rotates: true
+cfg.layer[16].rope_theta: Some(10000.0)
+cfg.layer[16].attention_kind: Gqa
+cfg.layer[16].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[16].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[16].kv_dtype: F32
+cfg.layer[16].cache_geometry: (32, 128, 128)
+cfg.layer[17].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[17].rotates: true
+cfg.layer[17].rope_theta: Some(10000.0)
+cfg.layer[17].attention_kind: Gqa
+cfg.layer[17].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[17].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[17].kv_dtype: F32
+cfg.layer[17].cache_geometry: (32, 128, 128)
+cfg.layer[18].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[18].rotates: true
+cfg.layer[18].rope_theta: Some(10000.0)
+cfg.layer[18].attention_kind: Gqa
+cfg.layer[18].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[18].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[18].kv_dtype: F32
+cfg.layer[18].cache_geometry: (32, 128, 128)
+cfg.layer[19].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[19].rotates: true
+cfg.layer[19].rope_theta: Some(10000.0)
+cfg.layer[19].attention_kind: Gqa
+cfg.layer[19].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[19].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[19].kv_dtype: F32
+cfg.layer[19].cache_geometry: (32, 128, 128)
+cfg.layer[20].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[20].rotates: true
+cfg.layer[20].rope_theta: Some(10000.0)
+cfg.layer[20].attention_kind: Gqa
+cfg.layer[20].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[20].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[20].kv_dtype: F32
+cfg.layer[20].cache_geometry: (32, 128, 128)
+cfg.layer[21].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[21].rotates: true
+cfg.layer[21].rope_theta: Some(10000.0)
+cfg.layer[21].attention_kind: Gqa
+cfg.layer[21].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[21].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[21].kv_dtype: F32
+cfg.layer[21].cache_geometry: (32, 128, 128)
+cfg.layer[22].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[22].rotates: true
+cfg.layer[22].rope_theta: Some(10000.0)
+cfg.layer[22].attention_kind: Gqa
+cfg.layer[22].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[22].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[22].kv_dtype: F32
+cfg.layer[22].cache_geometry: (32, 128, 128)
+cfg.layer[23].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[23].rotates: true
+cfg.layer[23].rope_theta: Some(10000.0)
+cfg.layer[23].attention_kind: Gqa
+cfg.layer[23].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[23].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[23].kv_dtype: F32
+cfg.layer[23].cache_geometry: (32, 128, 128)
+cfg.layer[24].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[24].rotates: true
+cfg.layer[24].rope_theta: Some(10000.0)
+cfg.layer[24].attention_kind: Gqa
+cfg.layer[24].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[24].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[24].kv_dtype: F32
+cfg.layer[24].cache_geometry: (32, 128, 128)
+cfg.layer[25].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[25].rotates: true
+cfg.layer[25].rope_theta: Some(10000.0)
+cfg.layer[25].attention_kind: Gqa
+cfg.layer[25].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[25].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[25].kv_dtype: F32
+cfg.layer[25].cache_geometry: (32, 128, 128)
+cfg.layer[26].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[26].rotates: true
+cfg.layer[26].rope_theta: Some(10000.0)
+cfg.layer[26].attention_kind: Gqa
+cfg.layer[26].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[26].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[26].kv_dtype: F32
+cfg.layer[26].cache_geometry: (32, 128, 128)
+cfg.layer[27].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[27].rotates: true
+cfg.layer[27].rope_theta: Some(10000.0)
+cfg.layer[27].attention_kind: Gqa
+cfg.layer[27].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[27].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[27].kv_dtype: F32
+cfg.layer[27].cache_geometry: (32, 128, 128)
+cfg.layer[28].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[28].rotates: true
+cfg.layer[28].rope_theta: Some(10000.0)
+cfg.layer[28].attention_kind: Gqa
+cfg.layer[28].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[28].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[28].kv_dtype: F32
+cfg.layer[28].cache_geometry: (32, 128, 128)
+cfg.layer[29].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[29].rotates: true
+cfg.layer[29].rope_theta: Some(10000.0)
+cfg.layer[29].attention_kind: Gqa
+cfg.layer[29].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[29].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[29].kv_dtype: F32
+cfg.layer[29].cache_geometry: (32, 128, 128)
+cfg.layer[30].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[30].rotates: true
+cfg.layer[30].rope_theta: Some(10000.0)
+cfg.layer[30].attention_kind: Gqa
+cfg.layer[30].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[30].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[30].kv_dtype: F32
+cfg.layer[30].cache_geometry: (32, 128, 128)
+cfg.layer[31].rope: Some(theta=10000.0 rot_dim=None freq_factors=None)
+cfg.layer[31].rotates: true
+cfg.layer[31].rope_theta: Some(10000.0)
+cfg.layer[31].attention_kind: Gqa
+cfg.layer[31].shape: LayerShape { attention: Gqa { n_heads: 32, n_kv_heads: 32 }, ffn_dim: 11008 }
+cfg.layer[31].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
+cfg.layer[31].kv_dtype: F32
+cfg.layer[31].cache_geometry: (32, 128, 128)
+decoder: REFUSED: tensor 'token_embd.weight' not found
