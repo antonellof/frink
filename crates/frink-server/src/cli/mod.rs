@@ -17,21 +17,24 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use frink_models::gpu_layers::GpuLayers;
 
 // `PartialEq` so frink-cli's serve tests can assert that both front
 // ends parse a command line into the SAME arguments, rather than
 // asserting field by field and missing whichever one is added next.
 #[derive(Parser, Debug, PartialEq)]
-// No `version` here on purpose. This struct is both `frink-server`'s
-// own argv and the body of frink-cli's `serve` subcommand, and clap
-// gives an embedded subcommand its own `--version` derived from the
-// variant name: `frink serve --version` printed `frink-serve 0.10.0`,
-// naming a binary nobody ships. The front end's own `--version` is the
-// truth, and both report the same workspace version anyway.
+// `version` with an explicit `display_name`. This struct is both
+// `frink-server`'s own argv and the body of frink-cli's `serve`
+// subcommand, and clap names an embedded subcommand after its variant:
+// `frink serve --version` once printed `frink-serve 0.10.0`, naming a
+// binary nobody ships. Both spellings print `frink-server` now, the
+// binary this is, at the one workspace version. llama-server takes
+// `--version`, so going without it was a gap (ADR 0005).
 #[command(
     name = "frink-server",
+    display_name = "frink-server",
+    version,
     about = "OpenAI-compatible Frink inference server"
 )]
 pub struct ServerArgs {
@@ -136,6 +139,46 @@ pub struct ServerArgs {
     /// the shape (`FRINK_METAL_ATTN`).
     #[arg(long = "flash-attn", visible_alias = "fa", value_name = "MODE", num_args = 0..=1, default_missing_value = "auto")]
     flash_attn: Option<String>,
+
+    /// Hugging Face access token for `-hf`, llama.cpp's `-hft` /
+    /// `--hf-token`. Sets `HF_TOKEN`, the variable the downloader
+    /// already reads and the one llama.cpp declares on this flag.
+    #[arg(long = "hf-token", visible_alias = "hft", value_name = "TOKEN")]
+    hf_token: Option<String>,
+
+    /// PEM private key to serve HTTPS with, llama.cpp's
+    /// `--ssl-key-file`. Sets `FRINK_TLS_KEY`; needs `--ssl-cert-file`.
+    #[arg(long = "ssl-key-file", value_name = "FNAME")]
+    ssl_key_file: Option<PathBuf>,
+
+    /// PEM certificate to serve HTTPS with, llama.cpp's
+    /// `--ssl-cert-file`. Sets `FRINK_TLS_CERT`; needs `--ssl-key-file`.
+    #[arg(long = "ssl-cert-file", value_name = "FNAME")]
+    ssl_cert_file: Option<PathBuf>,
+
+    /// Comma-separated origins allowed by CORS, llama.cpp's
+    /// `--cors-origins`. Sets `FRINK_CORS_ORIGINS`.
+    ///
+    /// Exact origins only. llama.cpp's default `*` and its special value
+    /// `localhost` (reflect the Origin header when it is local) are
+    /// refused by name: frink has no wildcard by design, and `localhost`
+    /// would otherwise be taken as the literal origin `localhost`, which
+    /// no browser sends.
+    #[arg(long = "cors-origins", value_name = "ORIGINS")]
+    cors_origins: Option<String>,
+
+    /// Threads that process HTTP requests, llama.cpp's
+    /// `--threads-http`. Sets `FRINK_TOKIO_WORKERS`. A count below 1
+    /// (llama.cpp's default is `-1`) keeps frink's own default, as it
+    /// keeps llama.cpp's; generation does not run on these threads in
+    /// either engine.
+    #[arg(long = "threads-http", value_name = "N", allow_hyphen_values = true)]
+    threads_http: Option<i64>,
+
+    /// Accepted: `/metrics` (Prometheus text format) is always served,
+    /// so llama.cpp's switch to turn it on has nothing left to turn on.
+    #[arg(long = "metrics", default_value_t = false)]
+    metrics: bool,
 
     /// IP address to listen on.
     #[arg(long, value_name = "HOST")]
@@ -312,11 +355,22 @@ impl ServerArgs {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut cmd = Self::command();
-        cmd.build();
+        let mut cmd = Self::built_command();
         let argv = llama_style_argv(&cmd, argv.into_iter().collect(), |k| std::env::var(k).ok())
             .unwrap_or_else(|e| cmd.error(clap::error::ErrorKind::UnknownArgument, e).exit());
-        Self::parse_from(argv)
+        let matches = cmd
+            .try_get_matches_from_mut(argv)
+            .unwrap_or_else(|e| e.exit());
+        Self::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    }
+
+    /// The command [`Self::parse_llama_style`] parses with, built, with
+    /// llama.cpp's `--usage` spelling of help added before clap indexes
+    /// the spellings ([`frink_core::argv::with_usage_alias`]).
+    pub fn built_command() -> clap::Command {
+        let mut cmd = frink_core::argv::with_usage_alias(Self::command());
+        cmd.build();
+        cmd
     }
 }
 
@@ -434,7 +488,34 @@ fn resolve_hf_repo(spec: &str, file: Option<&str>) -> anyhow::Result<String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// `--cors-origins` values llama.cpp gives a meaning frink does not
+/// have, refused by name before `FRINK_CORS_ORIGINS` would read them as
+/// something else (`security::parse_cors_origins` refuses `*` too, but
+/// only once the router is built, after the model has loaded).
+fn check_cors_origins(spec: &str) -> anyhow::Result<()> {
+    for origin in spec.split(',').map(str::trim) {
+        match origin {
+            "*" => anyhow::bail!(
+                "--cors-origins *: frink allows exact origins only, by design. List the \
+                 origins to allow"
+            ),
+            "localhost" => anyhow::bail!(
+                "--cors-origins localhost: llama.cpp's special value (reflect the Origin header \
+                 when it is local) is not implemented. List the exact origins, e.g. \
+                 http://localhost:5173"
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
+    if let Some(token) = &args.hf_token {
+        // Before `-hf` is resolved below, which is what reads it.
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var("HF_TOKEN", token) };
+    }
     if let Some(model) = &args.model {
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_MODEL_PATH", model) };
@@ -496,13 +577,33 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         );
     }
     if let Some(mode) = &args.flash_attn {
-        let mode = mode.trim().to_ascii_lowercase();
-        if mode == "off" || mode == "disabled" || mode == "0" {
-            anyhow::bail!(
-                "--flash-attn off: fused attention is a backend property here, not a per-run \
-                 switch. Set FRINK_METAL_ATTN=0 to take the unfused Metal path, or --device cpu"
-            );
+        frink_core::argv::check_flash_attn(mode).map_err(|e| anyhow::anyhow!(e))?;
+    }
+    match (&args.ssl_key_file, &args.ssl_cert_file) {
+        (Some(key), Some(cert)) => {
+            // SAFETY: called before the runtime starts worker threads.
+            unsafe {
+                std::env::set_var("FRINK_TLS_KEY", key);
+                std::env::set_var("FRINK_TLS_CERT", cert);
+            }
         }
+        (None, None) => {}
+        _ => anyhow::bail!(
+            "--ssl-key-file and --ssl-cert-file must be given together: HTTPS needs both the \
+             key and the certificate, and serving plain HTTP instead would ignore the one given"
+        ),
+    }
+    if let Some(origins) = &args.cors_origins {
+        check_cors_origins(origins)?;
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var("FRINK_CORS_ORIGINS", origins) };
+    }
+    // llama.cpp reads any count below 1 as "pick the default"
+    // (`server-http.cpp`: `if (n_threads_http < 1)`), so `0` and `-1`
+    // both keep frink's own default here too.
+    if let Some(n) = args.threads_http.filter(|n| *n > 0) {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var("FRINK_TOKIO_WORKERS", n.to_string()) };
     }
 
     if let Some(addr) = cli_bind_addr(args, std::env::var("FRINK_ADDR").ok().as_deref()) {
@@ -700,250 +801,6 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
 
     Ok(())
 }
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The production rewrite with an EMPTY environment, so a
-    /// `LLAMA_ARG_*` variable on the test host cannot change a test.
-    fn rewrite(argv: Vec<String>) -> Vec<String> {
-        let mut cmd = ServerArgs::command();
-        cmd.build();
-        llama_style_argv(&cmd, argv, |_| None).unwrap()
-    }
-
-    /// The server and `frink run` set the same `FRINK_CTK` variable, so
-    /// they have to agree about which values exist. The server used to
-    /// accept anything and pass it through, which meant
-    /// `frink-server --ctk nonsense` served f16 without a word while
-    /// `frink run --ctk nonsense` refused.
-    #[test]
-    fn the_server_accepts_exactly_the_cache_types_the_cli_does() {
-        for good in ["f16", "q8_0", "q4_0", "fp8", "q5_1"] {
-            let a = ServerArgs::try_parse_from(["frink-server", "--ctk", good]);
-            assert!(a.is_ok(), "{good} was refused");
-        }
-        for bad in ["nonsense", "turbo4", "q3_k"] {
-            let e = ServerArgs::try_parse_from(["frink-server", "--ctk", bad])
-                .expect_err(&format!("{bad} was accepted"));
-            let msg = e.to_string();
-            assert!(msg.contains("unsupported cache type"), "{msg}");
-        }
-    }
-
-    #[test]
-    fn parses_llama_server_style_options() {
-        let argv = [
-            "frink-server",
-            "-m",
-            "model.gguf",
-            "--host",
-            "::1",
-            "--port",
-            "9000",
-            "-t",
-            "4",
-            "-dev",
-            "Metal",
-            "-ngl",
-            "all",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
-
-        assert_eq!(args.model.as_deref(), Some("model.gguf"));
-        assert_eq!(args.host, Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
-        assert_eq!(args.port, Some(9000));
-        assert_eq!(args.threads, Some(4));
-        assert_eq!(args.device, Some(OffloadDevice::Metal));
-        assert_eq!(args.n_gpu_layers, Some(GpuLayers::All));
-        assert_eq!(
-            cli_bind_addr(&args, Some("127.0.0.1:8383")).as_deref(),
-            Some("[::1]:9000")
-        );
-    }
-
-    #[test]
-    fn port_zero_survives_argument_parsing_as_a_real_request() {
-        // `--port 0` must reach the bind call intact: it is a request
-        // for a kernel-assigned port, not a missing value to default to
-        // 8383. The address it produces is deliberately provisional --
-        // the ready line reports what was actually bound.
-        let argv = ["frink-server", "--port", "0"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
-        assert_eq!(args.port, Some(0));
-        assert_eq!(
-            cli_bind_addr(&args, Some("127.0.0.1:8383")).as_deref(),
-            Some("127.0.0.1:0")
-        );
-    }
-
-    #[test]
-    fn parallel_flag_parses_and_rewrites_np() {
-        let argv = ["frink-server", "-np", "4"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
-        assert_eq!(args.parallel, Some(4));
-    }
-
-    /// `-b` and `-ub` are two tokens in llama.cpp's hand-written
-    /// parser and one token to clap, which sees `-b` as a short option
-    /// it has never heard of. The rewrite is what makes a copied
-    /// `llama-server ... -b 2048 -ub 512` command run here at all.
-    #[test]
-    fn batch_flags_parse_and_rewrite_their_llama_cpp_short_forms() {
-        let argv = ["frink-server", "-b", "2048", "-ub", "512"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let args = ServerArgs::try_parse_from(rewrite(argv)).unwrap();
-        assert_eq!(args.batch_size, Some(2048));
-        assert_eq!(args.ubatch_size, Some(512));
-    }
-
-    /// Zero is not a batch size, and accepting it would make
-    /// `env_positive` panic the server later with a message naming an
-    /// environment variable the operator never set.
-    #[test]
-    fn a_zero_batch_size_is_refused_by_name_rather_than_lowered_to_the_environment() {
-        for flag in ["--batch-size", "--ubatch-size"] {
-            let args = ServerArgs::try_parse_from(
-                ["frink-server", flag, "0"].into_iter().map(String::from),
-            )
-            .unwrap();
-            let err = apply_cli_overrides(&args).unwrap_err().to_string();
-            assert!(err.contains(flag), "{flag}: {err}");
-        }
-    }
-
-    /// A path that is not a directory is refused at startup rather
-    /// than on the first save. The repo's rule about gates applies to
-    /// flags too: a `--slot-save-path` pointing at nothing looks
-    /// configured until somebody tries to use it, hours later.
-    #[test]
-    fn a_slot_save_path_that_is_not_a_directory_is_refused_at_startup() {
-        let args = ServerArgs::try_parse_from(
-            ["frink-server", "--slot-save-path", "/definitely/not/here"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
-        let err = apply_cli_overrides(&args).unwrap_err().to_string();
-        assert!(err.contains("--slot-save-path"), "{err}");
-        assert!(
-            std::env::var("FRINK_SLOT_SAVE_PATH").is_err(),
-            "a refused path must not have been lowered to the environment first"
-        );
-    }
-
-    /// llama.cpp's spelling and range (`common/arg.cpp:3608-3614`):
-    /// `-1`, `0` and `N` parse -- `-1` needs `allow_hyphen_values`, or
-    /// clap reads it as a flag -- and anything below `-1` is refused by
-    /// name before it is lowered to the environment.
-    #[test]
-    fn reasoning_budget_parses_llama_cpps_range_and_refuses_the_rest() {
-        for (value, expect) in [("-1", -1), ("0", 0), ("2000", 2000)] {
-            let args = ServerArgs::try_parse_from(
-                ["frink-server", "--reasoning-budget", value]
-                    .into_iter()
-                    .map(String::from),
-            )
-            .unwrap();
-            assert_eq!(args.reasoning_budget, Some(expect), "{value}");
-        }
-        let args = ServerArgs::try_parse_from(
-            ["frink-server", "--reasoning-budget", "-2"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
-        let err = apply_cli_overrides(&args).unwrap_err().to_string();
-        assert!(err.contains("--reasoning-budget"), "{err}");
-    }
-
-    /// Both spellings of llama.cpp's prefill switch parse, and they
-    /// conflict rather than letting the last one win silently.
-    #[test]
-    fn prefill_assistant_has_both_of_llama_cpps_spellings() {
-        let on = ServerArgs::try_parse_from(
-            ["frink-server", "--prefill-assistant"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
-        assert!(on.prefill_assistant && !on.no_prefill_assistant);
-        let off = ServerArgs::try_parse_from(
-            ["frink-server", "--no-prefill-assistant"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
-        assert!(off.no_prefill_assistant && !off.prefill_assistant);
-        assert!(ServerArgs::try_parse_from(
-            [
-                "frink-server",
-                "--prefill-assistant",
-                "--no-prefill-assistant"
-            ]
-            .into_iter()
-            .map(String::from),
-        )
-        .is_err());
-    }
-
-    /// `-ngl 10` used to offload every layer here, the divergence
-    /// `frink run` had already been fixed for. A count that cannot be
-    /// checked against a layer count is refused as well, rather than
-    /// trusted.
-    #[test]
-    fn a_partial_or_uncheckable_gpu_layer_count_is_refused() {
-        let args = ServerArgs::try_parse_from(
-            // No `-m`: setting `FRINK_MODEL_PATH` here would leak into
-            // every other test in this process.
-            ["frink-server", "--n-gpu-layers", "10"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
-        let err = apply_cli_overrides(&args).unwrap_err().to_string();
-        assert!(err.contains("--n-gpu-layers 10"), "{err}");
-    }
-
-    /// llama.cpp's `--alias` is a comma-separated list; frink serves one
-    /// name and must not serve `a,b` as a name.
-    #[test]
-    fn a_list_of_aliases_is_refused() {
-        let args = ServerArgs::try_parse_from(rewrite(
-            ["frink-server", "-a", "one,two"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        ))
-        .unwrap();
-        let err = apply_cli_overrides(&args).unwrap_err().to_string();
-        assert!(err.contains("--alias one,two"), "{err}");
-    }
-
-    #[test]
-    fn stdin_close_exit_is_opt_in() {
-        // Default off: a server whose stdin is /dev/null (systemd, cron,
-        // nohup) would otherwise exit the instant it started.
-        let args =
-            ServerArgs::try_parse_from(["frink-server"].into_iter().map(String::from)).unwrap();
-        assert!(!args.exit_on_stdin_close);
-        let args = ServerArgs::try_parse_from(
-            ["frink-server", "--exit-on-stdin-close"]
-                .into_iter()
-                .map(String::from),
-        )
-        .unwrap();
-        assert!(args.exit_on_stdin_close);
-    }
-}
+mod tests;

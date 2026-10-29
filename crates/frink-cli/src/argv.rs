@@ -11,16 +11,39 @@
 //! `visible_alias = "np"` is the spelling, on every front end at once
 //! ([`frink_core::argv`]).
 
-use clap::{Command, CommandFactory};
+use clap::{Command, CommandFactory, FromArgMatches};
 
 use crate::Cli;
 
 /// The root command, built, so globals are propagated into every
 /// subcommand and help/version exist as arguments.
+///
+/// This is the command `main` parses with, not a copy of it: the
+/// llama.cpp flag census (`llama_flags.rs`) reads the same tree, so a
+/// spelling it counts as accepted is one the binary accepts.
 pub(crate) fn built_cli() -> Command {
     let mut cmd = Cli::command();
+    // `--version` on every subcommand (`propagate_version` on `Cli`)
+    // prints `frink <version>`, not clap's `frink-run <version>`, a
+    // binary that does not exist. `serve` names itself `frink-server`.
+    let names: Vec<String> = cmd
+        .get_subcommands()
+        .filter(|s| s.get_display_name().is_none())
+        .map(|s| s.get_name().to_string())
+        .collect();
+    for name in names {
+        cmd = cmd.mut_subcommand(name, |s| s.display_name("frink"));
+    }
+    let mut cmd = frink_core::argv::with_usage_alias(cmd);
     cmd.build();
     cmd
+}
+
+/// `argv` (already through [`rewrite_llama_style_argv`]) parsed against
+/// [`built_cli`].
+pub(crate) fn parse(argv: Vec<String>) -> Result<Cli, clap::Error> {
+    let matches = built_cli().try_get_matches_from(argv)?;
+    Cli::from_arg_matches(&matches)
 }
 
 /// Rewrite `frink -m …` into `frink run -m …`, and every llama.cpp
@@ -49,7 +72,7 @@ pub(crate) fn rewrite_llama_style_argv(args: Vec<String>) -> Result<Vec<String>,
         .map(|offset| offset + 1)
         .unwrap_or(1);
     let first = args[first_word].as_str();
-    if matches!(first, "-h" | "--help" | "-V" | "--version") {
+    if matches!(first, "-h" | "--help" | "--usage" | "-V" | "--version") {
         return Ok(args);
     }
     let (head, sub_name, tail) = match root.find_subcommand(first) {

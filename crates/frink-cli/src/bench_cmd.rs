@@ -85,6 +85,29 @@ pub struct BenchCmd {
     /// marks the receipt as not quiet-host.
     #[arg(long, default_value_t = host_state::DEFAULT_MAX_LOAD)]
     pub max_load: f64,
+    /// Flash attention, llama-bench's `-fa` (`on`, `off`, `auto`; the
+    /// default is `auto` on both). `on` and `auto` are what frink does
+    /// wherever the backend has a fused kernel; `off` is refused, and so
+    /// is llama-bench's comma-separated sweep, since one `frink bench`
+    /// run measures one configuration.
+    #[arg(long = "flash-attn", visible_alias = "fa", value_name = "MODE")]
+    pub flash_attn: Option<String>,
+    /// Print the devices this build can run on and exit, llama-bench's
+    /// `--list-devices`.
+    #[arg(long = "list-devices", default_value_t = false)]
+    pub list_devices: bool,
+}
+
+/// `frink bench -fa VALUE`: one value through the shared
+/// [`frink_core::argv::check_flash_attn`], with llama-bench's sweep
+/// (`-fa 0,1`) refused by name rather than read as an unknown value.
+fn check_bench_flash_attn(value: &str) -> anyhow::Result<()> {
+    if value.contains(',') {
+        anyhow::bail!(
+            "--flash-attn {value}: frink bench measures one configuration per run;              llama-bench's comma-separated sweep is not implemented. Run once per value"
+        );
+    }
+    frink_core::argv::check_flash_attn(value).map_err(|e| anyhow::anyhow!(e))
 }
 
 impl BenchCmd {
@@ -112,7 +135,16 @@ impl BenchCmd {
             backend_label,
             receipt,
             max_load,
+            flash_attn,
+            list_devices,
         } = self;
+        if list_devices {
+            frink_models::devices::print_available_devices();
+            return Ok(());
+        }
+        if let Some(mode) = &flash_attn {
+            check_bench_flash_attn(mode)?;
+        }
         if render {
             return bench_render::render(std::path::Path::new(&bench_dir));
         }
@@ -405,4 +437,25 @@ fn synthetic(hidden: usize, ffn_dim: usize, iters: usize) {
     );
     println!("footprint of quantized vs f32 weights), not absolute performance on target hardware");
     println!("like a DGX Spark. See benchmarks/RESULTS.md for methodology and caveats.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_bench_flash_attn;
+
+    #[test]
+    fn bench_flash_attn_takes_one_llama_value_and_refuses_off_and_sweeps() {
+        for ok in ["on", "auto", "1", "enabled", "-1"] {
+            check_bench_flash_attn(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for (bad, says) in [
+            ("off", "backend property"),
+            ("0", "backend property"),
+            ("0,1", "sweep"),
+            ("maybe", "expected on"),
+        ] {
+            let err = check_bench_flash_attn(bad).unwrap_err().to_string();
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+    }
 }

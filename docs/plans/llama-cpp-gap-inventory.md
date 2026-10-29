@@ -672,7 +672,7 @@ These are the rows that matter most, because nothing errors.
 | `--rope-scaling`, `--rope-freq-base`, `--rope-freq-scale`, `--yarn-*` | `arg.cpp:2281-2340` | ALL MISSING | medium | M |
 | `-ot` / `--override-tensor`, `-cmoe` / `--cpu-moe`, `-ncmoe` | `arg.cpp:2670,2676,2683` | MISSING. **Notable**: this is per-tensor CPU/GPU placement, which is exactly what frink's `frink-core` expert-residency stack was built to execute and which nothing currently drives | high | L |
 | `-sm` / `--split-mode`, `-mg` / `--main-gpu`, `-ts` / `--tensor-split` | `arg.cpp:2717,2768,2741` | MISSING; frink has no multi-GPU concept | medium | XL |
-| `--lora` / `--lora-scaled` | `arg.cpp:2865,2875` | **DONE** (`run.rs`, `frink-server/src/cli.rs`; the adapter is a `WeightMatrix::Adapted` decoration in `frink-core/src/weight_matrix/lora.rs`, attached by name in `frink-models/src/lora_attach.rs`). Routed-expert targets, aLoRA and the dedicated engines refuse by name | -- | -- |
+| `--lora` / `--lora-scaled` | `arg.cpp:2865,2875` | **DONE** (`run.rs`, `frink-server/src/cli/mod.rs`; the adapter is a `WeightMatrix::Adapted` decoration in `frink-core/src/weight_matrix/lora.rs`, attached by name in `frink-models/src/lora_attach.rs`). Routed-expert targets, aLoRA and the dedicated engines refuse by name | -- | -- |
 | `-l` / `--logit-bias` | `arg.cpp:2193` | MISSING; the API refuses it by name on `/v1/completions` (`openai_extra.rs:198-207`) and silently drops it on chat (§3.2/E5) | medium | M |
 | `--keep`, `-r` / `--reverse-prompt`, `-sp` / `--special`, `--in-prefix`/`--in-suffix` | `arg.cpp:1630,1835,1842,1898,1906` | ALL MISSING | medium | S-M |
 | `--jinja` / `--no-jinja` | `arg.cpp:3571` | MISSING; frink always uses its own engine (`chat_template.rs`) | medium | S |

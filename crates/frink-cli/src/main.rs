@@ -42,7 +42,12 @@ use frink_models::{
 };
 
 #[derive(Parser)]
-#[command(name = "frink", version, about = "Pure-Rust MoE inference engine")]
+#[command(
+    name = "frink",
+    version,
+    propagate_version = true,
+    about = "Pure-Rust MoE inference engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -555,7 +560,7 @@ fn instance_target(command: &Commands) -> Option<(&'static str, Option<String>)>
         // the words.
         Commands::Perplexity { model, .. } => Some(("perplexity", Some(model.clone()))),
         Commands::Bench(args) => {
-            if args.suite || args.render || args.model.is_none() {
+            if args.suite || args.render || args.list_devices || args.model.is_none() {
                 return None;
             }
             Some(("bench", args.model.clone()))
@@ -600,7 +605,7 @@ fn main() -> anyhow::Result<()> {
             .error(clap::error::ErrorKind::UnknownArgument, e)
             .exit()
     });
-    let cli = Cli::parse_from(argv);
+    let cli = argv::parse(argv).unwrap_or_else(|e| e.exit());
 
     // BEFORE `claim_instance`, and that ordering is the whole point.
     //
@@ -619,7 +624,7 @@ fn main() -> anyhow::Result<()> {
             // the suite spawns a child per entry and render only reads
             // receipts, so applying a backend here would pin the parent
             // to one backend for children that each want their own.
-            if !args.suite && !args.render {
+            if !args.suite && !args.render && !args.list_devices {
                 bench_model::apply_env(args.threads, args.n_gpu_layers, args.model.as_deref())?;
             }
         }

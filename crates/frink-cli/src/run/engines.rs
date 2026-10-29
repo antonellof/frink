@@ -77,7 +77,7 @@ pub(super) fn run_mla_infer(
     // builds every pipeline and allocates every buffer, and that
     // cost divided by a short prompt is what made this line read
     // 12.64 t/s where llama.cpp reads 197.7 for the same file.
-    crate::cli_output::warm_up_engine(&engine);
+    crate::cli_output::warm_up_engine(&engine, args.warmup_enabled());
     let prefill_t = Instant::now();
     let mut pos = 0usize;
     let mut logits = if tokens.is_empty() {
@@ -204,7 +204,7 @@ pub(super) fn run_gemma4_infer(
     // builds every pipeline and allocates every buffer, and that
     // cost divided by a short prompt is what made this line read
     // 12.64 t/s where llama.cpp reads 197.7 for the same file.
-    crate::cli_output::warm_up_engine(&engine);
+    crate::cli_output::warm_up_engine(&engine, args.warmup_enabled());
     let prefill_t = Instant::now();
     let mut pos = 0usize;
     let mut logits = if tokens.is_empty() {
@@ -330,7 +330,7 @@ pub(super) fn run_glm52_infer(
     // builds every pipeline and allocates every buffer, and that
     // cost divided by a short prompt is what made this line read
     // 12.64 t/s where llama.cpp reads 197.7 for the same file.
-    crate::cli_output::warm_up_engine(&engine);
+    crate::cli_output::warm_up_engine(&engine, args.warmup_enabled());
     let prefill_t = Instant::now();
     let mut pos = 0usize;
     let mut logits = if tokens.is_empty() {
@@ -413,6 +413,8 @@ pub(super) fn refuse_what_dedicated_engines_ignore(
         grammar: _,
         grammar_file: _,
         json_schema: _,
+        // Through `grammar_source`, like the three above.
+        json_schema_file: _,
         min_p: _,
         repeat_last_n: _,
         repeat_penalty: _,
@@ -437,6 +439,20 @@ pub(super) fn refuse_what_dedicated_engines_ignore(
         draft_max: _,
         draft_p_min: _,
         system: _,
+        // Settled for every path by `InferArgs::apply_llama_flags`
+        // before this runs: read into `system`, refused, an env var, or
+        // a stderr setting the shared `cli_output` printers obey.
+        system_prompt_file: _,
+        jinja: _,
+        no_jinja: _,
+        flash_attn: _,
+        hf_token: _,
+        show_timings: _,
+        no_show_timings: _,
+        color: _,
+        // Each engine passes `warmup_enabled()` to `warm_up_engine`.
+        warmup: _,
+        no_warmup: _,
         no_cnv: _,
         single_turn: _,
         escape: _,
