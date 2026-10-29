@@ -489,7 +489,7 @@ pub use crate::matvec_kinds::legacy::{
 /// `QuantKind::name()`, so `frink-core` can ask for a kind without
 /// depending on a CUDA type.
 pub fn matvec_launch_meta(kind_name: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    crate::matvec_kinds::kind_by_name(kind_name).map(|k| (k.src, k.module_name, k.fn_name))
+    crate::matvec_kinds::kind_by_name(kind_name).map(|k| (k.source(), k.module_name, k.fn_name))
 }
 
 /// Looks a kind up in [`matvec_launch_meta`] and launches it. Every
@@ -611,6 +611,54 @@ pub fn launch_mxfp4_matvec(
     n_blocks_per_row: usize,
 ) -> Result<Vec<f32>, CudaError> {
     launch_matvec_by_kind("MXFP4", weights, x, rows, row_bytes, n_blocks_per_row)
+}
+
+/// Launches the Q4_1 matvec, generated from its GEMM dequant. **NEVER
+/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
+pub fn launch_q4_1_matvec(
+    weights: &[u8],
+    x: &[f32],
+    rows: usize,
+    row_bytes: usize,
+    n_blocks_per_row: usize,
+) -> Result<Vec<f32>, CudaError> {
+    launch_matvec_by_kind("Q4_1", weights, x, rows, row_bytes, n_blocks_per_row)
+}
+
+/// Launches the Q5_1 matvec, generated from its GEMM dequant. **NEVER
+/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
+pub fn launch_q5_1_matvec(
+    weights: &[u8],
+    x: &[f32],
+    rows: usize,
+    row_bytes: usize,
+    n_blocks_per_row: usize,
+) -> Result<Vec<f32>, CudaError> {
+    launch_matvec_by_kind("Q5_1", weights, x, rows, row_bytes, n_blocks_per_row)
+}
+
+/// Launches the TQ1_0 matvec, generated from its GEMM dequant. **NEVER
+/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
+pub fn launch_tq1_0_matvec(
+    weights: &[u8],
+    x: &[f32],
+    rows: usize,
+    row_bytes: usize,
+    n_blocks_per_row: usize,
+) -> Result<Vec<f32>, CudaError> {
+    launch_matvec_by_kind("TQ1_0", weights, x, rows, row_bytes, n_blocks_per_row)
+}
+
+/// Launches the PTQ1_0 matvec, generated from its GEMM dequant. **NEVER
+/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
+pub fn launch_ptq1_0_matvec(
+    weights: &[u8],
+    x: &[f32],
+    rows: usize,
+    row_bytes: usize,
+    n_blocks_per_row: usize,
+) -> Result<Vec<f32>, CudaError> {
+    launch_matvec_by_kind("PTQ1_0", weights, x, rows, row_bytes, n_blocks_per_row)
 }
 
 /// Launches the Q4_K matvec kernel. Verified on real GPU hardware -- see module docs.
@@ -1064,7 +1112,7 @@ mod tests {
             );
         }
         assert!(
-            matvec_launch_meta("Q4_1").is_none(),
+            matvec_launch_meta("Q8_1").is_none(),
             "a kind with no kernel resolved to a CUDA matvec"
         );
     }
@@ -1274,7 +1322,7 @@ mod tests {
                     // Enter through the ordinary kernel identity, not the
                     // coalesced one, so this exercises the ROUTING too.
                     let launch = super::MatvecLaunch {
-                        kernel_src: mv.src,
+                        kernel_src: mv.source(),
                         module_name: mv.module_name,
                         fn_name: mv.fn_name,
                         weights: &weights,

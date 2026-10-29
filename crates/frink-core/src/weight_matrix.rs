@@ -3959,6 +3959,10 @@ impl WeightMatrix {
             QuantKind::IQ4NL => frink_quant::IQ4_NL_BLOCK_BYTES,
             QuantKind::IQ4XS => frink_quant::IQ4_XS_BLOCK_BYTES,
             QuantKind::Mxfp4Gguf => frink_quant::MXFP4_GGUF_BLOCK_BYTES,
+            QuantKind::Q4_1 => frink_quant::Q4_1_BLOCK_BYTES,
+            QuantKind::Q5_1 => frink_quant::Q5_1_BLOCK_BYTES,
+            QuantKind::Tq1_0 => frink_quant::ternary::TQ1_0_BLOCK_BYTES,
+            QuantKind::Ptq1_0 => frink_quant::ternary::PTQ1_0_BLOCK_BYTES,
             _ => unreachable!(
                 "apply_gpu only calls this for the CUDA/Vulkan-dispatchable kinds, not {kind:?}"
             ),
@@ -5406,17 +5410,17 @@ pub(crate) mod tests {
     ///
     /// It has moved three times. `Q5_0` was that kind until
     /// 2026-09-05, when it gained both; `Q2_K` was until 2026-09-09,
-    /// when it and Q3_K did. `Q4_1` is the hole now, and the next row
-    /// of the coverage table in `docs/plans/cpu-cuda-parity.md` §6 --
-    /// which is the point: the test names a real hole and stops
-    /// compiling a comment. When Q4_1 lands, this probe moves again.
+    /// when it and Q3_K did; `Q4_1` was until Q4_1, Q5_1, TQ1_0 and
+    /// PTQ1_0 gained both (#405). `IQ2_XXS` is the hole now, which is
+    /// the point: the test names a real hole and stops compiling a
+    /// comment. When the IQ kinds land, this probe moves again.
     #[test]
     fn a_kind_cuda_cannot_run_is_recorded_as_leaving_the_gpu() {
         use crate::kernel_registry::{op, Backend, Outcome};
 
         let reg = crate::kernel_registry::Registry::new();
         let loc = std::panic::Location::caller();
-        shaped(QuantKind::Q4_1, 64, 256).probe_kernels_for(&reg, Backend::Cuda, "ffn_down", loc);
+        shaped(QuantKind::IQ2XXS, 64, 256).probe_kernels_for(&reg, Backend::Cuda, "ffn_down", loc);
         let report = reg.seal();
         assert!(
             report.entries.iter().any(|e| e.key.backend == Backend::Cuda

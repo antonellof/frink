@@ -257,6 +257,10 @@ pub(crate) fn cuda_matvec_launch(kind: QuantKind) -> Option<CudaMatvecLaunchFn> 
         QuantKind::IQ4NL => Some(frink_cuda::gpu::launch_iq4_nl_matvec),
         QuantKind::IQ4XS => Some(frink_cuda::gpu::launch_iq4_xs_matvec),
         QuantKind::Mxfp4Gguf => Some(frink_cuda::gpu::launch_mxfp4_matvec),
+        QuantKind::Q4_1 => Some(frink_cuda::gpu::launch_q4_1_matvec),
+        QuantKind::Q5_1 => Some(frink_cuda::gpu::launch_q5_1_matvec),
+        QuantKind::Tq1_0 => Some(frink_cuda::gpu::launch_tq1_0_matvec),
+        QuantKind::Ptq1_0 => Some(frink_cuda::gpu::launch_ptq1_0_matvec),
         _ => None,
     }
 }

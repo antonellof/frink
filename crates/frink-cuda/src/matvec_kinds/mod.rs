@@ -25,6 +25,7 @@
 
 pub mod coalesced;
 pub mod codebook;
+pub mod generic;
 pub mod kquant;
 pub mod legacy;
 
@@ -52,8 +53,41 @@ pub struct MatvecKind {
     pub module_name: &'static str,
     /// The `__global__` entry point inside that module.
     pub fn_name: &'static str,
-    /// The complete translation unit defining it.
-    pub src: &'static str,
+    /// Where the translation unit defining it comes from.
+    pub src: MatvecSrc,
+}
+
+/// A matvec's source: hand-written text, or generated from the kind's
+/// GEMM dequant ([`generic`]).
+#[derive(Debug, Clone, Copy)]
+pub enum MatvecSrc {
+    /// The complete translation unit, as written.
+    Text(&'static str),
+    /// [`generic::matvec_src`] of the `mul_mm` row of the same name, so
+    /// the dequant is the GEMM's and the gather's (#405).
+    FromDequant,
+}
+
+impl MatvecKind {
+    /// The complete translation unit defining [`Self::fn_name`].
+    pub fn source(&self) -> &'static str {
+        match self.src {
+            MatvecSrc::Text(src) => src,
+            MatvecSrc::FromDequant => generic::matvec_src(
+                crate::mul_mm::kind_by_name(self.name)
+                    .expect("a generated matvec has a mul_mm row (tested)"),
+            ),
+        }
+    }
+}
+
+/// The `mul_mm` row a generated matvec is built from, or `None` for a
+/// hand-written one.
+pub fn generated_kind(k: &MatvecKind) -> Option<&'static crate::mul_mm::MulMmKind> {
+    match k.src {
+        MatvecSrc::Text(_) => None,
+        MatvecSrc::FromDequant => crate::mul_mm::kind_by_name(k.name),
+    }
 }
 
 /// The dispatch table. A new format is one row here and nothing else.
@@ -68,67 +102,91 @@ pub const KINDS: &[MatvecKind] = &[
         name: "Q8_0",
         module_name: "frink_q8_0",
         fn_name: "q8_0_matvec",
-        src: legacy::Q8_0_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(legacy::Q8_0_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q4_0",
         module_name: "frink_q4_0",
         fn_name: "q4_0_matvec",
-        src: legacy::Q4_0_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(legacy::Q4_0_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q5_0",
         module_name: "frink_q5_0",
         fn_name: "q5_0_matvec",
-        src: legacy::Q5_0_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(legacy::Q5_0_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q2_K",
         module_name: "frink_q2_k",
         fn_name: "q2_k_matvec",
-        src: kquant::Q2_K_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(kquant::Q2_K_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q3_K",
         module_name: "frink_q3_k",
         fn_name: "q3_k_matvec",
-        src: kquant::Q3_K_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(kquant::Q3_K_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q4_K",
         module_name: "frink_q4_k",
         fn_name: "q4_k_matvec",
-        src: kquant::Q4_K_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(kquant::Q4_K_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q5_K",
         module_name: "frink_q5_k",
         fn_name: "q5_k_matvec",
-        src: kquant::Q5_K_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(kquant::Q5_K_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "Q6_K",
         module_name: "frink_q6_k",
         fn_name: "q6_k_matvec",
-        src: kquant::Q6_K_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(kquant::Q6_K_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "IQ4_NL",
         module_name: "frink_iq4_nl",
         fn_name: "iq4_nl_matvec",
-        src: codebook::IQ4_NL_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(codebook::IQ4_NL_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "IQ4_XS",
         module_name: "frink_iq4_xs",
         fn_name: "iq4_xs_matvec",
-        src: codebook::IQ4_XS_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(codebook::IQ4_XS_MATVEC_KERNEL_SRC),
     },
     MatvecKind {
         name: "MXFP4",
         module_name: "frink_mxfp4",
         fn_name: "mxfp4_matvec",
-        src: codebook::MXFP4_MATVEC_KERNEL_SRC,
+        src: MatvecSrc::Text(codebook::MXFP4_MATVEC_KERNEL_SRC),
+    },
+    MatvecKind {
+        name: "Q4_1",
+        module_name: "frink_q4_1",
+        fn_name: "q4_1_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "Q5_1",
+        module_name: "frink_q5_1",
+        fn_name: "q5_1_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "TQ1_0",
+        module_name: "frink_tq1_0",
+        fn_name: "tq1_0_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "PTQ1_0",
+        module_name: "frink_ptq1_0",
+        fn_name: "ptq1_0_matvec",
+        src: MatvecSrc::FromDequant,
     },
 ];
 
@@ -150,14 +208,14 @@ mod tests {
     fn every_row_names_an_entry_point_its_source_defines() {
         for k in KINDS {
             assert!(
-                k.src.contains(&format!("void {}(", k.fn_name)),
+                k.source().contains(&format!("void {}(", k.fn_name)),
                 "{}: the source in {} does not define {}",
                 k.name,
                 k.module_name,
                 k.fn_name
             );
             assert!(
-                k.src.contains("int n_blocks_per_row"),
+                k.source().contains("int n_blocks_per_row"),
                 "{}: does not take the launch geometry every caller supplies",
                 k.name
             );
@@ -174,12 +232,27 @@ mod tests {
         }
     }
 
+    /// A generated row names the entry and module its dequant's unit
+    /// defines, and only kinds with a `mul_mm` row are generated.
+    #[test]
+    fn every_generated_row_names_the_generic_entry() {
+        let mut n = 0;
+        for k in KINDS {
+            if let MatvecSrc::FromDequant = k.src {
+                let mm = generated_kind(k).unwrap_or_else(|| panic!("{}: no mul_mm row", k.name));
+                assert_eq!(k.fn_name, generic::entry(mm), "{}", k.name);
+                n += 1;
+            }
+        }
+        assert!(n >= 4, "the generated kinds stopped being checked");
+    }
+
     /// A kind with no kernel must not resolve. Resolving sends a decode
     /// to a module that cannot compile, and the caller has no way to
     /// fall back honestly.
     #[test]
     fn a_kind_with_no_matvec_does_not_resolve() {
-        for absent in ["Q5_1", "Q4_1", "Q8_1", "IQ1_S", "IQ2_XXS", "IQ3_S"] {
+        for absent in ["Q8_1", "IQ1_S", "IQ2_XXS", "IQ3_S"] {
             assert!(
                 kind_by_name(absent).is_none(),
                 "{absent} resolved to a CUDA matvec that does not exist"
@@ -218,7 +291,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{}: a matvec with no mul_mm row", k.name));
 
             let row_step = k
-                .src
+                .source()
                 .lines()
                 .find(|l| l.contains("row_ptr +"))
                 .unwrap_or_else(|| panic!("{}: no row-pointer arithmetic", k.name));
@@ -231,7 +304,7 @@ mod tests {
             );
 
             let x_step = k
-                .src
+                .source()
                 .lines()
                 .find(|l| l.contains("base = ") && l.trim_end().ends_with(';'))
                 .unwrap_or_else(|| panic!("{}: no activation-base arithmetic", k.name));
@@ -273,10 +346,10 @@ mod tests {
                 );
             };
             let decl = format!("__constant__ float {}[16] = {{", cb.c_name);
-            let at = mv.src.find(&decl).unwrap_or_else(|| {
+            let at = mv.source().find(&decl).unwrap_or_else(|| {
                 panic!("{}: the matvec does not declare {}", mm.name, cb.c_name)
             });
-            let body = &mv.src[at + decl.len()..];
+            let body = &mv.source()[at + decl.len()..];
             let body = &body[..body.find('}').expect("unterminated codebook")];
             let got: Vec<f32> = body
                 .split(',')
@@ -339,7 +412,7 @@ mod hardware_tests {
     /// Run on a machine with an actual CUDA device:
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware. Q2_K, Q3_K, IQ4_NL, IQ4_XS and MXFP4 have NEVER executed on a GPU; Q5_0 has not either. Run with --ignored on a CUDA-capable machine and record the result before any doc claims those kinds decode on CUDA"]
+    #[ignore = "requires real CUDA hardware. Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0 and PTQ1_0 have NEVER executed on a GPU; Q5_0 has not either. Run with --ignored on a CUDA-capable machine and record the result before any doc claims those kinds decode on CUDA"]
     fn every_cuda_matvec_matches_the_cpu_reference() {
         type Dot = fn(&[u8], &[f32]) -> f32;
         type Launch =
@@ -402,6 +475,26 @@ mod hardware_tests {
                 "MXFP4",
                 frink_quant::dot_mxfp4_gguf_f32_scalar,
                 crate::gpu::launch_mxfp4_matvec,
+            ),
+            (
+                "Q4_1",
+                frink_quant::dot_q4_1_f32_scalar,
+                crate::gpu::launch_q4_1_matvec,
+            ),
+            (
+                "Q5_1",
+                frink_quant::dot_q5_1_f32_scalar,
+                crate::gpu::launch_q5_1_matvec,
+            ),
+            (
+                "TQ1_0",
+                |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::TQ1_0, x),
+                crate::gpu::launch_tq1_0_matvec,
+            ),
+            (
+                "PTQ1_0",
+                |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::PTQ1_0, x),
+                crate::gpu::launch_ptq1_0_matvec,
             ),
         ];
 

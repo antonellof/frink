@@ -240,7 +240,8 @@ impl MulMmKind {
 // definition should not move a public name.
 pub use crate::mul_mm_kinds::kquant::K_SCALE_MIN_SRC;
 pub use crate::mul_mm_kinds::{
-    IQ4_NL, IQ4_XS, MXFP4, Q2_K, Q3_K, Q4_0, Q4_K, Q5_0, Q5_K, Q6_K, Q8_0,
+    IQ4_NL, IQ4_XS, MXFP4, PTQ1_0, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+    TQ1_0,
 };
 
 /// Scalar twin of the CUDA `frink_f16_to_f32` in `F16_SRC`: the same
@@ -275,7 +276,8 @@ pub fn f16_to_f32(bits: u16) -> f32 {
 /// The dispatch table. A caller looks up by GGUF quant name; a new
 /// format is one row here.
 pub const KINDS: &[MulMmKind] = &[
-    Q8_0, Q4_0, Q5_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4,
+    Q8_0, Q4_0, Q5_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0,
+    PTQ1_0,
 ];
 
 /// Looks up a kind by its GGUF quant name (`"Q4_0"`, `"Q8_0"`).
@@ -486,8 +488,10 @@ pub fn kernel_src_with_body(kind: &MulMmKind, body: &str) -> String {
     // helper costs nothing after NVRTC's dead-code pass, and a
     // per-kind include list is one more table that has to agree with
     // another one.
+    // The trit helper TQ1_0 and PTQ1_0 read is emitted the same way.
+    let trit = crate::mul_mm_kinds::ternary::TRIT_SRC;
     format!(
-        "{defines}{F16_SRC}{K_SCALE_MIN_SRC}{codebook}{}{body}",
+        "{defines}{F16_SRC}{K_SCALE_MIN_SRC}{trit}{codebook}{}{body}",
         kind.dequant_src
     )
 }
@@ -657,6 +661,14 @@ mod dequant_twin_tests {
             (&IQ4_NL, frink_quant::dequant_iq4_nl),
             (&IQ4_XS, frink_quant::dequant_iq4_xs),
             (&MXFP4, frink_quant::dequant_mxfp4_gguf),
+            (&Q4_1, frink_quant::dequant_q4_1),
+            (&Q5_1, frink_quant::dequant_q5_1),
+            (&TQ1_0, |b| {
+                frink_quant::ternary::dequant_trits(b, frink_quant::ternary::TQ1_0)
+            }),
+            (&PTQ1_0, |b| {
+                frink_quant::ternary::dequant_trits(b, frink_quant::ternary::PTQ1_0)
+            }),
         ];
 
         for k in KINDS {
@@ -766,6 +778,18 @@ mod dequant_twin_tests {
                 frink_quant::MXFP4_GGUF_BLOCK_BYTES,
                 frink_quant::MXFP4_GGUF_BLOCK_ELEMS,
             ),
+            ("Q4_1", frink_quant::Q4_1_BLOCK_BYTES, 32),
+            ("Q5_1", frink_quant::Q5_1_BLOCK_BYTES, 32),
+            (
+                "TQ1_0",
+                frink_quant::ternary::TQ1_0_BLOCK_BYTES,
+                frink_quant::ternary::TQ1_0_BLOCK_ELEMS,
+            ),
+            (
+                "PTQ1_0",
+                frink_quant::ternary::PTQ1_0_BLOCK_BYTES,
+                frink_quant::ternary::PTQ1_0_BLOCK_ELEMS,
+            ),
         ];
 
         for k in KINDS {
@@ -801,7 +825,7 @@ mod dequant_twin_tests {
         // A kind with no kernel must not resolve. Resolving would send
         // a GEMM to a module that cannot compile, and the caller would
         // have no way to fall back honestly.
-        for absent in ["Q4_1", "Q5_1", "Q8_1", "IQ1_S", "IQ2_XXS", "IQ3_S"] {
+        for absent in ["Q8_1", "IQ1_S", "IQ2_XXS", "IQ3_S"] {
             assert!(
                 kind_by_name(absent).is_none(),
                 "{absent} resolved to a mul_mm kernel that does not exist"

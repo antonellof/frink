@@ -286,6 +286,14 @@ pub(crate) mod fixtures {
         match kind.name {
             // `half d` at the head, nothing else.
             "Q8_0" | "Q4_0" | "Q5_0" | "IQ4_NL" | "IQ4_XS" => finite_f16(block, 0),
+            // `half d`, then `half m`.
+            "Q4_1" | "Q5_1" => {
+                finite_f16(block, 0);
+                finite_f16(block, 2);
+            }
+            // The trit formats keep their one `half d` LAST.
+            "TQ1_0" => finite_f16(block, 52),
+            "PTQ1_0" => finite_f16(block, 26),
             // `half d`, then `half dmin`.
             "Q4_K" | "Q5_K" => {
                 finite_f16(block, 0);
@@ -606,6 +614,14 @@ mod tests {
             ("IQ4_NL", frink_quant::dequant_iq4_nl),
             ("IQ4_XS", frink_quant::dequant_iq4_xs),
             ("MXFP4", frink_quant::dequant_mxfp4_gguf),
+            ("Q4_1", frink_quant::dequant_q4_1),
+            ("Q5_1", frink_quant::dequant_q5_1),
+            ("TQ1_0", |b| {
+                frink_quant::ternary::dequant_trits(b, frink_quant::ternary::TQ1_0)
+            }),
+            ("PTQ1_0", |b| {
+                frink_quant::ternary::dequant_trits(b, frink_quant::ternary::PTQ1_0)
+            }),
         ];
 
         for k in KINDS {
