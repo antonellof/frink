@@ -198,18 +198,15 @@ impl QuantKind {
             QuantKind::Q3K => Some("Q3_K"),
             QuantKind::IQ4NL => Some("IQ4_NL"),
             QuantKind::Mxfp4Gguf => Some("MXFP4"),
+            QuantKind::IQ2XXS => Some("IQ2_XXS"),
+            QuantKind::IQ2XS => Some("IQ2_XS"),
+            QuantKind::IQ2S => Some("IQ2_S"),
+            QuantKind::IQ3XXS => Some("IQ3_XXS"),
+            QuantKind::IQ3S => Some("IQ3_S"),
+            QuantKind::IQ1S => Some("IQ1_S"),
+            QuantKind::IQ1M => Some("IQ1_M"),
             // No Metal matvec kernel: scalar host paths only.
-            QuantKind::Q4_1
-            | QuantKind::Q5_1
-            | QuantKind::Q8_1
-            | QuantKind::IQ1S
-            | QuantKind::IQ2XXS
-            | QuantKind::IQ3XXS
-            | QuantKind::IQ2XS
-            | QuantKind::IQ2S
-            | QuantKind::IQ3S
-            | QuantKind::IQ1M
-            | QuantKind::Tq1_0 => None,
+            QuantKind::Q4_1 | QuantKind::Q5_1 | QuantKind::Q8_1 | QuantKind::Tq1_0 => None,
         }
     }
 }
@@ -1358,22 +1355,31 @@ impl WeightMatrix {
     }
 
     /// IQ4_NL left this list when Metal gained its GEMM (CUDA already
-    /// had one): it is no longer a kind whose batch is N matvecs.
+    /// had one): it is no longer a kind whose batch is N matvecs. The
+    /// IQ1/IQ2/IQ3 kinds have a GEMM on Metal and none on CUDA, so for
+    /// them the answer is the backend's: Metal's when the dense path runs
+    /// there (#405), and N matvecs otherwise.
     #[cfg(any(feature = "metal", feature = "cuda"))]
     pub fn prefers_gpu_batch(&self) -> bool {
-        !matches!(
-            self.base(),
-            WeightMatrix::Quantized {
-                kind: QuantKind::IQ1S
-                    | QuantKind::IQ2XXS
-                    | QuantKind::IQ3XXS
-                    | QuantKind::IQ2XS
-                    | QuantKind::IQ2S
-                    | QuantKind::IQ3S
-                    | QuantKind::IQ1M,
-                ..
-            }
-        )
+        let WeightMatrix::Quantized { kind, .. } = self.base() else {
+            return true;
+        };
+        let no_cuda_gemm = matches!(
+            kind,
+            QuantKind::IQ1S
+                | QuantKind::IQ2XXS
+                | QuantKind::IQ3XXS
+                | QuantKind::IQ2XS
+                | QuantKind::IQ2S
+                | QuantKind::IQ3S
+                | QuantKind::IQ1M
+        );
+        #[cfg(feature = "metal")]
+        if metal_dense_enabled() {
+            use gpu_backend::BackendCaps;
+            return !no_cuda_gemm || gpu_backend::Metal::gemm_supported(*kind);
+        }
+        !no_cuda_gemm
     }
 
     /// Computes `W @ x` for a single activation vector `x` of length
@@ -5319,15 +5325,15 @@ pub(crate) mod tests {
 
         // Supported: Q4_K has both a Metal matvec and a Metal GEMM.
         shaped(QuantKind::Q4K, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_down", loc);
-        // Unsupported: no Metal kernel of any kind for IQ2_XXS.
-        shaped(QuantKind::IQ2XXS, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_up", loc);
+        // Unsupported: no Metal kernel of any kind for Q4_1.
+        shaped(QuantKind::Q4_1, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_up", loc);
 
         let report = reg.seal();
         let violations = &report.violations;
         assert_eq!(
             violations.len(),
             2,
-            "expected matvec + gemm misses for IQ2_XXS only, got: {:?}",
+            "expected matvec + gemm misses for Q4_1 only, got: {:?}",
             report
                 .entries
                 .iter()
@@ -5337,7 +5343,7 @@ pub(crate) mod tests {
         assert!(
             violations
                 .iter()
-                .all(|v| v.key.kind == Some(QuantKind::IQ2XXS)),
+                .all(|v| v.key.kind == Some(QuantKind::Q4_1)),
             "Q4_K must not be flagged"
         );
         assert!(
@@ -5348,14 +5354,14 @@ pub(crate) mod tests {
             "the report must name the fallback that will actually run"
         );
         let rendered = report.render_violations();
-        assert!(rendered.contains("IQ2_XXS"), "{rendered}");
+        assert!(rendered.contains("Q4_1"), "{rendered}");
         assert!(rendered.contains("weight_matrix.rs"), "{rendered}");
 
-        // And the host tier it lands on is recorded too: IQ2_XXS has no
+        // And the host tier it lands on is recorded too: Q4_1 has no
         // integer vec_dot either, so it is f32 dequant-dot.
         assert!(
             report.entries.iter().any(|e| e.key.backend == Backend::Cpu
-                && e.key.kind == Some(QuantKind::IQ2XXS)
+                && e.key.kind == Some(QuantKind::Q4_1)
                 && matches!(e.outcome, Outcome::Miss { fallback, .. } if fallback == "f32 dequant-dot")),
             "{:?}",
             report.entries.iter().map(|e| e.to_string()).collect::<Vec<_>>()

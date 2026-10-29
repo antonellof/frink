@@ -52,6 +52,13 @@ fn every_gather_reuses_its_kinds_gemm_functor() {
                 assert!(src.contains("typedef Codebook4Dequant<CB4MXFP4> MXFP4Dequant;"));
                 "CB4MXFP4"
             }
+            // The IQ formats share `IqDequant`; the geometry is the
+            // `group` / `affine` struct it is instantiated over.
+            _ if crate::iq::by_name(k.kind_name()).is_some() => {
+                let g = functor.strip_suffix("Dequant").unwrap();
+                assert!(src.contains(&format!("typedef IqDequant<{g}> {functor};")));
+                g
+            }
             _ => functor,
         };
         let at = src
@@ -89,6 +96,13 @@ fn cpu_dequant(kind: EmbdKind, bytes: &[u8]) -> Vec<f32> {
         EmbdKind::Q3K => q::dequant_q3_k(bytes),
         EmbdKind::Iq4Nl => q::dequant_iq4_nl(bytes),
         EmbdKind::Mxfp4 => q::dequant_mxfp4_gguf(bytes),
+        EmbdKind::Iq2Xxs => q::dequant_iq2_xxs(bytes),
+        EmbdKind::Iq2Xs => q::dequant_iq2_xs(bytes),
+        EmbdKind::Iq2S => q::dequant_iq2_s(bytes),
+        EmbdKind::Iq3Xxs => q::dequant_iq3_xxs(bytes),
+        EmbdKind::Iq3S => q::dequant_iq3_s(bytes),
+        EmbdKind::Iq1S => q::dequant_iq1_s(bytes),
+        EmbdKind::Iq1M => q::dequant_iq1_m(bytes),
     }
     .expect("whole blocks")
 }
@@ -98,6 +112,9 @@ fn cpu_dequant(kind: EmbdKind, bytes: &[u8]) -> Vec<f32> {
 /// quantizer writes). The `half` scales sit where each format keeps
 /// them; MXFP4's second block carries the subnormal exponent 0.
 fn blocks(kind: EmbdKind, n_blocks: usize, block_bytes: usize, seed: u32) -> Vec<u8> {
+    if crate::iq::by_name(kind.kind_name()).is_some() {
+        return crate::iq::test_blocks(kind.kind_name(), seed, n_blocks);
+    }
     let mut w = crate::k_quant_check::pseudo_bytes(seed, n_blocks * block_bytes);
     let halves: &[usize] = match kind {
         EmbdKind::Q8_0 | EmbdKind::Q4_0 | EmbdKind::Q5_0 | EmbdKind::Iq4Xs | EmbdKind::Iq4Nl => {
@@ -109,6 +126,7 @@ fn blocks(kind: EmbdKind, n_blocks: usize, block_bytes: usize, seed: u32) -> Vec
         EmbdKind::Q2K => &[80, 82],
         EmbdKind::Q3K => &[108],
         EmbdKind::Mxfp4 => &[],
+        _ => unreachable!("the IQ kinds returned above"),
     };
     for b in 0..n_blocks {
         let at = b * block_bytes;

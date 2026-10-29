@@ -1,9 +1,11 @@
-//! A Q2_K and a Q3_K model decode on Metal as they do on the CPU (#405).
+//! Q2_K, Q3_K and IQ1/IQ2/IQ3 models decode on Metal as they do on the
+//! CPU (#405).
 //!
 //! The committed graph fixtures are all F32, so the Metal decode sweep
 //! in `decode_step_graphs` never reaches a quantized kernel. This suite
 //! writes the 512-wide synthetic llama (`common::synthetic_llama`) with
-//! every weight matrix in Q2_K, then in Q3_K, and runs the serving
+//! every weight matrix in Q2_K, then in Q3_K, then in each of IQ2_XXS,
+//! IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and IQ1_M, and runs the serving
 //! shape on both engines: a batched prefill (the simdgroup GEMM, 6
 //! tokens) and then [`STEPS`] single-token decodes (the matvec). The
 //! CPU runs in a child process, because a test process is pinned to
@@ -15,9 +17,11 @@
 //! test means the weights ran on the host and the comparison was the
 //! CPU against itself.
 //!
-//! `frink_quant` has no Q2_K or Q3_K encoder (the formats are load-only
-//! there), so the fixture's encoders are in `common::quant_encode`: a plain min/max
-//! quantizer per 16-weight sub-block. They only have to be a valid
+//! `frink_quant` has no Q2_K, Q3_K or IQ encoder (the formats are
+//! load-only there), so the fixture's encoders are in
+//! `common::quant_encode` (a plain min/max quantizer per 16-weight
+//! sub-block) and `common::iq_encode` (each group snapped to a nearby
+//! grid row). They only have to be a valid
 //! packing of SOME weights; `the_fixture_encoders_round_trip_through_the_cpu_dequant`
 //! holds them to `frink_quant`'s dequant, which is what defines the
 //! model both engines run.
@@ -39,7 +43,8 @@ const CHILD: &str = "FRINK_LOW_K_DECODE_CHILD";
 fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
     match dtype {
         GgmlType::Q2K | GgmlType::Q3K => common::quant_encode::encode(dtype, cols, w),
-        other => panic!("this suite encodes Q2_K and Q3_K, not {other:?}"),
+        iq if common::iq_encode::KINDS.contains(&iq) => common::quant_encode::encode(iq, cols, w),
+        other => panic!("this suite encodes Q2_K, Q3_K and the IQ kinds, not {other:?}"),
     }
 }
 
@@ -52,15 +57,30 @@ fn the_fixture_encoders_round_trip_through_the_cpu_dequant() {
         .map(|i| ((i as f32) * 0.37).sin() * 0.05)
         .collect();
     type Dequant = fn(&[u8]) -> Result<Vec<f32>, frink_quant::QuantError>;
+    // The IQ floors are the measured cosines less about 0.015 (M2 Pro,
+    // 2026-10-29: IQ2 0.933..0.946, IQ3 0.978 and 0.986, IQ1 0.908 and
+    // 0.925); a wrong field offset measures near 0.
+    let iq = common::iq_encode::KINDS.map(|k| {
+        let floor = match k {
+            GgmlType::IQ1S | GgmlType::IQ1M => 0.89,
+            GgmlType::IQ3XXS | GgmlType::IQ3S => 0.96,
+            _ => 0.92,
+        };
+        (k, common::iq_encode::dequant(k), floor)
+    });
     for (dtype, dequant, floor) in [
         (GgmlType::Q2K, frink_quant::dequant_q2_k as Dequant, 0.90f64),
         (GgmlType::Q3K, frink_quant::dequant_q3_k as Dequant, 0.97),
-    ] {
+    ]
+    .into_iter()
+    .chain(iq)
+    {
         let back = dequant(&encode(dtype, 1024, &v)).expect("whole blocks");
         let dot: f64 = v.iter().zip(&back).map(|(a, b)| f64::from(a * b)).sum();
         let nv: f64 = v.iter().map(|a| f64::from(a * a)).sum::<f64>().sqrt();
         let nb: f64 = back.iter().map(|a| f64::from(a * a)).sum::<f64>().sqrt();
         let cos = dot / (nv * nb);
+        eprintln!("{dtype:?}: cosine {cos:.4} to the input (floor {floor})");
         assert!(
             cos > floor,
             "{dtype:?}: cosine {cos} to the input, want > {floor}"
@@ -114,7 +134,16 @@ fn metal_decode_of_q2_k_and_q3_k_matches_cpu() {
     #[cfg(not(feature = "metal"))]
     eprintln!("skip: built without --features metal");
     #[cfg(feature = "metal")]
-    metal::run_both();
+    metal::run_kinds(&[GgmlType::Q2K, GgmlType::Q3K]);
+}
+
+#[test]
+#[ignore = "needs a real Metal-capable GPU; run with --features metal -- --ignored on Apple Silicon"]
+fn metal_decode_of_the_iq_kinds_matches_cpu() {
+    #[cfg(not(feature = "metal"))]
+    eprintln!("skip: built without --features metal");
+    #[cfg(feature = "metal")]
+    metal::run_kinds(&common::iq_encode::KINDS);
 }
 
 #[cfg(feature = "metal")]
@@ -183,17 +212,15 @@ mod metal {
         assert!(misses.is_empty(), "{kind:?} left Metal: {misses:#?}");
     }
 
-    pub fn run_both() {
+    pub fn run_kinds(kinds: &[GgmlType]) {
         if frink_metal::gpu::probe().is_none() {
             eprintln!("skip: no Metal GPU detected");
             return;
         }
         common::pin_backend(common::Backend::Metal);
         frink_models::set_metal_greedy_argmax(false);
-        for (dtype, kind) in [
-            (GgmlType::Q2K, QuantKind::Q2K),
-            (GgmlType::Q3K, QuantKind::Q3K),
-        ] {
+        for &dtype in kinds {
+            let kind = frink_core::weight_matrix::quant_kind_for(dtype).expect("a quant kind");
             let path = synthetic_llama::write("metal_low_k_decode", dtype, encode);
             let (tokens, cpu) = cpu_rows(&path);
             let before = frink_metal::metal_encode_stats().dispatches;
