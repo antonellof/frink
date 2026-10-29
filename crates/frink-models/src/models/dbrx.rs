@@ -10,6 +10,9 @@
 //!   Q, K and V inside the shared `build_qkv` (`crate::clamp_kqv`).
 //! - Routed FFN with the SOFTMAX literal and `norm_w = true`
 //!   (`:115-124`), the defaults.
+//! - **A fused `attn_qkv` with no bias** (`:31`): a file carrying
+//!   `attn_qkv.bias` does not load upstream, and stays unread here
+//!   (`crate::qkv_fused::QkvBias::NotCreated`, #447).
 //!
 //! Evidence: `tests/dbrx_graphs.rs`, against libllama.
 
@@ -17,6 +20,7 @@ use super::facts::{ArchFacts, ScalingFacts, TensorFacts};
 use super::ModelDef;
 use crate::norm::NormFunction;
 use crate::norm_sites::{NormSites, StoredNorm};
+use crate::qkv_fused::QkvBias;
 
 pub const FACTS: ArchFacts = ArchFacts {
     scaling: ScalingFacts {
@@ -29,6 +33,7 @@ pub const FACTS: ArchFacts = ArchFacts {
             ffn: Some(StoredNorm::required(&["attn_output_norm"])),
             ..NormSites::GENERIC
         },
+        qkv_bias: QkvBias::NotCreated,
         ..ArchFacts::DEFAULT.tensors
     },
     ..ArchFacts::DEFAULT

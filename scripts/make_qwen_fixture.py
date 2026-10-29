@@ -79,7 +79,10 @@ ROPE_BASE = 500.0
 RMS_EPS = 1e-5
 
 
-def main(out_path: str) -> None:
+def main(out_path: str, qkv_bias: bool = True) -> None:
+    # `qkv_bias=False` (`--no-qkv-bias`) drops the fused bias: refusal
+    # evidence for #447. `qwen.cpp:28` creates it REQUIRED, so libllama
+    # does not load the file, and frink refuses it by name.
     rng = np.random.default_rng(0x9E71)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -141,7 +144,9 @@ def main(out_path: str) -> None:
         # THE ARM. Centred at 1.0, not 0.0: a shifted bias moves every
         # head's Q and K the same way and so changes the attention
         # pattern as well as the values.
-        w.add_tensor(p + "attn_qkv.bias", (rnd(n_embd_qkv) + 1.0).astype(np.float32))
+        bias = (rnd(n_embd_qkv) + 1.0).astype(np.float32)
+        if qkv_bias:
+            w.add_tensor(p + "attn_qkv.bias", bias)
 
         w.add_tensor(p + "attn_output.weight", rnd(N_EMBD, N_EMBD))
 
@@ -163,4 +168,5 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "qwen-fixture.gguf")
+    args = [a for a in sys.argv[1:] if a != "--no-qkv-bias"]
+    main(args[0] if args else "qwen-fixture.gguf", "--no-qkv-bias" not in sys.argv[1:])

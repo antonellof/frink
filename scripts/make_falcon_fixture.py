@@ -58,7 +58,11 @@ CTX = 2048
 LN_EPS = 1e-5
 
 
-def main(out_path: str, forty_b: bool) -> None:
+def main(out_path: str, forty_b: bool, qkv_bias: bool = False) -> None:
+    # `qkv_bias` (`--qkv-bias`) adds an `attn_qkv.bias` per layer:
+    # refusal evidence for #447. `falcon.cpp:38` creates the fused
+    # weight and no bias, so libllama fails on the extra tensors
+    # (`wrong number of tensors`) and frink leaves them unread.
     rng = np.random.default_rng(0xFA1C)
     n_head_kv = 2 if forty_b else 1
 
@@ -117,6 +121,9 @@ def main(out_path: str, forty_b: bool) -> None:
     w.add_tensor("output_norm.weight", norm_w(N_EMBD))
     w.add_tensor("output_norm.bias", norm_b(N_EMBD))
     w.add_tensor("output.weight", rnd(N_VOCAB, N_EMBD))
+    if qkv_bias:
+        for il in range(N_LAYER):
+            w.add_tensor(f"blk.{il}.attn_qkv.bias", rnd(n_embd_q + 2 * n_embd_kv))
 
     w.write_header_to_file()
     w.write_kv_data_to_file()
@@ -129,5 +136,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("out", nargs="?", default="falcon-fixture.gguf")
     ap.add_argument("--40b", dest="forty_b", action="store_true")
+    ap.add_argument("--qkv-bias", action="store_true")
     args = ap.parse_args()
-    main(args.out, args.forty_b)
+    main(args.out, args.forty_b, args.qkv_bias)

@@ -108,6 +108,8 @@ no_rope_layer_graphs.rs:EXAONE4_32B_MTP_GOLDEN logits $F/exaone4_32b_mtp_tiny.gg
 no_rope_layer_graphs.rs:SMOLLM3_GOLDEN logits $F/smollm3_tiny.gguf @GRAPH
 no_rope_layer_graphs.rs:MAPLE_GOLDEN logits $F/maple_tiny.gguf @GRAPH
 no_rope_layer_graphs.rs:MAPLE_MODEL_ROPE_GOLDEN logits $F/maple_model_rope_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:MAPLE_SWA_SHORT_GOLDEN logits $F/maple_swa_short_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:MAPLE_SWA_LONG_GOLDEN logits $F/maple_swa_long_tiny.gguf @GRAPH
 olmo_graphs.rs:OLMO_GOLDEN logits $F/olmo_tiny.gguf @GRAPH
 olmo_graphs.rs:OLMO_CLAMPED_GOLDEN logits $F/olmo_clamped_tiny.gguf @GRAPH
 one_match_arm_graphs.rs:DEEPSEEK_GOLDEN logits $F/deepseek_tiny.gguf @GRAPH

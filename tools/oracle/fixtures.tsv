@@ -66,6 +66,7 @@ falcon_40b_tiny                          match                        make_falco
 falcon_h1_nossmnorm_tiny                 match                        make_falcon_h1_fixture.py OUT --no-ssm-norm
 falcon_h1_output_tiny                    match                        make_falcon_h1_fixture.py OUT --output
 falcon_h1_tiny                           match                        make_falcon_h1_fixture.py OUT
+falcon_qkvbias_tiny                      both-fail                    make_falcon_fixture.py OUT --qkv-bias  # refusal evidence: falcon.cpp:38 creates no attn_qkv.bias, libllama fails on the extra tensors (#447)
 falcon_tiny                              match                        make_falcon_fixture.py OUT
 frink_real_mixed_test                    ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
 frink_real_moe_test                      ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
@@ -138,6 +139,8 @@ mamba2_tiny                              match                        make_mamba
 mamba_dtbcrms_tiny                       match                        make_mamba_fixture.py OUT --arch mamba --dt-b-c-rms
 mamba_tiny                               match                        make_mamba_fixture.py OUT --arch mamba
 maple_model_rope_tiny                    match                        make_maple_fixture.py OUT --model-rope
+maple_swa_long_tiny                      match                        make_maple_fixture.py OUT --swa-array long
+maple_swa_short_tiny                     match                        make_maple_fixture.py OUT --swa-array short
 maple_tiny                               match                        make_maple_fixture.py OUT
 mellum_mtp_tiny                          match                        make_mellum_fixture.py OUT --mtp
 mellum_tiny                              match                        make_mellum_fixture.py OUT
@@ -197,6 +200,7 @@ qwen35_tiny                              match                        make_qwen3
 qwen35moe_tiny                           match                        make_qwen35_fixture.py OUT --moe
 qwen3moe_tiny                            match                        make_qwen3moe_fixture.py OUT
 qwen3next_tiny                           match                        make_qwen35_fixture.py OUT --next
+qwen_nobias_tiny                         both-fail                    make_qwen_fixture.py OUT --no-qkv-bias  # refusal evidence: qwen.cpp:28 creates attn_qkv.bias REQUIRED (#447)
 qwen_tiny                                match                        make_qwen_fixture.py OUT
 refact_tiny                              match                        make_alibi_fixture.py OUT --arch refact
 seed_oss_tiny                            match                        make_seed_oss_fixture.py OUT
