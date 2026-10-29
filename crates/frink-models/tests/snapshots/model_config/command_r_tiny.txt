@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/command_r_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-command-r-fixture",
+    name: "frink-command-r-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

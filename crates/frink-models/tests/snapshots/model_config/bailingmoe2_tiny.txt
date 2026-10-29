@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/bailingmoe2_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-bailingmoe2-fixture",
+    name: "frink-bailingmoe2-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

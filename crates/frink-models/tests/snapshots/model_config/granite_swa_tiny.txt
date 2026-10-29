@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/granite_swa_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-granite-swa-fixture",
+    name: "frink-granite-swa-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

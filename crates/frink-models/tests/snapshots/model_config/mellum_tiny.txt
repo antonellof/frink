@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/mellum_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-mellum-fixture",
+    name: "frink-mellum-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

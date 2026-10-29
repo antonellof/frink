@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/afmoe_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-afmoe-fixture",
+    name: "frink-afmoe-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

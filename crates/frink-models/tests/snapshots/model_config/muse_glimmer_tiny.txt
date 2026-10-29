@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/muse_glimmer_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-muse-glimmer-fixture",
+    name: "frink-muse-glimmer-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

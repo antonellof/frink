@@ -46,6 +46,7 @@
 //! measurement this run makes for itself. See [`calibration`].
 
 mod calibration;
+mod decode;
 mod dump;
 mod metrics;
 mod quant;
@@ -108,6 +109,12 @@ pub struct ParityArgs {
     pub dumper: Vec<String>,
     /// Prefix to write every compared logit vector under. See [`dump`].
     pub dump_logits: Option<String>,
+    /// Token ids to compare on instead of tokenizing a prompt. The
+    /// tokenizer half is skipped, said so, and not counted as a pass.
+    pub tokens: Option<Vec<u32>>,
+    /// Greedy decode steps to compare after the first token; 0 skips
+    /// the decode half. See [`decode`].
+    pub decode_steps: usize,
 }
 
 pub fn run(args: ParityArgs) -> anyhow::Result<()> {
@@ -124,9 +131,15 @@ pub fn run(args: ParityArgs) -> anyhow::Result<()> {
     // computed from a prompt the two engines do not even agree on.
     // Only the primary reference tokenizes: the tokenizer half is not
     // the half that needs calibrating.
-    let tokens_report = tokenize::run(&dumpers[0], Path::new(&path))?;
+    let tokens_report = match args.tokens {
+        Some(_) => None,
+        None => tokenize::run(&dumpers[0], Path::new(&path))?,
+    };
     match &tokens_report {
         Some(r) => tokenize::print_report(r),
+        None if args.tokens.is_some() => {
+            println!("tokenizer: SKIPPED — --tokens gave the ids, so there is no text to tokenize.")
+        }
         None => println!(
             "tokenizer: SKIPPED — the installed libllama cannot load this checkpoint, so it has \
              no tokenization to compare against. The logit comparison below will fail for the \
@@ -137,13 +150,23 @@ pub fn run(args: ParityArgs) -> anyhow::Result<()> {
 
     let prompt = args.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
 
-    let (tokens, frink_logits) = crate::verify_engine::prefill_logits(
-        Path::new(&path),
-        &prompt,
-        frink_models::tokenizer::SpecialTokens::Parse,
-        args.prompt_tokens,
-    )
-    .context("frink prefill")?;
+    let (tokens, frink_logits) = match &args.tokens {
+        Some(ids) if ids.is_empty() => anyhow::bail!("--tokens is empty"),
+        Some(ids) => {
+            let ids_usize: Vec<usize> = ids.iter().map(|&t| t as usize).collect();
+            let mut rows =
+                crate::verify_engine::teacher_forced_logits(Path::new(&path), &ids_usize, &[])
+                    .context("frink prefill")?;
+            (ids.clone(), rows.swap_remove(0))
+        }
+        None => crate::verify_engine::prefill_logits(
+            Path::new(&path),
+            &prompt,
+            frink_models::tokenizer::SpecialTokens::Parse,
+            args.prompt_tokens,
+        )
+        .context("frink prefill")?,
+    };
 
     // The reference is pinned to llama.cpp's CPU path (n_gpu_layers = 0),
     // because frink's CPU path is the one cross-validated against NumPy.
@@ -208,6 +231,13 @@ pub fn run(args: ParityArgs) -> anyhow::Result<()> {
              nearest reference)",
             band.nearest()
         ));
+    }
+    if args.decode_steps > 0 {
+        println!();
+        let worst = decode::run(&dumpers[0], Path::new(&path), &tokens, args.decode_steps)?;
+        if worst == decode::StepVerdict::Wrong {
+            failures.push("frink's greedy decode disagrees with llama.cpp's".to_string());
+        }
     }
     if !failures.is_empty() {
         anyhow::bail!("{}", failures.join("; "));

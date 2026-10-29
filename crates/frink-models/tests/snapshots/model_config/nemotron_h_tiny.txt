@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/nemotron_h_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-nemotron_h-fixture",
+    name: "frink-nemotron_h-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

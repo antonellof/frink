@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/ernie4_5_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-ernie4-5-fixture",
+    name: "frink-ernie4-5-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

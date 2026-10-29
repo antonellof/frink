@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/command_r_plus_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-command-r-fixture",
+    name: "frink-command-r-fixture",
     kv_dtype: F32,
     n_layers: 64,
     n_mtp_blocks: 0,
@@ -583,4 +583,4 @@ cfg.layer[63].shape: LayerShape { attention: Gqa { n_heads: 2, n_kv_heads: 1 }, 
 cfg.layer[63].ffn_acts: LayerFfnActs { routed: Swiglu, dense: Swiglu }
 cfg.layer[63].kv_dtype: F32
 cfg.layer[63].cache_geometry: (1, 8, 8)
-decoder: REFUSED: architecture 'ferrox-command-r-fixture' requires unimplemented feature: `blk.0.attn_q_norm.weight` / `attn_k_norm.weight` are a per-head LayerNorm here: `{n_embd_head_k, n_head}`, a distinct weight per head, applied as LLM_NORM (mean subtracted) over each head before RoPE (src/models/command-r.cpp:28-31,80,87). frink's QK norm is an RMSNorm whose per-head weight is shared by every head, and a weight this long would be read as one RMS over the whole projection; libllama's logits for this shape differ from the same file without the tensors by 8.73 (measured, tests/fixtures/stablelm_qknorm_tiny.gguf), so it stops (`frink_models::qk_layer_norm`)
+decoder: REFUSED: architecture 'frink-command-r-fixture' requires unimplemented feature: `blk.0.attn_q_norm.weight` / `attn_k_norm.weight` are a per-head LayerNorm here: `{n_embd_head_k, n_head}`, a distinct weight per head, applied as LLM_NORM (mean subtracted) over each head before RoPE (src/models/command-r.cpp:28-31,80,87). frink's QK norm is an RMSNorm whose per-head weight is shared by every head, and a weight this long would be read as one RMS over the whole projection; libllama's logits for this shape differ from the same file without the tensors by 8.73 (measured, tests/fixtures/stablelm_qknorm_tiny.gguf), so it stops (`frink_models::qk_layer_norm`)

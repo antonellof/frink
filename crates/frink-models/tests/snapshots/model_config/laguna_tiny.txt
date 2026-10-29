@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/laguna_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-laguna-fixture",
+    name: "frink-laguna-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

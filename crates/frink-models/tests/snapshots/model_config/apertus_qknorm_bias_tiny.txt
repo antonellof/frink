@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/apertus_qknorm_bias_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-apertus-fixture-qk-norm-bias",
+    name: "frink-apertus-fixture-qk-norm-bias",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

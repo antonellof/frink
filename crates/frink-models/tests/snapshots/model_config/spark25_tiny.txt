@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/spark25_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-spark25-fixture",
+    name: "frink-spark25-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

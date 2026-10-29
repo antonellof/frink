@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/qwen_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-qwen-fixture",
+    name: "frink-qwen-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

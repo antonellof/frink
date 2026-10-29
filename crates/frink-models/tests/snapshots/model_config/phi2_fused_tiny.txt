@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/phi2_fused_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-phi2-fixture",
+    name: "frink-phi2-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

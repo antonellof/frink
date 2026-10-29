@@ -307,6 +307,16 @@ enum Commands {
         /// each other answer that, with no frink in the comparison.
         #[arg(long)]
         dump_logits: Option<String>,
+        /// Token ids to compare on, comma separated, instead of
+        /// tokenizing `--prompt`. Skips the tokenizer half: libllama's
+        /// tokenizer cannot load a synthetic fixture's vocabulary.
+        #[arg(long, value_delimiter = ',')]
+        tokens: Option<Vec<u32>>,
+        /// Also compare a greedy decode of this many steps, each frink
+        /// step fed llama.cpp's own previous token. Prefill parity alone
+        /// cannot see a defect that shows only once decode starts.
+        #[arg(long, default_value_t = 0)]
+        decode_steps: usize,
     },
     /// Corpus perplexity, llama.cpp's `perplexity` tool.
     ///
@@ -901,6 +911,8 @@ fn main() -> anyhow::Result<()> {
             top_k,
             dumper,
             dump_logits,
+            tokens,
+            decode_steps,
         } => {
             return parity::run(parity::ParityArgs {
                 model,
@@ -909,6 +921,8 @@ fn main() -> anyhow::Result<()> {
                 top_k,
                 dumper,
                 dump_logits,
+                tokens,
+                decode_steps,
             });
         }
         Commands::Perplexity {

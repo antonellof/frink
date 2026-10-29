@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/talkie_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-talkie-fixture",
+    name: "frink-talkie-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

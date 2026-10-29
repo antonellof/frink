@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/smollm3_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-smollm3-fixture",
+    name: "frink-smollm3-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,
