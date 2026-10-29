@@ -10,23 +10,48 @@
 //! rather than the process. That is step 3 of
 //! `docs/plans/cpu-cuda-parity.md`.
 //!
-//! [`backend`] is that rule, and it is the ONLY place either scheduler
-//! is chosen. Every helper in [`crate::par`] calls it, so no call site
+//! [`backend`] is that rule, and it is the ONLY place a region's
+//! scheduler is read; [`decode_backend`] is the same constant applied
+//! once per decode step, and [`backend`] defers to what it chose. Every
+//! helper in [`crate::par`] calls it, so no call site
 //! can grow its own opinion: `weight_matrix` had four spellings of one
 //! GPU-router eligibility test and they drifted four ways, which is the
 //! failure this module exists to make impossible.
 //!
-//! # What deciding per operation costs, and has not been measured
+//! # Per operation inside a single-token CPU decode step was the bug
 //!
-//! Deciding per operation means a single token can use both schedulers:
-//! the FFN projections over the crossover go to the pool while
-//! attention, the norms and the narrow projections fork. Both sets of
-//! workers are then alive at once, and the pool workers spin for
-//! `FRINK_CPU_POOL_SPIN_US` before parking. Whether that costs
-//! anything is exactly the question a sweep on a quiet host answers and
-//! reading this file does not. `FRINK_CPU_POOL=rayon` is the revert,
-//! and it restores the previous behaviour exactly rather than
-//! approximately.
+//! Deciding per operation means one token uses both schedulers, and #27
+//! measured that default at about the rayon number on Llama-3.2-3B, with
+//! none of the pool's win. Counted rather than timed
+//! (`frink-models/tests/decode_scheduler_choice.rs`, one layer at the
+//! 3B widths, Q8_0, per-op default):
+//!
+//! - every layer alternated: an unpublished region (norm, attention) on
+//!   rayon, the projections on the pool, back to rayon, back to the
+//!   pool, about four to six scheduler changes per layer;
+//! - Q, K and V are three branches of one `join3`, and the join itself
+//!   published nothing, so it FORKED: three threads then submitted to
+//!   the pool at once, the pool admitted one (it refuses a second
+//!   submitter by design) and the other two projections fell back to
+//!   rayon. Gate and up did the same through `join2`. Both schedulers
+//!   were running regions at the same moment.
+//!
+//! What that costs is in how each idles. A pool worker that has just
+//! finished a region spins (`spin_loop`, no yield) for
+//! `FRINK_CPU_POOL_SPIN_US` (100 µs) before parking; a rayon worker
+//! yields 32 times and then sleeps on a condvar. So a rayon region right
+//! after a pool region runs while N-1 pool workers still burn the same
+//! cores, and the pool region after it wakes workers that have parked:
+//! the handoff the pool exists to avoid, paid at every boundary.
+//!
+//! So a single-token CPU decode step now picks ONE scheduler for the
+//! whole step from the model's shape ([`decode_backend`]), and every
+//! region inside it, joins included, follows that pick ([`backend`]).
+//! That reproduces exactly the two configurations #27 measured, rayon
+//! for a model below the crossover and the pool for one above it,
+//! rather than a mixture nobody measured. The per-operation rule is
+//! still what an operation outside such a step gets (prefill, and every
+//! engine that has not said how wide its layers are).
 
 use std::cell::Cell;
 
@@ -110,6 +135,59 @@ thread_local! {
     /// Read only on the thread that published it, before a region opens,
     /// so it never has to propagate into a worker.
     static OP_WORK: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+
+    /// The scheduler the enclosing decode step committed to, set by
+    /// [`with_forward`] on the step's own thread and carried into the
+    /// branches of a rayon `join` by [`super::join2`] / [`super::join3`].
+    /// `None` outside a step, where the per-operation rule decides.
+    static FORWARD: Cell<Option<Backend>> = const { Cell::new(None) };
+}
+
+/// The scheduler the enclosing decode step committed to, if any.
+pub(crate) fn forward() -> Option<Backend> {
+    FORWARD.with(Cell::get)
+}
+
+/// Run `f` with the calling thread committed to `which` (or to no step,
+/// for `None`), restoring the previous commitment afterwards, including
+/// when `f` unwinds.
+pub(crate) fn with_forward<R>(which: Option<Backend>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Backend>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORWARD.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(FORWARD.with(|c| c.replace(which)));
+    f()
+}
+
+/// **The per-step rule.** Which scheduler a single-token CPU decode step
+/// runs ALL of its regions on, given the multiply-accumulates of the
+/// widest matvec inside one of its layers (not the LM head).
+///
+/// The same [`SPIN_MIN_OP_MACS`], applied to the layer rather than to
+/// each operation. The bracket behind that constant was measured per
+/// MODEL anyway: every per-layer matvec of the model where the pool lost
+/// is under 0.9M, and every one of the models where it won is over
+/// 3.1M, so a model's widest layer matvec lands on the same side as all
+/// of its others.
+///
+/// Why the layer and not the head: SmolLM2-135M's head is 576 x 49152 =
+/// 28M, far over the crossover, and the pool measured -37% on that
+/// model. A step that took the pool because of its head would be the
+/// configuration that lost.
+///
+/// `FRINK_CPU_POOL` still pins it either way.
+pub fn decode_backend(widest_layer_macs: usize) -> Backend {
+    if let Some(pinned) = pinned() {
+        return pinned;
+    }
+    if widest_layer_macs >= SPIN_MIN_OP_MACS {
+        Backend::Spin
+    } else {
+        Backend::Rayon
+    }
 }
 
 /// Publish the shape of the operation `f` performs: `rows` output rows,
@@ -140,15 +218,29 @@ pub fn macs_per_row() -> usize {
 }
 
 /// **The one predicate.** Which scheduler the parallel regions of the
-/// operation now being set up run on.
+/// operation now being set up run on. In order:
 ///
-/// An unpublished operation (`op_macs() == 0`) reads as small and forks
-/// with rayon. That is deliberate: attention, sampling and the norm
-/// kernels do not publish a matrix shape, and their regions are the ones
-/// the -37% at 135M is made of.
+/// 1. `FRINK_CPU_POOL`, when it pins one.
+/// 2. Inside a pool task, the pool. [`crate::cpu_pool::CpuPool::run`]
+///    runs a nested region inline, because the outer region already has
+///    every core; forking rayon from a pool worker instead would put a
+///    second set of threads on cores the pool is using.
+/// 3. The enclosing decode step's commitment ([`decode_backend`]).
+/// 4. Otherwise per operation: published work over
+///    [`SPIN_MIN_OP_MACS`] takes the pool, everything else forks. An
+///    unpublished operation (`op_macs() == 0`) reads as small, which is
+///    deliberate: attention, sampling and the norm kernels do not
+///    publish a matrix shape, and their regions are the ones the -37%
+///    at 135M is made of.
 pub fn backend() -> Backend {
     if let Some(pinned) = pinned() {
         return pinned;
+    }
+    if crate::cpu_pool::in_region() {
+        return Backend::Spin;
+    }
+    if let Some(step) = forward() {
+        return step;
     }
     if op_macs() >= SPIN_MIN_OP_MACS {
         Backend::Spin
@@ -235,6 +327,72 @@ mod tests {
             });
             assert_eq!(op_macs(), 64);
         });
+    }
+
+    /// A decode step's commitment overrides the per-operation rule in
+    /// both directions, and is gone once the step ends.
+    ///
+    /// Sabotage: drop the `forward()` arm from `backend` and the first
+    /// assertion goes red (an unpublished region inside a pool step would
+    /// fork, which is the interleave #27 measured).
+    #[test]
+    fn a_decode_steps_commitment_overrides_the_per_operation_rule() {
+        if !unpinned() {
+            return;
+        }
+        with_forward(Some(Backend::Spin), || {
+            assert_eq!(backend(), Backend::Spin, "unpublished, inside a pool step");
+        });
+        with_forward(Some(Backend::Rayon), || {
+            with_op_work(4096, 4096, || {
+                assert_eq!(backend(), Backend::Rayon, "wide, inside a rayon step");
+            });
+        });
+        assert_eq!(forward(), None);
+        assert_eq!(backend(), Backend::Rayon);
+    }
+
+    /// The step rule is the same crossover as the operation rule, read
+    /// off the widest LAYER matvec: SmolLM2-135M's FFN (576 x 1536) forks
+    /// and Llama-3.2-1B's (2048 x 8192) takes the pool.
+    ///
+    /// Sabotage: compare against `SPIN_MIN_OP_MACS * 64` and the 1B row
+    /// goes red.
+    #[test]
+    fn the_step_rule_puts_135m_on_rayon_and_1b_on_the_pool() {
+        if !unpinned() {
+            return;
+        }
+        assert_eq!(decode_backend(576 * 1536), Backend::Rayon);
+        assert_eq!(decode_backend(2048 * 8192), Backend::Spin);
+        assert_eq!(decode_backend(3072 * 8192), Backend::Spin);
+    }
+
+    /// A region opened from inside a pool task stays on the pool (where
+    /// `CpuPool::run` runs it inline) instead of forking rayon from a
+    /// pool worker, whatever the per-operation rule would have said.
+    ///
+    /// Sabotage, run: drop the `in_region()` arm from `backend` and the
+    /// unpublished region below reads `Rayon`.
+    #[test]
+    fn a_region_nested_in_a_pool_task_stays_on_the_pool() {
+        if !unpinned() {
+            return;
+        }
+        let pool = crate::cpu_pool::CpuPool::new(2);
+        assert!(pool.run(4, &|_| assert_eq!(backend(), Backend::Spin)));
+    }
+
+    /// The commitment is restored when the step unwinds, so a panicking
+    /// step cannot leave its thread committed to a scheduler for every
+    /// operation that follows.
+    #[test]
+    fn a_panicking_step_does_not_leave_its_commitment_behind() {
+        let caught = std::panic::catch_unwind(|| {
+            with_forward(Some(Backend::Spin), || panic!("frink test panic"));
+        });
+        assert!(caught.is_err());
+        assert_eq!(forward(), None);
     }
 
     /// A row count times a row width cannot be allowed to wrap into a

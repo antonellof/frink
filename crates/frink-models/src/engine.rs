@@ -61,6 +61,10 @@ impl Engine for Decoder {
         self.config.vocab_size
     }
 
+    fn widest_layer_macs(&self) -> Option<usize> {
+        Some(Decoder::widest_layer_macs(self))
+    }
+
     /// Delegates to the inherent [`Decoder::forward_token`], which is
     /// itself promoted in `decoder/entry.rs`. The two wrappers nest, and
     /// nesting is free -- the inner one sees a rayon worker and returns
