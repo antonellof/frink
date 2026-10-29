@@ -64,6 +64,27 @@ eligibility test so a new field forces a Metal decision.
 | 14 | Metal eligibility derived from the plan | ignored Metal tests on hardware |
 | 15 | Fold `ExecutionPlan` into `ModelPlan` | `documented_capabilities.rs:160` |
 
+## Progress
+
+- Step 0: landed in #415 (`tests/model_config_snapshot.rs`).
+- Step 1a: `models/facts.rs` and `ArchFacts::from_tables`, built from
+  the raw name. `ModelConfig::from_gguf` reads 39 lookups through the
+  facts: 34 rows, the two refused-key lists derived from them, and 3
+  `HparamRules` (`swa_window_override`, `attention_scale_override`,
+  `rope_layers`). The two lists are derived in `models/refused_keys.rs`; the
+  `capability.rs` functions are wrappers. `models/facts_tests.rs`
+  holds every tabled name to its legacy answer, `DEFAULT` to an absent
+  name, and the loader source to no direct call of a routed lookup.
+- Step 1b, open: the 29 calls in `from_gguf` that still take the name
+  beside a hyperparameter or the file (`mtp_blocks::trunk_layers`,
+  `kv_head_dims`, `norm_function_for_file`, `moe_interleave`,
+  `clamp_kqv`, `attn_temperature`, `swa_geometry::rotary_widths`,
+  `yarn_log_mul_for`, `post_norm_eps`, `weightless_qk_norm`, `alibi`,
+  ...), and `Decoder::from_gguf`'s tensor tables (canonical name) and
+  `family` / `memory` (raw name). Where a resolver is a row lookup
+  followed by arithmetic, 1b moves the row into the facts and keeps the
+  arithmetic shared; the file readers stay loader code.
+
 ## Risks
 
 1. Raw versus canonical names must be reproduced exactly by

@@ -22,7 +22,7 @@
 //! for the dense (single-expert) case, and against real OLMoE / Qwen2-MoE
 //! checkpoints for the multi-expert 3D-packed-tensor path.
 
-mod arch_tables;
+pub(crate) mod arch_tables;
 mod decoder_from_gguf;
 mod expert_source;
 mod expert_store_build;

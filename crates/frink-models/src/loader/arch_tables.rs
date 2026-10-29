@@ -25,7 +25,7 @@ use frink_moe::GatingFunction;
 /// one, where the GGUF carries no key to correct it. Nothing is live
 /// today -- all three are `NewCode` for other reasons and refuse before
 /// reaching here -- but the list is what a later admission would trust.
-pub(super) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
+pub(crate) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
     "afmoe",
     // cohere2moe.cpp:27-29: the key read optional, SIGMOID when absent.
     "cohere2moe",
@@ -60,7 +60,7 @@ pub(super) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
 /// seeded SOFTMAX (`mellum.cpp:9,11,206`): on a file without the key
 /// the answer is unchanged, and on one with it this loader already
 /// read the key. No row is added or removed.
-pub(super) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
+pub(crate) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
     ("mimo2", GatingFunction::Sigmoid),
     // `nemotron-h.cpp:218`: the SIGMOID literal; the converter writes no
     // `expert_gating_func` (`conversion/nemotron.py:238-250`).
@@ -95,7 +95,7 @@ pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe", "l
 /// files (24 at `5b59b83` with this spelling of the command), and the
 /// five it gained are all NEW graphs (`beam`, `flint`, `glm5-next`,
 /// `k2-horizon`, `muse-spark`), every one refused, so no row is added.
-pub(super) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
+pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
     "bailingmoe2",
@@ -129,7 +129,7 @@ pub(super) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
 /// is what this loader already did for it). Without the row a Mellum
 /// file declaring `false` would have been renormalised here and not
 /// upstream. The other six are new graphs, all refused.
-pub(super) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
+pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
     "bailingmoe2",
@@ -208,7 +208,7 @@ pub(super) const DEDICATED_OWNS_ITS_BEHAVIOUR: &[(&str, &str)] = &[
 // `llama4.cpp:228` passes `false` beside its SIGMOID literal
 // (`GATING_LITERAL_ARCHITECTURES`): the top-k sigmoid scores weight
 // the experts unrenormalised.
-pub(super) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] =
+pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] =
     &["deepseek", "jamba", "llama4", "olmoe", "qwen2moe"];
 
 /// Architectures whose `{arch}.feed_forward_length` counts the gate and
@@ -232,7 +232,7 @@ pub(super) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] =
 /// nothing comparing them -- so
 /// `the_declared_ffn_width_matches_the_matrices_that_load`
 /// (tests/one_match_arm_graphs.rs) now compares them.
-pub(super) const FFN_LENGTH_COUNTS_GATE_AND_UP: &[&str] = &["qwen"];
+pub(crate) const FFN_LENGTH_COUNTS_GATE_AND_UP: &[&str] = &["qwen"];
 
 /// Architectures whose checkpoints carry `{arch}.leading_dense_block_count`
 /// while their reference graph never branches on it: **every** layer is
@@ -257,7 +257,7 @@ pub(super) const FFN_LENGTH_COUNTS_GATE_AND_UP: &[&str] = &["qwen"];
 /// `dots1`, `glm4moe` and every other leading-dense architecture the key
 /// is load-bearing and must be honoured. Membership here is a statement
 /// about ONE architecture's graph, checked in that graph.
-pub(super) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
+pub(crate) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
 
 /// Architectures whose reference graph applies `attn_q_norm` /
 /// `attn_k_norm` AFTER `ggml_rope_ext`, not before it.

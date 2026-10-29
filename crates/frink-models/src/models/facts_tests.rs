@@ -1,0 +1,308 @@
+//! `ArchFacts` against the tables it is built from, and the loader
+//! against the facts.
+
+use super::*;
+use crate::loader::arch_tables as t;
+
+/// A name no table has a row for.
+const ABSENT: &str = "frink-test-absent-from-every-table";
+
+/// Every name some table keys on, plus the catalog, an alias and a name
+/// nobody knows.
+fn every_tabled_name() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = crate::capability::architecture_catalog()
+        .iter()
+        .map(|p| p.gguf_name)
+        .collect();
+    names.extend(t::SIGMOID_GATING_ARCHITECTURES);
+    names.extend(t::GATING_LITERAL_ARCHITECTURES.iter().map(|(n, _)| *n));
+    names.extend(t::EXPERT_WEIGHTS_NORM_READERS);
+    names.extend(t::EXPERT_WEIGHTS_SCALE_READERS);
+    names.extend(t::NO_TOPK_RENORMALIZE_ARCHITECTURES);
+    names.extend(t::FFN_LENGTH_COUNTS_GATE_AND_UP);
+    names.extend(t::LEADING_DENSE_KEY_IS_INERT);
+    names.extend(crate::router_input::ROUTER_INPUT_TABLE.iter().map(|r| r.0));
+    names.extend(crate::layer_shapes::PURE_RECURRENT.iter().map(|r| r.0));
+    names.extend(crate::rope_layers::ROPE_PATTERN_READERS.iter().map(|r| r.0));
+    names.extend(crate::norm::NORM_BY_RMS_EPS_KEY.iter().map(|r| r.0));
+    names.extend(crate::capability::LOGIT_SOFTCAP_ARCHITECTURES);
+    names.extend(crate::capability::AUDITED_GENERIC_GQA);
+    names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
+    names.extend(crate::act_layers::XIELU_ARCHITECTURES);
+    names.extend(["llama-embed", "granite-moe", ABSENT]);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The rules agree when they answer alike on a grid that reaches every
+/// hparam-keyed arm today's functions have (EXAONE-4's 64 layers,
+/// Gemma's 46 and 62, Baichuan's 40, a zero head width).
+fn assert_rules_agree(name: &str, a: HparamRules, b: HparamRules) {
+    let HparamRules {
+        swa_window_override: wa,
+        attention_scale_override: sa,
+        rope_layers: ra,
+    } = a;
+    let HparamRules {
+        swa_window_override: wb,
+        attention_scale_override: sb,
+        rope_layers: rb,
+    } = b;
+    for n_layers in [1, 4, 26, 40, 46, 62, 63, 64, 65] {
+        assert_eq!(
+            wa(name, n_layers),
+            wb(name, n_layers),
+            "{name}: swa_window_override({n_layers})"
+        );
+        for head_dim in [0, 128, 256] {
+            assert_eq!(
+                sa(name, n_layers, 4608, 32, head_dim),
+                sb(name, n_layers, 4608, 32, head_dim),
+                "{name}: attention_scale_override({n_layers}, head_dim {head_dim})"
+            );
+        }
+        for window in [false, true] {
+            for dense in [0, 1, 3] {
+                assert_eq!(
+                    ra(name, n_layers, window, dense),
+                    rb(name, n_layers, window, dense),
+                    "{name}: rope_layers({n_layers}, {window}, {dense})"
+                );
+            }
+        }
+    }
+}
+
+/// Field by field, with no `..`: a field added to [`ArchFacts`] does not
+/// compile here until the agreement tests compare it.
+fn assert_same(name: &str, got: ArchFacts, want: ArchFacts) {
+    let ArchFacts {
+        profile,
+        audited,
+        moe,
+        swa,
+        ffn,
+        norm,
+        scaling,
+        topology,
+        rules,
+    } = got;
+    assert_eq!(
+        profile.map(|p| p.gguf_name),
+        want.profile.map(|p| p.gguf_name),
+        "{name}: profile"
+    );
+    assert_eq!(profile, want.profile, "{name}: profile row");
+    assert_eq!(audited, want.audited, "{name}: audited");
+    assert_eq!(moe, want.moe, "{name}: moe");
+    assert_eq!(swa, want.swa, "{name}: swa");
+    assert_eq!(ffn, want.ffn, "{name}: ffn");
+    assert_eq!(norm, want.norm, "{name}: norm");
+    assert_eq!(scaling, want.scaling, "{name}: scaling");
+    assert_eq!(topology, want.topology, "{name}: topology");
+    assert_rules_agree(name, rules, want.rules);
+}
+
+/// `DEFAULT` is what a name absent from every table gets, so a legacy
+/// default that changes (a table's `unwrap_or`, a `match` arm's `_`)
+/// cannot leave the constant stating the old one.
+#[test]
+fn default_is_a_name_absent_from_every_table() {
+    assert_same(ABSENT, ArchFacts::from_tables(ABSENT), ArchFacts::DEFAULT);
+}
+
+/// For every name any table keys on, the facts state what each legacy
+/// lookup answers, written here against the public lookups rather than
+/// through `from_tables`, so a later step that builds some names' facts
+/// elsewhere is held to the tables' answers for them.
+#[test]
+fn from_tables_agrees_with_every_legacy_lookup() {
+    use crate::capability as cap;
+    for name in every_tabled_name() {
+        let profile = cap::resolve_profile(name);
+        let want = ArchFacts {
+            profile,
+            audited: cap::is_audited_generic(name),
+            moe: MoeFacts {
+                sigmoid_by_default: t::SIGMOID_GATING_ARCHITECTURES.contains(&name),
+                gating_literal: t::GATING_LITERAL_ARCHITECTURES
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, g)| *g),
+                reads_expert_weights_norm: t::EXPERT_WEIGHTS_NORM_READERS.contains(&name),
+                reads_expert_weights_scale: t::EXPERT_WEIGHTS_SCALE_READERS.contains(&name),
+                no_topk_renormalize: t::NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&name),
+                leading_dense_key_is_inert: t::LEADING_DENSE_KEY_IS_INERT.contains(&name),
+                routed_weight_before_ffn: crate::routed_weight_site::weight_before_ffn(name),
+                router_input: crate::router_input::router_input(name),
+            },
+            swa: SwaFacts {
+                default_layout: cap::default_swa_layout(name),
+                window_required: crate::swa_geometry::window_required(name),
+                rope_base_required: crate::swa_geometry::swa_rope_base_required(name),
+                layers_unscaled_rope: crate::swa_geometry::swa_layers_unscaled_rope(name),
+                full_layers_rotate_half: crate::swa_geometry::full_layers_rotate_half(name),
+                layers_drop_rope_factors: crate::swa_geometry::swa_layers_drop_rope_factors(name),
+                rope_base_follows_model: cap::swa_rope_base_follows_model(name),
+                rope_scale_follows_model: cap::swa_rope_scale_follows_model(name),
+            },
+            ffn: FfnFacts {
+                length_counts_gate_and_up: t::FFN_LENGTH_COUNTS_GATE_AND_UP.contains(&name),
+                geglu: cap::uses_geglu(name),
+                relu_sqr: cap::uses_relu_sqr(name),
+                gelu_ungated: cap::uses_gelu_ungated(name),
+                reglu: cap::uses_reglu(name),
+                xielu: crate::act_layers::uses_xielu(name),
+                reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(name),
+            },
+            norm: NormFacts {
+                norm_by_rms_eps_key: crate::norm::NORM_BY_RMS_EPS_KEY
+                    .iter()
+                    .any(|(a, _)| *a == name),
+                block_sub_norms: crate::sub_norms::block_sub_norms(name),
+            },
+            scaling: ScalingFacts {
+                multipliers: crate::scalar_multipliers::multiplier_support(name),
+                logit_softcap: cap::LOGIT_SOFTCAP_ARCHITECTURES.contains(&name),
+                embeddings_scaled_by_sqrt_n_embd: profile
+                    .is_some_and(|p| cap::embeddings_scaled_by_sqrt_n_embd(name, p.family)),
+            },
+            topology: TopologyFacts {
+                pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(name),
+                reads_rope_pattern: crate::rope_layers::reads_rope_pattern(name),
+                skip_stream: crate::skip_stream::has_skip_stream(name),
+                parallel_ssm: crate::mamba2::parallel_with_attention(name),
+                learned_positions: crate::position_embd::learned_positions(name),
+            },
+            rules: HparamRules {
+                swa_window_override: cap::swa_window_override,
+                attention_scale_override: cap::attention_scale_override,
+                rope_layers: crate::rope_layers::rope_layers,
+            },
+        };
+        assert_same(name, ArchFacts::from_tables(name), want);
+    }
+}
+
+/// Plan risk 1: the config loader keys on the RAW name. `llama-embed`
+/// is the one alias `canonical_architecture` folds, and on the config
+/// side it keeps its own catalog row.
+#[test]
+fn config_facts_are_keyed_on_the_raw_name() {
+    let raw = ArchFacts::from_tables("llama-embed");
+    assert_eq!(raw.profile.map(|p| p.gguf_name), Some("llama-embed"));
+    assert_eq!(
+        crate::capability::canonical_architecture("llama-embed"),
+        "llama"
+    );
+    assert!(raw.audited);
+}
+
+/// A row on a name the catalog does not know can never be read: the
+/// loader refuses the name before it reads any facts.
+#[test]
+fn every_tabled_name_is_a_catalog_name() {
+    for name in every_tabled_name() {
+        if name == ABSENT {
+            continue;
+        }
+        assert!(
+            crate::capability::resolve_profile(name).is_some(),
+            "`{name}` has a table row but no catalog row, so the row is dead"
+        );
+    }
+}
+
+/// The derived key lists answer as they did when they lived in
+/// `capability.rs` and read the tables by name.
+#[test]
+fn the_refused_key_lists_derive_from_the_facts() {
+    let gemma = ArchFacts::from_tables("gemma3");
+    assert!(gemma.unsupported_feature_keys("gemma3").is_empty());
+    let grok = ArchFacts::from_tables("grok");
+    let keys: Vec<String> = grok
+        .unsupported_feature_keys("grok")
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert!(!keys.iter().any(|k| k.contains("softcapping")), "{keys:?}");
+    let llama = ArchFacts::from_tables("llama");
+    assert!(llama
+        .unsupported_feature_keys("llama")
+        .iter()
+        .any(|(k, _)| k == "llama.attn_logit_softcapping"));
+    // The scaling keys are the complement of the multiplier row.
+    let granite: Vec<String> = ArchFacts::from_tables("granite")
+        .unsupported_scaling_keys("granite")
+        .into_iter()
+        .map(|(k, _, _)| k)
+        .collect();
+    assert!(!granite.contains(&"granite.residual_scale".to_string()));
+    assert!(llama
+        .unsupported_scaling_keys("llama")
+        .iter()
+        .any(|(k, _, _)| k == "llama.residual_scale"));
+}
+
+/// `ModelConfig::from_gguf` reads these through [`ArchFacts`]; a direct
+/// call creeping back would bypass whatever a `models/<arch>.rs` later
+/// supplies. The source is scanned rather than trusted.
+#[test]
+fn the_config_loader_reads_the_tables_only_through_the_facts() {
+    // Code only: the comments still name the tables they explain.
+    let src: String = include_str!("../loader/model_config.rs")
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // A table is used as `NAME.contains(..)` / `NAME.iter()`; the bare
+    // name also appears inside the best-effort strings the snapshots pin.
+    for direct in [
+        "arch_tables",
+        "resolve_profile(",
+        "capability::unsupported_feature_keys",
+        "capability::unsupported_scaling_keys",
+        "pure_recurrent_block(",
+        "NORM_BY_RMS_EPS_KEY.",
+        "LEADING_DENSE_KEY_IS_INERT.",
+        "FFN_LENGTH_COUNTS_GATE_AND_UP.",
+        "reads_rope_pattern(",
+        "GATING_LITERAL_ARCHITECTURES.",
+        "SIGMOID_GATING_ARCHITECTURES.",
+        "EXPERT_WEIGHTS_NORM_READERS.",
+        "NO_TOPK_RENORMALIZE_ARCHITECTURES.",
+        "EXPERT_WEIGHTS_SCALE_READERS.",
+        "capability::swa_window_override",
+        "window_required(",
+        "swa_rope_base_required(",
+        "swa_layers_unscaled_rope(",
+        "default_swa_layout(",
+        "multiplier_support(",
+        "embeddings_scaled_by_sqrt_n_embd(",
+        "capability::attention_scale_override",
+        "swa_rope_base_follows_model(",
+        "uses_geglu(",
+        "uses_relu_sqr(",
+        "uses_gelu_ungated(",
+        "uses_reglu(",
+        "uses_xielu(",
+        "reads_swiglu_clamps(",
+        "full_layers_rotate_half(",
+        "swa_layers_drop_rope_factors(",
+        "swa_rope_scale_follows_model(",
+        "is_audited_generic(",
+        "has_skip_stream(",
+        "parallel_with_attention(",
+        "rope_layers::rope_layers(",
+        "router_input::router_input(",
+        "block_sub_norms(",
+        "learned_positions(",
+        "weight_before_ffn(",
+    ] {
+        assert!(
+            !src.contains(direct),
+            "loader/model_config.rs calls `{direct}` directly; read it from `ArchFacts`"
+        );
+    }
+}
