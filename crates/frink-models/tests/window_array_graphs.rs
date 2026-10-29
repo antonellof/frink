@@ -6,31 +6,27 @@
 //!
 //! # The array
 //!
-//! `{arch}.attention.sliding_window_pattern` is read upstream with
-//! `get_key_or_arr`, and that name hides three behaviours decided by
-//! which overload each graph's `load_arch_hparams` calls:
+//! At the pin (`604cc430`) `{arch}.attention.sliding_window_pattern` is
+//! read in one of two ways (re-derived for #420; `crate::swa_layers`
+//! holds the census):
 //!
-//! | mode | arrays are | scalars are | rows |
-//! |---|---|---|---|
-//! | scalar overload, `required = false` | **IGNORED** (returns false, seed stands; `llama-model-loader.cpp:502-507`) | the period | `exaone4`, `exaone-moe`, `olmo2`, `gemma3`, ... (15) |
-//! | array overload | the per-layer truth, length = `n_layer()` at the time, which is `block_count` | broadcast as a BOOL | `mimo2`, `step35`, `gemma4`, `gemma4-assistant`, `dflash` |
-//! | scalar then array | the per-layer truth | the period | `mellum`, `cohere2moe` |
+//! | mode | arrays are | scalars are | absent | rows |
+//! |---|---|---|---|---|
+//! | `load_swa_pattern` (`llama-model.cpp:3952-3959`) | the per-layer truth | the period | the seed | `exaone4`, `exaone-moe`, `olmo2`, `gemma3`, `mellum`, `cohere2moe`, ... (19) |
+//! | `get_arr`, required | the per-layer truth, any length | refused | refused | `mimo2`, `step35`, `maple`, `gemma4`, ... |
 //!
-//! frink refused the array form for every architecture. Three fixtures
-//! evidence the two branches a generic-path row can reach:
+//! Four fixtures evidence the `load_swa_pattern` row:
 //!
 //! - `exaone_moe_array`: the base `exaone_moe` fixture plus the array
 //!   `conversion/exaone.py:84` writes ([T, T, T, F], the seeded
-//!   period). **libllama's logits are byte-identical to the base's.**
+//!   period). libllama's logits are the base's.
 //! - `exaone_moe_array_flipped`: the same with the array INVERTED.
-//!   **libllama's logits are STILL byte-identical to the base's**,
-//!   which is the measurement that upstream never reads it; frink
-//!   answers the seeded period for both.
-//! - `mellum`: the one generic-path graph that HONOURS the array. Its
-//!   array [T, T, F, T] disagrees with the seeded period-4 [T, T, T, F]
-//!   on two layers, the window is narrower than the prompt, and the
-//!   golden is the file's layout: `load_tensors` reports `is_swa =
-//!   1, 1, 0, 1`.
+//!   libllama runs the array: its logits move off the base's by 0.70
+//!   (until #420 frink ran the seeded period and read WRONG).
+//! - `mellum`: its array [T, T, F, T] disagrees with the seeded period-4
+//!   [T, T, T, F] on two layers; `load_tensors` reports `is_swa = 1, 1,
+//!   0, 1`.
+//! - `mellum_nopattern`: no key at all, the seeded period.
 //!
 //! # The MTP block
 //!
@@ -63,6 +59,8 @@
 //!     crates/frink-models/tests/fixtures/exaone_moe_mtp_tiny.gguf --window-array agree --mtp
 //! PYTHONPATH=$LLAMA/gguf-py python3 scripts/make_mellum_fixture.py \
 //!     crates/frink-models/tests/fixtures/mellum_tiny.gguf
+//! PYTHONPATH=$LLAMA/gguf-py python3 scripts/make_mellum_fixture.py \
+//!     crates/frink-models/tests/fixtures/mellum_nopattern_tiny.gguf --no-pattern
 //! /tmp/ref_logits <fixture> 3 7 11 19 23 5
 //! ```
 
@@ -177,6 +175,113 @@ const MELLUM_GOLDEN: [f32; 48] = [
     -0.067254916,
 ];
 
+/// `exaone_moe_array_flipped_tiny.gguf`: the array INVERTED against the
+/// seeded period. `load_swa_pattern` takes the array (#420), so
+/// libllama's logits move off the base file's by 0.70 max abs.
+const EXAONE_MOE_FLIPPED_GOLDEN: [f32; 48] = [
+    -0.36112043,
+    -0.15549019,
+    -0.2942359,
+    -0.0548671,
+    -0.08957204,
+    0.086164206,
+    0.25420028,
+    0.049788203,
+    0.20311397,
+    -0.009974703,
+    0.4299879,
+    0.27177116,
+    0.36194116,
+    -0.3163033,
+    -0.010676175,
+    0.1885718,
+    -0.120714575,
+    0.08473517,
+    0.0375147,
+    0.4242869,
+    0.26002222,
+    0.33452454,
+    -0.0062123537,
+    -0.30934316,
+    -0.5209664,
+    -0.19133455,
+    -0.103322566,
+    -0.2931842,
+    -0.13361463,
+    -0.07746658,
+    0.10823922,
+    -0.13729525,
+    0.22548118,
+    -0.3418675,
+    -0.10008506,
+    -0.15268692,
+    0.008641757,
+    -0.094832055,
+    -0.06721012,
+    -0.5969528,
+    0.043797053,
+    -0.09765089,
+    -0.20075879,
+    1.4021993e-5,
+    0.15751052,
+    -0.02442417,
+    -0.016382776,
+    -0.6707088,
+];
+
+/// `mellum_nopattern_tiny.gguf`: no `sliding_window_pattern` at all.
+/// `load_swa_pattern(ml, 4)` keeps the seed, [T, T, T, F] (#420).
+const MELLUM_NOPATTERN_GOLDEN: [f32; 48] = [
+    0.37298518,
+    -0.18626924,
+    0.33165437,
+    -0.19307545,
+    -0.17579763,
+    0.12869173,
+    0.26050994,
+    0.05211313,
+    -0.10542885,
+    0.088689186,
+    -0.23170376,
+    -0.21285078,
+    -0.32911098,
+    0.1662871,
+    0.14099197,
+    0.20221432,
+    0.51401716,
+    -0.0034375787,
+    -0.19342026,
+    -0.030705646,
+    -0.22674789,
+    0.4210993,
+    -0.13054617,
+    -0.037026204,
+    -0.4449697,
+    0.23926044,
+    0.47461843,
+    -0.2816104,
+    0.30103633,
+    -0.16393946,
+    -0.112568095,
+    -0.017281383,
+    -0.16355602,
+    -0.437272,
+    -0.22602874,
+    -0.5332494,
+    0.12737328,
+    0.23687601,
+    0.077030405,
+    -0.17496257,
+    -0.008741047,
+    -0.3190671,
+    0.04778391,
+    0.26289815,
+    0.07921851,
+    0.12163802,
+    0.41894308,
+    0.32847905,
+];
+
 /// `mellum_mtp_tiny.gguf`: `mellum_tiny.gguf` with one MTP block
 /// appended. libllama's answer is the trunk's, bit for bit (#441).
 const MELLUM_MTP_GOLDEN: [f32; 48] = [
@@ -231,9 +336,10 @@ const MELLUM_MTP_GOLDEN: [f32; 48] = [
 ];
 
 /// Every (fixture, golden) pair this suite audits, for the KL report.
-const ROWS: [(&str, &[f32]); 4] = [
+const ROWS: [(&str, &[f32]); 5] = [
     ("exaone_moe_array", &EXAONE_MOE_GOLDEN),
-    ("exaone_moe_array_flipped", &EXAONE_MOE_GOLDEN),
+    ("exaone_moe_array_flipped", &EXAONE_MOE_FLIPPED_GOLDEN),
+    ("mellum_nopattern", &MELLUM_NOPATTERN_GOLDEN),
     ("exaone_moe_mtp", &EXAONE_MOE_MTP_GOLDEN),
     ("mellum", &MELLUM_GOLDEN),
 ];
@@ -243,39 +349,49 @@ fn prefill(decoder: &Decoder) -> Vec<f32> {
     decoder.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv)
 }
 
-// --- the array, ignored where llama.cpp ignores it -------------------
+// --- `load_swa_pattern`: the array, then the scalar, then the seed ---
 
-/// The array a real converter writes, on a graph that reads the scalar
-/// overload: the same golden as the base fixture, on all three paths.
+/// The array a real converter writes AGREES with the seeded period, so
+/// the base golden holds on all three paths whichever one is read.
 #[test]
 fn exaone_moe_with_the_converter_array_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match("exaone_moe_array", &EXAONE_MOE_GOLDEN);
     let d = load_graph_fixture("exaone_moe_array");
     assert_eq!(
         d.config.swa_layers,
-        SwaLayers::period(4, false),
-        "exaone-moe.cpp:6-8 seeds 4 and :7's scalar overload returns false on an array"
+        SwaLayers::PerLayer(vec![true, true, true, false].into()),
+        "load_swa_pattern takes the array first (llama-model.cpp:3953)"
     );
 }
 
-/// The INVERTED array: llama.cpp's logits do not move, so neither may
-/// frink's. This is the over-refusal, lifted, and the proof that
-/// lifting it by IGNORING rather than by honouring is llama.cpp's
-/// answer and not a guess.
+/// The INVERTED array is the layout libllama runs (#420): its logits
+/// move off the base file's, and frink's follow them.
 #[test]
-fn exaone_moe_with_a_disagreeing_array_is_still_the_seeded_period() {
-    assert_all_three_paths_match("exaone_moe_array_flipped", &EXAONE_MOE_GOLDEN);
+fn exaone_moe_with_a_disagreeing_array_runs_the_array_as_llama_cpp_does() {
+    assert_all_three_paths_match("exaone_moe_array_flipped", &EXAONE_MOE_FLIPPED_GOLDEN);
+    assert!(worst_vs(&EXAONE_MOE_FLIPPED_GOLDEN, &EXAONE_MOE_GOLDEN) > 1e-1);
     let d = load_graph_fixture("exaone_moe_array_flipped");
+    // The file says [F, F, F, T], and that is what runs.
+    assert_eq!(d.config.layer_sliding_window(0), None);
+    assert_eq!(
+        d.config.layer_sliding_window(3),
+        Some(d.config.sliding_window.unwrap())
+    );
+}
+
+/// No key at all: `load_swa_pattern(ml, 4)` keeps the seed, where frink
+/// used to refuse the file as missing a required key (#420).
+#[test]
+fn mellum_without_a_pattern_key_runs_the_seeded_period_as_llama_cpp_does() {
+    assert_all_three_paths_match("mellum_nopattern", &MELLUM_NOPATTERN_GOLDEN);
+    let d = load_graph_fixture("mellum_nopattern");
     assert_eq!(d.config.swa_layers, SwaLayers::period(4, false));
-    // The file says [F, F, F, T]; the graph runs [T, T, T, F].
-    assert_eq!(d.config.layer_sliding_window(0), Some(3));
-    assert_eq!(d.config.layer_sliding_window(3), None);
 }
 
 // --- the array, honoured where llama.cpp honours it ------------------
 
-/// `mellum.cpp:12-17`: the array is the layout, and it is NOT the
-/// seeded period.
+/// `mellum.cpp:16`: the array is the layout, and it is NOT the seeded
+/// period.
 #[test]
 fn mellum_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match("mellum", &MELLUM_GOLDEN);

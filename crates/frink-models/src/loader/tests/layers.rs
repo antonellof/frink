@@ -3,30 +3,16 @@
 
 use super::*;
 
-/// A per-layer sliding-window ARRAY on an architecture whose graph
-/// reads the key as a scalar is IGNORED and the seeded period
-/// stands, exactly as llama.cpp does; a scalar still overrides the
-/// period.
-///
-/// Three generations of this gate. `capability::
-/// unsupported_feature_keys` refused the key outright with the
-/// reason "not implemented in the generic decoder", which was
-/// false. Then the loader refused the ARRAY form for every
-/// architecture, on the reasoning that honouring it as a period was
-/// impossible and ignoring it would substitute the seed for the
-/// file's layout -- which is TRUE and is ALSO what llama.cpp does:
-/// `get_key_or_arr(kid, swa_period, false)` returns false on an
-/// array (`llama-model-loader.cpp:502-507`) and `plamo3.cpp:9-11`
-/// keeps its 8. Every real EXAONE-4 32B, EXAONE-MoE and Olmo-3
-/// export carries the array (`conversion/exaone.py:84`,
-/// `olmo.py:59-66`) and was refused over a value upstream never
-/// reads. `crate::swa_layers` carries which graphs read which form;
-/// the array-HONOURED mode has its own fixture in
-/// `tests/window_array_graphs.rs`.
+/// An ARRAY-valued `sliding_window_pattern` is the layout on a graph
+/// that calls `load_swa_pattern` (`llama-model.cpp:3952-3959`: the
+/// array first, then the scalar, then the seed). `plamo3.cpp:9` is one
+/// of them, so a file whose array disagrees with the seeded 8 runs the
+/// array (#420), and the scalar spelling of the same key overrides the
+/// seed as a period.
 #[test]
-fn an_array_valued_sliding_window_pattern_is_ignored_where_llama_cpp_ignores_it() {
+fn an_array_valued_sliding_window_pattern_is_honoured_where_llama_cpp_honours_it() {
     // Disagrees with plamo3's seeded last-dense 8 on layers 0..3,
-    // so honouring it would be visible.
+    // so honouring it is visible.
     let pattern: [u32; 4] = [0, 0, 0, 0];
     let kvs: Vec<(&str, Kv)> = vec![
         ("general.architecture", Kv::Str("plamo3")),
@@ -43,14 +29,13 @@ fn an_array_valued_sliding_window_pattern_is_ignored_where_llama_cpp_ignores_it(
         ),
     ];
     let file = open_metadata_gguf("swa_pattern_array", &kvs);
-    let config = ModelConfig::from_gguf(&file).expect("the array is not a refusal");
+    let config = ModelConfig::from_gguf(&file).expect("the array loads");
     assert_eq!(
         config.swa_layers,
-        crate::swa_layers::SwaLayers::period(8, false),
-        "plamo3.cpp:9-11 seeds 8 and the scalar overload ignores an array"
+        crate::swa_layers::SwaLayers::PerLayer(vec![false; 4].into()),
+        "load_swa_pattern takes the array over plamo3.cpp:9's seed"
     );
-    assert_eq!(config.layer_sliding_window(0), Some(3));
-    assert_eq!(config.layer_sliding_window(3), Some(3));
+    assert_eq!(config.layer_sliding_window(0), None);
 
     // And the scalar spelling of the same key overrides the seed.
     let mut scalar = kvs;

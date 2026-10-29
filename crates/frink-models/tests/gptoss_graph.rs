@@ -318,3 +318,23 @@ fn gpt_oss_golden_is_not_vacuous() {
         );
     }
 }
+
+/// `openai-moe.cpp:6` reads `attention.sliding_window` REQUIRED: libllama
+/// does not load `gptoss_nowindow_tiny.gguf` (`key not found in model:
+/// gpt-oss.attention.sliding_window`, measured), and frink refuses it by
+/// name instead of attending the whole context on every layer (#458).
+#[test]
+fn a_gpt_oss_file_without_its_window_is_refused() {
+    let path = format!(
+        "{}/tests/fixtures/gptoss_nowindow_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    match ModelConfig::from_gguf(&file) {
+        Err(frink_models::LoadError::UnsupportedFeature(arch, msg)) => {
+            assert_eq!(arch, "gpt-oss");
+            assert!(msg.contains("openai-moe.cpp:6"), "{msg}");
+        }
+        other => panic!("a gpt-oss file without its window must be refused, got {other:?}"),
+    }
+}

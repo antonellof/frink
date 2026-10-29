@@ -48,7 +48,10 @@ ROPE_BASE = 10000.0
 RMS_EPS = 1e-5
 
 
-def main(out_path: str) -> None:
+def main(out_path: str, window: bool = True) -> None:
+    # `window=False` (`--no-window`) drops `attention.sliding_window`:
+    # refusal evidence for #458. `openai-moe.cpp:6` reads it REQUIRED,
+    # so libllama does not load the file, and frink refuses it by name.
     rng = np.random.default_rng(0xF3110)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -73,7 +76,8 @@ def main(out_path: str) -> None:
     w.add_expert_count(N_EXPERT)
     w.add_expert_used_count(N_EXPERT_USED)
     w.add_expert_feed_forward_length(N_FF_EXP)
-    w.add_sliding_window(SLIDING_WINDOW)
+    if window:
+        w.add_sliding_window(SLIDING_WINDOW)
     w.add_file_type(gguf.LlamaFileType.ALL_F32)
 
     # Minimal SPM-flavoured vocab: llama.cpp needs tokens/scores/types to
@@ -140,4 +144,5 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "gptoss-fixture.gguf")
+    args = [a for a in sys.argv[1:] if a != "--no-window"]
+    main(args[0] if args else "gptoss-fixture.gguf", "--no-window" not in sys.argv[1:])
