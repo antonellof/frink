@@ -74,14 +74,28 @@ impl Decoder {
         // `metal_embd_kind` is only `Some` when `embedding_scale` is
         // `None` (the GPU gather has no scale op), so the empty vector
         // this leaves behind is one the scale would not have touched.
+        // The CUDA resident stack gathers the embedding row on the device
+        // (`frink_cuda::get_rows`) when the row IS the first hidden state;
+        // `hidden` then stays empty until a layer the stack declines, at
+        // which point the host embeds as before (#405).
+        #[cfg(feature = "cuda")]
+        let cuda_embd = self.cuda_embedding_gather();
+        #[cfg(feature = "cuda")]
+        let cuda_gathers = cuda_embd.is_some();
+        #[cfg(not(feature = "cuda"))]
+        let cuda_gathers = false;
         #[cfg(feature = "metal")]
-        let mut hidden = if metal_embd_kind.is_some() {
+        let mut hidden = if metal_embd_kind.is_some() || cuda_gathers {
             Vec::new()
         } else {
             self.embed_token(token_id, pos)
         };
         #[cfg(not(feature = "metal"))]
-        let mut hidden = self.embed_token(token_id, pos);
+        let mut hidden = if cuda_gathers {
+            Vec::new()
+        } else {
+            self.embed_token(token_id, pos)
+        };
         #[cfg(feature = "cuda")]
         if cuda_gqa_enabled()
             && self.config.layer_shapes.is_uniform()
@@ -659,12 +673,26 @@ impl Decoder {
                 // before touching any cache, and the body below then
                 // runs the layer. `FRINK_CUDA_DECODE=host` is the A/B.
                 #[cfg(feature = "cuda")]
-                if let Some((h_out, run_len)) =
-                    self.try_cuda_dense_stack(l, &hidden, pos, 1, kv_caches)
                 {
-                    hidden = h_out;
-                    fused_through = l + run_len;
-                    continue;
+                    let ids = [token_id as u32];
+                    let input = match cuda_embd {
+                        Some(table) if l == 0 && hidden.is_empty() => {
+                            frink_cuda::prefill::StackInput::Gather { table, ids: &ids }
+                        }
+                        _ => frink_cuda::prefill::StackInput::Hidden(&hidden),
+                    };
+                    if let Some((h_out, run_len)) =
+                        self.try_cuda_dense_stack(l, input, pos, 1, kv_caches)
+                    {
+                        hidden = h_out;
+                        fused_through = l + run_len;
+                        continue;
+                    }
+                    // The stack declined a token it was to gather for:
+                    // the host embeds it now, as it would have up front.
+                    if cuda_gathers && l == 0 && hidden.is_empty() {
+                        hidden = self.embed_token(token_id, pos);
+                    }
                 }
                 let cache = &mut kv_caches[l];
                 let layer = self.layer_for(l);

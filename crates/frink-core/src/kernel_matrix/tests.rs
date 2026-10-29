@@ -13,7 +13,7 @@ const PINNED: &[(Backend, Op, usize)] = &[
     (Backend::Cpu, Op::GetRows, 0),
     (Backend::Cuda, Op::Matvec, 11),
     (Backend::Cuda, Op::Gemm, 11),
-    (Backend::Cuda, Op::GetRows, 22),
+    (Backend::Cuda, Op::GetRows, 11),
     (Backend::Metal, Op::Matvec, 0),
     (Backend::Metal, Op::Gemm, 0),
     (Backend::Metal, Op::GetRows, 0),
@@ -267,10 +267,10 @@ fn the_cpu_int_dot_table_is_the_dispatch() {
     }
 }
 
-/// The Metal gather column is the decode path's table, and no other
-/// backend claims one.
+/// The Metal and CUDA gather columns are their decode paths' tables,
+/// and Vulkan claims none.
 #[test]
-fn get_rows_is_the_metal_gather_table_and_host_elsewhere() {
+fn get_rows_is_the_gather_tables_and_host_elsewhere() {
     let m = KernelMatrix::derive();
     for &k in QuantKind::ALL {
         let gathers = frink_metal::embd_kinds::EmbdKind::from_kind_name(k.name()).is_some();
@@ -286,7 +286,17 @@ fn get_rows_is_the_metal_gather_table_and_host_elsewhere() {
             gathers
         );
         assert_eq!(m.cell(Backend::Cpu, Op::GetRows, k), Cell::Kernel);
-        assert!(m.cell(Backend::Cuda, Op::GetRows, k).is_host());
+        let cuda_gathers = frink_cuda::get_rows::kind_by_name(k.name()).is_some();
+        assert_eq!(
+            m.cell(Backend::Cuda, Op::GetRows, k) == Cell::Kernel,
+            cuda_gathers,
+            "{k:?}"
+        );
+        assert_eq!(
+            m.cell(Backend::Cuda, Op::GetRows, k).is_host(),
+            !cuda_gathers,
+            "{k:?}"
+        );
         assert!(m.cell(Backend::Vulkan, Op::GetRows, k).is_host());
     }
 }

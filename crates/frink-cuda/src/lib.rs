@@ -20,6 +20,10 @@ pub mod counters;
 /// One-row (decode) attention split across the keys: kernel text and
 /// its host twin, always compiled so the host check can run it.
 pub mod decode_attn;
+/// The embedding gather (`get_rows`): kernel text built from each
+/// kind's `mul_mm` dequant, and its scalar twin. Always compiled, so
+/// `frink-core`'s kernel matrix reads the set on a CPU-only build.
+pub mod get_rows;
 
 /// The per-kind CUDA matvec (decode) kernel table. Always compiled,
 /// for the same reason [`mul_mm`] is: it is kernel text plus three
@@ -44,6 +48,8 @@ pub mod mul_mm_tc;
 
 #[cfg(feature = "cuda")]
 pub mod attn;
+#[cfg(feature = "cuda")]
+pub mod get_rows_launch;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "cuda")]

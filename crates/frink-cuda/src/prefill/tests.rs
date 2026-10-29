@@ -100,7 +100,7 @@ fn host_causal_gqa(q: &[f32], k: &[f32], v: &[f32], n_q: usize, a: &AttnArgs) ->
 
 /// A Q8_0 projection with both views, as `frink-core` builds one:
 /// the GEMM's and the matvec's, over the same bytes.
-fn q8_0_proj(data: &'static [u8], rows: usize, cols: usize) -> ProjWeights<'static> {
+pub(super) fn q8_0_proj(data: &'static [u8], rows: usize, cols: usize) -> ProjWeights<'static> {
     let (kernel_src, module_name, fn_name) =
         crate::gpu::matvec_launch_meta("Q8_0").expect("Q8_0 has a matvec");
     ProjWeights {
@@ -123,7 +123,7 @@ fn q8_0_proj(data: &'static [u8], rows: usize, cols: usize) -> ProjWeights<'stat
     }
 }
 
-fn wave(n: usize, seed: f32) -> Vec<f32> {
+pub(super) fn wave(n: usize, seed: f32) -> Vec<f32> {
     (0..n).map(|i| ((i as f32) * 0.037 + seed).sin()).collect()
 }
 
@@ -502,7 +502,7 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     // between them must equal two single launches, K/V rows per layer.
     let second = launch_prefill_dense_layer(&out.hidden, &layer, &params, batch).unwrap();
     let stacked = launch_prefill_dense_stack(
-        &hidden_in,
+        StackInput::Hidden(&hidden_in),
         &[(&layer, &params), (&layer, &params)],
         batch,
         StackKv::UploadPrefix,
@@ -528,7 +528,7 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
 /// Q8_0 fixture bytes with every block scale near `2^-9`, so a
 /// layer's activations stay near 1 (see the note in the layer test
 /// above), leaked for the `'static` views.
-fn small_q8_0(rows: usize, cols: usize, seed: u32) -> &'static [u8] {
+pub(super) fn small_q8_0(rows: usize, cols: usize, seed: u32) -> &'static [u8] {
     let mut data = fixtures::weights(&Q8_0, rows, cols, seed);
     for block in data.as_chunks_mut::<34>().0 {
         let bits = u16::from(block[0]) | (u16::from(block[1]) << 8);
@@ -581,9 +581,14 @@ fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
         prefix_v: &[],
         start_pos: 0,
     };
-    let err = launch_prefill_dense_stack(&w, &[(&layer, &params)], 1, StackKv::UploadPrefix)
-        .err()
-        .expect("a one-row step with no matvec must be refused");
+    let err = launch_prefill_dense_stack(
+        StackInput::Hidden(&w),
+        &[(&layer, &params)],
+        1,
+        StackKv::UploadPrefix,
+    )
+    .err()
+    .expect("a one-row step with no matvec must be refused");
     assert!(
         matches!(&err, CudaError::Unsupported(m) if m.contains("matvec")),
         "{err:?}"
@@ -799,10 +804,16 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         let launch = [(&layer, &p[0]), (&layer, &p[1])];
         let [m0, m1] = mirrors;
         let mut slots = [m0, m1];
-        let via_mirror =
-            launch_prefill_dense_stack(row, &launch, 1, StackKv::Mirrors(&mut slots)).unwrap();
+        let via_mirror = launch_prefill_dense_stack(
+            StackInput::Hidden(row),
+            &launch,
+            1,
+            StackKv::Mirrors(&mut slots),
+        )
+        .unwrap();
         let via_upload =
-            launch_prefill_dense_stack(row, &launch, 1, StackKv::UploadPrefix).unwrap();
+            launch_prefill_dense_stack(StackInput::Hidden(row), &launch, 1, StackKv::UploadPrefix)
+                .unwrap();
         (via_mirror, via_upload)
     };
     for pos in start..start + 4 {

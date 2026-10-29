@@ -26,7 +26,8 @@ use frink_core::cache::KvCache;
 use frink_core::kv_store::KvBuf;
 use frink_cuda::prefill::{
     launch_prefill_dense_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror,
-    LayerRopeCuda, PrefillDenseLayerCuda, PrefillParams, ProjWeights, RopeLayoutCuda, StackKv,
+    LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams, ProjWeights, RopeLayoutCuda,
+    StackInput, StackKv,
 };
 
 use super::fused_view::FusedAttnExtras;
@@ -45,6 +46,30 @@ struct CacheRows<'a> {
 }
 
 impl Decoder {
+    /// The embedding table as the device gather reads it
+    /// (`frink_cuda::get_rows`), or `None` when the first hidden state
+    /// is not the bare table row and the host must embed: an embedding
+    /// scale (Gemma), an embedding norm (BLOOM), a learned position
+    /// table, the skip stream's weightless norm, the HRM streams, or a
+    /// table that is not plain quantized bytes of a kind CUDA gathers
+    /// (an adapter, a Hadamard fold, a float table). Every one of those
+    /// is something `embed_token` does to the row after `dequant_row`.
+    pub(crate) fn cuda_embedding_gather(&self) -> Option<MulMmWeights<'_>> {
+        if !frink_core::weight_matrix::cuda_dense_enabled()
+            || !resident_decode_enabled()
+            || self.config.embedding_scale.is_some()
+            || !matches!(self.embedding_norm, crate::norm::NormOp::None)
+            || self.position_embd.is_some()
+            || self.config.skip_stream
+            || self.hrm_z_l_init.is_some()
+        {
+            return None;
+        }
+        let view = self.embedding.cuda_mul_mm_view()?;
+        frink_cuda::get_rows::kind_by_name(view.kind.name)?;
+        Some(view)
+    }
+
     /// Runs the longest run of eligible dense layers starting at `l`
     /// over `hidden_rows` (`batch_size` rows) on the device, pushes each
     /// layer's K/V rows into its cache, and answers the new hidden rows
@@ -61,7 +86,7 @@ impl Decoder {
     pub(crate) fn try_cuda_dense_stack(
         &self,
         l: usize,
-        hidden_rows: &[f32],
+        input: StackInput<'_>,
         start_pos: usize,
         batch_size: usize,
         kv_caches: &mut [KvCache],
@@ -136,7 +161,7 @@ impl Decoder {
         } else {
             StackKv::UploadPrefix
         };
-        let out = match launch_prefill_dense_stack(hidden_rows, &launch, batch_size, kv) {
+        let out = match launch_prefill_dense_stack(input, &launch, batch_size, kv) {
             Ok(out) => out,
             Err(e) => {
                 let what = if decode { "decode" } else { "prefill" };
