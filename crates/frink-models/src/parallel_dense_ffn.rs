@@ -103,33 +103,20 @@ pub const PARALLEL_DENSE_FFN_ARCHITECTURES: &[ParallelDenseFfn] = &[ParallelDens
     lines: "src/models/arctic.cpp:38-42,118-154",
 }];
 
-/// The SAME scale on the SAME sum, under the `_shexp` names: a graph
-/// whose routed layers carry a real shared expert and scale
-/// `moe_out + shexp_out` by a constant. `cohere2moe.cpp:248-260`
-/// (`ggml_scale(ctx0, ggml_add(cur, ffn_shexp), 0.5f)`, the HF
-/// "average" combination strategy, the only one its converter admits,
-/// `conversion/command_r.py:103-105`) is the one graph of 155 that does
-/// (measured: `grep -n 'ggml_scale' src/models/*.cpp` beside a
-/// `ffn_shexp`), and only on a layer that HAS the shared expert
-/// (`:248` `if (layer.ffn_up_shexp)`). The loader records it as
-/// `MoeWeights::parallel_sum_scale`, the field the two dense rows
-/// above already fill, so the FFN bodies apply one scale at one site
-/// whichever names the dense branch was loaded from.
-pub const SHARED_EXPERT_SUM_SCALE: &[(&str, f32, &str)] =
-    &[("cohere2moe", 0.5, "src/models/cohere2moe.cpp:248-260")];
-
 /// The scale on `moe_out + shexp_out` for `arch`, when its routed
 /// layer carries a shared expert; `None` for a plain sum.
 pub fn shared_expert_sum_scale(arch: &str, has_shared_expert: bool) -> Option<f32> {
     sum_scale_on_layer(shared_expert_sum_scale_row(arch), has_shared_expert)
 }
 
-/// `arch`'s [`SHARED_EXPERT_SUM_SCALE`] row: the scale alone.
+/// `arch`'s shared-expert sum scale alone.
+///
+/// A row of the architecture's `crate::models` definition: `cohere2moe`
+/// (`cohere2moe.cpp:248-260`, `* 0.5`) is the one graph with one.
 pub fn shared_expert_sum_scale_row(arch: &str) -> Option<f32> {
-    SHARED_EXPERT_SUM_SCALE
-        .iter()
-        .find(|(a, _, _)| *a == arch)
-        .map(|(_, scale, _)| *scale)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .shared_expert_sum_scale
 }
 
 /// The row's scale on a layer that loaded a shared expert, else `None`.

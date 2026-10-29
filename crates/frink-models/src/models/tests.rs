@@ -85,3 +85,38 @@ fn the_qwen_rows_no_fixture_reaches_are_pinned() {
     // qwen3moe.cpp:144: `norm_w = true`.
     assert!(!ArchFacts::of("qwen3moe").moe.no_topk_renormalize);
 }
+
+/// How each registry graph reads `attention.sliding_window_pattern`,
+/// measured as `swa_layers`' two tables are (`load_swa_pattern` callers
+/// read an array then a scalar, the `get_arr` readers an array only).
+/// No snapshot fixture declares the key on most of these, so the census
+/// is pinned here: a definition that drops its row reads the key as dead
+/// metadata and serves the seed instead of the file's layout.
+#[test]
+fn the_registry_pattern_readers_are_pinned() {
+    use crate::swa_layers::PatternKeyRead;
+    let callers = [
+        "cohere2",    // cohere2.cpp:5
+        "cohere2moe", // cohere2moe.cpp:28
+        "exaone4",    // exaone4.cpp:7
+        "gemma2",     // gemma2.cpp:6
+        "gemma3",     // gemma3.cpp:7
+        "mellum",     // mellum.cpp:16
+        "plamo3",     // plamo3.cpp:9
+        "gpt-oss",    // openai-moe.cpp:9
+        "llama4",     // llama4.cpp:19
+        "olmo2",      // olmo2.cpp:9
+    ];
+    for name in registry_names() {
+        let want = if callers.contains(&name) {
+            PatternKeyRead::ArrayThenScalar
+        } else if ["kolibri1", "maple", "spark2_5", "granite_swa"].contains(&name) {
+            // `get_arr` with no scalar attempt: kolibri1.cpp:17,
+            // maple.cpp:10, spark2-5.cpp:8, granite-swa.cpp:17.
+            PatternKeyRead::PerLayerBool
+        } else {
+            PatternKeyRead::Unread
+        };
+        assert_eq!(crate::swa_layers::pattern_key_read(name), want, "{name}");
+    }
+}

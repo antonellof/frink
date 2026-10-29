@@ -110,6 +110,9 @@ pub struct SwaFacts {
     /// `chunked_swa`: the literal chunk and the lines, for a CHUNKED
     /// window (`llama4`).
     pub chunked: Option<(usize, &'static str)>,
+    /// `swa_layers::pattern_key_read`: how the graph reads
+    /// `attention.sliding_window_pattern`.
+    pub pattern_key_read: crate::swa_layers::PatternKeyRead,
 }
 
 /// FFN rows, in the order the loader tests them.
@@ -130,6 +133,9 @@ pub struct FfnFacts {
     pub xielu: bool,
     /// `act_layers::reads_swiglu_clamps`.
     pub reads_swiglu_clamps: bool,
+    /// `act_layers::CLAMP_BEFORE_SILU`: the clamped SwiGLU clamps the gate
+    /// BEFORE the SiLU (`ggml_swiglu_clamp`).
+    pub clamp_before_silu: bool,
 }
 
 /// Norm rows (`norm`, `sub_norms`).
@@ -173,11 +179,15 @@ pub struct TopologyFacts {
     pub skip_stream: bool,
     /// `mamba2::parallel_with_attention`.
     pub parallel_ssm: bool,
-    /// `position_embd::learned_positions`.
-    pub learned_positions: bool,
+    /// `alibi`: how the graph arrives at its ALiBi bias, which positions
+    /// the tokens in place of RoPE.
+    pub alibi: Option<crate::alibi::MaxAlibiBias>,
     /// `parallel_residual`: attention and FFN read the same layer input
     /// and are summed into one residual add.
     pub parallel_residual: Option<&'static crate::parallel_residual::ParallelResidual>,
+    /// `layer_shapes::PER_LAYER_SHAPE_ARCHS`: llama.cpp reads the head and
+    /// FFN counts per layer; the note says where.
+    pub per_layer_shapes: Option<&'static str>,
     /// `rope_finetuned::ROPE_GATED_ON_FINETUNED`: a file declaring
     /// `rope.scaling.finetuned = false` rotates nothing.
     pub rope_gated_on_finetuned: bool,
@@ -219,6 +229,11 @@ pub struct TensorFacts {
     pub ffn_bias: Option<(Presence, bool)>,
     /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
     pub output_bias: Option<Presence>,
+    /// `position_embd`: a learned position table added to the
+    /// embeddings, whether it is REQUIRED, and the llama.cpp lines.
+    pub position_embd: Option<(Presence, &'static str)>,
+    /// `attn_gate::ATTN_GATE_ARCHS`: the gate on the attention output.
+    pub attn_gate: Option<crate::attn_gate::AttnGateSpec>,
     /// `qkv_fused::QKV_TENSOR_CREATORS`: which Q/K/V biases the graph
     /// creates, and how.
     pub qkv_tensors: crate::qkv_fused::QkvTensors,
@@ -262,7 +277,7 @@ impl HparamRules {
     /// Today's name-keyed functions.
     pub const LEGACY: Self = Self {
         swa_window_override: crate::capability::swa_window_override_from_table,
-        attention_scale_override: crate::capability::attention_scale_override,
+        attention_scale_override: crate::capability::attention_scale_override_from_table,
         rope_layers: crate::rope_layers::rope_layers_from_table,
         load_checks: no_load_checks,
         weightless_qk_norm: crate::weightless_qk_norm::no_weightless_qk_norm,
@@ -297,6 +312,7 @@ impl ArchFacts {
             rope_scale_follows_model: false,
             rope_base_key_unread: None,
             chunked: None,
+            pattern_key_read: crate::swa_layers::PatternKeyRead::Unread,
         },
         ffn: FfnFacts {
             length_counts_gate_and_up: false,
@@ -306,6 +322,7 @@ impl ArchFacts {
             reglu: false,
             xielu: false,
             reads_swiglu_clamps: false,
+            clamp_before_silu: false,
         },
         norm: NormFacts {
             norm_by_rms_eps_key: false,
@@ -324,8 +341,9 @@ impl ArchFacts {
             reads_rope_pattern: false,
             skip_stream: false,
             parallel_ssm: false,
-            learned_positions: false,
+            alibi: None,
             parallel_residual: None,
+            per_layer_shapes: None,
             rope_gated_on_finetuned: false,
             reads_nextn: false,
         },
@@ -343,6 +361,8 @@ impl ArchFacts {
             attn_out_bias: None,
             ffn_bias: None,
             output_bias: None,
+            position_embd: None,
+            attn_gate: None,
             qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
             attn_norm_2_feeds_attention: false,
             parallel_dense: None,
@@ -397,6 +417,7 @@ impl ArchFacts {
                 rope_base_key_unread: None,
                 // No table: `llama4` was the only row.
                 chunked: None,
+                pattern_key_read: crate::swa_layers::pattern_key_read_from_table(arch),
             },
             ffn: FfnFacts {
                 // No table: `qwen` was the only row (`crate::models::qwen`).
@@ -406,12 +427,12 @@ impl ArchFacts {
                 gelu_ungated: crate::capability::uses_gelu_ungated_from_table(arch),
                 reglu: crate::capability::uses_reglu(arch),
                 xielu: crate::act_layers::uses_xielu(arch),
-                reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(arch),
+                reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps_from_table(arch),
+                clamp_before_silu: crate::act_layers::clamp_before_silu_from_table(arch),
             },
             norm: NormFacts {
-                norm_by_rms_eps_key: crate::norm::NORM_BY_RMS_EPS_KEY
-                    .iter()
-                    .any(|(a, _)| *a == arch),
+                // No table: `cohere2moe` was the only row.
+                norm_by_rms_eps_key: false,
                 block_sub_norms: crate::sub_norms::block_sub_norms(arch),
             },
             scaling: ScalingFacts {
@@ -429,11 +450,15 @@ impl ArchFacts {
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
-                reads_rope_pattern: crate::rope_layers::reads_rope_pattern(arch),
+                // No table: `granite_swa` was the only row.
+                reads_rope_pattern: false,
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
-                learned_positions: crate::position_embd::learned_positions(arch),
-                parallel_residual: crate::parallel_residual::parallel_residual_from_table(arch),
+                // No table: the five ALiBi graphs are in `crate::models`.
+                alibi: None,
+                // No table: all eight graphs are in `crate::models`.
+                parallel_residual: None,
+                per_layer_shapes: crate::layer_shapes::per_layer_shapes_from_table(arch),
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
                     .contains(&arch),
                 reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
@@ -452,14 +477,16 @@ impl ArchFacts {
                 per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(arch),
                 post_norms_both_or_neither: crate::norm_sites::post_norms_both_or_neither(arch),
-                shared_expert_sum_scale: crate::parallel_dense_ffn::shared_expert_sum_scale_row(
-                    arch,
-                ),
+                // No table: `cohere2moe` was the only row.
+                shared_expert_sum_scale: None,
                 weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(arch),
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
+                // No table: `gpt2`, `starcoder` and `mpt` are in `crate::models`.
+                position_embd: None,
+                attn_gate: crate::attn_gate::attn_gate_spec_from_table(arch),
                 qkv_tensors: crate::qkv_fused::qkv_tensors_from_table(arch),
                 // No table: `falcon` was the only row.
                 attn_norm_2_feeds_attention: false,

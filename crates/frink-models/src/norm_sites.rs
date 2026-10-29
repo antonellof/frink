@@ -74,20 +74,6 @@ use frink_gguf::{GgufError, TensorSource};
 pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] =
     &["seed_oss", "glm4moe", "qwen35", "qwen35moe", "qwen3next"];
 
-/// Architectures that norm the TOKEN EMBEDDINGS before layer 0, with
-/// the model-level `token_embd_norm` pair (`LLM_TENSOR_TOKEN_EMBD_NORM`,
-/// spelled without a `blk.` prefix).
-///
-/// `bloom`: `bloom.cpp:25-26` create `tok_norm` / `tok_norm_b`
-/// REQUIRED and `:77-80` norm `inpL` with them, `LLM_NORM`, right after
-/// `build_inp_embd`. Measured over all 155 graphs: `bloom` is the one
-/// decoder on the generic path; `bert` / `nomic-bert` / `nomic-bert-moe`
-/// / `jina-bert-v2` / `jina-bert-v3` / `modern-bert` are the encoder
-/// engine, `rwkv6` / `rwkv7` / `wavtokenizer-dec` their own. The site
-/// takes the architecture's norm FUNCTION like every other
-/// ([`NormSites::function`]), so `bloom`'s is the biased LayerNorm.
-pub const EMBEDDING_NORM_ARCHITECTURES: &[&str] = &["bloom"];
-
 /// Architectures that norm the token embeddings with a WEIGHTLESS RMS:
 /// `build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1)` before layer
 /// 0, with no `token_embd_norm` tensor to load.
@@ -95,7 +81,7 @@ pub const EMBEDDING_NORM_ARCHITECTURES: &[&str] = &["bloom"];
 /// `muse-glimmer.cpp:69` is the one (measured over the 155 graphs on
 /// 2026-09-19, the same scan that found the weightless RMS in
 /// `hrm-text.cpp`, which norms INSIDE its layers and not here). It is
-/// a separate table from [`EMBEDDING_NORM_ARCHITECTURES`] because the
+/// a separate fact from `bloom`'s stored embedding norm because the
 /// two answer different questions -- "is there a tensor" and "is there
 /// a norm" -- and `bloom`'s site has a weight where this one has none.
 pub const WEIGHTLESS_EMBEDDING_NORM: &[&str] = &["muse-glimmer"];
@@ -121,7 +107,7 @@ pub fn weightless_embedding_norm(arch: &str) -> bool {
 /// (`llama-arch.cpp:384`, "fix for wrong tensor name"), created at
 /// `lfm2.cpp:36` as `output_norm` and applied at `:212` after the last
 /// layer; nothing norms the embeddings (`:191`). The same name is
-/// `bloom`'s embedding norm ([`EMBEDDING_NORM_ARCHITECTURES`]), one
+/// `bloom`'s embedding norm (`crate::models::bloom`), one
 /// tensor name feeding two different sites, decided by architecture --
 /// the `attn_output_norm` case again. `lfm2moe` shares the loader line
 /// (`lfm2moe.cpp:31`).
@@ -327,7 +313,7 @@ pub struct NormSites {
     /// norm IS the final one.
     pub output: Option<StoredNorm>,
     /// The norm on the token embeddings before layer 0, or `None` for
-    /// every architecture but [`EMBEDDING_NORM_ARCHITECTURES`].
+    /// every architecture but `bloom` (`crate::models::bloom`).
     pub embedding: Option<StoredNorm>,
 }
 
@@ -380,9 +366,6 @@ impl NormSites {
             sites.output = None;
         } else if OUTPUT_NORM_UNDER_EMBEDDING_NAME.contains(&arch) {
             sites.output = Some(StoredNorm::required(&["token_embd_norm"]));
-        }
-        if EMBEDDING_NORM_ARCHITECTURES.contains(&arch) {
-            sites.embedding = Some(StoredNorm::required(&["token_embd_norm"]));
         }
         if PRE_FFN_NORM_IS_POST_ATTENTION_NORM.contains(&arch) {
             sites.ffn = Some(StoredNorm::required(&["post_attention_norm"]));
@@ -532,7 +515,7 @@ mod tests {
         assert_eq!(b.output, Some(StoredNorm::required(&["output_norm"])));
         for arch in OUTPUT_NORM_UNDER_EMBEDDING_NAME {
             assert!(
-                !EMBEDDING_NORM_ARCHITECTURES.contains(arch),
+                NormSites::for_arch(arch).embedding.is_none(),
                 "{arch}: one tensor cannot feed both sites"
             );
         }

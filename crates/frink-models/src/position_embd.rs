@@ -45,22 +45,16 @@ use frink_gguf::TensorSource;
 use crate::loader::{load_weight_matrix, LoadError};
 use crate::proj_bias::Presence;
 
-/// The generic-path graphs that create `position_embd.weight`, with
-/// whether the tensor is required and the lines.
-pub const LEARNED_POSITION_CREATORS: &[(&str, Presence, &str)] = &[
-    ("gpt2", Presence::Required, "src/models/gpt2.cpp:19,74-77"),
-    (
-        "starcoder",
-        Presence::Required,
-        "src/models/starcoder.cpp:19,75-78",
-    ),
-    ("mpt", Presence::Optional, "src/models/mpt.cpp:19,80-84"),
-];
-
 /// Whether `arch`'s graph adds a learned position table to its token
 /// embeddings (and, for the two REQUIRED rows, rotates nothing).
+///
+/// A row of the architecture's `crate::models` definition (`gpt2`,
+/// `starcoder` REQUIRED; `mpt` optional).
 pub fn learned_positions(arch: &str) -> bool {
-    LEARNED_POSITION_CREATORS.iter().any(|(n, _, _)| *n == arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .position_embd
+        .is_some()
 }
 
 /// `position_embd.weight`: `Some` when the architecture's graph creates
@@ -71,13 +65,11 @@ pub fn learned_positions(arch: &str) -> bool {
 pub fn load_position_embd(
     file: &impl TensorSource,
     arch: &str,
+    row: Option<(Presence, &'static str)>,
     hidden_dim: usize,
     n_ctx_train: Option<usize>,
 ) -> Result<Option<WeightMatrix>, LoadError> {
-    let Some((_, presence, lines)) = LEARNED_POSITION_CREATORS
-        .iter()
-        .find(|(n, _, _)| *n == arch)
-    else {
+    let Some((presence, lines)) = row else {
         return Ok(None);
     };
     const NAME: &str = "position_embd.weight";
@@ -121,7 +113,18 @@ mod tests {
     /// the generic path for its own reason.
     #[test]
     fn every_row_is_registered_and_the_required_rows_rotate_nothing() {
-        for (arch, presence, lines) in LEARNED_POSITION_CREATORS {
+        // Every row, over the catalog: they live in `crate::models`.
+        let rows: Vec<(&str, Presence, &str)> = crate::capability::architecture_catalog()
+            .iter()
+            .filter_map(|p| {
+                crate::models::ArchFacts::of(p.gguf_name)
+                    .tensors
+                    .position_embd
+                    .map(|(presence, lines)| (p.gguf_name, presence, lines))
+            })
+            .collect();
+        assert_eq!(rows.len(), 3, "gpt2, starcoder, mpt: {rows:?}");
+        for (arch, presence, lines) in rows {
             assert!(
                 crate::capability::resolve_profile(arch).is_some(),
                 "`{arch}` ({lines}) is not a registered architecture"

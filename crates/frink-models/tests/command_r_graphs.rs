@@ -41,7 +41,7 @@ use common::{
     assert_all_three_paths_match, assert_decoder_matches_on_all_three_paths, graph_caches,
     graph_fixture_path, kl_vs_golden, load_graph_fixture, worst_vs, GRAPH_PROMPT, GRAPH_TOL,
 };
-use frink_models::capability::{resolve_architecture, ArchPath, WEIGHTED_LAYER_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::config::{ModelConfig, RopeLayout};
 use frink_models::loader::LoadError;
 use frink_models::norm::NormOp;
@@ -193,7 +193,9 @@ fn report_kl_against_llama_cpp() {
 /// lm_head tied, NORM RoPE at the Command-R base.
 #[test]
 fn the_loaded_layers_are_the_graph() {
-    assert!(WEIGHTED_LAYER_NORM.contains(&"command-r"));
+    assert!(frink_models::capability::uses_weighted_layer_norm(
+        "command-r"
+    ));
     assert!(matches!(
         resolve_architecture("command-r"),
         Some(ArchPath::GenericGqa {
