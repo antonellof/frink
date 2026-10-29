@@ -474,6 +474,18 @@ the pool per operation.
 measured on both aarch64 and x86 rather than guessed. `spin` stops
 being a user-visible knob.
 
+**Per operation was the wrong grain for decode (#27).** Counted, not
+timed, on one layer at Llama-3.2-3B's widths: the per-operation default
+opened eleven regions in a decode step, four to six on the pool and the
+rest on rayon, with six scheduler changes, and Q/K/V and gate/up forked
+and raced each other for the pool, so both schedulers ran at once. A
+single-token CPU decode step now picks one scheduler for the whole step
+from its widest layer matvec (`frink_core::par::decode_step`), which is
+exactly one of the two measured configurations: nine regions, all on
+the pool, at 1B and 3B widths; all on rayon at 135M's. Prefill and
+engines that do not report a layer width keep the per-operation rule.
+The A/B on a quiet host is still owed.
+
 ### 4. Find the 60 ms (#128)  [NAMED 2026-09-10: rayon's cold submit]
 
 **The premise of this step was wrong twice, and both corrections are
