@@ -29,6 +29,7 @@ use frink_moe::GatingFunction;
 use crate::capability::{ArchProfile, DecoderFamily, SwaPattern, SwaWindowOverride};
 use crate::layer_shapes::ZeroKvLayer;
 use crate::norm_sites::NormSites;
+use crate::proj_bias::Presence;
 use crate::rope_layers::RopeLayers;
 use crate::router_input::RouterInput;
 use crate::scalar_multipliers::MultiplierSupport;
@@ -148,6 +149,9 @@ pub struct TopologyFacts {
     pub parallel_ssm: bool,
     /// `position_embd::learned_positions`.
     pub learned_positions: bool,
+    /// `rope_finetuned::ROPE_GATED_ON_FINETUNED`: a file declaring
+    /// `rope.scaling.finetuned = false` rotates nothing.
+    pub rope_gated_on_finetuned: bool,
 }
 
 /// Decoder tensor-table rows (`Decoder::from_gguf`, canonical name).
@@ -176,6 +180,11 @@ pub struct TensorFacts {
     pub weightless_embedding_norm: bool,
     /// `QK_NORM_AFTER_ROPE_ARCHITECTURES`.
     pub qk_norm_after_rope: bool,
+    /// `proj_bias::ATTN_OUT_BIAS_CREATORS`: `blk.N.attn_output.bias`.
+    pub attn_out_bias: Option<Presence>,
+    /// `proj_bias::FFN_BIAS_CREATORS`: the dense FFN biases, and
+    /// whether `ffn_gate.bias` is among them.
+    pub ffn_bias: Option<(Presence, bool)>,
 }
 
 /// The decisions that are code rather than rows: each takes a
@@ -252,6 +261,7 @@ impl ArchFacts {
             skip_stream: false,
             parallel_ssm: false,
             learned_positions: false,
+            rope_gated_on_finetuned: false,
         },
         tensors: TensorFacts {
             gpt_oss_layers: false,
@@ -264,6 +274,8 @@ impl ArchFacts {
             shared_expert_sum_scale: None,
             weightless_embedding_norm: false,
             qk_norm_after_rope: false,
+            attn_out_bias: None,
+            ffn_bias: None,
         },
         rules: HparamRules::LEGACY,
     };
@@ -273,6 +285,9 @@ impl ArchFacts {
     /// Keyed on the name exactly as given; the callers decide raw or
     /// canonical (module doc).
     pub fn from_tables(arch: &str) -> Self {
+        // Only the legacy tables: a public lookup that consults the
+        // registry (`multiplier_support`, `attn_out_presence`, ...) would
+        // recurse through `of`.
         use crate::loader::arch_tables as t;
         let profile = crate::capability::resolve_profile(arch);
         Self {
@@ -317,7 +332,7 @@ impl ArchFacts {
                 block_sub_norms: crate::sub_norms::block_sub_norms(arch),
             },
             scaling: ScalingFacts {
-                multipliers: crate::scalar_multipliers::multiplier_support(arch),
+                multipliers: crate::scalar_multipliers::multiplier_support_from_table(arch),
                 logit_softcap: crate::capability::LOGIT_SOFTCAP_ARCHITECTURES.contains(&arch),
                 // Only read once the profile resolved; an unknown name
                 // has no family and is refused before this is read.
@@ -331,6 +346,8 @@ impl ArchFacts {
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
                 learned_positions: crate::position_embd::learned_positions(arch),
+                rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
+                    .contains(&arch),
             },
             tensors: TensorFacts {
                 gpt_oss_layers: arch == "gpt-oss",
@@ -345,8 +362,26 @@ impl ArchFacts {
                 ),
                 weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(arch),
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
+                attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
+                ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
             },
             rules: HparamRules::LEGACY,
+        }
+    }
+
+    /// The facts every loader reads: the `crate::models` registry
+    /// entry naming `arch`, else the legacy tables.
+    ///
+    /// The catalog row and the audited flag still come from
+    /// `capability.rs` for a registry name (steps 10 and 11 move them).
+    pub fn of(arch: &str) -> Self {
+        match super::find(arch) {
+            Some(def) => Self {
+                profile: crate::capability::resolve_profile(arch),
+                audited: crate::capability::is_audited_generic(arch),
+                ..def.facts
+            },
+            None => Self::from_tables(arch),
         }
     }
 
@@ -358,4 +393,4 @@ impl ArchFacts {
 
 #[cfg(test)]
 #[path = "facts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

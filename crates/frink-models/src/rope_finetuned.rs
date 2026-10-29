@@ -36,14 +36,10 @@
 //! `granite` / `granitemoe` file takes the `true` default and rotates.
 
 /// Architectures whose graph builds no positions and applies no RoPE
-/// when `{arch}.rope.scaling.finetuned` is false.
-pub const ROPE_GATED_ON_FINETUNED: &[&str] = &[
-    "granite",
-    "granitemoe",
-    "granite-moe",
-    "granitehybrid",
-    "granite-hybrid",
-];
+/// when `{arch}.rope.scaling.finetuned` is false. `granite`,
+/// `granitemoe` and `granite-moe` state it in their `crate::models`
+/// files (#403 step 2).
+pub const ROPE_GATED_ON_FINETUNED: &[&str] = &["granitehybrid", "granite-hybrid"];
 
 /// True when `arch` gates its RoPE on the key and the file declares it
 /// false: the model rotates NOTHING (`RopeLayers::Never`).
@@ -51,7 +47,17 @@ pub const ROPE_GATED_ON_FINETUNED: &[&str] = &[
 /// `declared` is the file's value, `None` when the key is absent --
 /// which is llama.cpp's `true` default for these rows, i.e. rotate.
 pub fn unrotated(arch: &str, declared: Option<bool>) -> bool {
-    ROPE_GATED_ON_FINETUNED.contains(&arch) && declared == Some(false)
+    unrotated_for(
+        crate::models::ArchFacts::of(arch)
+            .topology
+            .rope_gated_on_finetuned,
+        declared,
+    )
+}
+
+/// [`unrotated`] given the row (`ArchFacts`).
+pub fn unrotated_for(gated: bool, declared: Option<bool>) -> bool {
+    gated && declared == Some(false)
 }
 
 #[cfg(test)]

@@ -3947,7 +3947,7 @@ pub const LOGIT_SOFTCAP_ARCHITECTURES: &[&str] = &["grok", "muse-glimmer"];
 /// is named in [`LOGIT_SOFTCAP_ARCHITECTURES`] for the softcaps. Derived
 /// from the facts: [`crate::models::ArchFacts::unsupported_feature_keys`].
 pub fn unsupported_feature_keys(arch: &str) -> Vec<(String, &'static str)> {
-    crate::models::ArchFacts::from_tables(arch).unsupported_feature_keys(arch)
+    crate::models::ArchFacts::of(arch).unsupported_feature_keys(arch)
 }
 
 /// Scalar multipliers a checkpoint can declare in metadata that the
@@ -3955,7 +3955,7 @@ pub fn unsupported_feature_keys(arch: &str) -> Vec<(String, &'static str)> {
 /// Derived from [`crate::scalar_multipliers::multiplier_support`]: see
 /// [`crate::models::ArchFacts::unsupported_scaling_keys`].
 pub fn unsupported_scaling_keys(arch: &str) -> Vec<(String, &'static str, f32)> {
-    crate::models::ArchFacts::from_tables(arch).unsupported_scaling_keys(arch)
+    crate::models::ArchFacts::of(arch).unsupported_scaling_keys(arch)
 }
 
 /// Markdown coverage table for docs / CI drift checks.

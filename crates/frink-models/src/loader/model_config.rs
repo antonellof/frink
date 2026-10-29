@@ -46,7 +46,7 @@ impl ModelConfig {
         // Every table row this function reads, resolved once from the
         // RAW name (`crate::models::facts`); the order of the reads
         // below is unchanged.
-        let facts = crate::models::ArchFacts::from_tables(&arch);
+        let facts = crate::models::ArchFacts::of(&arch);
         let arch_profile = facts
             .profile
             .ok_or_else(|| LoadError::UnsupportedArchitecture(arch.clone()))?;
@@ -818,8 +818,8 @@ impl ModelConfig {
         // it false runs UNROTATED in llama.cpp (every Granite-4.0 hybrid
         // export), which is `RopeLayers::Never` below
         // (`crate::rope_finetuned`).
-        let rope_switched_off = crate::rope_finetuned::unrotated(
-            &arch,
+        let rope_switched_off = crate::rope_finetuned::unrotated_for(
+            facts.topology.rope_gated_on_finetuned,
             file.metadata(&key("rope.scaling.finetuned"))
                 .and_then(GgufValue::as_bool),
         );

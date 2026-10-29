@@ -5,15 +5,28 @@ use super::*;
 use crate::loader::arch_tables as t;
 
 /// A name no table has a row for.
-const ABSENT: &str = "frink-test-absent-from-every-table";
+pub(crate) const ABSENT: &str = "frink-test-absent-from-every-table";
 
-/// Every name some table keys on, plus the catalog, an alias and a name
-/// nobody knows.
-fn every_tabled_name() -> Vec<&'static str> {
+/// Every name some table keys on, plus the catalog, the registry, an
+/// alias and a name nobody knows.
+pub(crate) fn every_tabled_name() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = crate::capability::architecture_catalog()
         .iter()
         .map(|p| p.gguf_name)
         .collect();
+    names.extend(crate::capability::AUDITED_GENERIC_GQA);
+    names.extend(crate::models::REGISTRY.iter().flat_map(|d| d.names));
+    names.extend(behaviour_table_names());
+    names.extend(["llama-embed", "granite-moe", "gpt-oss", ABSENT]);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Every name a BEHAVIOUR table keys on: everything above but the
+/// catalog and `AUDITED_GENERIC_GQA`, which plan steps 10 and 11 move.
+pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
     names.extend(t::SIGMOID_GATING_ARCHITECTURES);
     names.extend(t::GATING_LITERAL_ARCHITECTURES.iter().map(|(n, _)| *n));
     names.extend(t::EXPERT_WEIGHTS_NORM_READERS);
@@ -26,7 +39,6 @@ fn every_tabled_name() -> Vec<&'static str> {
     names.extend(crate::rope_layers::ROPE_PATTERN_READERS.iter().map(|r| r.0));
     names.extend(crate::norm::NORM_BY_RMS_EPS_KEY.iter().map(|r| r.0));
     names.extend(crate::capability::LOGIT_SOFTCAP_ARCHITECTURES);
-    names.extend(crate::capability::AUDITED_GENERIC_GQA);
     names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
     names.extend(crate::act_layers::XIELU_ARCHITECTURES);
     names.extend(t::QK_NORM_AFTER_ROPE_ARCHITECTURES);
@@ -63,7 +75,9 @@ fn every_tabled_name() -> Vec<&'static str> {
             names.extend(table);
         }
     }
-    names.extend(["llama-embed", "granite-moe", "gpt-oss", ABSENT]);
+    names.extend(crate::rope_finetuned::ROPE_GATED_ON_FINETUNED);
+    names.extend(crate::proj_bias::ATTN_OUT_BIAS_CREATORS.iter().map(|r| r.0));
+    names.extend(crate::proj_bias::FFN_BIAS_CREATORS.iter().map(|r| r.0));
     names.sort_unstable();
     names.dedup();
     names
@@ -110,7 +124,7 @@ fn assert_rules_agree(name: &str, a: HparamRules, b: HparamRules) {
 
 /// Field by field, with no `..`: a field added to [`ArchFacts`] does not
 /// compile here until the agreement tests compare it.
-fn assert_same(name: &str, got: ArchFacts, want: ArchFacts) {
+pub(crate) fn assert_same(name: &str, got: ArchFacts, want: ArchFacts) {
     let ArchFacts {
         profile,
         audited,
@@ -148,12 +162,12 @@ fn default_is_a_name_absent_from_every_table() {
     assert_same(ABSENT, ArchFacts::from_tables(ABSENT), ArchFacts::DEFAULT);
 }
 
-/// For every name any table keys on, the facts state what each legacy
-/// lookup answers, written here against the public lookups rather than
-/// through `from_tables`, so a later step that builds some names' facts
-/// elsewhere is held to the tables' answers for them.
+/// For every name any table keys on, the facts the loaders read
+/// ([`ArchFacts::of`]) state what each public lookup answers. For a
+/// registry name, a row left behind in (or added to) a legacy table the
+/// definition does not state turns this red.
 #[test]
-fn from_tables_agrees_with_every_legacy_lookup() {
+fn the_facts_agree_with_every_public_lookup() {
     use crate::capability as cap;
     for name in every_tabled_name() {
         let profile = cap::resolve_profile(name);
@@ -210,6 +224,7 @@ fn from_tables_agrees_with_every_legacy_lookup() {
                 skip_stream: crate::skip_stream::has_skip_stream(name),
                 parallel_ssm: crate::mamba2::parallel_with_attention(name),
                 learned_positions: crate::position_embd::learned_positions(name),
+                rope_gated_on_finetuned: crate::rope_finetuned::unrotated(name, Some(false)),
             },
             tensors: TensorFacts {
                 gpt_oss_layers: name == "gpt-oss",
@@ -230,6 +245,8 @@ fn from_tables_agrees_with_every_legacy_lookup() {
                 ),
                 weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(name),
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&name),
+                attn_out_bias: crate::proj_bias::attn_out_presence(name),
+                ffn_bias: crate::proj_bias::ffn_presence(name),
             },
             rules: HparamRules {
                 swa_window_override: cap::swa_window_override,
@@ -237,7 +254,7 @@ fn from_tables_agrees_with_every_legacy_lookup() {
                 rope_layers: crate::rope_layers::rope_layers,
             },
         };
-        assert_same(name, ArchFacts::from_tables(name), want);
+        assert_same(name, ArchFacts::of(name), want);
     }
 }
 
@@ -246,7 +263,7 @@ fn from_tables_agrees_with_every_legacy_lookup() {
 /// side it keeps its own catalog row.
 #[test]
 fn config_facts_are_keyed_on_the_raw_name() {
-    let raw = ArchFacts::from_tables("llama-embed");
+    let raw = ArchFacts::of("llama-embed");
     assert_eq!(raw.profile.map(|p| p.gguf_name), Some("llama-embed"));
     assert_eq!(
         crate::capability::canonical_architecture("llama-embed"),
@@ -274,22 +291,22 @@ fn every_tabled_name_is_a_catalog_name() {
 /// `capability.rs` and read the tables by name.
 #[test]
 fn the_refused_key_lists_derive_from_the_facts() {
-    let gemma = ArchFacts::from_tables("gemma3");
+    let gemma = ArchFacts::of("gemma3");
     assert!(gemma.unsupported_feature_keys("gemma3").is_empty());
-    let grok = ArchFacts::from_tables("grok");
+    let grok = ArchFacts::of("grok");
     let keys: Vec<String> = grok
         .unsupported_feature_keys("grok")
         .into_iter()
         .map(|(k, _)| k)
         .collect();
     assert!(!keys.iter().any(|k| k.contains("softcapping")), "{keys:?}");
-    let llama = ArchFacts::from_tables("llama");
+    let llama = ArchFacts::of("llama");
     assert!(llama
         .unsupported_feature_keys("llama")
         .iter()
         .any(|(k, _)| k == "llama.attn_logit_softcapping"));
     // The scaling keys are the complement of the multiplier row.
-    let granite: Vec<String> = ArchFacts::from_tables("granite")
+    let granite: Vec<String> = ArchFacts::of("granite")
         .unsupported_scaling_keys("granite")
         .into_iter()
         .map(|(k, _, _)| k)
@@ -311,6 +328,8 @@ fn the_config_loader_reads_the_tables_only_through_the_facts() {
     // name also appears inside the best-effort strings the snapshots pin.
     for direct in [
         "arch_tables",
+        "from_tables(",
+        "rope_finetuned::unrotated(",
         "resolve_profile(",
         "capability::unsupported_feature_keys",
         "capability::unsupported_scaling_keys",
@@ -373,6 +392,8 @@ fn the_decoder_loader_reads_the_tables_only_through_the_facts() {
     let src = code_only(include_str!("../loader/decoder_from_gguf.rs"));
     for direct in [
         "arch_tables",
+        "from_tables(",
+        "rope_finetuned::unrotated(",
         "resolve_profile(",
         "== \"gpt-oss\"",
         "NormSites::with_function(",
@@ -395,11 +416,11 @@ fn the_decoder_loader_reads_the_tables_only_through_the_facts() {
     // facts first, from the name `canonical_architecture` returned; the
     // raw facts from `general.architecture` itself.
     let canonical = src
-        .find("ArchFacts::from_tables(&arch)")
+        .find("ArchFacts::of(&arch)")
         .expect("tensor facts built from the canonical `arch`");
     assert!(src[..canonical].contains("canonical_architecture("));
     let raw = src
-        .find("ArchFacts::from_tables(\n            file.metadata_str(\"general.architecture\")")
+        .find("ArchFacts::of(\n            file.metadata_str(\"general.architecture\")")
         .expect("family / memory facts built from the raw name");
     assert!(raw > canonical);
 }
