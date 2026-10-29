@@ -261,6 +261,13 @@ pub(crate) fn cuda_matvec_launch(kind: QuantKind) -> Option<CudaMatvecLaunchFn> 
         QuantKind::Q5_1 => Some(frink_cuda::gpu::launch_q5_1_matvec),
         QuantKind::Tq1_0 => Some(frink_cuda::gpu::launch_tq1_0_matvec),
         QuantKind::Ptq1_0 => Some(frink_cuda::gpu::launch_ptq1_0_matvec),
+        QuantKind::IQ2XXS => Some(frink_cuda::gpu::launch_iq2_xxs_matvec),
+        QuantKind::IQ2XS => Some(frink_cuda::gpu::launch_iq2_xs_matvec),
+        QuantKind::IQ2S => Some(frink_cuda::gpu::launch_iq2_s_matvec),
+        QuantKind::IQ3XXS => Some(frink_cuda::gpu::launch_iq3_xxs_matvec),
+        QuantKind::IQ3S => Some(frink_cuda::gpu::launch_iq3_s_matvec),
+        QuantKind::IQ1S => Some(frink_cuda::gpu::launch_iq1_s_matvec),
+        QuantKind::IQ1M => Some(frink_cuda::gpu::launch_iq1_m_matvec),
         _ => None,
     }
 }

@@ -34,6 +34,11 @@ fn f16_fields(name: &str) -> &'static [usize] {
         "Q4_1" | "Q5_1" => &[0, 2],
         "TQ1_0" => &[52],
         "PTQ1_0" => &[26],
+        "IQ2_XXS" | "IQ2_XS" | "IQ2_S" | "IQ3_XXS" | "IQ3_S" | "IQ1_S" => &[0],
+        // IQ1_M's scale is assembled from scale-word nibbles; byte 55
+        // holds its sign and top exponent bit, so clearing byte 55's two
+        // top bits (`at + 1` below) keeps it finite.
+        "IQ1_M" => &[54],
         other => panic!("{other}: no header layout for the host check"),
     }
 }

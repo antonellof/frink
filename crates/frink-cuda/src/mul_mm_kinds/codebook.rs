@@ -112,6 +112,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_iq4_nl,
     codebook: Some(IQ4NL_CODEBOOK),
+    grids: &[],
 };
 
 /// Scalar twin of [`IQ4_NL`]'s `dequant_src`.
@@ -172,6 +173,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_iq4_xs,
     codebook: Some(IQ4NL_CODEBOOK),
+    grids: &[],
 };
 
 /// Scalar twin of [`IQ4_XS`]'s `dequant_src`.
@@ -241,6 +243,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_mxfp4,
     codebook: Some(MXFP4_CODEBOOK),
+    grids: &[],
 };
 
 /// Scalar twin of the `frink_e8m0_to_f32` in [`MXFP4`]'s

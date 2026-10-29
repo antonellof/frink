@@ -24,6 +24,8 @@ pub mod decode_attn;
 /// kind's `mul_mm` dequant, and its scalar twin. Always compiled, so
 /// `frink-core`'s kernel matrix reads the set on a CPU-only build.
 pub mod get_rows;
+/// The IQ grid tables as CUDA C, generated from `frink_quant::iq_tables`.
+pub mod iq_grids;
 
 /// The per-kind CUDA matvec (decode) kernel table. Always compiled,
 /// for the same reason [`mul_mm`] is: it is kernel text plus three
@@ -48,6 +50,8 @@ pub mod mul_mm_tc;
 
 #[cfg(feature = "cuda")]
 pub mod attn;
+#[cfg(feature = "cuda")]
+mod gen_launch;
 #[cfg(feature = "cuda")]
 pub mod get_rows_launch;
 #[cfg(feature = "cuda")]

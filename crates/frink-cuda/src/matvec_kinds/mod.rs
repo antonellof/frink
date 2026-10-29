@@ -188,6 +188,48 @@ pub const KINDS: &[MatvecKind] = &[
         fn_name: "ptq1_0_matvec",
         src: MatvecSrc::FromDequant,
     },
+    MatvecKind {
+        name: "IQ2_XXS",
+        module_name: "frink_iq2_xxs",
+        fn_name: "iq2_xxs_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "IQ2_XS",
+        module_name: "frink_iq2_xs",
+        fn_name: "iq2_xs_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "IQ2_S",
+        module_name: "frink_iq2_s",
+        fn_name: "iq2_s_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "IQ3_XXS",
+        module_name: "frink_iq3_xxs",
+        fn_name: "iq3_xxs_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "IQ3_S",
+        module_name: "frink_iq3_s",
+        fn_name: "iq3_s_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "IQ1_S",
+        module_name: "frink_iq1_s",
+        fn_name: "iq1_s_matvec",
+        src: MatvecSrc::FromDequant,
+    },
+    MatvecKind {
+        name: "IQ1_M",
+        module_name: "frink_iq1_m",
+        fn_name: "iq1_m_matvec",
+        src: MatvecSrc::FromDequant,
+    },
 ];
 
 /// Looks up a kind by its GGUF quant name. `None` means CUDA has no
@@ -252,7 +294,7 @@ mod tests {
     /// fall back honestly.
     #[test]
     fn a_kind_with_no_matvec_does_not_resolve() {
-        for absent in ["Q8_1", "IQ1_S", "IQ2_XXS", "IQ3_S"] {
+        for absent in ["Q8_1", "F16", "BF16"] {
             assert!(
                 kind_by_name(absent).is_none(),
                 "{absent} resolved to a CUDA matvec that does not exist"
@@ -412,7 +454,7 @@ mod hardware_tests {
     /// Run on a machine with an actual CUDA device:
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware. Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0 and PTQ1_0 have NEVER executed on a GPU; Q5_0 has not either. Run with --ignored on a CUDA-capable machine and record the result before any doc claims those kinds decode on CUDA"]
+    #[ignore = "requires real CUDA hardware. Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0, PTQ1_0 and the seven IQ1/IQ2/IQ3 kinds have NEVER executed on a GPU; Q5_0 has not either. Run with --ignored on a CUDA-capable machine and record the result before any doc claims those kinds decode on CUDA"]
     fn every_cuda_matvec_matches_the_cpu_reference() {
         type Dot = fn(&[u8], &[f32]) -> f32;
         type Launch =
@@ -495,6 +537,41 @@ mod hardware_tests {
                 "PTQ1_0",
                 |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::PTQ1_0, x),
                 crate::gpu::launch_ptq1_0_matvec,
+            ),
+            (
+                "IQ2_XXS",
+                frink_quant::dot_iq2_xxs_f32_scalar,
+                crate::gpu::launch_iq2_xxs_matvec,
+            ),
+            (
+                "IQ2_XS",
+                frink_quant::dot_iq2_xs_f32_scalar,
+                crate::gpu::launch_iq2_xs_matvec,
+            ),
+            (
+                "IQ2_S",
+                frink_quant::dot_iq2_s_f32_scalar,
+                crate::gpu::launch_iq2_s_matvec,
+            ),
+            (
+                "IQ3_XXS",
+                frink_quant::dot_iq3_xxs_f32_scalar,
+                crate::gpu::launch_iq3_xxs_matvec,
+            ),
+            (
+                "IQ3_S",
+                frink_quant::dot_iq3_s_f32_scalar,
+                crate::gpu::launch_iq3_s_matvec,
+            ),
+            (
+                "IQ1_S",
+                frink_quant::dot_iq1_s_f32_scalar,
+                crate::gpu::launch_iq1_s_matvec,
+            ),
+            (
+                "IQ1_M",
+                frink_quant::dot_iq1_m_f32_scalar,
+                crate::gpu::launch_iq1_m_matvec,
             ),
         ];
 

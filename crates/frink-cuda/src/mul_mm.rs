@@ -188,6 +188,10 @@ pub struct MulMmKind {
     /// than in a parallel table so a kind cannot be added without one --
     /// the untestable half and the testable half are the same row.
     pub dequant_twin: fn(xb: &[u8], il: usize, reg: &mut [f32; SUB]),
+    /// The IQ grid and sign tables `dequant_src` indexes, emitted ahead
+    /// of it from `frink_quant::iq_tables` ([`crate::iq_grids`]). Empty
+    /// for every kind that reads no grid.
+    pub grids: &'static [crate::iq_grids::IqGrid],
 }
 
 /// The 16-entry value table a codebook format's 4-bit code indexes.
@@ -240,8 +244,8 @@ impl MulMmKind {
 // definition should not move a public name.
 pub use crate::mul_mm_kinds::kquant::K_SCALE_MIN_SRC;
 pub use crate::mul_mm_kinds::{
-    IQ4_NL, IQ4_XS, MXFP4, PTQ1_0, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
-    TQ1_0,
+    IQ1_M, IQ1_S, IQ2_S, IQ2_XS, IQ2_XXS, IQ3_S, IQ3_XXS, IQ4_NL, IQ4_XS, MXFP4, PTQ1_0, Q2_K,
+    Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, TQ1_0,
 };
 
 /// Scalar twin of the CUDA `frink_f16_to_f32` in `F16_SRC`: the same
@@ -277,7 +281,7 @@ pub fn f16_to_f32(bits: u16) -> f32 {
 /// format is one row here.
 pub const KINDS: &[MulMmKind] = &[
     Q8_0, Q4_0, Q5_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0,
-    PTQ1_0,
+    PTQ1_0, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, IQ1_M,
 ];
 
 /// Looks up a kind by its GGUF quant name (`"Q4_0"`, `"Q8_0"`).
@@ -490,8 +494,10 @@ pub fn kernel_src_with_body(kind: &MulMmKind, body: &str) -> String {
     // another one.
     // The trit helper TQ1_0 and PTQ1_0 read is emitted the same way.
     let trit = crate::mul_mm_kinds::ternary::TRIT_SRC;
+    // The grids too come from the kind's own row.
+    let grids = crate::iq_grids::grids_src(kind.grids);
     format!(
-        "{defines}{F16_SRC}{K_SCALE_MIN_SRC}{trit}{codebook}{}{body}",
+        "{defines}{F16_SRC}{K_SCALE_MIN_SRC}{trit}{codebook}{grids}{}{body}",
         kind.dequant_src
     )
 }
@@ -669,6 +675,13 @@ mod dequant_twin_tests {
             (&PTQ1_0, |b| {
                 frink_quant::ternary::dequant_trits(b, frink_quant::ternary::PTQ1_0)
             }),
+            (&IQ2_XXS, frink_quant::dequant_iq2_xxs),
+            (&IQ2_XS, frink_quant::dequant_iq2_xs),
+            (&IQ2_S, frink_quant::dequant_iq2_s),
+            (&IQ3_XXS, frink_quant::dequant_iq3_xxs),
+            (&IQ3_S, frink_quant::dequant_iq3_s),
+            (&IQ1_S, frink_quant::dequant_iq1_s),
+            (&IQ1_M, frink_quant::dequant_iq1_m),
         ];
 
         for k in KINDS {
@@ -790,6 +803,41 @@ mod dequant_twin_tests {
                 frink_quant::ternary::PTQ1_0_BLOCK_BYTES,
                 frink_quant::ternary::PTQ1_0_BLOCK_ELEMS,
             ),
+            (
+                "IQ2_XXS",
+                frink_quant::IQ2_XXS_BLOCK_BYTES,
+                frink_quant::IQ2_XXS_BLOCK_ELEMS,
+            ),
+            (
+                "IQ2_XS",
+                frink_quant::IQ2_XS_BLOCK_BYTES,
+                frink_quant::IQ2_XS_BLOCK_ELEMS,
+            ),
+            (
+                "IQ2_S",
+                frink_quant::IQ2_S_BLOCK_BYTES,
+                frink_quant::IQ2_S_BLOCK_ELEMS,
+            ),
+            (
+                "IQ3_XXS",
+                frink_quant::IQ3_XXS_BLOCK_BYTES,
+                frink_quant::IQ3_XXS_BLOCK_ELEMS,
+            ),
+            (
+                "IQ3_S",
+                frink_quant::IQ3_S_BLOCK_BYTES,
+                frink_quant::IQ3_S_BLOCK_ELEMS,
+            ),
+            (
+                "IQ1_S",
+                frink_quant::IQ1_S_BLOCK_BYTES,
+                frink_quant::IQ1_S_BLOCK_ELEMS,
+            ),
+            (
+                "IQ1_M",
+                frink_quant::IQ1_M_BLOCK_BYTES,
+                frink_quant::IQ1_M_BLOCK_ELEMS,
+            ),
         ];
 
         for k in KINDS {
@@ -825,7 +873,7 @@ mod dequant_twin_tests {
         // A kind with no kernel must not resolve. Resolving would send
         // a GEMM to a module that cannot compile, and the caller would
         // have no way to fall back honestly.
-        for absent in ["Q8_1", "IQ1_S", "IQ2_XXS", "IQ3_S"] {
+        for absent in ["Q8_1", "F16", "BF16"] {
             assert!(
                 kind_by_name(absent).is_none(),
                 "{absent} resolved to a mul_mm kernel that does not exist"
