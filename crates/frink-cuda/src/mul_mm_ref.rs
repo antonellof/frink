@@ -294,6 +294,18 @@ pub(crate) mod fixtures {
             // The trit formats keep their one `half d` LAST.
             "TQ1_0" => finite_f16(block, 52),
             "PTQ1_0" => finite_f16(block, 26),
+            // The IQ grid kinds keep `half d` at the head.
+            "IQ2_XXS" | "IQ2_XS" | "IQ2_S" | "IQ3_XXS" | "IQ3_S" | "IQ1_S" => finite_f16(block, 0),
+            // IQ1_M has no `half d`: its scale is the top nibbles of the
+            // four scale words at 48..56, sc[3]'s at bits 12..16. Byte 55
+            // carries the f16's sign and exponent bits 12..14; byte 53's
+            // top two bits are exponent bits 10..11. Exponent 11, as
+            // `finite_f16` pins, with the sign and every sub-scale left
+            // random.
+            "IQ1_M" => {
+                block[53] |= 0xC0;
+                block[55] = (block[55] & 0x8F) | 0x20;
+            }
             // `half d`, then `half dmin`.
             "Q4_K" | "Q5_K" => {
                 finite_f16(block, 0);
@@ -622,6 +634,13 @@ mod tests {
             ("PTQ1_0", |b| {
                 frink_quant::ternary::dequant_trits(b, frink_quant::ternary::PTQ1_0)
             }),
+            ("IQ2_XXS", frink_quant::dequant_iq2_xxs),
+            ("IQ2_XS", frink_quant::dequant_iq2_xs),
+            ("IQ2_S", frink_quant::dequant_iq2_s),
+            ("IQ3_XXS", frink_quant::dequant_iq3_xxs),
+            ("IQ3_S", frink_quant::dequant_iq3_s),
+            ("IQ1_S", frink_quant::dequant_iq1_s),
+            ("IQ1_M", frink_quant::dequant_iq1_m),
         ];
 
         for k in KINDS {

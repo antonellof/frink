@@ -279,6 +279,10 @@ either pool: a fixed cost of about 60 ms per token (#128).
 
 ## Coverage: which kinds have a kernel
 
+This table is history; [`docs/KERNELS.md`](../KERNELS.md) is generated
+from the dispatch and is the current answer (#405 closed the CUDA
+rows, matvec, GEMM and get_rows, pending a hardware run).
+
 frink has 21 `QuantKind`s. llama.cpp implements all of them on both
 CPU and CUDA. frink does not, and this table is the parity gap that a
 tok/s column cannot show.
@@ -295,8 +299,9 @@ tok/s column cannot show.
 | IQ4_XS | yes | **new, unverified** | **new, unverified** | matvec+GEMM |
 | Q2_K | yes | **new, unverified** | **new, unverified** | **no** |
 | Q3_K | yes | **new, unverified** | **new, unverified** | **no** |
-| Q4_1, Q5_1, Q8_1 | no | **no** | **no** | **no** |
-| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | IQ1_M only | **no** | **no** | **no** |
+| Q4_1, Q5_1 | no | **new, unverified** | **new, unverified** | **no** |
+| Q8_1 | no | n/a | n/a | n/a |
+| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | IQ1_M only | **new, unverified** | **new, unverified** | **no** |
 | MXFP4 | yes | **new, unverified** | **new, unverified** | **no** |
 
 "no" means the tensor is decoded on the host and the GPU is idle for

@@ -83,6 +83,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_tq1_0,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of [`TQ1_0`]'s `dequant_src`.
@@ -146,6 +147,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_ptq1_0,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of [`PTQ1_0`]'s `dequant_src`.

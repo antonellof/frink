@@ -84,6 +84,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_q4_k,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of [`Q4_K`]'s `dequant_src`.
@@ -151,6 +152,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_q5_k,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of [`Q5_K`]'s `dequant_src`.
@@ -240,6 +242,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_q6_k,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of [`Q6_K`]'s `dequant_src`.
@@ -352,6 +355,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_q2_k,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of [`Q2_K`]'s `dequant_src`.
@@ -449,6 +453,7 @@ __device__ __forceinline__ void frink_dequant_sub(
 "#,
     dequant_twin: dequant_sub_q3_k,
     codebook: None,
+    grids: &[],
 };
 
 /// Scalar twin of the `frink_q3_k_scale` in [`Q3_K`]'s `dequant_src`.

@@ -1407,26 +1407,20 @@ impl WeightMatrix {
         })
     }
 
-    /// IQ4_NL left this list when Metal gained its GEMM (CUDA already
-    /// had one): it is no longer a kind whose batch is N matvecs. The
-    /// IQ1/IQ2/IQ3 kinds have a GEMM on Metal and none on CUDA, so for
-    /// them the answer is the backend's: Metal's when the dense path runs
-    /// there (#405), and N matvecs otherwise.
+    /// A kind batches when the backend that runs it has a GEMM for it:
+    /// Metal's set when the dense path runs there, CUDA's otherwise.
+    /// Both now cover every weight kind (#405); the predicate stays
+    /// derived so a kind added to `QuantKind` without a GEMM answers
+    /// `false` and keeps the per-position path.
     #[cfg(any(feature = "metal", feature = "cuda"))]
     pub fn prefers_gpu_batch(&self) -> bool {
         let WeightMatrix::Quantized { kind, .. } = self.base() else {
             return true;
         };
-        let no_cuda_gemm = matches!(
-            kind,
-            QuantKind::IQ1S
-                | QuantKind::IQ2XXS
-                | QuantKind::IQ3XXS
-                | QuantKind::IQ2XS
-                | QuantKind::IQ2S
-                | QuantKind::IQ3S
-                | QuantKind::IQ1M
-        );
+        // Derived from `frink_cuda::mul_mm::KINDS`, which since #405
+        // holds every weight kind; it was a hand list of the seven IQ
+        // kinds that had none.
+        let no_cuda_gemm = !cuda_mul_mm_kind_supported(*kind);
         #[cfg(feature = "metal")]
         if metal_dense_enabled() {
             use gpu_backend::BackendCaps;
@@ -3963,6 +3957,13 @@ impl WeightMatrix {
             QuantKind::Q5_1 => frink_quant::Q5_1_BLOCK_BYTES,
             QuantKind::Tq1_0 => frink_quant::ternary::TQ1_0_BLOCK_BYTES,
             QuantKind::Ptq1_0 => frink_quant::ternary::PTQ1_0_BLOCK_BYTES,
+            QuantKind::IQ2XXS => frink_quant::IQ2_XXS_BLOCK_BYTES,
+            QuantKind::IQ2XS => frink_quant::IQ2_XS_BLOCK_BYTES,
+            QuantKind::IQ2S => frink_quant::IQ2_S_BLOCK_BYTES,
+            QuantKind::IQ3XXS => frink_quant::IQ3_XXS_BLOCK_BYTES,
+            QuantKind::IQ3S => frink_quant::IQ3_S_BLOCK_BYTES,
+            QuantKind::IQ1S => frink_quant::IQ1_S_BLOCK_BYTES,
+            QuantKind::IQ1M => frink_quant::IQ1_M_BLOCK_BYTES,
             _ => unreachable!(
                 "apply_gpu only calls this for the CUDA/Vulkan-dispatchable kinds, not {kind:?}"
             ),
@@ -5411,16 +5412,18 @@ pub(crate) mod tests {
     /// It has moved three times. `Q5_0` was that kind until
     /// 2026-09-05, when it gained both; `Q2_K` was until 2026-09-09,
     /// when it and Q3_K did; `Q4_1` was until Q4_1, Q5_1, TQ1_0 and
-    /// PTQ1_0 gained both (#405). `IQ2_XXS` is the hole now, which is
-    /// the point: the test names a real hole and stops compiling a
-    /// comment. When the IQ kinds land, this probe moves again.
+    /// PTQ1_0 gained both, and `IQ2_XXS` until the IQ kinds did (#405).
+    /// No weight kind is a hole any more. `Q8_1` is the one kind left:
+    /// ggml's activation format, which no backend has a kernel for and
+    /// the kernel matrix marks `n/a`. The probe still has to name the
+    /// host path for it, so the recording is what is pinned here.
     #[test]
     fn a_kind_cuda_cannot_run_is_recorded_as_leaving_the_gpu() {
         use crate::kernel_registry::{op, Backend, Outcome};
 
         let reg = crate::kernel_registry::Registry::new();
         let loc = std::panic::Location::caller();
-        shaped(QuantKind::IQ2XXS, 64, 256).probe_kernels_for(&reg, Backend::Cuda, "ffn_down", loc);
+        shaped(QuantKind::Q8_1, 64, 256).probe_kernels_for(&reg, Backend::Cuda, "ffn_down", loc);
         let report = reg.seal();
         assert!(
             report.entries.iter().any(|e| e.key.backend == Backend::Cuda

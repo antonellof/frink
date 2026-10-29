@@ -135,32 +135,32 @@ mod tests {
     use super::*;
     use frink_gguf::GgmlType;
 
-    /// An IQ2_XXS projection has no CUDA kernel: the plan must say it leaves
-    /// the GPU, by kind and op, and say nothing about the Q4_K one.
+    /// Every weight kind has a CUDA kernel for every op (#405), so the
+    /// plan's gaps are the CPU's: a Q4_1 projection has no integer dot
+    /// there, and the plan must say so by kind and op, and say nothing
+    /// about the Q4_K one. The same tensors on CUDA are fully covered.
     #[test]
     fn a_kind_with_no_kernel_is_named_in_the_plan() {
         let tensors = [
             ("token_embd.weight", GgmlType::Q4K),
             ("output.weight", GgmlType::Q6K),
-            ("blk.0.attn_q.weight", GgmlType::IQ2XXS),
+            ("blk.0.attn_q.weight", GgmlType::Q4_1),
             ("blk.0.ffn_up.weight", GgmlType::Q4K),
             ("blk.0.attn_norm.weight", GgmlType::F32),
         ];
-        let lines = plan_lines(&tensors, BudgetBackend::Cuda);
-        let text = lines.join("\n");
+        let text = plan_lines(&tensors, BudgetBackend::Cpu).join("\n");
         assert!(text.contains("4 quantized tensors"), "{text}");
         assert!(
-            text.contains("IQ2_XXS  matvec   -> host (1 tensor)"),
+            text.contains("Q4_1     matvec   -> f32 dot (1 tensor)"),
             "{text}"
         );
         assert!(
-            text.contains("IQ2_XXS  gemm     -> host (1 tensor)"),
+            text.contains("Q4_1     gemm     -> f32 dot (1 tensor)"),
             "{text}"
         );
-        // CUDA gathers a Q4_K embedding on the device (#405).
-        assert!(!text.contains("get_rows"), "{text}");
-        assert!(!text.contains("Q4_K     matvec"), "{text}");
-        assert!(!text.contains("Q6_K"), "{text}");
+        assert!(!text.contains("Q4_K"), "{text}");
+        let cuda = plan_lines(&tensors, BudgetBackend::Cuda);
+        assert!(cuda[1].contains("every quantized tensor"), "{cuda:?}");
     }
 
     #[test]

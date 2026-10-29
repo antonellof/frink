@@ -460,6 +460,10 @@ pub(crate) use crate::resident::{resident_cuda_f32, resident_cuda_weights, Resid
 // existing path still resolves -- a refactor that moves a definition
 // should not move a public name.
 use crate::matvec_kinds::coalesced::{coalesced_kind, CoalescedKind, MatvecWidth};
+// The launchers of the matvecs generated from a GEMM dequant, one line
+// each in `gen_launch`; re-exported so every kind's launcher has the
+// same path.
+pub use crate::gen_launch::*;
 pub use crate::matvec_kinds::coalesced::{
     Q4_K_MATVEC_COALESCED_KERNEL_SRC, Q5_K_MATVEC_COALESCED_KERNEL_SRC,
     Q6_K_MATVEC_COALESCED_KERNEL_SRC, Q8_0_MATVEC_COALESCED_KERNEL_SRC,
@@ -496,7 +500,7 @@ pub fn matvec_launch_meta(kind_name: &str) -> Option<(&'static str, &'static str
 /// `launch_q*_matvec` below is this call with its name filled in, so
 /// the launchers cannot name a module or entry point the table does
 /// not.
-fn launch_matvec_by_kind(
+pub(crate) fn launch_matvec_by_kind(
     kind_name: &str,
     weights: &[u8],
     x: &[f32],
@@ -611,54 +615,6 @@ pub fn launch_mxfp4_matvec(
     n_blocks_per_row: usize,
 ) -> Result<Vec<f32>, CudaError> {
     launch_matvec_by_kind("MXFP4", weights, x, rows, row_bytes, n_blocks_per_row)
-}
-
-/// Launches the Q4_1 matvec, generated from its GEMM dequant. **NEVER
-/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
-pub fn launch_q4_1_matvec(
-    weights: &[u8],
-    x: &[f32],
-    rows: usize,
-    row_bytes: usize,
-    n_blocks_per_row: usize,
-) -> Result<Vec<f32>, CudaError> {
-    launch_matvec_by_kind("Q4_1", weights, x, rows, row_bytes, n_blocks_per_row)
-}
-
-/// Launches the Q5_1 matvec, generated from its GEMM dequant. **NEVER
-/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
-pub fn launch_q5_1_matvec(
-    weights: &[u8],
-    x: &[f32],
-    rows: usize,
-    row_bytes: usize,
-    n_blocks_per_row: usize,
-) -> Result<Vec<f32>, CudaError> {
-    launch_matvec_by_kind("Q5_1", weights, x, rows, row_bytes, n_blocks_per_row)
-}
-
-/// Launches the TQ1_0 matvec, generated from its GEMM dequant. **NEVER
-/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
-pub fn launch_tq1_0_matvec(
-    weights: &[u8],
-    x: &[f32],
-    rows: usize,
-    row_bytes: usize,
-    n_blocks_per_row: usize,
-) -> Result<Vec<f32>, CudaError> {
-    launch_matvec_by_kind("TQ1_0", weights, x, rows, row_bytes, n_blocks_per_row)
-}
-
-/// Launches the PTQ1_0 matvec, generated from its GEMM dequant. **NEVER
-/// RUN ON A GPU** -- see [`crate::matvec_kinds::generic`].
-pub fn launch_ptq1_0_matvec(
-    weights: &[u8],
-    x: &[f32],
-    rows: usize,
-    row_bytes: usize,
-    n_blocks_per_row: usize,
-) -> Result<Vec<f32>, CudaError> {
-    launch_matvec_by_kind("PTQ1_0", weights, x, rows, row_bytes, n_blocks_per_row)
 }
 
 /// Launches the Q4_K matvec kernel. Verified on real GPU hardware -- see module docs.
