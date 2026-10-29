@@ -89,7 +89,7 @@ fn metadata() -> BTreeMap<String, GgufValue> {
     .collect()
 }
 
-fn tensors(dtype: GgmlType, moe: bool) -> Vec<Tensor> {
+fn tensors(dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
     let mut seed = 0u64;
     let mut matrix = |name: String, rows: usize, cols: usize, dtype: GgmlType| {
         seed += 1;
@@ -120,7 +120,7 @@ fn tensors(dtype: GgmlType, moe: bool) -> Vec<Tensor> {
         "token_embd.weight".to_string(),
         N_VOCAB,
         N_EMBD,
-        GgmlType::F32,
+        embd,
     )];
     for l in 0..N_LAYER {
         out.push(norm(format!("blk.{l}.attn_norm.weight"), 2 * l as u64));
@@ -175,16 +175,22 @@ fn tensors(dtype: GgmlType, moe: bool) -> Vec<Tensor> {
 /// by `encode`, and returns its path. `tag` names the file, so two
 /// suites never share one.
 pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
-    write_variant(tag, dtype, false, encode)
+    write_variant(tag, dtype, GgmlType::F32, false, encode)
+}
+
+/// [`write`] with the token embedding stored as `embd` rather than F32,
+/// for the suites that exercise a backend's embedding gather.
+pub fn write_with_embd(tag: &str, dtype: GgmlType, embd: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, dtype, embd, false, encode)
 }
 
 /// [`write`] with every FFN a routed MoE of [`N_EXPERT`] experts of
 /// [`N_FF_EXP`], top [`N_EXPERT_USED`], the experts stored as `dtype`.
 pub fn write_moe(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
-    write_variant(tag, dtype, true, encode)
+    write_variant(tag, dtype, GgmlType::F32, true, encode)
 }
 
-fn write_variant(tag: &str, dtype: GgmlType, moe: bool, encode: Encode) -> PathBuf {
+fn write_variant(tag: &str, dtype: GgmlType, embd: GgmlType, moe: bool, encode: Encode) -> PathBuf {
     let mut meta = metadata();
     if moe {
         meta.insert("llama.expert_count".into(), GgufValue::U32(N_EXPERT as u32));
@@ -193,7 +199,7 @@ fn write_variant(tag: &str, dtype: GgmlType, moe: bool, encode: Encode) -> PathB
             GgufValue::U32(N_EXPERT_USED as u32),
         );
     }
-    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype, moe)
+    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype, embd, moe)
         .into_iter()
         .map(|t| {
             let shape = if t.n_expert > 1 {
@@ -223,7 +229,10 @@ fn write_variant(tag: &str, dtype: GgmlType, moe: bool, encode: Encode) -> PathB
     // keeps two concurrent runs apart.
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(&dir).expect("create the fixture directory");
-    let path = dir.join(format!("{tag}_{dtype:?}-{}.gguf", std::process::id()));
+    let path = dir.join(format!(
+        "{tag}_{dtype:?}_{embd:?}-{}.gguf",
+        std::process::id()
+    ));
     let file = std::fs::File::create(&path).expect("create the fixture");
     let mut w = GgufWriter::create(file, &meta, plan).expect("write the header");
     for (p, bytes) in &encoded {

@@ -97,7 +97,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("deepseek32", "src/models/deepseek32.cpp"),
     ("deepseek4", "src/models/deepseek4.cpp"),
     ("exaone-moe", "src/models/exaone-moe.cpp:23"),
-    ("exaone4", "src/models/exaone4.cpp:18"),
     ("gemma4-assistant", "src/models/gemma4-assistant.cpp"),
     ("glm-dsa", "src/models/glm-dsa.cpp"),
     ("glm4moe", "src/models/glm4-moe.cpp"),
@@ -113,6 +112,12 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
 /// Does `arch`'s graph subtract `nextn_predict_layers` from its layer
 /// count?
 pub fn reads_nextn(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch).topology.reads_nextn
+}
+
+/// [`reads_nextn`] from [`NEXTN_READERS`] alone (`exaone4` is in
+/// `crate::models::exaone4`).
+pub(crate) fn reads_nextn_from_table(arch: &str) -> bool {
     NEXTN_READERS.iter().any(|(a, _)| *a == arch)
 }
 
@@ -341,7 +346,13 @@ mod tests {
         for arch in ["llama", "grok", "gemma4", "qwen3moe", "mistral4"] {
             assert!(!reads_nextn(arch), "{arch}");
         }
-        assert_eq!(NEXTN_READERS.len(), 17, "measured on 2026-09-11");
+        // The census spans the table and the registry.
+        let moved = crate::models::REGISTRY
+            .iter()
+            .filter(|d| d.facts.topology.reads_nextn)
+            .map(|d| d.names.len())
+            .sum::<usize>();
+        assert_eq!(NEXTN_READERS.len() + moved, 17, "measured on 2026-09-11");
     }
 
     /// Exactly the skipped range, and only `blk.` names.

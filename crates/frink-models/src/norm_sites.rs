@@ -41,7 +41,7 @@
 //! that every name is a row this loader can reach.
 
 use crate::loader::load_f32_vec;
-use crate::norm::{norm_function, NormFunction, NormOp, NormParam};
+use crate::norm::{NormFunction, NormOp, NormParam};
 use crate::LoadError;
 use frink_gguf::{GgufError, TensorSource};
 
@@ -382,10 +382,10 @@ pub struct NormSites {
 }
 
 impl NormSites {
-    /// The table row for `arch`, with the architecture's own norm
-    /// function.
+    /// The row for `arch`, with the architecture's own norm function:
+    /// its `crate::models` definition, else the legacy tables.
     pub fn for_arch(arch: &str) -> Self {
-        Self::with_function(arch, norm_function(arch))
+        crate::models::ArchFacts::of(arch).tensors.norm_sites
     }
 
     /// The row of an architecture no norm table names: RMSNorm, the
@@ -401,8 +401,18 @@ impl NormSites {
         embedding: None,
     };
 
-    /// The table row for `arch` under `function`: the loader's entry,
-    /// which has read the file (`crate::norm::norm_function_for_file`).
+    /// The post-norm-only topology (`olmo2.cpp`, `exaone4.cpp`): no
+    /// pre-attention and no pre-FFN norm, each branch's output normed
+    /// before its residual add. One constant for the rows that share it.
+    pub const POST_NORM_ONLY: Self = Self {
+        attn: None,
+        ffn: None,
+        ..Self::GENERIC
+    };
+
+    /// The legacy tables' row for `arch` under `function`, for
+    /// `ArchFacts::from_tables`; a `crate::models` architecture states
+    /// its row there instead.
     pub fn with_function(arch: &str, function: NormFunction) -> Self {
         let mut sites = Self {
             function,
@@ -415,10 +425,6 @@ impl NormSites {
         }
         if EMBEDDING_NORM_ARCHITECTURES.contains(&arch) {
             sites.embedding = Some(StoredNorm::required(&["token_embd_norm"]));
-        }
-        if crate::capability::is_post_norm_only(arch) {
-            sites.attn = None;
-            sites.ffn = None;
         }
         if PRE_FFN_NORM_IS_POST_ATTENTION_NORM.contains(&arch) {
             sites.ffn = Some(StoredNorm::required(&["post_attention_norm"]));

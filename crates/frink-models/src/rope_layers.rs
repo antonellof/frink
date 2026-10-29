@@ -236,6 +236,32 @@ pub fn rope_layers(
     has_sliding_window: bool,
     n_dense_lead: usize,
 ) -> RopeLayers {
+    (crate::models::ArchFacts::of(arch).rules.rope_layers)(
+        arch,
+        n_layers,
+        has_sliding_window,
+        n_dense_lead,
+    )
+}
+
+/// `exaone4.cpp:111`'s `use_rope = is_swa(il) || swa_type == NONE`:
+/// with a window only the sliding layers rotate, without one all do.
+/// Shared by `exaone4` (`crate::models::exaone4`) and `exaone-moe`.
+pub fn sliding_layers_rotate(has_sliding_window: bool) -> RopeLayers {
+    if has_sliding_window {
+        RopeLayers::SlidingOnly
+    } else {
+        RopeLayers::All
+    }
+}
+
+/// [`rope_layers`] from this table alone, for `HparamRules::LEGACY`.
+pub fn rope_layers_from_table(
+    arch: &str,
+    n_layers: usize,
+    has_sliding_window: bool,
+    n_dense_lead: usize,
+) -> RopeLayers {
     let no_rope_every = |phase| RopeLayers::NoRopeEvery {
         step: step(LLAMA_CPP_DEFAULT_NO_ROPE_STEP),
         phase,
@@ -248,14 +274,9 @@ pub fn rope_layers(
         // SWA on unconditionally and :13 reads the window as a REQUIRED
         // key, so its `has_sliding_window` is always true and the second
         // arm here is unreachable for it -- which is the whole reason
-        // the two rows are one rule.
-        "exaone4" | "exaone-moe" => {
-            if has_sliding_window {
-                RopeLayers::SlidingOnly
-            } else {
-                RopeLayers::All
-            }
-        }
+        // the two rows are one rule (`exaone4`'s half is
+        // `crate::models::exaone4`).
+        "exaone-moe" => sliding_layers_rotate(has_sliding_window),
         // `cohere2.cpp:4` pins `swa_type` to STANDARD and `:13` reads the
         // window as a REQUIRED key (the loader refuses a file without
         // it, `crate::swa_geometry::window_required`), so this is

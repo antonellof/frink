@@ -7,10 +7,13 @@
 //! ([`facts::ArchFacts::from_tables`]) for every architecture that has
 //! not moved yet. One file per llama.cpp `src/models/<arch>.cpp`.
 
+pub mod exaone4;
 pub mod facts;
 pub mod granite;
 pub mod granite_moe;
 pub mod llama;
+pub mod olmo;
+pub mod olmo2;
 mod refused_keys;
 
 #[cfg(test)]
@@ -38,7 +41,14 @@ pub struct ModelDef {
 }
 
 /// Every architecture that has moved out of the legacy tables.
-pub const REGISTRY: &[ModelDef] = &[llama::DEF, granite::DEF, granite_moe::DEF];
+pub const REGISTRY: &[ModelDef] = &[
+    llama::DEF,
+    granite::DEF,
+    granite_moe::DEF,
+    olmo::DEF,
+    olmo2::DEF,
+    exaone4::DEF,
+];
 
 /// The registry entry naming `arch`.
 pub fn find(arch: &str) -> Option<&'static ModelDef> {

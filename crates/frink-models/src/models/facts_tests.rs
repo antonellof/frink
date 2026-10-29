@@ -76,6 +76,9 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
         }
     }
     names.extend(crate::rope_finetuned::ROPE_GATED_ON_FINETUNED);
+    names.extend(crate::clamp_kqv::CLAMPED_QKV_ARCHITECTURES);
+    names.extend(crate::clamp_kqv::CLAMP_KQV_REQUIRED);
+    names.extend(crate::mtp_blocks::NEXTN_READERS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::ATTN_OUT_BIAS_CREATORS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::FFN_BIAS_CREATORS.iter().map(|r| r.0));
     names.sort_unstable();
@@ -217,6 +220,13 @@ fn the_facts_agree_with_every_public_lookup() {
                 logit_softcap: cap::LOGIT_SOFTCAP_ARCHITECTURES.contains(&name),
                 embeddings_scaled_by_sqrt_n_embd: profile
                     .is_some_and(|p| cap::embeddings_scaled_by_sqrt_n_embd(name, p.family)),
+                // Read: a declared clamp survives; required: an absent
+                // one is refused.
+                clamp_kqv: matches!(
+                    crate::clamp_kqv::resolve_clamp(name, Some(1.0)),
+                    Ok(Some(_))
+                )
+                .then(|| crate::clamp_kqv::resolve_clamp(name, None).is_err()),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(name),
@@ -225,6 +235,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 parallel_ssm: crate::mamba2::parallel_with_attention(name),
                 learned_positions: crate::position_embd::learned_positions(name),
                 rope_gated_on_finetuned: crate::rope_finetuned::unrotated(name, Some(false)),
+                reads_nextn: crate::mtp_blocks::reads_nextn(name),
             },
             tensors: TensorFacts {
                 gpt_oss_layers: name == "gpt-oss",
@@ -276,8 +287,11 @@ fn config_facts_are_keyed_on_the_raw_name() {
 /// loader refuses the name before it reads any facts.
 #[test]
 fn every_tabled_name_is_a_catalog_name() {
+    // `NEXTN_READERS` is a census of llama.cpp's graphs, measured over
+    // all of `src/models/`, and names some frink has no row for.
+    let census = |n: &str| crate::mtp_blocks::NEXTN_READERS.iter().any(|r| r.0 == n);
     for name in every_tabled_name() {
-        if name == ABSENT {
+        if name == ABSENT || census(name) {
             continue;
         }
         assert!(
