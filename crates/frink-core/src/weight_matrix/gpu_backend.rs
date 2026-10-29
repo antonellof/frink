@@ -220,6 +220,8 @@ fn metal_matvec_launch(kind: QuantKind) -> Option<MetalMatvecLaunchFn> {
         QuantKind::Ptq1_0 => Some(frink_metal::gpu::launch_ptq1_0_matvec),
         QuantKind::Q2K => Some(frink_metal::q2_k::launch_q2_k_matvec),
         QuantKind::Q3K => Some(frink_metal::q3_k::launch_q3_k_matvec),
+        QuantKind::IQ4NL => Some(frink_metal::codebook4::launch_iq4_nl_matvec),
+        QuantKind::Mxfp4Gguf => Some(frink_metal::codebook4::launch_mxfp4_matvec),
         _ => None,
     }
 }
@@ -322,7 +324,9 @@ impl BackendCaps for Metal {
             | QuantKind::IQ4XS
             | QuantKind::Ptq1_0
             | QuantKind::Q2K
-            | QuantKind::Q3K => Some(kind.name()),
+            | QuantKind::Q3K
+            | QuantKind::IQ4NL
+            | QuantKind::Mxfp4Gguf => Some(kind.name()),
             _ => None,
         }
     }
@@ -362,6 +366,8 @@ impl BackendCaps for Metal {
                 | QuantKind::Ptq1_0
                 | QuantKind::Q2K
                 | QuantKind::Q3K
+                | QuantKind::IQ4NL
+                | QuantKind::Mxfp4Gguf
         )
     }
 }

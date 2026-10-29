@@ -64,6 +64,10 @@ mod k_quant_check;
 #[cfg(feature = "metal")]
 pub mod attn;
 
+/// IQ4_NL and MXFP4: the two 32-element codebook formats, one body.
+#[cfg(feature = "metal")]
+pub mod codebook4;
+
 /// The KV wire format: dtypes, append and dequant kernels. Split from
 /// `attn` so the store and the softmax are separate concepts.
 #[cfg(feature = "metal")]

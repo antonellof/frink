@@ -116,12 +116,17 @@ the kernel tables:
 | Metal only | `IQ4_XS`, `Q5_0` | AVX2 + NEON | Metal matvec + GEMM |
 | Metal only, scalar CPU | `PTQ1_0` (PrismML ternary) | scalar | Metal matvec + GEMM |
 | GPU, f32 CPU dot | `Q2_K`, `Q3_K` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
-| CPU-vectorized | `Q4_1`, `Q5_1`, `Q8_1`, `IQ4_NL`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none |
+| Codebook | `IQ4_NL` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
+| Codebook, scalar CPU | GGUF-block `MXFP4` (gpt-oss's experts) | scalar | Metal matvec + GEMM, CUDA matvec + GEMM |
+| CPU-vectorized | `Q4_1`, `Q5_1`, `Q8_1`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none |
 | AVX2 only | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | none |
-| Scalar only | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M`, GGUF-block `MXFP4` | none | none |
+| Scalar only | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M` | none | none |
 
 Metal's MoE indexed GEMM (`mul_mm_id`) is narrower still: `Q4_0`,
-`Q8_0` and `Q4_K` only.
+`Q8_0` and `Q4_K` only. `IQ4_NL` and `MXFP4` experts have no indexed
+kernel (`mul_mv_id` or `mul_mm_id`); on Metal each expert product is
+its own matvec. The per-backend matrix is
+[`docs/KERNELS.md`](KERNELS.md).
 
 Before choosing a quant:
 
@@ -470,7 +475,7 @@ stops matching the code turns a test red.
 | Semantic anchor checkpoints for KV | **Yes.** `anchor::decode_slide` and `WindowPolicy` are wired into `generate.rs` and the batch scheduler. |
 | Agentic context edits without recompute | **Partial, and no longer leaking.** The radix prefix cache shares pages and reports `cached_tokens` on both the private and the batched path. `evict` is called from `acquire_paged_caches`, which both paths go through, when a request cannot find pages: the tree gives back what no live lease has locked, and the caller retries immediately rather than charging reclamation against its deadline. What is still partial is the edit itself: a changed middle forces a recompute from that point, because the cache is a prefix tree. |
 | Elastic VRAM re-allocation without restart | **Partial.** `POST /v1/cache/rebuild` re-splits KV pool geometry at runtime. Moving bytes between an expert cache and KV is not implemented. |
-| MXFP4 / BF16 | **Yes**, executable. MXFP4 is CPU-only. |
+| MXFP4 / BF16 | **Yes**, executable. GGUF-block MXFP4 has Metal and CUDA matvec and GEMM kernels; the safetensors two-buffer form is CPU-only. |
 | NVFP4 / FP8 | **Refused by name, not executed.** NVFP4 is recognized and sized by `frink-gguf` (tag 40) and has no execution path, so a file carrying it stops instead of computing something else. FP8 appears only as a KV cache wire (`--ctk fp8`), not as a weight format. |
 | DeepSeek-V4-Flash, GLM-5.2, Kimi K3 | **Loaders and primitives only.** Nothing has run end to end on a real checkpoint. |
 | OpenAI + Anthropic compatible APIs | **Yes**, both, plus Responses. Tool calls parsed in eleven wire formats. |
