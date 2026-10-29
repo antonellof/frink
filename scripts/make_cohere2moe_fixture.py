@@ -43,10 +43,15 @@ Variants:
   * `--mtp`        one NextN block appended inside `block_count`
                    (`nextn_predict_layers = 1`), as a real export ships it
   * `--norm-w`     `expert_weights_norm = true` and a SOFTMAX gating key
+  * `--no-eps`     neither norm epsilon key: refusal evidence, `:4-9`
+                   throw `missing Cohere2 MoE norm epsilon` (#464)
+  * `--no-dense-lead`  no `leading_dense_block_count`: refusal
+                   evidence, `:15` reads it REQUIRED (#464)
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \\
         python3 scripts/make_cohere2moe_fixture.py OUT.gguf [--rms] [--mtp] [--norm-w]
+        [--no-eps] [--no-dense-lead]
 
 The golden values that go with it are produced by llama.cpp itself
 (see `scripts/gptoss_reference_logits.cpp`), not by this script.
@@ -80,7 +85,14 @@ DENSE_LEAD = 1
 PATTERN = [False, True, True, False]
 
 
-def main(out_path: str, rms: bool, mtp: bool, norm_w: bool) -> None:
+def main(
+    out_path: str,
+    rms: bool,
+    mtp: bool,
+    norm_w: bool,
+    eps: bool = True,
+    dense_lead: bool = True,
+) -> None:
     rng = np.random.default_rng(0xC02E)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -99,7 +111,9 @@ def main(out_path: str, rms: bool, mtp: bool, norm_w: bool) -> None:
     w.add_head_count(N_HEAD)
     w.add_head_count_kv(N_HEAD_KV)
     w.add_rope_freq_base(ROPE_BASE)
-    if rms:
+    if not eps:
+        pass
+    elif rms:
         w.add_layer_norm_rms_eps(EPS)
     else:
         w.add_layer_norm_eps(EPS)
@@ -111,7 +125,8 @@ def main(out_path: str, rms: bool, mtp: bool, norm_w: bool) -> None:
     w.add_expert_count(N_EXPERT)
     w.add_expert_used_count(N_EXPERT_USED)
     w.add_expert_feed_forward_length(N_FF_EXP)
-    w.add_leading_dense_block_count(DENSE_LEAD)
+    if dense_lead:
+        w.add_leading_dense_block_count(DENSE_LEAD)
     w.add_expert_weights_norm(norm_w)
     if norm_w:
         w.add_expert_gating_func(gguf.ExpertGatingFuncType.SOFTMAX)
@@ -196,4 +211,6 @@ if __name__ == "__main__":
         "--rms" in sys.argv[1:],
         "--mtp" in sys.argv[1:],
         "--norm-w" in sys.argv[1:],
+        "--no-eps" not in sys.argv[1:],
+        "--no-dense-lead" not in sys.argv[1:],
     )

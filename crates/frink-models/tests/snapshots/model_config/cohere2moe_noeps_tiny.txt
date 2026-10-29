@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/cohere2moe_noeps_tiny.gguf
+config: REFUSED: architecture 'cohere2moe' requires unimplemented feature: neither `cohere2moe.attention.layer_norm_epsilon` nor `cohere2moe.attention.layer_norm_rms_epsilon` is present; cohere2moe.cpp:4-9 throws `missing Cohere2 MoE norm epsilon` on such a file

@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/cohere2moe_nodense_tiny.gguf
+config: REFUSED: architecture 'cohere2moe' requires unimplemented feature: `cohere2moe.leading_dense_block_count` is absent; cohere2moe.cpp:15 reads it as a REQUIRED key
