@@ -17,8 +17,11 @@
 //! - The shared-norm parallel residual (`:222-266`) and `logit_scale`
 //!   REQUIRED and multiplied (`:14`).
 //!
-//! Two keys this file reads REQUIRED are defaulted here rather than
-//! refused (#464).
+//! - **Two refusals no table states** ([`load_checks`], #464):
+//!   `leading_dense_block_count` is REQUIRED (`:15`), and `:4-9` throw
+//!   `missing Cohere2 MoE norm epsilon` when neither
+//!   `attention.layer_norm_epsilon` nor `attention.layer_norm_rms_epsilon`
+//!   is present.
 //!
 //! Evidence: `tests/cohere2moe_graphs.rs`, against libllama.
 
@@ -32,6 +35,7 @@ use crate::norm_sites::NormSites;
 use crate::rope_layers::RopeLayers;
 use crate::scalar_multipliers::MultiplierSupport;
 use crate::swa_layers::PatternKeyRead;
+use frink_gguf::TensorSource;
 
 /// `cohere2moe.cpp:192`: `is_swa(il) || il < n_layer_dense_lead`. The
 /// window is REQUIRED, so there always is one.
@@ -42,6 +46,33 @@ pub fn rope_layers(
     n_dense_lead: usize,
 ) -> RopeLayers {
     RopeLayers::SlidingOrLeadingDense { n_dense_lead }
+}
+
+/// The throws in `cohere2moe.cpp`'s `load_arch_hparams` that no table
+/// states. `None` loads.
+pub fn load_checks(file: &dyn TensorSource, arch: &str, _n_layers: usize) -> Option<String> {
+    let key = |s: &str| format!("{arch}.{s}");
+    if file
+        .metadata(&key("attention.layer_norm_epsilon"))
+        .is_none()
+        && file
+            .metadata(&key("attention.layer_norm_rms_epsilon"))
+            .is_none()
+    {
+        return Some(format!(
+            "neither `{}` nor `{}` is present; cohere2moe.cpp:4-9 throws `missing Cohere2 MoE \
+             norm epsilon` on such a file",
+            key("attention.layer_norm_epsilon"),
+            key("attention.layer_norm_rms_epsilon")
+        ));
+    }
+    if file.metadata(&key("leading_dense_block_count")).is_none() {
+        return Some(format!(
+            "`{}` is absent; cohere2moe.cpp:15 reads it as a REQUIRED key",
+            key("leading_dense_block_count")
+        ));
+    }
+    None
 }
 
 pub const FACTS: ArchFacts = ArchFacts {
@@ -85,6 +116,7 @@ pub const FACTS: ArchFacts = ArchFacts {
     },
     rules: HparamRules {
         rope_layers,
+        load_checks,
         ..HparamRules::LEGACY
     },
     ..ArchFacts::DEFAULT
