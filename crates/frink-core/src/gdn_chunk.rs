@@ -86,8 +86,18 @@ pub fn delta_chunk_rows(
     beta: &[f32],
     out: &mut [f32],
 ) {
+    // `metal_dense_enabled()` first: `FRINK_METAL=0` (`--device cpu`)
+    // means no Metal work at all. This launch once read only the shape,
+    // so a CPU-pinned process with the `metal` feature compiled in ran
+    // every 32-row recurrent prefill on the GPU, and the host goldens
+    // over `qwen3next` drifted by 4.9e-5 under a flag that said CPU.
+    // `metal_off_dispatches_nothing` in frink-models walks every
+    // fixture and fails on any dispatch.
     #[cfg(feature = "metal")]
-    if rows >= DEVICE_ROWS && dims.head_dim <= frink_metal::gdn_chunk::MAX_HEAD_DIM {
+    if crate::weight_matrix::metal_dense_enabled()
+        && rows >= DEVICE_ROWS
+        && dims.head_dim <= frink_metal::gdn_chunk::MAX_HEAD_DIM
+    {
         let shape = frink_metal::gdn::DeltaShape {
             n_k_heads: dims.n_k_heads,
             n_v_heads: dims.n_v_heads,

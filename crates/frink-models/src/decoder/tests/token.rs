@@ -23,7 +23,7 @@ use super::*;
 fn a_geglu_moe_layer_runs_geglu_in_its_routed_experts_not_swiglu() {
     let mut cfg = tiny_test_config();
     cfg.ffn_activation = crate::config::FfnActivation::Gelu;
-    let decoder = Decoder::new_random_small(cfg, 2, 8);
+    let decoder = host_decoder(cfg, 2, 8);
     let hidden_dim = decoder.config.hidden_dim;
     let layer = &decoder.layers[1];
     assert!(
@@ -105,7 +105,7 @@ fn a_geglu_moe_layer_runs_geglu_in_its_routed_experts_not_swiglu() {
 #[test]
 fn forward_pass_produces_finite_logits_of_correct_shape() {
     let vocab = 10;
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, vocab);
+    let decoder = host_decoder(tiny_test_config(), 2, vocab);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
     let logits = decoder.forward_token(3, 0, &mut caches);
@@ -128,7 +128,7 @@ fn forward_pass_produces_finite_logits_of_correct_shape() {
 /// `frink-moe`'s/`frink-core`'s own `#[ignore]`d tests).
 #[test]
 fn gpu_vram_budget_bytes_with_nothing_placed_matches_the_default() {
-    let mut decoder = Decoder::new_random_small(tiny_test_config(), 2, 10);
+    let mut decoder = host_decoder(tiny_test_config(), 2, 10);
     let mut caches_default: Vec<KvCache> = decoder.config.new_kv_caches();
     let default_logits = decoder.forward_token(3, 0, &mut caches_default);
 
@@ -155,7 +155,7 @@ fn gpu_vram_budget_bytes_with_nothing_placed_matches_the_default() {
 #[test]
 fn shared_expert_gate_scales_shared_output_by_sigmoid_of_the_gate_logit() {
     let cfg = tiny_test_config();
-    let mut decoder = Decoder::new_random_small(cfg, 2, 8);
+    let mut decoder = host_decoder(cfg, 2, 8);
     let hidden_dim = decoder.config.hidden_dim;
     assert_eq!(
         decoder.layers[1].moe.shared_experts.len(),
@@ -227,7 +227,7 @@ fn shared_expert_gate_scales_shared_output_by_sigmoid_of_the_gate_logit() {
 
 #[test]
 fn kv_cache_grows_by_one_position_per_layer_per_step() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 3, 5);
+    let decoder = host_decoder(tiny_test_config(), 3, 5);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
     decoder.forward_token(0, 0, &mut caches);
@@ -241,7 +241,7 @@ fn kv_cache_grows_by_one_position_per_layer_per_step() {
 
 #[test]
 fn same_token_same_position_is_deterministic() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, 8);
+    let decoder = host_decoder(tiny_test_config(), 2, 8);
     let mut caches_a: Vec<KvCache> = decoder.config.new_kv_caches();
     let mut caches_b: Vec<KvCache> = decoder.config.new_kv_caches();
 
@@ -252,7 +252,7 @@ fn same_token_same_position_is_deterministic() {
 
 #[test]
 fn multi_step_decode_stays_finite_across_positions() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, 8);
+    let decoder = host_decoder(tiny_test_config(), 2, 8);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
     for pos in 0..16 {
@@ -267,7 +267,7 @@ fn multi_step_decode_stays_finite_across_positions() {
 #[test]
 fn dense_layer_forward_pass_produces_finite_logits_of_correct_shape() {
     let vocab = 10;
-    let decoder = Decoder::new_random_small(tiny_dense_test_config(), 2, vocab);
+    let decoder = host_decoder(tiny_dense_test_config(), 2, vocab);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
     let logits = decoder.forward_token(3, 0, &mut caches);
@@ -285,7 +285,7 @@ fn dense_layer_fast_path_still_records_expert_zero_activations() {
     // `MoeWeights::placement_plan` and hotness-based GPU placement
     // depend on this being real for every model shape, not just
     // genuinely-MoE ones.
-    let decoder = Decoder::new_random_small(tiny_dense_test_config(), 1, 8);
+    let decoder = host_decoder(tiny_dense_test_config(), 1, 8);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
     decoder.forward_token(0, 0, &mut caches);
@@ -308,7 +308,7 @@ fn dense_layer_fast_path_still_records_expert_zero_activations() {
 #[test]
 fn placement_plan_reflects_real_observed_expert_activations() {
     let cfg = tiny_test_config(); // 6 experts, top-2 active/token
-    let decoder = Decoder::new_random_small(cfg, 2, 16);
+    let decoder = host_decoder(cfg, 2, 16);
     let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
 
     let n_calls = 20;

@@ -16,6 +16,8 @@ use frink_gguf::GgmlType;
 use crate::tensor::Tensor;
 
 pub mod gpu_backend;
+mod host_pin;
+pub use host_pin::{host_backend_pinned, pin_host_backend};
 pub mod hadamard;
 pub mod lora;
 mod repack_cache;

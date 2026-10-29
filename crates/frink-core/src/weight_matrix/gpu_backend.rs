@@ -528,6 +528,10 @@ impl BackendDispatch for Metal {
     }
 
     fn dense_enabled() -> bool {
+        // Before the cell: a host pin holds whatever was decided first.
+        if super::host_pin::host_backend_pinned() {
+            return false;
+        }
         use std::sync::OnceLock;
         // A `static` inside a generic function is shared across every
         // monomorphization, so this cache cannot be hoisted into a
@@ -575,6 +579,10 @@ impl BackendDispatch for Cuda {
     }
 
     fn dense_enabled() -> bool {
+        // Before the cell: a host pin holds whatever was decided first.
+        if super::host_pin::host_backend_pinned() {
+            return false;
+        }
         use std::sync::OnceLock;
         // See the note on `Metal::dense_enabled` for why this cell is
         // not shared through a default method.
@@ -676,6 +684,10 @@ impl BackendDispatch for Vulkan {
     }
 
     fn dense_enabled() -> bool {
+        // Before the cell: a host pin holds whatever was decided first.
+        if super::host_pin::host_backend_pinned() {
+            return false;
+        }
         use std::sync::OnceLock;
         // See the note on `Metal::dense_enabled` for why this cell is
         // not shared through a default method.

@@ -346,7 +346,8 @@ pub unsafe fn launch_delta_chunk(
         // One dispatch per chunk, in order: the chunks ARE the
         // recurrence, and a serial encoder runs them back to back
         // against the same state without a submission between.
-        encoder.dispatchThreadgroups_threadsPerThreadgroup(
+        crate::dispatch::dispatch_counted(
+            &encoder,
             MTLSize {
                 width: shape.n_v_heads,
                 height: 1,

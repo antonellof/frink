@@ -648,8 +648,8 @@ fn paged_decode_matches_contiguous_on_a_gated_model() {
 #[test]
 #[ignore = "needs Apple Metal GPU"]
 fn a_gated_model_matches_llama_cpp_with_metal_switched_on() {
-    std::env::set_var("FRINK_METAL", "1");
-    std::env::set_var("FRINK_METAL_ATTN", "1");
+    #[cfg(feature = "metal")]
+    common::pin_backend(common::Backend::Metal);
     #[cfg(not(feature = "metal"))]
     {
         eprintln!("skip: built without --features metal");

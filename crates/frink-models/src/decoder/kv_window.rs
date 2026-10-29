@@ -92,7 +92,7 @@ impl KvWindowPolicy {
     pub fn from_env() -> Self {
         let on = Self::parse(std::env::var(KV_WINDOW_ENV).ok().as_deref());
         #[cfg(feature = "metal")]
-        let on = on && !frink_metal::attn::metal_attn_enabled();
+        let on = on && !crate::decoder::metal_eligibility::metal_attn_switched_on();
         KvWindowPolicy { enabled: on }
     }
 

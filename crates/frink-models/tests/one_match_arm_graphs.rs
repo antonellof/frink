@@ -60,7 +60,7 @@ use common::{
 };
 use frink_gguf::TensorSource;
 use frink_models::capability::QkNormStyle;
-use frink_models::{Decoder, ModelConfig};
+use frink_models::ModelConfig;
 
 // --- deepseek (V1) -------------------------------------------------
 //
@@ -159,7 +159,7 @@ fn renormalising_deepseeks_top_k_weights_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.moe.norm_topk_prob = true;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = caches(&d);
     let worst = worst_vs(&d.forward_batch_last(&PROMPT, 0, &mut kv), &DEEPSEEK_GOLDEN);
     assert!(
@@ -671,7 +671,7 @@ fn rotating_hunyuan_dense_at_the_unscaled_base_diverges_from_llama_cpp() {
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.rope_theta = 500.0;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&PROMPT, 0, &mut kv),
@@ -848,7 +848,7 @@ fn routing_ernie_moe_through_sigmoid_instead_of_softmax_diverges_from_llama_cpp(
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let mut config = ModelConfig::from_gguf(&file).expect("parses");
     config.moe.gating = frink_moe::GatingFunction::Sigmoid;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = caches(&d);
     let worst = worst_vs(
         &d.forward_batch_last(&PROMPT, 0, &mut kv),
@@ -1054,7 +1054,7 @@ fn running_chatglm_without_its_fused_qkv_bias_diverges_from_llama_cpp() {
     let path = fixture("chatglm");
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let config = ModelConfig::from_gguf(&file).expect("parses");
-    let mut d = Decoder::from_gguf(&path, config).expect("loads");
+    let mut d = common::load_decoder(&path, config);
     for layer in d.layers.iter_mut() {
         layer.attn.q_bias = None;
         layer.attn.k_bias = None;
@@ -1086,7 +1086,7 @@ fn rotating_chatglms_whole_head_instead_of_half_diverges_from_llama_cpp() {
         "the sabotage target must be there"
     );
     config.rope_dim = None;
-    let d = Decoder::from_gguf(&path, config).expect("loads");
+    let d = common::load_decoder(&path, config);
     let mut kv = caches(&d);
     let worst = worst_vs(&d.forward_batch_last(&PROMPT, 0, &mut kv), &CHATGLM_GOLDEN);
     assert!(
@@ -1285,7 +1285,7 @@ fn running_qwen_without_its_fused_qkv_bias_diverges_from_llama_cpp() {
     let path = fixture("qwen");
     let file = frink_gguf::GgufFile::open(&path).expect("opens");
     let config = ModelConfig::from_gguf(&file).expect("parses");
-    let mut d = Decoder::from_gguf(&path, config).expect("loads");
+    let mut d = common::load_decoder(&path, config);
     for layer in d.layers.iter_mut() {
         layer.attn.q_bias = None;
         layer.attn.k_bias = None;

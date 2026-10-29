@@ -169,7 +169,7 @@ fn the_paged_path_scales_embeddings_and_softcaps_logits_like_the_contiguous_one(
 /// reservation would get wrong.
 fn paged_prefill_matches_contiguous(config: ModelConfig) {
     let n_layers = 2;
-    let mut decoder = Decoder::new_random_small(config, n_layers, 10);
+    let mut decoder = host_decoder(config, n_layers, 10);
     // Evicting, whatever the shell says: the paged prefill gathers into a
     // contiguous scratch copy and scatters it back by offset, so a
     // windowed arm here is what proves the scratch never evicts (#61).
@@ -291,7 +291,7 @@ fn paged_prefill_is_bit_identical_across_every_arm() {
 fn concurrent_decodes_against_one_shared_store_match_running_them_alone() {
     use std::sync::Arc;
 
-    let decoder = Arc::new(Decoder::new_random_small(tiny_test_config(), 2, 10));
+    let decoder = Arc::new(host_decoder(tiny_test_config(), 2, 10));
     let prompts: [&[usize]; 3] = [&[3, 1, 4], &[1, 5, 9], &[2, 6, 5]];
     let continuation = [7usize, 8, 3];
 
@@ -384,7 +384,7 @@ fn run_one(
 /// refuses.
 #[test]
 fn a_decode_step_the_stores_cannot_hold_advances_no_layer() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, 10);
+    let decoder = host_decoder(tiny_test_config(), 2, 10);
     let mut caches: Vec<PagedKvCache> = (0..2).map(|_| PagedKvCache::new()).collect();
     // Block size 1 so "one more position" always needs a block.
     // Layer 0 gets two, layer 1 exactly one: the prompt fills layer
@@ -421,7 +421,7 @@ fn a_decode_step_the_stores_cannot_hold_advances_no_layer() {
 
 #[test]
 fn a_prefill_the_stores_cannot_hold_refuses_before_writing_any_layer() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, 10);
+    let decoder = host_decoder(tiny_test_config(), 2, 10);
     let prompt = [1usize, 2, 3, 4, 5, 6];
     let mut paged_caches: Vec<PagedKvCache> = (0..2).map(|_| PagedKvCache::new()).collect();
     // Layer 0 fits the prompt with room to spare; layer 1's two
@@ -459,7 +459,7 @@ fn a_prefill_the_stores_cannot_hold_refuses_before_writing_any_layer() {
 /// serving path actually prefills long prompts.
 #[test]
 fn two_paged_prefill_chunks_equal_one_call_over_the_whole_prompt() {
-    let decoder = Decoder::new_random_small(tiny_test_config(), 2, 10);
+    let decoder = host_decoder(tiny_test_config(), 2, 10);
     let prompt = [3usize, 1, 4, 1, 5, 9, 2];
     let split = 3;
 
@@ -504,7 +504,7 @@ fn paged_matches_contiguous(config: ModelConfig) {
 /// by handing a different `ModelConfig` in.
 fn paged_matches_contiguous_with(config: ModelConfig, prepare: impl FnOnce(&mut Decoder)) {
     let n_layers = 2;
-    let mut decoder = Decoder::new_random_small(config, n_layers, 10);
+    let mut decoder = host_decoder(config, n_layers, 10);
     prepare(&mut decoder);
     let decoder = decoder;
 

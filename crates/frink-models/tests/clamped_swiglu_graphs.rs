@@ -495,8 +495,8 @@ fn a_clamp_array_of_the_wrong_length_is_refused_naming_the_key() {
 #[test]
 #[ignore = "needs Apple Metal GPU"]
 fn a_clamped_two_width_model_stays_on_the_host_with_metal_switched_on() {
-    std::env::set_var("FRINK_METAL", "1");
-    std::env::set_var("FRINK_METAL_ATTN", "1");
+    #[cfg(feature = "metal")]
+    common::pin_backend(common::Backend::Metal);
     #[cfg(not(feature = "metal"))]
     {
         eprintln!("skip: built without --features metal");

@@ -109,7 +109,7 @@ fn the_gpu_router_predicate_admits_only_routing_it_reproduces() {
     // predicate is supposed to ADMIT.
     let mut base = tiny_test_config();
     base.moe.gating = frink_moe::GatingFunction::Softmax;
-    let decoder = Decoder::new_random_small(base.clone(), 2, 8);
+    let decoder = host_decoder(base.clone(), 2, 8);
     let plain_layer = &decoder.layers[0];
     let n_experts = base.moe.n_experts;
     // Chosen so each feature really bites: the top two experts sit
@@ -145,7 +145,7 @@ fn the_gpu_router_predicate_admits_only_routing_it_reproduces() {
     assert!(agrees(plain_layer, &base));
 
     // A per-expert router bias.
-    let mut biased_decoder = Decoder::new_random_small(base.clone(), 2, 8);
+    let mut biased_decoder = host_decoder(base.clone(), 2, 8);
     biased_decoder.layers[0].moe.exp_probs_bias =
         Some((0..n_experts).map(|e| 0.9 - 0.4 * e as f32).collect());
     let biased_layer = &biased_decoder.layers[0];
