@@ -5,8 +5,8 @@
 //!   declares a window of zero, `swa_type = CHUNKED`, `n_swa = 8192`
 //!   whatever the file says, a period-4 pattern (3 chunked, 1 full),
 //!   the sliding layers' RoPE base and scale seeded from the model's,
-//!   and a LITERAL attention temperature (scale 0.1, floor 8192, offset
-//!   1) on the unrotated layers (`:15-17,175-176`). A declared zero
+//!   and a LITERAL attention temperature (scale 0.1, floor 8192 and
+//!   offset 1) on the unrotated layers (`:15-17,175-176`). A declared zero
 //!   takes the branch libllama aborts on, refused by name
 //!   (`crate::chunked_swa`).
 //! - **No RoPE on the full layer of each period** (`:145-146`, the
