@@ -49,6 +49,9 @@ pub(super) fn try_build_moe_packed_q4_planes(
                     QuantKind::IQ3S => "IQ3_S",
                     QuantKind::IQ1S => "IQ1_S",
                     QuantKind::IQ1M => "IQ1_M",
+                    QuantKind::Q4_1 => "Q4_1",
+                    QuantKind::Q5_1 => "Q5_1",
+                    QuantKind::Tq1_0 => "TQ1_0",
                     _ => return None,
                 };
                 let _ = frink_metal::gpu::mul_mm_sg_meta(kind_str)?;

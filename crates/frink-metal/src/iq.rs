@@ -43,7 +43,7 @@
 //! A row past `n_rows` is clamped to the last row before it is read
 //! (ggml's buffers are padded, these are not); its result is dropped.
 
-use crate::gpu::{MatvecEpilogue, MetalError};
+use crate::gen_kinds::{gen_launchers, Family, GenKind, KINDS};
 
 /// The seven formats' `group` / `affine` pairs and the dequant functor
 /// built from them. Spliced into the GEMM translation unit
@@ -311,93 +311,6 @@ kernel void NAME(                                                           \
 }
 "#;
 
-/// One IQ format: its GGUF name and every entry point generated for it.
-/// [`KINDS`] is the one table; the MSL entry lines are generated from
-/// it, so the lookups and the source cannot name different sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct IqKind {
-    pub name: &'static str,
-    /// The MSL `group` / `affine` struct.
-    pub functor: &'static str,
-    pub block_bytes: usize,
-    pub prefix: &'static str,
-    pub matvec: &'static str,
-    pub mm_sg: &'static str,
-    pub mm_sg_a: &'static str,
-    pub mm_sg_f16: &'static str,
-    pub mm_sg_f16_a: &'static str,
-    pub mm_id: &'static str,
-    pub mm_id_f16: &'static str,
-    pub moe_matvec_id: &'static str,
-    pub moe_down_id: &'static str,
-}
-
-macro_rules! iq_kind {
-    ($name:literal, $functor:literal, $bytes:expr, $p:literal) => {
-        IqKind {
-            name: $name,
-            functor: $functor,
-            block_bytes: $bytes,
-            prefix: $p,
-            matvec: concat!($p, "_matvec"),
-            mm_sg: concat!($p, "_mul_mm_sg"),
-            mm_sg_a: concat!($p, "_mul_mm_sg_a"),
-            mm_sg_f16: concat!($p, "_mul_mm_sg_f16"),
-            mm_sg_f16_a: concat!($p, "_mul_mm_sg_f16_a"),
-            mm_id: concat!($p, "_mul_mm_id"),
-            mm_id_f16: concat!($p, "_mul_mm_id_f16"),
-            moe_matvec_id: concat!($p, "_moe_matvec_id"),
-            moe_down_id: concat!($p, "_moe_down_id"),
-        }
-    };
-}
-
-/// The seven, with `frink_quant`'s block sizes.
-pub(crate) const KINDS: [IqKind; 7] = [
-    iq_kind!(
-        "IQ2_XXS",
-        "IQ2XXS",
-        frink_quant::IQ2_XXS_BLOCK_BYTES,
-        "iq2_xxs"
-    ),
-    iq_kind!("IQ2_XS", "IQ2XS", frink_quant::IQ2_XS_BLOCK_BYTES, "iq2_xs"),
-    iq_kind!("IQ2_S", "IQ2S", frink_quant::IQ2_S_BLOCK_BYTES, "iq2_s"),
-    iq_kind!(
-        "IQ3_XXS",
-        "IQ3XXS",
-        frink_quant::IQ3_XXS_BLOCK_BYTES,
-        "iq3_xxs"
-    ),
-    iq_kind!("IQ3_S", "IQ3S", frink_quant::IQ3_S_BLOCK_BYTES, "iq3_s"),
-    iq_kind!("IQ1_S", "IQ1S", frink_quant::IQ1_S_BLOCK_BYTES, "iq1_s"),
-    iq_kind!("IQ1_M", "IQ1M", frink_quant::IQ1_M_BLOCK_BYTES, "iq1_m"),
-];
-
-/// Elements per super-block, the same for all seven.
-pub(crate) const BLOCK_ELEMS: usize = 256;
-
-/// Rows one matvec threadgroup owns: four per simdgroup, two simdgroups.
-pub(crate) const ROWS_PER_TG: usize = 8;
-
-/// Threads and threadgroup bytes of every IQ matvec.
-pub(crate) const MATVEC_TG: (usize, usize) = (64, 0);
-
-/// The kind named `name` (`"IQ2_XXS"`, ...).
-pub(crate) fn by_name(name: &str) -> Option<&'static IqKind> {
-    KINDS.iter().find(|k| k.name == name)
-}
-
-/// The kind whose decode matvec is `fn_name`.
-pub(crate) fn by_matvec_fn(fn_name: &str) -> Option<&'static IqKind> {
-    KINDS.iter().find(|k| k.matvec == fn_name)
-}
-
-/// The MSL functor name the GEMM, `mul_mm_id` and the gather
-/// instantiate for `functor` (`IqDequant<IQ2XXS>` behind a typedef).
-pub(crate) fn dequant_typedef(functor: &str) -> String {
-    format!("{functor}Dequant")
-}
-
 /// The functors, after the grid tables, for the GEMM translation unit.
 pub(crate) fn gemm_functors_msl() -> &'static str {
     use std::sync::LazyLock;
@@ -406,30 +319,12 @@ pub(crate) fn gemm_functors_msl() -> &'static str {
             "{}\nconstant float IQ1_DELTA = 0.125f;\n{IQ_FUNCTORS_MSL}",
             crate::iq_grids::iq_grids_msl()
         );
-        for k in &KINDS {
-            s.push_str(&format!(
-                "typedef IqDequant<{}> {};\n",
-                k.functor,
-                dequant_typedef(k.functor)
-            ));
+        for (k, group) in kinds() {
+            s.push_str(&format!("typedef IqDequant<{group}> {};\n", k.dequant));
         }
         Box::leak(s.into_boxed_str())
     });
     &SRC
-}
-
-/// The GEMM and `mul_mm_id` entry lines, one set per kind.
-pub(crate) fn gemm_entries_msl() -> String {
-    let mut s = String::new();
-    for k in &KINDS {
-        let dq = dequant_typedef(k.functor);
-        s.push_str(&format!(
-            "MUL_MM_SG_ENTRY({}, {dq})\nMUL_MM_SG_F16_ENTRY({}, {dq})\n\
-             MUL_MM_ID_ENTRY({}, {dq})\nMUL_MM_ID_F16_ENTRY({}, {dq})\n",
-            k.mm_sg, k.mm_sg_f16, k.mm_id, k.mm_id_f16
-        ));
-    }
-    s
 }
 
 /// The matvec translation unit: tables, functors, the body, a matvec
@@ -442,12 +337,10 @@ pub(crate) fn iq_matvec_src() -> &'static str {
             gemm_functors_msl(),
             crate::moe_mv_id::MOE_MV_ID_MSL
         );
-        for k in &KINDS {
+        for (k, f) in kinds() {
             s.push_str(&format!(
                 "IQ_MATVEC_ENTRY({}, {f})\nMOE_MV_ID_ENTRIES({}, iq_matvec_impl<{f}>)\n",
-                k.matvec,
-                k.prefix,
-                f = k.functor
+                k.matvec, k.prefix
             ));
         }
         Box::leak(s.into_boxed_str())
@@ -455,114 +348,7 @@ pub(crate) fn iq_matvec_src() -> &'static str {
     &SRC
 }
 
-/// `matvec_launch_meta`'s row for an IQ kind.
-pub(crate) fn matvec_launch_meta(
-    kind: &str,
-) -> Option<(&'static str, &'static str, usize, usize, usize)> {
-    let k = by_name(kind)?;
-    Some((
-        iq_matvec_src(),
-        k.matvec,
-        k.block_bytes,
-        BLOCK_ELEMS,
-        ROWS_PER_TG,
-    ))
-}
-
-/// `mul_mm_sg_meta` / `mul_mm_id_meta`'s row for an IQ kind.
-pub(crate) fn gemm_meta(kind: &str, id: bool) -> Option<(&'static str, usize, usize)> {
-    let k = by_name(kind)?;
-    Some((
-        if id { k.mm_id } else { k.mm_sg },
-        k.block_bytes,
-        BLOCK_ELEMS,
-    ))
-}
-
-/// The exact-tile (`_a`) sibling of an IQ `mul_mm_sg` entry point.
-pub(crate) fn aligned_fn(fn_name: &str) -> Option<&'static str> {
-    KINDS.iter().find_map(|k| {
-        if k.mm_sg == fn_name {
-            Some(k.mm_sg_a)
-        } else if k.mm_sg_f16 == fn_name {
-            Some(k.mm_sg_f16_a)
-        } else {
-            None
-        }
-    })
-}
-
-/// The half-activation sibling of an IQ `mul_mm_sg` or `mul_mm_id`
-/// entry point.
-pub(crate) fn f16_fn(fn_name: &str) -> Option<&'static str> {
-    KINDS.iter().find_map(|k| {
-        if k.mm_sg == fn_name {
-            Some(k.mm_sg_f16)
-        } else if k.mm_id == fn_name {
-            Some(k.mm_id_f16)
-        } else {
-            None
-        }
-    })
-}
-
-fn matvec(
-    kind: &str,
-    weights: &[u8],
-    x: &[f32],
-    rows: usize,
-    row_bytes: usize,
-) -> Result<Vec<f32>, MetalError> {
-    crate::gpu::launch_matvec_kind_with(
-        kind,
-        weights,
-        x,
-        rows,
-        row_bytes,
-        MatvecEpilogue::default(),
-    )
-    .ok_or(MetalError::CommandFailed)?
-}
-
-fn gemm(
-    kind: &str,
-    weights: &[u8],
-    x_batch: &[f32],
-    rows: usize,
-    row_bytes: usize,
-    batch_size: usize,
-) -> Result<Vec<f32>, MetalError> {
-    crate::gpu::launch_mul_mm_sg(kind, weights, x_batch, rows, row_bytes, batch_size)?
-        .ok_or(MetalError::CommandFailed)
-}
-
-macro_rules! launchers {
-    ($($kind:literal, $mv:ident, $mm:ident;)*) => {$(
-        #[doc = concat!("The ", $kind, " decode matvec.")]
-        pub fn $mv(
-            weights: &[u8],
-            x: &[f32],
-            rows: usize,
-            row_bytes: usize,
-        ) -> Result<Vec<f32>, MetalError> {
-            matvec($kind, weights, x, rows, row_bytes)
-        }
-
-        #[doc = concat!("The ", $kind, " simdgroup GEMM; `x_batch` is `[batch, cols]`, ")]
-        #[doc = "the result `[batch, rows]`."]
-        pub fn $mm(
-            weights: &[u8],
-            x_batch: &[f32],
-            rows: usize,
-            row_bytes: usize,
-            batch_size: usize,
-        ) -> Result<Vec<f32>, MetalError> {
-            gemm($kind, weights, x_batch, rows, row_bytes, batch_size)
-        }
-    )*};
-}
-
-launchers! {
+gen_launchers! {
     "IQ2_XXS", launch_iq2_xxs_matvec, launch_iq2_xxs_mul_mm_sg;
     "IQ2_XS", launch_iq2_xs_matvec, launch_iq2_xs_mul_mm_sg;
     "IQ2_S", launch_iq2_s_matvec, launch_iq2_s_mul_mm_sg;
@@ -572,13 +358,21 @@ launchers! {
     "IQ1_M", launch_iq1_m_matvec, launch_iq1_m_mul_mm_sg;
 }
 
+/// The IQ rows of the shared table, with their `group` / `affine` struct.
+pub(crate) fn kinds() -> impl Iterator<Item = (&'static GenKind, &'static str)> {
+    KINDS.iter().filter_map(|k| match k.family {
+        Family::Iq { group } => Some((k, group)),
+        Family::Functor => None,
+    })
+}
+
 #[cfg(test)]
 /// Test blocks of `name`: every grid and sign byte random, every scale field realistic, so the
 /// GEMM's `half` tiles stay in range. Random IQ1_M scale words would
 /// put a random f16 (often a NaN) in the super-scale, so their top
 /// nibbles are overwritten with `d`'s bits.
 pub(crate) fn test_blocks(name: &str, seed: u32, n_blocks: usize) -> Vec<u8> {
-    let k = by_name(name).expect("an IQ kind");
+    let k = crate::gen_kinds::by_name(name).expect("an IQ kind");
     let bb = k.block_bytes;
     let mut w = crate::k_quant_check::pseudo_bytes(seed, n_blocks * bb);
     for b in 0..n_blocks {

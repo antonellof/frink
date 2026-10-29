@@ -1,5 +1,5 @@
 //! Fixture encoders for the quant kinds `frink_quant` loads but does
-//! not write (Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4), shared by the suites that
+//! not write (Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1), shared by the suites that
 //! store a synthetic model in them. Each is a plain quantizer: it only
 //! has to be a valid packing of SOME weights, and
 //! `metal_low_k_quant_decode`'s round-trip test holds them to
@@ -202,6 +202,47 @@ pub fn iq4_nl_row(row: &[f32]) -> Vec<u8> {
     out
 }
 
+/// One row of f32 as Q4_1 (`bits = 4`, 20-byte blocks) or Q5_1
+/// (`bits = 5`, 24): per 32 weights, `m = min` and `d = (max - min) /
+/// (2^bits - 1)` as halves, each weight stored as the nearest
+/// `round((v - m) / d)`, low nibble element `j` and high nibble `j + 16`,
+/// and Q5_1's fifth bits in the `qh` word (bit `j` for element `j`).
+pub fn q_min_row(row: &[f32], bits: u32) -> Vec<u8> {
+    assert!(
+        row.len().is_multiple_of(32),
+        "a legacy row is whole 32-weight blocks"
+    );
+    let top = ((1u32 << bits) - 1) as f32;
+    let mut out = Vec::new();
+    for block in row.as_chunks::<32>().0 {
+        let lo = block.iter().copied().fold(f32::MAX, f32::min);
+        let hi = block.iter().copied().fold(f32::MIN, f32::max);
+        let d = f16::from_f32((hi - lo) / top);
+        let m = f16::from_f32(lo);
+        let (df, mf) = (d.to_f32(), m.to_f32());
+        let q: Vec<u32> = block
+            .iter()
+            .map(|&v| {
+                if df > 0.0 {
+                    ((v - mf) / df).round().clamp(0.0, top) as u32
+                } else {
+                    0
+                }
+            })
+            .collect();
+        out.extend_from_slice(&d.to_le_bytes());
+        out.extend_from_slice(&m.to_le_bytes());
+        if bits == 5 {
+            let qh = (0..32).fold(0u32, |h, j| h | ((q[j] >> 4) << j));
+            out.extend_from_slice(&qh.to_le_bytes());
+        }
+        for j in 0..16 {
+            out.push(((q[j] & 0xF) | ((q[j + 16] & 0xF) << 4)) as u8);
+        }
+    }
+    out
+}
+
 /// `w`, a whole number of `cols`-wide rows, as `dtype`: the kinds
 /// above, the IQ1/IQ2/IQ3 kinds through `super::iq_encode`, and Q8_0,
 /// Q5_K and Q6_K through `frink_quant`'s own encoders.
@@ -228,6 +269,15 @@ pub fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
         GgmlType::Q6K => w.chunks_exact(cols).for_each(|r| {
             frink_quant::encode_row_q6_k(r, None, &mut out).expect("whole blocks");
         }),
+        GgmlType::Q4_1 => w
+            .chunks_exact(cols)
+            .for_each(|r| out.extend(q_min_row(r, 4))),
+        GgmlType::Q5_1 => w
+            .chunks_exact(cols)
+            .for_each(|r| out.extend(q_min_row(r, 5))),
+        GgmlType::TQ1_0 => {
+            out = frink_quant::ternary::quantize_trits(w, frink_quant::ternary::TQ1_0);
+        }
         GgmlType::Q8_0 => w.chunks_exact(cols).for_each(|r| {
             frink_quant::encode_row_q8_0(r, &mut out).expect("whole blocks");
         }),

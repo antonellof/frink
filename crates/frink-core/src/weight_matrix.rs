@@ -205,8 +205,12 @@ impl QuantKind {
             QuantKind::IQ3S => Some("IQ3_S"),
             QuantKind::IQ1S => Some("IQ1_S"),
             QuantKind::IQ1M => Some("IQ1_M"),
-            // No Metal matvec kernel: scalar host paths only.
-            QuantKind::Q4_1 | QuantKind::Q5_1 | QuantKind::Q8_1 | QuantKind::Tq1_0 => None,
+            QuantKind::Q4_1 => Some("Q4_1"),
+            QuantKind::Q5_1 => Some("Q5_1"),
+            QuantKind::Tq1_0 => Some("TQ1_0"),
+            // ggml's activation format: no weight path in the reference
+            // to match (`QuantKind::is_activation_format`).
+            QuantKind::Q8_1 => None,
         }
     }
 }
@@ -241,6 +245,18 @@ impl QuantKind {
         QuantKind::Tq1_0,
         QuantKind::Ptq1_0,
     ];
+
+    /// A kind ggml defines only as the activation side of an integer dot
+    /// (`vec_dot_type`), with no weight path: at the pin `Q8_1` has no
+    /// `to_float` in `ggml.c`, no CPU `vec_dot`, no Metal or CUDA kernel,
+    /// and no `llama_ftype` or `gguf-py` quantizer writes it. So no
+    /// backend has a reference kernel to match, and the coverage matrix
+    /// marks its accelerator cells not applicable rather than counting
+    /// them as host fallbacks (#405). frink's CPU still reads such a
+    /// weight if a file holds one.
+    pub fn is_activation_format(self) -> bool {
+        matches!(self, QuantKind::Q8_1)
+    }
 
     /// The GGUF-facing name. Also the key
     /// [`frink_metal::gpu::matvec_launch_meta`] is looked up by, which
@@ -5199,8 +5215,9 @@ pub(crate) mod tests {
         /// `block_bytes_for_kind`'s partial one) stay in sync.
         ///
         /// The probe was `Q2_K` until 2026-09-09, when Q2_K gained a
-        /// CUDA matvec and a GEMM and stopped being unsupported. `Q4_1`
-        /// has neither on any backend and is the hole now. Moving it
+        /// CUDA matvec and a GEMM and stopped being unsupported, then
+        /// `Q4_1` until Metal gained one (#405). `Q8_1` has a kernel on
+        /// no backend (it is an activation format in ggml). Moving it
         /// found a real defect rather than being bookkeeping: with the
         /// `cuda` feature on and no driver present, the first real
         /// dispatch through `Cuda::launch_matvec` aborted the process
@@ -5209,13 +5226,13 @@ pub(crate) mod tests {
         #[test]
         fn apply_gpu_returns_none_for_an_unsupported_quant_kind() {
             let matrix = WeightMatrix::Quantized {
-                data: WeightBytes::Owned(vec![0u8; frink_quant::Q4_1_BLOCK_BYTES]),
+                data: WeightBytes::Owned(vec![0u8; frink_quant::Q8_1_BLOCK_BYTES]),
                 rows: 1,
-                cols: frink_quant::Q4_1_BLOCK_ELEMS,
-                kind: QuantKind::Q4_1,
+                cols: frink_quant::Q8_1_BLOCK_ELEMS,
+                kind: QuantKind::Q8_1,
             };
             assert!(matrix
-                .apply_gpu(&[0.0; frink_quant::Q4_1_BLOCK_ELEMS])
+                .apply_gpu(&[0.0; frink_quant::Q8_1_BLOCK_ELEMS])
                 .is_none());
         }
 
@@ -5325,15 +5342,15 @@ pub(crate) mod tests {
 
         // Supported: Q4_K has both a Metal matvec and a Metal GEMM.
         shaped(QuantKind::Q4K, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_down", loc);
-        // Unsupported: no Metal kernel of any kind for Q4_1.
-        shaped(QuantKind::Q4_1, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_up", loc);
+        // Unsupported: no Metal kernel of any kind for Q8_1.
+        shaped(QuantKind::Q8_1, 64, 256).probe_kernels_for(&reg, Backend::Metal, "ffn_up", loc);
 
         let report = reg.seal();
         let violations = &report.violations;
         assert_eq!(
             violations.len(),
             2,
-            "expected matvec + gemm misses for Q4_1 only, got: {:?}",
+            "expected matvec + gemm misses for Q8_1 only, got: {:?}",
             report
                 .entries
                 .iter()
@@ -5343,7 +5360,7 @@ pub(crate) mod tests {
         assert!(
             violations
                 .iter()
-                .all(|v| v.key.kind == Some(QuantKind::Q4_1)),
+                .all(|v| v.key.kind == Some(QuantKind::Q8_1)),
             "Q4_K must not be flagged"
         );
         assert!(
@@ -5354,14 +5371,14 @@ pub(crate) mod tests {
             "the report must name the fallback that will actually run"
         );
         let rendered = report.render_violations();
-        assert!(rendered.contains("Q4_1"), "{rendered}");
+        assert!(rendered.contains("Q8_1"), "{rendered}");
         assert!(rendered.contains("weight_matrix.rs"), "{rendered}");
 
-        // And the host tier it lands on is recorded too: Q4_1 has no
+        // And the host tier it lands on is recorded too: Q8_1 has no
         // integer vec_dot either, so it is f32 dequant-dot.
         assert!(
             report.entries.iter().any(|e| e.key.backend == Backend::Cpu
-                && e.key.kind == Some(QuantKind::Q4_1)
+                && e.key.kind == Some(QuantKind::Q8_1)
                 && matches!(e.outcome, Outcome::Miss { fallback, .. } if fallback == "f32 dequant-dot")),
             "{:?}",
             report.entries.iter().map(|e| e.to_string()).collect::<Vec<_>>()

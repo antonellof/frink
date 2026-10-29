@@ -17,11 +17,12 @@
 //! it is undone on the activation before any launch
 //! (`frink_core::weight_matrix::hadamard`).
 
-/// The decode helper and the GEMM functor, spliced into the GEMM
-/// translation unit (`gpu::K_QUANT_MUL_MM_SG_KERNEL_SRC`) and prepended
-/// to the matvec's.
+/// The trit decode and the PTQ1_0 and TQ1_0 GEMM functors, spliced into
+/// the GEMM translation unit (`gpu::K_QUANT_MUL_MM_SG_KERNEL_SRC`) and
+/// prepended to the PTQ1_0 matvec's and to `crate::dq_mv`'s, which runs
+/// TQ1_0's matvec on its functor.
 pub const PTQ1_0_DEQUANT_MSL: &str = r#"
-// PTQ1_0: one trit of a five-trit (qs) or four-trit (qh) byte, as
+// One trit of a five-trit (qs) or four-trit (qh) byte, as
 // -1 / 0 / +1. `p` is 3^n for trit n, most significant first.
 constant uchar PTQ1_0_POW3[5] = {1, 3, 9, 27, 81};
 static inline float ptq1_0_trit(uchar q, uchar p) {
@@ -65,6 +66,37 @@ struct PTQ1_0Dequant {
     static constexpr constant short BLOCK_BYTES = 28;
     static inline void get(device const uchar* xb, short il, thread float4x4& reg) {
         ptq1_0_dequant_16(xb, il, reg);
+    }
+};
+
+// ggml TQ1_0 (`block_tq1_0 { qs[48]; qh[4]; half d }`, 256 elements):
+// the same trit codec over a wider block. ggml `dequantize_row_tq1_0`
+// walks one stage of 32 qs bytes (element 32 n + m is trit n of qs[m]),
+// one of 16 (160 + 16 n + m, trit n of qs[32 + m]), then qh (240 + 4 n
+// + h, trit n of qh[h]). Sixteen elements [16 il, 16 il + 16): il < 10
+// is trit il / 2 of qs[16 (il % 2) ..], il < 15 trit il - 10 of
+// qs[32 ..], il = 15 the qh tail.
+struct TQ1_0Dequant {
+    static constexpr constant short NL = 16;
+    static constexpr constant short BLOCK_BYTES = 54;
+    static inline void get(device const uchar* xb, short il, thread float4x4& reg) {
+        const float d = float(*(device const half*)(xb + 52));
+        if (il < 10) {
+            const uchar p = PTQ1_0_POW3[il / 2];
+            device const uchar* q = xb + 16 * (il % 2);
+            for (short m = 0; m < 16; ++m) {
+                reg[m / 4][m % 4] = d * ptq1_0_trit(q[m], p);
+            }
+        } else if (il < 15) {
+            const uchar p = PTQ1_0_POW3[il - 10];
+            for (short m = 0; m < 16; ++m) {
+                reg[m / 4][m % 4] = d * ptq1_0_trit(xb[32 + m], p);
+            }
+        } else {
+            for (short e = 0; e < 16; ++e) {
+                reg[e / 4][e % 4] = d * ptq1_0_trit(xb[48 + e % 4], PTQ1_0_POW3[e / 4]);
+            }
+        }
     }
 };
 "#;
