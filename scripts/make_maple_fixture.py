@@ -29,11 +29,18 @@ Layer 2 is the FULL-attention layer: it is the one whose logits move if
 attention also sees the whole six-token prompt where the sliding layers
 see three.
 
+**`--model-rope`** writes NO `rope.freq_base_swa`, a model base other
+than 10000 and a linear `rope.scaling.factor` of 2 (#446). `maple.cpp:12-13`
+seed the sliding layers' base AND scale from the model's before the
+optional key (`:14`), so libllama rotates every layer at the model's
+base and scale; a reader that fell back to `llama_hparams`' defaults
+(base 10000, scale 1) would rotate the sliding layers differently.
+
 Weights are pseudo-random from a fixed seed so the file is byte-stable.
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \
-        python3 scripts/make_maple_fixture.py OUT.gguf
+        python3 scripts/make_maple_fixture.py OUT.gguf [--model-rope]
 
 The golden values that go with it are produced by llama.cpp itself
 (see `scripts/gptoss_reference_logits.cpp`), not by this script.
@@ -57,6 +64,10 @@ CTX = 64
 SWA_WINDOW = 3
 ROPE_BASE = 10000.0
 ROPE_BASE_SWA = 5000.0
+# `--model-rope`: the model's own base and a linear factor, both away
+# from `llama_hparams`' SWA defaults (10000, 1).
+MODEL_ROPE_BASE = 40000.0
+MODEL_ROPE_LINEAR = 2.0
 RMS_EPS = 1e-5
 N_EXPERT = 6
 N_EXPERT_USED = 2
@@ -72,7 +83,9 @@ FF_EXP = [16, 16, 16, 16]
 CLAMP_EXP = [2.0, 0.0, 1.5, 0.0]
 
 
-def main(out_path: str, no_clamp: bool = False, all_swa: bool = False) -> None:
+def main(
+    out_path: str, no_clamp: bool = False, all_swa: bool = False, model_rope: bool = False
+) -> None:
     n_layer = len(IS_SWA)
     rng = np.random.default_rng(0x4A9E)
 
@@ -90,8 +103,13 @@ def main(out_path: str, no_clamp: bool = False, all_swa: bool = False) -> None:
     w.add_key_length(HEAD_DIM)
     w.add_value_length(HEAD_DIM)
     w.add_layer_norm_rms_eps(RMS_EPS)
-    w.add_rope_freq_base(ROPE_BASE)
-    w.add_rope_freq_base_swa(ROPE_BASE_SWA)
+    if model_rope:
+        w.add_rope_freq_base(MODEL_ROPE_BASE)
+        w.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
+        w.add_rope_scaling_factor(MODEL_ROPE_LINEAR)
+    else:
+        w.add_rope_freq_base(ROPE_BASE)
+        w.add_rope_freq_base_swa(ROPE_BASE_SWA)
     w.add_rope_dimension_count(HEAD_DIM)
     w.add_sliding_window(SWA_WINDOW)
     w.add_sliding_window_pattern([True] * len(IS_SWA) if all_swa else IS_SWA)
@@ -149,4 +167,5 @@ if __name__ == "__main__":
         sys.argv[1] if len(sys.argv) > 1 else "maple-fixture.gguf",
         "--no-clamp" in sys.argv[2:],
         "--all-swa" in sys.argv[2:],
+        "--model-rope" in sys.argv[2:],
     )

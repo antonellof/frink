@@ -43,6 +43,14 @@ carries the evidence across: the alias is only ever safe because it is
 the same row, and a test that reads both files against one golden is the
 only thing that can keep it that way.
 
+**`--no-rope`** writes the same file plus `rope.scaling.finetuned =
+false`, the key `granite.cpp:33-37` reads as a switch for RoPE itself.
+`granite-moe.cpp`'s `load_arch_hparams` does NOT read it, so libllama
+keeps `rope_pattern` at the all-ones seed (`llama-model.cpp:1464`) and
+rotates this file exactly as it rotates the one without the key (#439).
+A reader that honoured the key here would run it unrotated, and the
+golden is far from that.
+
 Weights are pseudo-random from a fixed seed so the file is byte-stable,
 and the seed does not depend on the architecture string.
 
@@ -51,6 +59,7 @@ Usage:
         python3 scripts/make_granitemoe_fixture.py OUT.gguf
     PYTHONPATH=... python3 scripts/make_granitemoe_fixture.py OUT.gguf \\
         --arch granite-moe
+    PYTHONPATH=... python3 scripts/make_granitemoe_fixture.py OUT.gguf --no-rope
 
 The golden logits that go with the `granitemoe` file are produced by
 llama.cpp itself (see `scripts/gptoss_reference_logits.cpp`), not by
@@ -87,7 +96,7 @@ EMBEDDING_SCALE = 2.0
 ATTENTION_SCALE = 0.9
 
 
-def main(out_path: str, arch: str) -> None:
+def main(out_path: str, arch: str, no_rope: bool = False) -> None:
     rng = np.random.default_rng(0x62471)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -119,6 +128,8 @@ def main(out_path: str, arch: str) -> None:
     w.add_residual_scale(RESIDUAL_SCALE)
     w.add_embedding_scale(EMBEDDING_SCALE)
     w.add_attention_scale(ATTENTION_SCALE)
+    if no_rope:
+        w.add_rope_scaling_finetuned(False)
 
     tokens = ["<unk>", "<s>", "</s>"] + [f"tok{i}" for i in range(3, N_VOCAB)]
     w.add_tokenizer_model("llama")
@@ -179,4 +190,6 @@ if __name__ == "__main__":
         i = argv.index("--arch")
         arch = argv[i + 1]
         del argv[i : i + 2]
-    main(argv[0] if argv else "granitemoe-fixture.gguf", arch)
+    no_rope = "--no-rope" in argv
+    argv = [a for a in argv if a != "--no-rope"]
+    main(argv[0] if argv else "granitemoe-fixture.gguf", arch, no_rope)

@@ -136,12 +136,11 @@ impl ModelConfig {
             file.metadata_u64(&key("block_count"))
                 .ok_or_else(|| LoadError::MissingHparam(key("block_count")))? as usize;
         // llama.cpp's `n_layer()` is `block_count` MINUS the NextN/MTP
-        // blocks the converter appended inside it, for the graphs that
-        // read `nextn_predict_layers` (`crate::mtp_blocks`). `n_layers`
-        // is the trunk from here on; `block_count` is handed ONLY to the
-        // two things llama.cpp decides before it has read the key --
-        // `exaone4.cpp:4`'s layer-count gate and the per-layer array
-        // lengths -- and nowhere else.
+        // blocks the converter appended inside it (`crate::mtp_blocks`:
+        // subtracted for every architecture, loadable only where the
+        // tensor loader creates them). `n_layers` is the trunk from here
+        // on; `block_count` is handed ONLY to the per-layer array
+        // lengths, which llama.cpp reads at `n_layer_all`.
         let trunk = crate::mtp_blocks::trunk_layers(file, &arch, block_count)?;
         // Nanbeige's `num_loops`: the trunk is the PHYSICAL count and
         // `n_layers` the logical one from here on (`crate::layer_loops`);
@@ -305,8 +304,7 @@ impl ModelConfig {
                 &key("expert_used_count"),
                 // `n_layer_all`, i.e. `block_count` including any MTP
                 // blocks, which is the length llama.cpp asks for at
-                // `llama-model.cpp:1266` -- BEFORE `n_layer()` drops
-                // them.
+                // `llama-model.cpp:1415`.
                 block_count,
             )? {
                 Some(per_layer) => {
@@ -576,32 +574,45 @@ impl ModelConfig {
         // is that a window of 0 means "unused," so only a real nonzero
         // value here is treated as active.
         let declared_window = metadata_u64_any(file, &[key("attention.sliding_window")]);
-        let sliding_window = declared_window
-            .map(|v| v as usize)
-            .filter(|&w| w > 0)
-            // `phi3` declares a window that llama.cpp deliberately does
-            // NOT honour -- see `capability::swa_disabled_by_arch`. This
-            // has to drop the window rather than pick a period, because
-            // upstream is declining to use the file's value, not
-            // choosing a different one.
-            //
-            // `block_count`, NOT `n_layers`: `exaone4.cpp:4` tests
-            // `n_layer() == 64` at a point where `n_layer_nextn` has not
-            // been read yet (`:18`), so a 64-trunk EXAONE-4 with an MTP
-            // block appended sees 65 there and gets no window.
-            //
-            // `smallthinker` declares a window that llama.cpp REPLACES:
-            // `smallthinker.cpp:8` assigns `n_swa = 4096` on the branch
-            // the file's nonzero value selected. One table decides all
-            // three answers (`capability::swa_window_override`), so a
-            // row cannot be dropped by one reader and pinned by another.
-            .and_then(
-                |w| match (facts.rules.swa_window_override)(&arch, trunk.block_count) {
-                    crate::capability::SwaWindowOverride::Honour => Some(w),
+        // `phi3` declares a window that llama.cpp deliberately does NOT
+        // honour -- see `capability::swa_disabled_by_arch`. This has to
+        // drop the window rather than pick a period, because upstream is
+        // declining to use the file's value, not choosing a different one.
+        //
+        // `smallthinker` declares a window that llama.cpp REPLACES:
+        // `smallthinker.cpp:8` assigns `n_swa = 4096` on the branch the
+        // file's nonzero value selected. `exaone4`'s 64-layer graph SEEDS
+        // 4096 and lets the key override it (`exaone4.cpp:6,14`). One
+        // table decides every answer (`capability::swa_window_override`),
+        // so a row cannot be dropped by one reader and pinned by another.
+        //
+        // `n_layers`, the TRUNK: llama.cpp reads `nextn_predict_layers`
+        // in the common loader before any `load_arch_hparams`
+        // (`llama-model.cpp:1411,1571`), so `exaone4.cpp:4`'s
+        // `n_layer() == 64` already excludes an appended MTP block.
+        let window_override = (facts.rules.swa_window_override)(&arch, trunk.n_layers);
+        let sliding_window = match (declared_window, window_override) {
+            (Some(0), crate::capability::SwaWindowOverride::Seed(_)) => {
+                return Err(LoadError::UnsupportedFeature(
+                    arch.clone(),
+                    format!(
+                        "`{arch}.attention.sliding_window` is 0, which llama.cpp reads over the \
+                         window this graph seeds and then masks every key with \
+                         (`p1 - p0 >= n_swa`, llama-hparams.h:529)"
+                    ),
+                ));
+            }
+            (None, crate::capability::SwaWindowOverride::Seed(seeded)) => Some(seeded),
+            (declared, rule) => declared
+                .map(|v| v as usize)
+                .filter(|&w| w > 0)
+                .and_then(|w| match rule {
+                    crate::capability::SwaWindowOverride::Honour
+                    | crate::capability::SwaWindowOverride::Seed(_) => Some(w),
                     crate::capability::SwaWindowOverride::Drop => None,
                     crate::capability::SwaWindowOverride::Pin(pinned) => Some(pinned),
-                },
-            );
+                }),
+        };
 
         // A CHUNKED window (`crate::chunked_swa`): the literal chunk on
         // the branch the file takes, whatever nonzero value it declares

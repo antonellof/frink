@@ -116,7 +116,8 @@ eligibility test so a new field forces a Metal decision.
   (`HparamRules`). `rope_layers::PER_LAYER_ROPE_GATES` keeps its
   `exaone4` row: it is a census of llama.cpp's graphs that the rule is
   checked against, not a row the loader reads. Divergences found and
-  filed, not fixed: #440, #441.
+  filed, not fixed in the move: #440, #441 (fixed since, with #439 and
+  #446).
 - Step 4: `models/qwen.rs`, `qwen2.rs`, `qwen2moe.rs`, `qwen3.rs`,
   `qwen3moe.rs`. Their rows left `NO_TOPK_RENORMALIZE_ARCHITECTURES`,
   `proj_bias::OUTPUT_BIAS_CREATORS` and `FFN_LENGTH_COUNTS_GATE_AND_UP`

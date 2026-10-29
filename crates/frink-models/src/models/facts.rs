@@ -217,7 +217,7 @@ pub struct TensorFacts {
 /// it at its own.
 #[derive(Debug, Clone, Copy)]
 pub struct HparamRules {
-    /// `capability::swa_window_override(arch, block_count)`:
+    /// `capability::swa_window_override(arch, n_layers)`, on the trunk:
     /// `exaone4.cpp:4`'s layer-count gate.
     pub swa_window_override: fn(&str, usize) -> SwaWindowOverride,
     /// `capability::attention_scale_override(arch, n_layers, n_embd,

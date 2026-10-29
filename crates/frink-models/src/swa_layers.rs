@@ -37,20 +37,19 @@
 //! window_array_graphs.rs` measures that libllama's logits do not move
 //! when the array is rewritten to DISAGREE, and frink matches both.
 //!
-//! **The length is `block_count`, not the trunk.** `mimo2.cpp:12` and
-//! `step35.cpp:26` pass `hparams.n_layer()` as the array length BEFORE
-//! `:19` / `:32` read `nextn_predict_layers`, so `n_layer()` is still
-//! `n_layer_all` there and the converters write the array at the full
-//! `block_count` with the MTP entries appended (`mimo.py:146-153`,
-//! `step3.py:164-173`). [`read_swa_layers`] therefore checks the length
-//! against `block_count` and keeps the first `n_layers` entries, and
-//! `set_swa_pattern` (`llama-hparams.cpp:19-21`) zeroes the entries past
-//! the trunk anyway. `cohere2moe.cpp:23` reads `nextn_predict_layers`
-//! BEFORE `:35` reads the array, so `n_layer()` is the TRUNK there and
-//! its converter writes one entry per trunk layer (`command_r.py:98`
-//! from `layer_types`); [`ARRAY_AT_TRUNK_LENGTH`] is that one row, and
-//! a file with the array at `block_count` length is refused there as
-//! llama.cpp refuses it.
+//! **The length is `block_count`, not the trunk.** The converters write
+//! the array at the full `block_count` with the MTP entries appended
+//! (`mimo.py:146-153`, `step3.py:164-173`). [`read_swa_layers`]
+//! therefore checks the length against `block_count` and keeps the
+//! first `n_layers` entries, and `set_swa_pattern`
+//! (`llama-hparams.cpp:19-21`) zeroes the entries past the trunk anyway.
+//! `cohere2moe`'s converter writes one entry per trunk layer
+//! (`command_r.py:98` from `layer_types`); [`ARRAY_AT_TRUNK_LENGTH`] is
+//! that one row. llama.cpp itself checks NO length here: the array is
+//! read with `get_arr` (`mimo2.cpp:12`, `step35.cpp:26`,
+//! `load_swa_pattern` at `llama-model.cpp:3952-3959`), which only caps
+//! it at `LLAMA_MAX_LAYERS`, so a length no converter writes is an
+//! over-refusal here (#452).
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -180,12 +179,10 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("kolibri1", "src/models/kolibri1.cpp:17"),
 ];
 
-/// The graphs that read `nextn_predict_layers` BEFORE the array, so
-/// `hparams.n_layer()` at the read is the trunk and the array is one
-/// entry per TRUNK layer (module doc). Every other array reader takes
-/// it at `block_count`.
-pub const ARRAY_AT_TRUNK_LENGTH: &[(&str, &str)] =
-    &[("cohere2moe", "src/models/cohere2moe.cpp:23,35")];
+/// The graphs whose converter writes the array one entry per TRUNK
+/// layer (module doc). Every other array reader takes it at
+/// `block_count`.
+pub const ARRAY_AT_TRUNK_LENGTH: &[(&str, &str)] = &[("cohere2moe", "conversion/command_r.py:98")];
 
 /// The length `arch`'s array read passes as `n`.
 pub fn array_length(arch: &str, trunk: &TrunkLayers) -> usize {
@@ -474,9 +471,8 @@ mod tests {
         ));
     }
 
-    /// `cohere2moe.cpp:23,35` read the MTP count first, so its array
-    /// is one entry per TRUNK layer, and the `block_count`-long
-    /// spelling is the wrong length there.
+    /// `cohere2moe`'s converter writes one entry per TRUNK layer, and
+    /// the `block_count`-long spelling is refused there (#452).
     #[test]
     fn cohere2moe_s_array_is_trunk_length() {
         assert_eq!(array_length("cohere2moe", &trunk(5, 4)), 4);

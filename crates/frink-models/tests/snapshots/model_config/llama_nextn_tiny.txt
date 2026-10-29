@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/llama_nextn_tiny.gguf
+config: REFUSED: architecture 'llama' requires unimplemented feature: NextN/MTP prediction layers are counted in block_count; llama.cpp subtracts them for every architecture (n_layer = n_layer_all - n_layer_nextn) but `llama`'s tensor loader creates only the trunk (metadata llama.nextn_predict_layers=1), so upstream fails on the trailing blocks' tensors, and the generic decoder would run the speculative head as ordinary decoder layers

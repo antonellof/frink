@@ -132,10 +132,10 @@ fn read_f32_per_layer(
 /// The xIELU table for a file, read exactly as `apertus.cpp:6-9` reads
 /// it, folded exactly as `ggml_xielu` folds it.
 ///
-/// `n_layers` is the TRUNK count. `apertus` reads no
-/// `nextn_predict_layers`, so `crate::mtp_blocks` refuses a nonzero one
-/// for it and the trunk is `block_count`; passing the trunk rather than
-/// `block_count` keeps that true if a NextN reader ever adopts xIELU.
+/// `n_layers` is the TRUNK count. `apertus`'s tensor loader creates no
+/// MTP blocks, so `crate::mtp_blocks` refuses a nonzero
+/// `nextn_predict_layers` for it and the trunk is `block_count`; passing
+/// the trunk keeps that true if an MTP loader ever adopts xIELU.
 pub fn read_xielu_layers(
     file: &impl TensorSource,
     n_layers: usize,
@@ -283,13 +283,12 @@ pub fn reads_swiglu_clamps(arch: &str) -> bool {
 /// carries NEITHER key, which is plain SwiGLU with nothing per layer
 /// to carry.
 ///
-/// `n_layers` is the TRUNK count: `step35.cpp:28-29` run AFTER `:32`
-/// has read `nextn_predict_layers`, so `n_layer()` is the trunk there
-/// -- but the converter writes both arrays at `block_count` length
-/// (`step3.py:207-220`, padded with `0.0` for the MTP blocks), and
-/// llama.cpp's `get_key_or_arr` refuses a length other than the one
-/// asked for. `block_count` is what a real export carries, so that is
-/// the length accepted here, and only the trunk's entries are kept.
+/// The length is `block_count`: `step35.cpp:28-29` pass
+/// `hparams.n_layer_all`, the converter writes both arrays at that
+/// length (`step3.py:207-220`, padded with `0.0` for the MTP blocks),
+/// and llama.cpp's `get_key_or_arr` refuses any other length
+/// (`llama-model-loader.cpp:480-482`). Only the trunk's entries are
+/// kept.
 pub fn read_swiglu_clamps(
     file: &impl TensorSource,
     arch: &str,

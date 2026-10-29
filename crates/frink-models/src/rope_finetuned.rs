@@ -33,12 +33,15 @@
 //! WITHOUT RoPE (NoPE), and this switch is what a served `granitehybrid`
 //! needs before its logits can match. `GraniteModel` and
 //! `GraniteMoeModel` never write the key, so every converter-produced
-//! `granite` / `granitemoe` file takes the `true` default and rotates.
+//! `granite` / `granitemoe` file takes the `true` default and rotates;
+//! and `granite-moe.cpp` does not read it at all, so a `granitemoe`
+//! file that declares it false rotates too.
 
 /// Architectures whose graph builds no positions and applies no RoPE
-/// when `{arch}.rope.scaling.finetuned` is false. `granite`,
-/// `granitemoe` and `granite-moe` state it in their `crate::models`
-/// files (#403 step 2).
+/// when `{arch}.rope.scaling.finetuned` is false. `granite` states it
+/// in `crate::models::granite`; `granitemoe` runs the same graph but its
+/// hparam loader never reads the key, so it is NOT gated
+/// (`crate::models::granite_moe`, #439).
 pub const ROPE_GATED_ON_FINETUNED: &[&str] = &["granitehybrid", "granite-hybrid"];
 
 /// True when `arch` gates its RoPE on the key and the file declares it

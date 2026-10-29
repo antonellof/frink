@@ -179,8 +179,8 @@ pub struct ModelConfig {
     /// `block_count`, which llama.cpp creates `TENSOR_SKIP` and never
     /// runs (`crate::mtp_blocks`). Their tensors are `blk.N.*` for
     /// `n_layers <= N < n_layers + n_mtp_blocks`; the loader marks them
-    /// deliberately unread. Zero for every architecture whose graph
-    /// does not read `nextn_predict_layers`.
+    /// deliberately unread. Zero for every architecture whose tensor
+    /// loader does not create them (`crate::mtp_blocks::NEXTN_READERS`).
     pub n_mtp_blocks: usize,
     pub hidden_dim: usize,
     /// Query heads of the WIDEST layer. Every layer's for a uniform

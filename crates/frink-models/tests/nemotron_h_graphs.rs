@@ -253,6 +253,59 @@ const NH_MOE_GOLDEN: [f32; 48] = [
     0.4540789,
 ];
 
+/// `nemotron_h_moe_mtp_tiny.gguf`: the MoE file with one MTP block
+/// appended. libllama's answer is the trunk's, bit for bit (#441).
+const NH_MOE_MTP_GOLDEN: [f32; 48] = [
+    -0.08564463,
+    -1.6987882,
+    1.8891695,
+    -1.4673432,
+    0.29491013,
+    0.91232616,
+    -0.8917312,
+    0.025637537,
+    -1.7253764,
+    -0.0134396255,
+    0.70770055,
+    0.62906206,
+    0.2945255,
+    -3.4463587,
+    -0.27748364,
+    -0.4468332,
+    -1.6725576,
+    0.98237514,
+    -1.7984445,
+    0.9663483,
+    2.6736376,
+    -0.88111633,
+    -0.14342141,
+    -1.6324458,
+    0.9185461,
+    1.219005,
+    -1.8341842,
+    0.47902396,
+    -1.6169834,
+    1.8832691,
+    -3.6289985,
+    1.2772204,
+    0.22597614,
+    -1.5320957,
+    -0.75469035,
+    0.52414393,
+    2.7344248,
+    -0.4001045,
+    1.48726,
+    0.31474167,
+    -0.31410033,
+    1.9143553,
+    -0.88485783,
+    0.8758001,
+    0.6030649,
+    -1.224995,
+    1.2363113,
+    0.4540789,
+];
+
 fn decode(decoder: &Decoder) -> Vec<f32> {
     let mut kv = graph_caches(decoder);
     let mut out = Vec::new();
@@ -286,6 +339,18 @@ fn the_optional_biases_match_llama_cpp_and_are_visible() {
 #[test]
 fn a_separate_output_weight_matches_llama_cpp() {
     assert_all_three_paths_match(NH_OUTPUT, &NH_OUTPUT_GOLDEN);
+}
+
+/// An MTP block appended to the MoE file is skipped, as libllama skips
+/// it (#441): `nemotron-h.cpp:147-195` create it `TENSOR_SKIP` and the
+/// common loader has already subtracted it from `n_layer()`. frink
+/// refused this file until the census was re-measured at the pin.
+#[test]
+fn nemotron_h_moe_with_an_mtp_block_matches_llama_cpp() {
+    assert_eq!(NH_MOE_MTP_GOLDEN, NH_MOE_GOLDEN);
+    assert_all_three_paths_match("nemotron_h_moe_mtp", &NH_MOE_MTP_GOLDEN);
+    let d = load_graph_fixture("nemotron_h_moe_mtp");
+    assert_eq!((d.config.n_layers, d.config.n_mtp_blocks), (4, 1));
 }
 
 /// `nemotron_h_moe` (Nemotron-3 Nano 30B-A3B): the FFN layer is a
