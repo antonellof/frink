@@ -2315,7 +2315,12 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 1,
             )
             .replacen("// @FRINK_IQ_FUNCTORS@", crate::iq::gemm_functors_msl(), 1)
-            .replacen("// @FRINK_IQ_ENTRIES@", &crate::iq::gemm_entries_msl(), 1)
+            .replacen("// @FRINK_DQ_FUNCTORS@", crate::dq_mv::DQ_FUNCTORS_MSL, 1)
+            .replacen(
+                "// @FRINK_GEN_ENTRIES@",
+                &crate::gen_kinds::gemm_entries_msl(),
+                1,
+            )
             .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1);
         Box::leak(src.into_boxed_str())
     });
@@ -2327,6 +2332,7 @@ using namespace metal;
 // @FRINK_TERNARY_FUNCTOR@
 // @FRINK_CODEBOOK4_FUNCTORS@
 // @FRINK_IQ_FUNCTORS@
+// @FRINK_DQ_FUNCTORS@
 
 // @FRINK_LOW_K_FUNCTORS@
 
@@ -3293,7 +3299,7 @@ MUL_MM_SG_ENTRY(iq4_xs_mul_mm_sg, IQ4XSDequant)
 // @FRINK_TERNARY_ENTRIES@
 // @FRINK_LOW_K_ENTRIES@
 // @FRINK_CODEBOOK4_ENTRIES@
-// @FRINK_IQ_ENTRIES@
+// @FRINK_GEN_ENTRIES@
 MUL_MM_ID_ENTRY(q4_0_mul_mm_id, Q4_0Dequant)
 MUL_MM_ID_ENTRY(q4_k_mul_mm_id, Q4KDequant)
 MUL_MM_ID_ENTRY(q8_0_mul_mm_id, Q8_0Dequant)
@@ -3645,7 +3651,7 @@ pub fn mul_mm_sg_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "Q3_K" => Some(("q3_k_mul_mm_sg", 110, 256)),
         "IQ4_NL" => Some(("iq4_nl_mul_mm_sg", 18, 32)),
         "MXFP4" => Some(("mxfp4_mul_mm_sg", 17, 32)),
-        _ => crate::iq::gemm_meta(kind, false),
+        _ => crate::gen_kinds::gemm_meta(kind, false),
     }
 }
 
@@ -3662,7 +3668,7 @@ pub fn mul_mm_id_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "Q5_K" => Some(("q5_k_mul_mm_id", 176, 256)),
         "Q6_K" => Some(("q6_k_mul_mm_id", 210, 256)),
         "IQ4_XS" => Some(("iq4_xs_mul_mm_id", 136, 256)),
-        _ => crate::iq::gemm_meta(kind, true),
+        _ => crate::gen_kinds::gemm_meta(kind, true),
     }
 }
 
@@ -3680,7 +3686,7 @@ pub fn mul_mm_id_f16_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
                 "q5_k_mul_mm_id" => "q5_k_mul_mm_id_f16",
                 "q6_k_mul_mm_id" => "q6_k_mul_mm_id_f16",
                 "iq4_xs_mul_mm_id" => "iq4_xs_mul_mm_id_f16",
-                _ => crate::iq::f16_fn(base).unwrap_or(base),
+                _ => crate::gen_kinds::f16_fn(base).unwrap_or(base),
             },
             bb,
             be,
@@ -4209,7 +4215,7 @@ pub(crate) fn mul_mm_sg_aligned_fn(fn_name: &str) -> Option<&'static str> {
         "iq4_nl_mul_mm_sg_f16" => "iq4_nl_mul_mm_sg_f16_a",
         "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_a",
         "mxfp4_mul_mm_sg_f16" => "mxfp4_mul_mm_sg_f16_a",
-        _ => return crate::iq::aligned_fn(fn_name),
+        _ => return crate::gen_kinds::aligned_fn(fn_name),
     })
 }
 
@@ -4229,7 +4235,7 @@ pub(crate) fn mul_mm_sg_f16_fn(fn_name: &str) -> Option<&'static str> {
         "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_f16",
         "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
         "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
-        _ => return crate::iq::f16_fn(fn_name),
+        _ => return crate::gen_kinds::f16_fn(fn_name),
     })
 }
 
@@ -4857,7 +4863,8 @@ pub fn launch_ptq1_0_matvec(
 /// below holds the two together.
 pub const MATVEC_KINDS: &[&str] = &[
     "F32", "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
-    "IQ4_NL", "MXFP4", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ1_S", "IQ1_M",
+    "IQ4_NL", "MXFP4", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S", "IQ1_S", "IQ1_M", "Q4_1",
+    "Q5_1", "TQ1_0",
 ];
 
 pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usize, usize, usize)> {
@@ -4923,7 +4930,7 @@ pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usi
             32,
             4,
         )),
-        _ => crate::iq::matvec_launch_meta(kind),
+        _ => crate::gen_kinds::matvec_launch_meta(kind),
     }
 }
 
@@ -7378,8 +7385,11 @@ pub(crate) fn encode_matvec_with_offsets(
         "q2_k_matvec" | "q3_k_matvec" => (64usize, 0usize),
         // ggml IQ4_NL / MXFP4: 2 simdgroups x 2 rows, codebook in TG memory.
         "iq4_nl_matvec" | "mxfp4_matvec" => crate::codebook4::CODEBOOK4_MATVEC_TG,
-        // ggml IQ1/IQ2/IQ3: 2 simdgroups x 4 rows, grids in constant memory.
-        _ if crate::iq::by_matvec_fn(launch.fn_name).is_some() => crate::iq::MATVEC_TG,
+        // The generated kinds (IQ1/IQ2/IQ3, Q4_1, Q5_1, TQ1_0): 2 simdgroups
+        // x 4 rows, nothing staged in threadgroup memory.
+        _ if crate::gen_kinds::by_matvec_fn(launch.fn_name).is_some() => {
+            crate::gen_kinds::MATVEC_TG
+        }
         _ if rows_per_tg > 1 => (32usize, 256 * 4),
         _ => {
             let tg = n_blocks_per_row.next_power_of_two().clamp(32, 256);

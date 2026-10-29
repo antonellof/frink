@@ -35,12 +35,15 @@ pub enum EmbdKind {
     Iq3S,
     Iq1S,
     Iq1M,
+    Q4_1,
+    Q5_1,
+    Tq1_0,
 }
 
 impl EmbdKind {
     /// Every variant. `every_variant_is_listed_once` holds this to the
     /// exhaustive matches below.
-    pub const ALL: [EmbdKind; 19] = [
+    pub const ALL: [EmbdKind; 22] = [
         EmbdKind::Q8_0,
         EmbdKind::Q4_0,
         EmbdKind::Q5_0,
@@ -60,6 +63,9 @@ impl EmbdKind {
         EmbdKind::Iq3S,
         EmbdKind::Iq1S,
         EmbdKind::Iq1M,
+        EmbdKind::Q4_1,
+        EmbdKind::Q5_1,
+        EmbdKind::Tq1_0,
     ];
 
     /// The GGUF name of the stored type, as `frink_core::QuantKind::name`
@@ -85,6 +91,9 @@ impl EmbdKind {
             EmbdKind::Iq3S => "IQ3_S",
             EmbdKind::Iq1S => "IQ1_S",
             EmbdKind::Iq1M => "IQ1_M",
+            EmbdKind::Q4_1 => "Q4_1",
+            EmbdKind::Q5_1 => "Q5_1",
+            EmbdKind::Tq1_0 => "TQ1_0",
         }
     }
 
@@ -111,6 +120,9 @@ impl EmbdKind {
             EmbdKind::Iq3S => "iq3_s_matvec",
             EmbdKind::Iq1S => "iq1_s_matvec",
             EmbdKind::Iq1M => "iq1_m_matvec",
+            EmbdKind::Q4_1 => "q4_1_matvec",
+            EmbdKind::Q5_1 => "q5_1_matvec",
+            EmbdKind::Tq1_0 => "tq1_0_matvec",
         }
     }
 
@@ -136,6 +148,9 @@ impl EmbdKind {
             EmbdKind::Iq3S => "get_rows_iq3_s",
             EmbdKind::Iq1S => "get_rows_iq1_s",
             EmbdKind::Iq1M => "get_rows_iq1_m",
+            EmbdKind::Q4_1 => "get_rows_q4_1",
+            EmbdKind::Q5_1 => "get_rows_q5_1",
+            EmbdKind::Tq1_0 => "get_rows_tq1_0",
         }
     }
 
@@ -162,6 +177,9 @@ impl EmbdKind {
             EmbdKind::Iq3S => "IQ3SDequant",
             EmbdKind::Iq1S => "IQ1SDequant",
             EmbdKind::Iq1M => "IQ1MDequant",
+            EmbdKind::Q4_1 => "Q4_1Dequant",
+            EmbdKind::Q5_1 => "Q5_1Dequant",
+            EmbdKind::Tq1_0 => "TQ1_0Dequant",
         }
     }
 
@@ -209,7 +227,10 @@ mod tests {
                 | EmbdKind::Iq3Xxs
                 | EmbdKind::Iq3S
                 | EmbdKind::Iq1S
-                | EmbdKind::Iq1M => {}
+                | EmbdKind::Iq1M
+                | EmbdKind::Q4_1
+                | EmbdKind::Q5_1
+                | EmbdKind::Tq1_0 => {}
             }
         }
     }
@@ -222,7 +243,7 @@ mod tests {
             assert_eq!(EmbdKind::from_kind_name(k.kind_name()), Some(k));
             assert_eq!(EmbdKind::from_fn_name(k.matvec_fn_name()), Some(k));
         }
-        assert_eq!(EmbdKind::from_kind_name("Q4_1"), None);
+        assert_eq!(EmbdKind::from_kind_name("Q8_1"), None);
         assert_eq!(EmbdKind::from_fn_name("f32_matvec"), None);
     }
 

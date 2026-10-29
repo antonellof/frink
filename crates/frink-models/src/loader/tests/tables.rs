@@ -118,14 +118,6 @@ fn every_architecture_keyed_behaviour_table_names_a_real_generic_row() {
             crate::norm_sites::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
         ),
         (
-            "PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM",
-            crate::norm_sites::PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM,
-        ),
-        (
-            "POST_NORMS_UNDER_GROK_NAMES",
-            crate::norm_sites::POST_NORMS_UNDER_GROK_NAMES,
-        ),
-        (
             "ATTN_NORM_2_FEEDS_ATTENTION",
             crate::norm_sites::ATTN_NORM_2_FEEDS_ATTENTION,
         ),
@@ -181,14 +173,6 @@ fn the_layer_shape_tables_only_name_audited_architectures() {
         (
             "PRE_FFN_NORM_IS_POST_ATTENTION_NORM",
             crate::norm_sites::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
-        ),
-        (
-            "PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM",
-            crate::norm_sites::PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM,
-        ),
-        (
-            "POST_NORMS_UNDER_GROK_NAMES",
-            crate::norm_sites::POST_NORMS_UNDER_GROK_NAMES,
         ),
         (
             "ATTN_NORM_2_FEEDS_ATTENTION",

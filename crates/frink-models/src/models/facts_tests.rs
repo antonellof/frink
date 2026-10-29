@@ -63,8 +63,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
         names.extend(ns::POST_NORMS_BOTH_OR_NEITHER.iter().map(|r| r.0));
         for table in [
             ns::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
-            ns::PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM,
-            ns::POST_NORMS_UNDER_GROK_NAMES,
             ns::EMBEDDING_NORM_ARCHITECTURES,
             ns::WEIGHTLESS_EMBEDDING_NORM,
             ns::NO_OUTPUT_NORM,
@@ -76,7 +74,12 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     }
     names.extend(crate::rope_finetuned::ROPE_GATED_ON_FINETUNED);
     names.extend(crate::clamp_kqv::CLAMPED_QKV_ARCHITECTURES);
-    names.extend(crate::clamp_kqv::CLAMP_KQV_REQUIRED);
+    names.extend(crate::loader::rope_scaling::YARN_BETA_READERS);
+    names.extend(
+        crate::parallel_dense_ffn::PARALLEL_DENSE_FFN_ARCHITECTURES
+            .iter()
+            .map(|r| r.arch),
+    );
     names.extend(crate::mtp_blocks::NEXTN_READERS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::ATTN_OUT_BIAS_CREATORS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::FFN_BIAS_CREATORS.iter().map(|r| r.0));
@@ -203,7 +206,10 @@ fn the_facts_agree_with_every_public_lookup() {
                     .map_or(t::EXPERT_WEIGHTS_NORM_READERS.contains(&name), |f| {
                         f.moe.reads_expert_weights_norm
                     }),
-                reads_expert_weights_scale: t::EXPERT_WEIGHTS_SCALE_READERS.contains(&name),
+                reads_expert_weights_scale: def
+                    .map_or(t::EXPERT_WEIGHTS_SCALE_READERS.contains(&name), |f| {
+                        f.moe.reads_expert_weights_scale
+                    }),
                 // A table with no public lookup: the definition's
                 // statement, else the table (`no_registry_name_remains_in_a_legacy_table`
                 // holds the table empty for registry names).
@@ -250,7 +256,9 @@ fn the_facts_agree_with_every_public_lookup() {
             },
             scaling: ScalingFacts {
                 multipliers: crate::scalar_multipliers::multiplier_support(name),
-                logit_softcap: cap::LOGIT_SOFTCAP_ARCHITECTURES.contains(&name),
+                logit_softcap: def.map_or(cap::LOGIT_SOFTCAP_ARCHITECTURES.contains(&name), |f| {
+                    f.scaling.logit_softcap
+                }),
                 embeddings_scaled_by_sqrt_n_embd: profile
                     .is_some_and(|p| cap::embeddings_scaled_by_sqrt_n_embd(name, p.family)),
                 // Read: a declared clamp survives; required: an absent
@@ -260,6 +268,10 @@ fn the_facts_agree_with_every_public_lookup() {
                     Ok(Some(_))
                 )
                 .then(|| crate::clamp_kqv::resolve_clamp(name, None).is_err()),
+                reads_yarn_beta: def.map_or(
+                    crate::loader::rope_scaling::YARN_BETA_READERS.contains(&name),
+                    |f| f.scaling.reads_yarn_beta,
+                ),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(name),
@@ -293,6 +305,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 ffn_bias: crate::proj_bias::ffn_presence(name),
                 output_bias: crate::proj_bias::output_presence(name),
                 qkv_bias: crate::qkv_fused::qkv_bias(name),
+                parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
             },
             rules: HparamRules {
                 swa_window_override: cap::swa_window_override,

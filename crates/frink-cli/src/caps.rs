@@ -82,6 +82,9 @@ fn gap(backend: Backend, cell: Cell) -> Option<&'static str> {
         Cell::Host(_) if backend.is_accelerator() => Some("host"),
         Cell::F32Dot => Some("f32 dot"),
         Cell::Loop(_) => Some("matvec loop"),
+        // The weight still runs, on the host: the kind has no reference
+        // kernel on any accelerator to match.
+        Cell::NotApplicable => Some("host (activation format)"),
         Cell::Kernel | Cell::Host(_) => None,
     }
 }

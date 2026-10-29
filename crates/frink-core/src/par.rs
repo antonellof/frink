@@ -14,15 +14,19 @@
 //!
 //! # The switch
 //!
-//! Which of the two runs is decided **per operation, from its size**, by
-//! the one predicate in [`policy`]: [`backend`]. `FRINK_CPU_POOL` pins
-//! it either way (`spin` / `rayon`) and is an A/B override, not the
-//! decision. See [`policy::SPIN_MIN_OP_MACS`] for the crossover and what
-//! is and is not measured about it.
+//! Which of the two runs is decided by the one predicate in [`policy`]:
+//! [`backend`]. Inside a single-token CPU decode step ([`decode_step`])
+//! it answers the step's one choice, made from the model's widest layer
+//! matvec; everywhere else it answers per operation, from its size.
+//! `FRINK_CPU_POOL` pins it either way (`spin` / `rayon`) and is an A/B
+//! override, not the decision. See [`policy::SPIN_MIN_OP_MACS`] for the
+//! crossover and what is and is not measured about it.
 //!
 //! Every helper below asks [`backend`] and none of them decides
 //! anything itself, which is what stops the two arms of that choice from
-//! drifting apart across thirty call sites.
+//! drifting apart across thirty call sites. The helpers themselves live
+//! in `regions`, each with its spin arm split out over an explicit pool
+//! so a test can drive it.
 //!
 //! # `min_len`, and where `MIN_TASK_MACS` went
 //!
@@ -45,14 +49,16 @@
 
 use std::cell::Cell;
 
-use rayon::prelude::*;
-
 use crate::cpu_pool::CpuPool;
 
 mod carry;
 pub mod policy;
+mod regions;
 
-pub use policy::{backend, macs_per_row, with_op_work};
+pub use policy::{backend, decode_backend, macs_per_row, with_op_work};
+pub use regions::{
+    chunks_mut, chunks_mut2, chunks_mut2_by, chunks_mut_init, indices, indices_init, items_mut,
+};
 
 thread_local! {
     /// How many parallel regions THIS thread has opened while not being
@@ -65,6 +71,82 @@ thread_local! {
     /// else the test binary happened to be running at the time, which is
     /// the difference between a guard and a flake.
     static COLD_REGIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Regions opened in this PROCESS, by the scheduler that ran them, and
+/// how many times consecutive regions changed scheduler. Monotonic; read
+/// it before and after an operation and assert on [`RegionTally::since`].
+///
+/// This is how #27's interleaving is observed without a stopwatch: a
+/// decode step whose regions alternate between the two schedulers shows
+/// one `switch` per boundary, and every boundary hands the work from one
+/// set of awake workers to another that has to be woken (see
+/// [`policy`]'s module docs for how each one idles).
+///
+/// Process-wide on purpose, unlike [`cold_regions`]: the regions that
+/// gave #27 away were opened on OTHER threads, by the branches of a
+/// forked `join`, and a per-thread count would not have seen them. The
+/// price is that it counts every concurrent caller, so only a test
+/// binary that runs one test can assert on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegionTally {
+    /// Regions forked with rayon.
+    pub rayon: u64,
+    /// Regions run on the persistent pool.
+    pub spin: u64,
+    /// Consecutive regions that ran on different schedulers.
+    pub switches: u64,
+}
+
+impl RegionTally {
+    /// What happened between `before` and `self`.
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            rayon: self.rayon - before.rayon,
+            spin: self.spin - before.spin,
+            switches: self.switches - before.switches,
+        }
+    }
+}
+
+mod tally_state {
+    use std::sync::atomic::{AtomicU64, AtomicU8};
+
+    pub(super) static RAYON: AtomicU64 = AtomicU64::new(0);
+    pub(super) static SPIN: AtomicU64 = AtomicU64::new(0);
+    pub(super) static SWITCHES: AtomicU64 = AtomicU64::new(0);
+    /// `0` before the first region, else `1 + Backend as u8` of the last.
+    pub(super) static LAST: AtomicU8 = AtomicU8::new(0);
+}
+
+/// The process's [`RegionTally`].
+pub fn region_tally() -> RegionTally {
+    use std::sync::atomic::Ordering::Relaxed;
+    RegionTally {
+        rayon: tally_state::RAYON.load(Relaxed),
+        spin: tally_state::SPIN.load(Relaxed),
+        switches: tally_state::SWITCHES.load(Relaxed),
+    }
+}
+
+/// Counts one region on `which`. Two relaxed atomics per region, against
+/// a region that costs at least a cache-line handoff to every worker.
+fn tally(which: Backend) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (counter, tag) = match which {
+        Backend::Rayon => (&tally_state::RAYON, 1u8),
+        Backend::Spin => (&tally_state::SPIN, 2u8),
+    };
+    counter.fetch_add(1, Relaxed);
+    let prev = tally_state::LAST.swap(tag, Relaxed);
+    if prev != 0 && prev != tag {
+        tally_state::SWITCHES.fetch_add(1, Relaxed);
+    }
+}
+
+/// Records one region that ran on the persistent pool.
+fn note_spin_region() {
+    tally(Backend::Spin);
 }
 
 /// Parallel regions this thread has opened without being a rayon worker.
@@ -85,6 +167,16 @@ pub fn cold_regions() -> u64 {
 /// anyway, and the counter is touched only on the cold path, which after
 /// [`on_workers`] is once per decode step rather than once per matvec.
 fn note_rayon_region() {
+    tally(Backend::Rayon);
+    note_cold_entry();
+}
+
+/// Counts a submission into rayon from outside its workers, for
+/// [`cold_regions`]. Separate from the [`region_tally`] count because
+/// [`on_workers`]'s own promotion is a cold entry but not a work region:
+/// counting it as a rayon region would read every promoted pool step as
+/// having changed scheduler at its start.
+fn note_cold_entry() {
     if rayon::current_thread_index().is_none() {
         COLD_REGIONS.with(|c| c.set(c.get().saturating_add(1)));
     }
@@ -177,11 +269,60 @@ where
     // The one cold entry this whole design is willing to pay. Counted
     // like any other, so [`cold_regions`] reports the true total and a
     // test can assert it is exactly one.
-    note_rayon_region();
+    note_cold_entry();
     rayon::scope(move |_| {
         let _adopted = carried.adopt();
         f()
     })
+}
+
+/// Run one single-token decode step `f` whose widest per-layer matvec is
+/// `widest_layer_macs` multiply-accumulates, with EVERY parallel region
+/// inside it on one scheduler.
+///
+/// This is the decode-side entry #27 asked for. Deciding per operation
+/// made a 3B step alternate between the two schedulers at every layer
+/// and run both at once inside the Q/K/V `join3` (see [`policy`]'s
+/// module docs for the counts and for how each pool idles). One choice
+/// per step, from [`decode_backend`], gives the two configurations that
+/// were actually measured:
+///
+/// - **Pool** for a model over the crossover: every region, the joins
+///   (which then run their branches one after the other) and the LM
+///   head included, goes to the pool, as under `FRINK_CPU_POOL=spin`.
+/// - **Rayon** below it: every region forks, as under
+///   `FRINK_CPU_POOL=rayon`.
+///
+/// Both are still promoted with [`on_workers`], so the step runs on a
+/// rayon worker either way. For the pool arm that is one park and wake
+/// per token, which the default already paid, and it buys the case two
+/// requests decode at once: the pool admits one submitter, and the other
+/// step's regions fall back to rayon. From a worker that fallback is
+/// rayon's in-worker path; from a plain thread it would be the cold
+/// submission `on_workers` exists to avoid, once per region. (Under the
+/// pin, `on_workers` does not promote, which keeps the pin's behaviour
+/// exactly what it was.)
+///
+/// `None` (an engine that has not said how wide its layers are), a
+/// backend other than the CPU, and a call already inside a step all keep
+/// what they had: [`on_workers`], and the per-operation rule. Metal and
+/// CUDA steps are therefore unchanged by construction; nobody has
+/// measured the pool under them.
+pub fn decode_step<R, F>(widest_layer_macs: Option<usize>, f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    if policy::forward().is_some() {
+        return f();
+    }
+    let cpu = crate::weight_matrix::active_backend() == crate::kernel_registry::Backend::Cpu;
+    match widest_layer_macs.filter(|_| cpu).map(decode_backend) {
+        None => on_workers(f),
+        // Committed INSIDE the promoted closure: the commitment is a
+        // thread-local of the thread that runs the step.
+        Some(step) => on_workers(move || policy::with_forward(Some(step), f)),
+    }
 }
 
 /// Which scheduler CPU parallel regions use.
@@ -233,335 +374,25 @@ pub fn num_threads() -> usize {
 /// the pool can usefully chase. No work threshold appears here; see the
 /// module docs on `MIN_TASK_MACS`.
 pub fn task_count(n_items: usize) -> usize {
+    tasks_for(num_threads(), n_items)
+}
+
+/// [`task_count`] for a pool `width` threads wide.
+fn tasks_for(width: usize, n_items: usize) -> usize {
     if n_items == 0 {
         return 0;
     }
-    n_items.min(num_threads().saturating_mul(TASKS_PER_THREAD).max(1))
+    n_items.min(width.saturating_mul(TASKS_PER_THREAD).max(1))
 }
 
-/// `(items_per_task, n_tasks)` for a contiguous split of `n_items`.
-fn split(n_items: usize) -> (usize, usize) {
-    let n_tasks = task_count(n_items);
+/// `(items_per_task, n_tasks)` for a contiguous split of `n_items` over
+/// a pool `width` threads wide.
+fn split_for(width: usize, n_items: usize) -> (usize, usize) {
+    let n_tasks = tasks_for(width, n_items);
     if n_tasks == 0 {
         return (0, 0);
     }
     (n_items.div_ceil(n_tasks), n_tasks)
-}
-
-/// A raw pointer that may cross into worker threads.
-///
-/// Only ever used to hand each task a *disjoint* sub-slice of one
-/// allocation the submitter borrows mutably for the whole region.
-struct SendPtr<T>(*mut T);
-
-// Hand-written rather than derived: `#[derive(Copy)]` would add a
-// `T: Copy` bound, and the element types here are `f32` today but a
-// `Q8Activations` tomorrow.
-impl<T> Clone for SendPtr<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<T> Copy for SendPtr<T> {}
-
-impl<T> SendPtr<T> {
-    /// The element pointer at `offset`.
-    ///
-    /// A method rather than a field read at the call sites, because
-    /// closure capture is per *field*: reading `base.0` inside a task
-    /// captures the bare `*mut T`, which is not `Sync`, and the whole
-    /// point of this wrapper is the `unsafe impl` above.
-    ///
-    /// # Safety
-    /// `offset` must be within the allocation this was built from.
-    unsafe fn at(self, offset: usize) -> *mut T {
-        // SAFETY: the caller's invariant.
-        unsafe { self.0.add(offset) }
-    }
-}
-
-// SAFETY: the pointer comes from a `&mut [T]` the submitter holds for
-// the duration of the region, and each task derives a sub-slice from a
-// half-open index range that no other task's range overlaps. `T: Send`
-// is required at every call site, which is what makes moving those
-// sub-slices onto worker threads sound.
-unsafe impl<T: Send> Send for SendPtr<T> {}
-unsafe impl<T: Send> Sync for SendPtr<T> {}
-
-/// Run `f(index)` for every `index` in `0..n`.
-pub fn indices<F>(n: usize, min_len: usize, f: F)
-where
-    F: Fn(usize) + Send + Sync,
-{
-    if n == 0 {
-        return;
-    }
-    if backend() == Backend::Spin {
-        let (per, n_tasks) = split(n);
-        let task = |t: usize| {
-            let lo = t * per;
-            let hi = ((t + 1) * per).min(n);
-            for i in lo..hi {
-                f(i);
-            }
-        };
-        if pool().run(n_tasks, &task) {
-            return;
-        }
-    }
-    note_rayon_region();
-    (0..n)
-        .into_par_iter()
-        .with_min_len(min_len.max(1))
-        .for_each(&f);
-}
-
-/// [`indices`] with a per-task scratch value, the shape rayon spells
-/// `for_each_init`. One `S` is created per task, not per index.
-pub fn indices_init<S, I, F>(n: usize, min_len: usize, init: I, f: F)
-where
-    S: Send,
-    I: Fn() -> S + Send + Sync,
-    F: Fn(&mut S, usize) + Send + Sync,
-{
-    if n == 0 {
-        return;
-    }
-    if backend() == Backend::Spin {
-        let (per, n_tasks) = split(n);
-        let task = |t: usize| {
-            let lo = t * per;
-            let hi = ((t + 1) * per).min(n);
-            if lo >= hi {
-                return;
-            }
-            let mut state = init();
-            for i in lo..hi {
-                f(&mut state, i);
-            }
-        };
-        if pool().run(n_tasks, &task) {
-            return;
-        }
-    }
-    note_rayon_region();
-    (0..n)
-        .into_par_iter()
-        .with_min_len(min_len.max(1))
-        .for_each_init(&init, |state, i| f(state, i));
-}
-
-/// Run `f(index, &mut item)` over `data`, the shape rayon spells
-/// `par_iter_mut().with_min_len(..).enumerate()`.
-pub fn items_mut<T, F>(data: &mut [T], min_len: usize, f: F)
-where
-    T: Send,
-    F: Fn(usize, &mut T) + Send + Sync,
-{
-    let n = data.len();
-    if n == 0 {
-        return;
-    }
-    if backend() == Backend::Spin {
-        let base = SendPtr(data.as_mut_ptr());
-        let (per, n_tasks) = split(n);
-        let task = |t: usize| {
-            let lo = t * per;
-            let hi = ((t + 1) * per).min(n);
-            for i in lo..hi {
-                // SAFETY: `base` points at `data`, borrowed mutably for
-                // the whole call and outliving the region. Index `i` is
-                // inside `0..n` and belongs to exactly one task, so no
-                // two of these `&mut T` overlap.
-                f(i, unsafe { &mut *base.at(i) });
-            }
-        };
-        if pool().run(n_tasks, &task) {
-            return;
-        }
-    }
-    note_rayon_region();
-    data.par_iter_mut()
-        .with_min_len(min_len.max(1))
-        .enumerate()
-        .for_each(|(i, slot)| f(i, slot));
-}
-
-/// [`chunks_mut`] over two slices of the same length at once, the shape
-/// rayon spells `a.par_chunks_mut(k).zip(b.par_chunks_mut(k))`.
-///
-/// Exists because the MoE decode path computes a gate row and an up row
-/// from one shared activation: splitting that into two regions would
-/// double the region count, which is the thing this whole module is
-/// trying to reduce.
-pub fn chunks_mut2<T, U, F>(a: &mut [T], b: &mut [U], chunk_len: usize, min_len: usize, f: F)
-where
-    T: Send,
-    U: Send,
-    F: Fn(usize, &mut [T], &mut [U]) + Send + Sync,
-{
-    assert_eq!(a.len(), b.len(), "zipped slices must be the same length");
-    chunks_mut2_by(a, b, chunk_len, chunk_len, min_len, f);
-}
-
-/// [`chunks_mut2`] with a chunk length per slice: `a` in runs of
-/// `len_a`, `b` in runs of `len_b`, the SAME number of chunks (a gated
-/// delta-net's per-head `S x S` state beside its per-head `S` output).
-pub fn chunks_mut2_by<T, U, F>(
-    a: &mut [T],
-    b: &mut [U],
-    len_a: usize,
-    len_b: usize,
-    min_len: usize,
-    f: F,
-) where
-    T: Send,
-    U: Send,
-    F: Fn(usize, &mut [T], &mut [U]) + Send + Sync,
-{
-    assert!(len_a > 0 && len_b > 0, "chunk lengths must be positive");
-    let n_chunks = a.len().div_ceil(len_a);
-    assert_eq!(
-        n_chunks,
-        b.len().div_ceil(len_b),
-        "zipped slices must split into the same number of chunks"
-    );
-    if n_chunks == 0 {
-        return;
-    }
-    if backend() == Backend::Spin {
-        let (total_a, total_b) = (a.len(), b.len());
-        let base_a = SendPtr(a.as_mut_ptr());
-        let base_b = SendPtr(b.as_mut_ptr());
-        let (per, n_tasks) = split(n_chunks);
-        let task = |t: usize| {
-            let lo = t * per;
-            let hi = ((t + 1) * per).min(n_chunks);
-            for c in lo..hi {
-                // SAFETY: both pointers come from slices the caller
-                // borrows mutably for the whole call, splitting into
-                // the same number of chunks, and chunk `c` of each is
-                // visited by exactly one task.
-                unsafe {
-                    f(
-                        c,
-                        chunk_of(base_a, total_a, len_a, c),
-                        chunk_of(base_b, total_b, len_b, c),
-                    );
-                }
-            }
-        };
-        if pool().run(n_tasks, &task) {
-            return;
-        }
-    }
-    note_rayon_region();
-    a.par_chunks_mut(len_a)
-        .zip(b.par_chunks_mut(len_b))
-        .with_min_len(min_len.max(1))
-        .enumerate()
-        .for_each(|(c, (ca, cb))| f(c, ca, cb));
-}
-
-/// Run `f(chunk_index, &mut chunk)` over `data` split into runs of
-/// `chunk_len`, the shape rayon spells `par_chunks_mut(chunk_len)`.
-///
-/// A trailing partial chunk is delivered short, exactly as
-/// `par_chunks_mut` does.
-pub fn chunks_mut<T, F>(data: &mut [T], chunk_len: usize, min_len: usize, f: F)
-where
-    T: Send,
-    F: Fn(usize, &mut [T]) + Send + Sync,
-{
-    assert!(chunk_len > 0, "chunk length must be positive");
-    let len = data.len();
-    if len == 0 {
-        return;
-    }
-    let n_chunks = len.div_ceil(chunk_len);
-    if backend() == Backend::Spin {
-        let base = SendPtr(data.as_mut_ptr());
-        let (per, n_tasks) = split(n_chunks);
-        let task = |t: usize| {
-            let lo = t * per;
-            let hi = ((t + 1) * per).min(n_chunks);
-            for c in lo..hi {
-                // SAFETY: see `chunks_mut_init`; the ranges are the same
-                // disjoint half-open chunks of one live borrow.
-                f(c, unsafe { chunk_of(base, len, chunk_len, c) });
-            }
-        };
-        if pool().run(n_tasks, &task) {
-            return;
-        }
-    }
-    note_rayon_region();
-    data.par_chunks_mut(chunk_len)
-        .with_min_len(min_len.max(1))
-        .enumerate()
-        .for_each(|(c, chunk)| f(c, chunk));
-}
-
-/// The `c`-th `chunk_len`-sized chunk of the `len`-element allocation at
-/// `base`, delivered short when it is the trailing one.
-///
-/// # Safety
-/// `base` must point at a live allocation of at least `len` elements
-/// that outlives the returned slice, and the caller must guarantee that
-/// no other live slice covers chunk `c` -- which the callers do by
-/// visiting each chunk index from exactly one task.
-unsafe fn chunk_of<'a, T>(base: SendPtr<T>, len: usize, chunk_len: usize, c: usize) -> &'a mut [T] {
-    let start = c * chunk_len;
-    let end = ((c + 1) * chunk_len).min(len);
-    debug_assert!(start < end && end <= len);
-    // SAFETY: the caller's invariants, plus `start..end` being inside
-    // `0..len` by construction of `c < len.div_ceil(chunk_len)`.
-    unsafe { std::slice::from_raw_parts_mut(base.at(start), end - start) }
-}
-
-/// [`chunks_mut`] with a per-task scratch value.
-pub fn chunks_mut_init<T, S, I, F>(data: &mut [T], chunk_len: usize, min_len: usize, init: I, f: F)
-where
-    T: Send,
-    S: Send,
-    I: Fn() -> S + Send + Sync,
-    F: Fn(&mut S, usize, &mut [T]) + Send + Sync,
-{
-    assert!(chunk_len > 0, "chunk length must be positive");
-    let len = data.len();
-    if len == 0 {
-        return;
-    }
-    let n_chunks = len.div_ceil(chunk_len);
-    if backend() == Backend::Spin {
-        let base = SendPtr(data.as_mut_ptr());
-        let (per, n_tasks) = split(n_chunks);
-        let task = |t: usize| {
-            let lo = t * per;
-            let hi = ((t + 1) * per).min(n_chunks);
-            if lo >= hi {
-                return;
-            }
-            let mut state = init();
-            for c in lo..hi {
-                // SAFETY: `base` points at `data`, which the caller
-                // borrows mutably for this whole call and which outlives
-                // the region (`CpuPool::run` does not return until every
-                // worker has stopped touching the closure). Chunk index
-                // `c` is visited by exactly one task, so no two of these
-                // slices overlap.
-                f(&mut state, c, unsafe { chunk_of(base, len, chunk_len, c) });
-            }
-        };
-        if pool().run(n_tasks, &task) {
-            return;
-        }
-    }
-    note_rayon_region();
-    data.par_chunks_mut(chunk_len)
-        .with_min_len(min_len.max(1))
-        .enumerate()
-        .for_each_init(&init, |state, (c, chunk)| f(state, c, chunk));
 }
 
 /// Two independent pieces of work.
@@ -581,7 +412,14 @@ where
     match backend() {
         Backend::Rayon => {
             note_rayon_region();
-            rayon::join(a, b)
+            // A stolen branch runs on another worker, whose thread has
+            // not heard of the enclosing step; tell it. Without this the
+            // branch falls back to the per-operation rule.
+            let step = policy::forward();
+            rayon::join(
+                move || policy::with_forward(step, a),
+                move || policy::with_forward(step, b),
+            )
         }
         Backend::Spin => (a(), b()),
     }
@@ -600,7 +438,17 @@ where
     match backend() {
         Backend::Rayon => {
             note_rayon_region();
-            let (ra, (rb, rc)) = rayon::join(a, || rayon::join(b, c));
+            // See `join2`.
+            let step = policy::forward();
+            let (ra, (rb, rc)) = rayon::join(
+                move || policy::with_forward(step, a),
+                move || {
+                    rayon::join(
+                        move || policy::with_forward(step, b),
+                        move || policy::with_forward(step, c),
+                    )
+                },
+            );
             (ra, rb, rc)
         }
         Backend::Spin => (a(), b(), c()),
@@ -622,8 +470,6 @@ mod tests {
     fn the_promotion_applies_here() -> bool {
         policy::pinned().is_none() && carry::promotable(crate::weight_matrix::active_backend())
     }
-
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     /// With nothing published and nothing pinned, the helpers fork with
     /// rayon -- the behaviour every caller that has not opted into the
@@ -647,31 +493,50 @@ mod tests {
     /// reaching the pool without asking, and asking the environment
     /// instead of asking the predicate.
     ///
-    /// Sabotage: inline `pool().run(..)` into a helper without its
-    /// `if backend() == Backend::Spin` guard, or read the environment
-    /// variable in a second place, and this goes red.
+    /// Sabotage: hand the process pool to a `*_on` spin arm from a helper
+    /// without its `if backend() == Backend::Spin &&` guard, or read the
+    /// environment variable in a second place, and this goes red.
     #[test]
     fn every_scheduler_choice_in_this_crate_goes_through_the_one_predicate() {
         // The needles are assembled rather than written out, because
-        // this file is one of the files being searched and a literal
+        // these files are among the files being searched and a literal
         // would count itself.
         let call = format!("{}()", "backend");
-        let guard = format!("if {call} == Backend::Spin {{");
+        let guard = format!("if {call} == Backend::Spin && ");
         let dispatch = format!("match {call} {{");
-        let enters_pool = format!("if {}().run(", "pool");
+        let process_pool = format!("{}()", "pool");
 
-        let src = include_str!("par.rs");
-        let guarded = src.matches(&guard).count();
+        // The region helpers reach the process pool only behind the
+        // guard, one guard per reach, and on the same line.
+        let regions = include_str!("par/regions.rs");
+        let guarded = regions.matches(&guard).count();
         assert!(guarded >= 6, "expected one guard per region helper");
         assert_eq!(
-            src.matches(&enters_pool).count(),
+            regions.matches(&process_pool).count(),
             guarded,
             "a helper reached the persistent pool without asking the predicate"
         );
+        assert!(
+            regions
+                .lines()
+                .filter(|l| l.contains(&process_pool))
+                .all(|l| l.contains(&guard)),
+            "the guard and the pool it guards must be one condition"
+        );
+
+        // Here, the pool is reached by `num_threads`'s dispatch and by
+        // its own definition, and by nothing else.
+        let src = include_str!("par.rs");
         assert_eq!(
             src.matches(&dispatch).count(),
             3,
             "num_threads, join2 and join3 dispatch on the predicate"
+        );
+        let defined = format!("fn {process_pool}");
+        assert_eq!(
+            src.matches(&process_pool).count() - src.matches(&defined).count(),
+            1,
+            "only num_threads may reach the process pool from par.rs"
         );
 
         // And the environment is consulted in exactly one place, so the
@@ -718,110 +583,58 @@ mod tests {
         // A one-element-per-row matrix and a 4096-element-per-row matrix
         // decompose identically: work per item is not an input.
         assert_eq!(task_count(4096), task_count(4096));
-        let (per, n) = split(1000);
+        let (per, n) = split_for(num_threads(), 1000);
         assert_eq!(n, task_count(1000));
         assert!(per * n >= 1000 && (per - 1) * n < 1000);
     }
 
-    /// Both arms must visit every index exactly once and produce the
-    /// same answer, whichever one the env var picked -- that is the
-    /// property the whole switch rests on.
+    /// A forked join's branches run under the step their submitter
+    /// committed to, whichever worker steals them.
+    ///
+    /// The first branch sleeps so the others are stolen by idle workers
+    /// whenever the pool has more than one thread. Without the carry a
+    /// stolen branch reads its own thread's `None` and falls back to the
+    /// per-operation rule: that is how Q, K and V came to race for the
+    /// pool from three threads at once.
+    ///
+    /// Sabotage, run: pass `b` and `c` to `rayon::join` bare in `join3`
+    /// (no `with_forward`) and this goes red.
     #[test]
-    fn indices_visits_every_index_exactly_once() {
-        for n in [0usize, 1, 7, 64, 5000] {
-            let hits: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
-            indices(n, 8, |i| {
-                hits[i].fetch_add(1, Ordering::Relaxed);
-            });
-            assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1), "n={n}");
+    fn a_forked_joins_branches_inherit_the_steps_commitment() {
+        use std::time::Duration;
+        if policy::pinned().is_some() {
+            return;
         }
-    }
-
-    #[test]
-    fn items_mut_writes_every_slot_with_its_own_index() {
-        for n in [0usize, 1, 9, 257] {
-            let mut data = vec![0u32; n];
-            items_mut(&mut data, 4, |i, slot| *slot = i as u32 + 1);
-            assert_eq!(data, (1..=n as u32).collect::<Vec<_>>(), "n={n}");
-        }
-    }
-
-    /// The trailing partial chunk is the easy thing to lose, and losing
-    /// it silently drops the last rows of a matvec.
-    #[test]
-    fn chunks_mut_delivers_a_short_trailing_chunk() {
-        let mut data = vec![0u32; 10];
-        let seen: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
-        chunks_mut(&mut data, 4, 1, |c, chunk| {
-            seen.lock().unwrap().push((c, chunk.len()));
-            for (i, slot) in chunk.iter_mut().enumerate() {
-                *slot = (c * 4 + i) as u32;
-            }
+        let rayon_step = Some(Backend::Rayon);
+        let seen = on_workers(|| {
+            policy::with_forward(rayon_step, || {
+                join3(
+                    || {
+                        std::thread::sleep(Duration::from_millis(20));
+                        policy::forward()
+                    },
+                    policy::forward,
+                    policy::forward,
+                )
+            })
         });
-        let mut seen = seen.into_inner().unwrap();
-        seen.sort_unstable();
-        assert_eq!(seen, vec![(0, 4), (1, 4), (2, 2)]);
-        assert_eq!(data, (0..10).collect::<Vec<u32>>());
-    }
-
-    /// Per-task scratch is created per task, never shared between two
-    /// tasks that might run at the same time.
-    #[test]
-    fn chunks_mut_init_gives_each_task_its_own_scratch() {
-        let mut data = vec![0u64; 512];
-        chunks_mut_init(
-            &mut data,
-            8,
-            1,
-            || Vec::<u64>::with_capacity(8),
-            |scratch: &mut Vec<u64>, c, chunk| {
-                scratch.clear();
-                scratch.extend(chunk.iter().map(|_| c as u64));
-                chunk.copy_from_slice(scratch);
-            },
-        );
-        for (c, chunk) in data.chunks(8).enumerate() {
-            assert!(chunk.iter().all(|&v| v == c as u64));
-        }
+        assert_eq!(seen, (rayon_step, rayon_step, rayon_step));
+        let seen = policy::with_forward(rayon_step, || {
+            join2(
+                || {
+                    std::thread::sleep(Duration::from_millis(20));
+                    policy::forward()
+                },
+                policy::forward,
+            )
+        });
+        assert_eq!(seen, (rayon_step, rayon_step));
     }
 
     #[test]
     fn joins_return_every_result_in_order() {
         assert_eq!(join2(|| 1u8, || 2u8), (1, 2));
         assert_eq!(join3(|| 1u8, || 2u8, || 3u8), (1, 2, 3));
-    }
-
-    /// The two arms are not allowed to disagree. This runs each helper
-    /// through the spin pool directly and through rayon directly, in one
-    /// process, and compares -- because the env var can only select one
-    /// of them per run, and "they agree" is the claim the PR makes.
-    #[test]
-    fn the_spin_arm_and_the_rayon_arm_produce_identical_results() {
-        let pool = CpuPool::new(4);
-        for n in [1usize, 5, 63, 1024] {
-            let mut spun = vec![0f32; n];
-            let base = SendPtr(spun.as_mut_ptr());
-            let (per, n_tasks) = split(n);
-            let task = |t: usize| {
-                let lo = t * per;
-                let hi = ((t + 1) * per).min(n);
-                for i in lo..hi {
-                    // SAFETY: disjoint single-element writes; index `i`
-                    // belongs to exactly one task.
-                    unsafe { *base.at(i) = (i as f32) * 0.5 + 1.0 };
-                }
-            };
-            assert!(pool.run(n_tasks, &task));
-
-            let mut forked = vec![0f32; n];
-            forked
-                .par_iter_mut()
-                .with_min_len(8)
-                .enumerate()
-                .for_each(|(i, slot)| *slot = (i as f32) * 0.5 + 1.0);
-
-            assert_eq!(spun, forked, "n={n}");
-        }
     }
 
     /// Every helper in this module must report the region it is about

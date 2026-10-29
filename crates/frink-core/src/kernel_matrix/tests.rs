@@ -11,16 +11,42 @@ const PINNED: &[(Backend, Op, usize)] = &[
     (Backend::Cpu, Op::Matvec, 17),
     (Backend::Cpu, Op::Gemm, 17),
     (Backend::Cpu, Op::GetRows, 0),
-    (Backend::Cuda, Op::Matvec, 12),
-    (Backend::Cuda, Op::Gemm, 12),
-    (Backend::Cuda, Op::GetRows, 23),
-    (Backend::Metal, Op::Matvec, 4),
-    (Backend::Metal, Op::Gemm, 4),
-    (Backend::Metal, Op::GetRows, 4),
-    (Backend::Vulkan, Op::Matvec, 22),
-    (Backend::Vulkan, Op::Gemm, 23),
-    (Backend::Vulkan, Op::GetRows, 23),
+    (Backend::Cuda, Op::Matvec, 11),
+    (Backend::Cuda, Op::Gemm, 11),
+    (Backend::Cuda, Op::GetRows, 22),
+    (Backend::Metal, Op::Matvec, 0),
+    (Backend::Metal, Op::Gemm, 0),
+    (Backend::Metal, Op::GetRows, 0),
+    (Backend::Vulkan, Op::Matvec, 21),
+    (Backend::Vulkan, Op::Gemm, 22),
+    (Backend::Vulkan, Op::GetRows, 22),
 ];
+
+/// `n/a` is exactly the activation formats' accelerator cells: it can
+/// neither hide a real gap (a weight kind marked `n/a`) nor leave an
+/// activation format counted as one. The CPU column never says `n/a`.
+#[test]
+fn not_applicable_is_exactly_the_activation_formats_on_accelerators() {
+    let m = KernelMatrix::derive();
+    for &b in Backend::ALL {
+        for o in Op::ALL {
+            for &k in QuantKind::ALL {
+                let na = m.cell(b, o, k) == Cell::NotApplicable;
+                assert_eq!(
+                    na,
+                    b.is_accelerator() && k.is_activation_format(),
+                    "{b} {} {k:?}",
+                    o.name()
+                );
+            }
+        }
+    }
+    let formats: Vec<_> = QuantKind::ALL
+        .iter()
+        .filter(|k| k.is_activation_format())
+        .collect();
+    assert_eq!(formats, [&QuantKind::Q8_1]);
+}
 
 /// The gap a host fallback or a CPU `f32` cell stands for.
 fn gap(backend: Backend, cell: Cell) -> bool {
@@ -99,6 +125,12 @@ fn accelerator_cells_are_the_capability_tables() {
         ($b:ty) => {
             let b = <$b as BackendCaps>::ID;
             for &k in QuantKind::ALL {
+                if k.is_activation_format() {
+                    // No reference kernel to claim, and none claimed.
+                    assert!(<$b as BackendCaps>::matvec_kernel(k).is_none(), "{b} {k:?}");
+                    assert!(!<$b as BackendCaps>::gemm_supported(k), "{b} {k:?}");
+                    continue;
+                }
                 let matvec = <$b as BackendCaps>::matvec_kernel(k).is_some();
                 let gemm = <$b as BackendCaps>::gemm_supported(k);
                 assert_eq!(
@@ -242,6 +274,13 @@ fn get_rows_is_the_metal_gather_table_and_host_elsewhere() {
     let m = KernelMatrix::derive();
     for &k in QuantKind::ALL {
         let gathers = frink_metal::embd_kinds::EmbdKind::from_kind_name(k.name()).is_some();
+        if k.is_activation_format() {
+            assert!(!gathers, "{k:?}");
+            for b in [Backend::Metal, Backend::Cuda, Backend::Vulkan] {
+                assert_eq!(m.cell(b, Op::GetRows, k), Cell::NotApplicable);
+            }
+            continue;
+        }
         assert_eq!(
             m.cell(Backend::Metal, Op::GetRows, k) == Cell::Kernel,
             gathers

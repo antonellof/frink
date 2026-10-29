@@ -114,11 +114,12 @@ the kernel tables:
 |---|---|---|---|
 | Full | `Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` | AVX2 + NEON, plus the int-dot path | Metal matvec + GEMM, CUDA matvec + GEMM |
 | Metal only | `IQ4_XS`, `Q5_0` | AVX2 + NEON | Metal matvec + GEMM |
-| Metal only, scalar CPU | `PTQ1_0` (PrismML ternary) | scalar | Metal matvec + GEMM |
+| Metal only, scalar CPU | `PTQ1_0` (PrismML ternary), `TQ1_0` | scalar | Metal matvec + GEMM |
 | GPU, f32 CPU dot | `Q2_K`, `Q3_K` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
 | Codebook | `IQ4_NL` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
 | Codebook, scalar CPU | GGUF-block `MXFP4` (gpt-oss's experts) | scalar | Metal matvec + GEMM, CUDA matvec + GEMM |
-| CPU-vectorized | `Q4_1`, `Q5_1`, `Q8_1`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none |
+| Legacy with a min | `Q4_1`, `Q5_1` | AVX2 + NEON | Metal matvec + GEMM |
+| CPU-vectorized | `Q8_1`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none; `Q8_1` is ggml's activation format, with no weight path to match (`n/a` in KERNELS.md) |
 | Grid codebook, AVX2 CPU | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | Metal matvec + GEMM |
 | Grid codebook, scalar CPU | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M` | none | Metal matvec + GEMM |
 

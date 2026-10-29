@@ -7,6 +7,11 @@
 //! not. The caller supplies the encoder, so a kind with no
 //! `frink_quant` encoder can still be written by the suite that needs
 //! it.
+//!
+//! The width is the default, not a fixture of the file: [`Shape`] holds
+//! it, [`Shape::DEFAULT`] is the 512-wide llama above, and [`write_shaped`]
+//! writes any other, for a suite whose assertion depends on where a
+//! layer's matvecs sit against a size threshold (`decode_scheduler_choice`).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -37,6 +42,33 @@ pub const N_EXPERT: usize = 4;
 pub const N_EXPERT_USED: usize = 2;
 pub const N_FF_EXP: usize = N_FF;
 
+/// The dimensions of one synthetic llama. The constants above are
+/// [`Shape::DEFAULT`]'s fields, so the two cannot disagree.
+#[derive(Debug, Clone, Copy)]
+pub struct Shape {
+    pub n_embd: usize,
+    pub n_ff: usize,
+    pub n_head: usize,
+    pub n_head_kv: usize,
+    pub n_layer: usize,
+    pub n_vocab: usize,
+}
+
+impl Shape {
+    pub const DEFAULT: Self = Self {
+        n_embd: N_EMBD,
+        n_ff: N_FF,
+        n_head: N_HEAD,
+        n_head_kv: N_HEAD_KV,
+        n_layer: N_LAYER,
+        n_vocab: N_VOCAB,
+    };
+
+    pub fn head_dim(self) -> usize {
+        self.n_embd / self.n_head
+    }
+}
+
 /// A deterministic, sign-balanced fill. A 64-bit LCG is enough: the
 /// weights only have to be fixed, not good.
 fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
@@ -64,20 +96,20 @@ struct Tensor {
     values: Vec<f32>,
 }
 
-fn metadata() -> BTreeMap<String, GgufValue> {
+fn metadata(s: Shape) -> BTreeMap<String, GgufValue> {
     let u = |n: usize| GgufValue::U32(n as u32);
     [
         (
             "general.architecture",
             GgufValue::String("llama".to_string()),
         ),
-        ("llama.block_count", u(N_LAYER)),
-        ("llama.embedding_length", u(N_EMBD)),
-        ("llama.feed_forward_length", u(N_FF)),
-        ("llama.attention.head_count", u(N_HEAD)),
-        ("llama.attention.head_count_kv", u(N_HEAD_KV)),
-        ("llama.attention.key_length", u(HEAD_DIM)),
-        ("llama.vocab_size", u(N_VOCAB)),
+        ("llama.block_count", u(s.n_layer)),
+        ("llama.embedding_length", u(s.n_embd)),
+        ("llama.feed_forward_length", u(s.n_ff)),
+        ("llama.attention.head_count", u(s.n_head)),
+        ("llama.attention.head_count_kv", u(s.n_head_kv)),
+        ("llama.attention.key_length", u(s.head_dim())),
+        ("llama.vocab_size", u(s.n_vocab)),
         ("llama.rope.freq_base", GgufValue::F32(10_000.0)),
         (
             "llama.attention.layer_norm_rms_epsilon",
@@ -89,7 +121,16 @@ fn metadata() -> BTreeMap<String, GgufValue> {
     .collect()
 }
 
-fn tensors(dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
+fn tensors(s: Shape, dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
+    let Shape {
+        n_embd,
+        n_ff,
+        n_head_kv,
+        n_layer,
+        n_vocab,
+        ..
+    } = s;
+    let head_dim = s.head_dim();
     let mut seed = 0u64;
     let mut matrix = |name: String, rows: usize, cols: usize, dtype: GgmlType| {
         seed += 1;
@@ -106,29 +147,29 @@ fn tensors(dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
     let norm = |name: String, seed: u64| Tensor {
         name,
         rows: 1,
-        cols: N_EMBD,
+        cols: n_embd,
         n_expert: 1,
         dtype: GgmlType::F32,
-        values: fill(1000 + seed, N_EMBD, 0.2)
+        values: fill(1000 + seed, n_embd, 0.2)
             .into_iter()
             .map(|v| 1.0 + v)
             .collect(),
     };
 
-    let kv = N_HEAD_KV * HEAD_DIM;
+    let kv = n_head_kv * head_dim;
     let mut out = vec![matrix(
         "token_embd.weight".to_string(),
-        N_VOCAB,
-        N_EMBD,
+        n_vocab,
+        n_embd,
         embd,
     )];
-    for l in 0..N_LAYER {
+    for l in 0..n_layer {
         out.push(norm(format!("blk.{l}.attn_norm.weight"), 2 * l as u64));
         for (name, rows, cols) in [
-            ("attn_q", N_EMBD, N_EMBD),
-            ("attn_k", kv, N_EMBD),
-            ("attn_v", kv, N_EMBD),
-            ("attn_output", N_EMBD, N_EMBD),
+            ("attn_q", n_embd, n_embd),
+            ("attn_k", kv, n_embd),
+            ("attn_v", kv, n_embd),
+            ("attn_output", n_embd, n_embd),
         ] {
             out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
         }
@@ -138,13 +179,13 @@ fn tensors(dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
             out.push(matrix(
                 format!("blk.{l}.ffn_gate_inp.weight"),
                 N_EXPERT,
-                N_EMBD,
+                n_embd,
                 GgmlType::F32,
             ));
             for (name, rows, cols) in [
-                ("ffn_gate_exps", N_FF_EXP, N_EMBD),
-                ("ffn_up_exps", N_FF_EXP, N_EMBD),
-                ("ffn_down_exps", N_EMBD, N_FF_EXP),
+                ("ffn_gate_exps", N_FF_EXP, n_embd),
+                ("ffn_up_exps", N_FF_EXP, n_embd),
+                ("ffn_down_exps", n_embd, N_FF_EXP),
             ] {
                 let mut t = matrix(
                     format!("blk.{l}.{name}.weight"),
@@ -159,15 +200,15 @@ fn tensors(dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
             continue;
         }
         for (name, rows, cols) in [
-            ("ffn_gate", N_FF, N_EMBD),
-            ("ffn_up", N_FF, N_EMBD),
-            ("ffn_down", N_EMBD, N_FF),
+            ("ffn_gate", n_ff, n_embd),
+            ("ffn_up", n_ff, n_embd),
+            ("ffn_down", n_embd, n_ff),
         ] {
             out.push(matrix(format!("blk.{l}.{name}.weight"), rows, cols, dtype));
         }
     }
     out.push(norm("output_norm.weight".to_string(), 99));
-    out.push(matrix("output.weight".to_string(), N_VOCAB, N_EMBD, dtype));
+    out.push(matrix("output.weight".to_string(), n_vocab, n_embd, dtype));
     out
 }
 
@@ -175,23 +216,46 @@ fn tensors(dtype: GgmlType, embd: GgmlType, moe: bool) -> Vec<Tensor> {
 /// by `encode`, and returns its path. `tag` names the file, so two
 /// suites never share one.
 pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
-    write_variant(tag, dtype, GgmlType::F32, false, encode)
+    write_variant(tag, Shape::DEFAULT, dtype, GgmlType::F32, false, encode)
+}
+
+/// [`write`] at `shape` instead of [`Shape::DEFAULT`].
+pub fn write_shaped(tag: &str, shape: Shape, dtype: GgmlType, encode: Encode) -> PathBuf {
+    write_variant(tag, shape, dtype, GgmlType::F32, false, encode)
 }
 
 /// [`write`] with the token embedding stored as `embd` rather than F32,
 /// for the suites that exercise a backend's embedding gather.
 pub fn write_with_embd(tag: &str, dtype: GgmlType, embd: GgmlType, encode: Encode) -> PathBuf {
-    write_variant(tag, dtype, embd, false, encode)
+    write_variant(tag, Shape::DEFAULT, dtype, embd, false, encode)
 }
 
 /// [`write`] with every FFN a routed MoE of [`N_EXPERT`] experts of
 /// [`N_FF_EXP`], top [`N_EXPERT_USED`], the experts stored as `dtype`.
 pub fn write_moe(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
-    write_variant(tag, dtype, GgmlType::F32, true, encode)
+    write_variant(tag, Shape::DEFAULT, dtype, GgmlType::F32, true, encode)
 }
 
-fn write_variant(tag: &str, dtype: GgmlType, embd: GgmlType, moe: bool, encode: Encode) -> PathBuf {
-    let mut meta = metadata();
+fn write_variant(
+    tag: &str,
+    shape: Shape,
+    dtype: GgmlType,
+    embd: GgmlType,
+    moe: bool,
+    encode: Encode,
+) -> PathBuf {
+    assert!(
+        !moe || matches!(
+            shape,
+            Shape {
+                n_embd: N_EMBD,
+                n_ff: N_FF,
+                ..
+            }
+        ),
+        "the MoE variant sizes its experts by N_FF_EXP and is written at Shape::DEFAULT only"
+    );
+    let mut meta = metadata(shape);
     if moe {
         meta.insert("llama.expert_count".into(), GgufValue::U32(N_EXPERT as u32));
         meta.insert(
@@ -199,7 +263,7 @@ fn write_variant(tag: &str, dtype: GgmlType, embd: GgmlType, moe: bool, encode: 
             GgufValue::U32(N_EXPERT_USED as u32),
         );
     }
-    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype, embd, moe)
+    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(shape, dtype, embd, moe)
         .into_iter()
         .map(|t| {
             let shape = if t.n_expert > 1 {

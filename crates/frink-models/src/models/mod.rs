@@ -7,14 +7,19 @@
 //! ([`facts::ArchFacts::from_tables`]) for every architecture that has
 //! not moved yet. One file per llama.cpp `src/models/<arch>.cpp`.
 
+pub mod dbrx;
+pub mod dots1;
 pub mod exaone4;
 pub mod facts;
 pub mod granite;
 pub mod granite_moe;
+pub mod grok;
 pub mod kolibri1;
 pub mod llama;
 pub mod olmo;
 pub mod olmo2;
+pub mod olmoe;
+pub mod phimoe;
 pub mod qwen;
 pub mod qwen2;
 pub mod qwen2moe;
@@ -60,6 +65,11 @@ pub const REGISTRY: &[ModelDef] = &[
     qwen3::DEF,
     qwen3moe::DEF,
     kolibri1::DEF,
+    olmoe::DEF,
+    dots1::DEF,
+    phimoe::DEF,
+    dbrx::DEF,
+    grok::DEF,
 ];
 
 /// The registry entry naming `arch`.

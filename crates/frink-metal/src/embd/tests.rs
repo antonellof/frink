@@ -54,7 +54,7 @@ fn every_gather_reuses_its_kinds_gemm_functor() {
             }
             // The IQ formats share `IqDequant`; the geometry is the
             // `group` / `affine` struct it is instantiated over.
-            _ if crate::iq::by_name(k.kind_name()).is_some() => {
+            _ if crate::iq::kinds().any(|(g, _)| g.name == k.kind_name()) => {
                 let g = functor.strip_suffix("Dequant").unwrap();
                 assert!(src.contains(&format!("typedef IqDequant<{g}> {functor};")));
                 g
@@ -103,6 +103,9 @@ fn cpu_dequant(kind: EmbdKind, bytes: &[u8]) -> Vec<f32> {
         EmbdKind::Iq3S => q::dequant_iq3_s(bytes),
         EmbdKind::Iq1S => q::dequant_iq1_s(bytes),
         EmbdKind::Iq1M => q::dequant_iq1_m(bytes),
+        EmbdKind::Q4_1 => q::dequant_q4_1(bytes),
+        EmbdKind::Q5_1 => q::dequant_q5_1(bytes),
+        EmbdKind::Tq1_0 => q::ternary::dequant_trits(bytes, q::ternary::TQ1_0),
     }
     .expect("whole blocks")
 }
@@ -112,8 +115,8 @@ fn cpu_dequant(kind: EmbdKind, bytes: &[u8]) -> Vec<f32> {
 /// quantizer writes). The `half` scales sit where each format keeps
 /// them; MXFP4's second block carries the subnormal exponent 0.
 fn blocks(kind: EmbdKind, n_blocks: usize, block_bytes: usize, seed: u32) -> Vec<u8> {
-    if crate::iq::by_name(kind.kind_name()).is_some() {
-        return crate::iq::test_blocks(kind.kind_name(), seed, n_blocks);
+    if crate::gen_kinds::by_name(kind.kind_name()).is_some() {
+        return crate::gen_kinds::test_blocks(kind.kind_name(), seed, n_blocks);
     }
     let mut w = crate::k_quant_check::pseudo_bytes(seed, n_blocks * block_bytes);
     let halves: &[usize] = match kind {
@@ -126,7 +129,7 @@ fn blocks(kind: EmbdKind, n_blocks: usize, block_bytes: usize, seed: u32) -> Vec
         EmbdKind::Q2K => &[80, 82],
         EmbdKind::Q3K => &[108],
         EmbdKind::Mxfp4 => &[],
-        _ => unreachable!("the IQ kinds returned above"),
+        _ => unreachable!("the generated kinds returned above"),
     };
     for b in 0..n_blocks {
         let at = b * block_bytes;

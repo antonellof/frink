@@ -235,7 +235,8 @@ fn assert_schedulers_agree(path: &Path, raw_prompt: bool) {
 /// continuation, because a matvec that skips rows moves the argmax.
 /// The same edit in `items_mut`, `chunks_mut2_by` and `chunks_mut_init`
 /// stays green: a dense llama decode step does not reach them, so this
-/// suite says nothing about their spin arms.
+/// suite says nothing about their spin arms. `frink_core::par::regions`
+/// holds those three against their rayon twins on a private pool.
 #[test]
 fn the_two_cpu_schedulers_produce_token_identical_output() {
     for dtype in [GgmlType::Q8_0, GgmlType::Q4K] {

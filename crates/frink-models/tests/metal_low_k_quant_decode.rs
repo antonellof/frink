@@ -1,18 +1,23 @@
-//! Q2_K, Q3_K and IQ1/IQ2/IQ3 models decode on Metal as they do on the
-//! CPU (#405).
+//! Q2_K, Q3_K, IQ1/IQ2/IQ3, Q4_1, Q5_1 and TQ1_0 models decode on Metal
+//! as they do on the CPU (#405).
 //!
 //! The committed graph fixtures are all F32, so the Metal decode sweep
 //! in `decode_step_graphs` never reaches a quantized kernel. This suite
 //! writes the 512-wide synthetic llama (`common::synthetic_llama`) with
 //! every weight matrix in Q2_K, then in Q3_K, then in each of IQ2_XXS,
-//! IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and IQ1_M, and runs the serving
+//! IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and IQ1_M, then in Q4_1, Q5_1
+//! and TQ1_0, and runs the serving
 //! shape on both engines: a batched prefill (the simdgroup GEMM, 6
 //! tokens) and then [`STEPS`] single-token decodes (the matvec). The
 //! CPU runs in a child process, because a test process is pinned to
 //! one backend (`common::backend`).
 //!
-//! The Metal run replays the CPU's greedy tokens, so every step compares
-//! the same position and a near-tie at one step cannot hide the rest.
+//! Both engines replay one fixed continuation of distinct tokens
+//! ([`replay`]), so every step compares the same position at a
+//! different token and a near-tie at one step cannot hide the rest. It
+//! used to be the CPU's greedy continuation, which a kind that encodes
+//! the random weights closely (Q4_1, cosine 0.999) collapses to one
+//! repeated token: nothing wrong with the kernels, little to compare.
 //! It also reads the kernel registry: a Metal miss for the kind under
 //! test means the weights ran on the host and the comparison was the
 //! CPU against itself.
@@ -44,6 +49,9 @@ fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
     match dtype {
         GgmlType::Q2K | GgmlType::Q3K => common::quant_encode::encode(dtype, cols, w),
         iq if common::iq_encode::KINDS.contains(&iq) => common::quant_encode::encode(iq, cols, w),
+        GgmlType::Q4_1 | GgmlType::Q5_1 | GgmlType::TQ1_0 => {
+            common::quant_encode::encode(dtype, cols, w)
+        }
         other => panic!("this suite encodes Q2_K, Q3_K and the IQ kinds, not {other:?}"),
     }
 }
@@ -68,9 +76,16 @@ fn the_fixture_encoders_round_trip_through_the_cpu_dequant() {
         };
         (k, common::iq_encode::dequant(k), floor)
     });
+    fn tq1_0(b: &[u8]) -> Result<Vec<f32>, frink_quant::QuantError> {
+        frink_quant::ternary::dequant_trits(b, frink_quant::ternary::TQ1_0)
+    }
     for (dtype, dequant, floor) in [
         (GgmlType::Q2K, frink_quant::dequant_q2_k as Dequant, 0.90f64),
         (GgmlType::Q3K, frink_quant::dequant_q3_k as Dequant, 0.97),
+        (GgmlType::Q4_1, frink_quant::dequant_q4_1 as Dequant, 0.99),
+        (GgmlType::Q5_1, frink_quant::dequant_q5_1 as Dequant, 0.99),
+        // Three levels per block of 256 on a sine: measured 0.955.
+        (GgmlType::TQ1_0, tq1_0 as Dequant, 0.94),
     ]
     .into_iter()
     .chain(iq)
@@ -86,6 +101,24 @@ fn the_fixture_encoders_round_trip_through_the_cpu_dequant() {
             "{dtype:?}: cosine {cos} to the input, want > {floor}"
         );
     }
+}
+
+/// The continuation both engines feed: [`STEPS`] distinct ids, none of
+/// them a prompt token.
+fn replay() -> Vec<usize> {
+    (0..STEPS)
+        .map(|i| (7 + 31 * i) % synthetic_llama::N_VOCAB)
+        .collect()
+}
+
+#[test]
+fn the_replayed_continuation_is_distinct_and_off_the_prompt() {
+    let r = replay();
+    let mut d = r.clone();
+    d.sort_unstable();
+    d.dedup();
+    assert_eq!(d.len(), STEPS);
+    assert!(r.iter().all(|t| !synthetic_llama::PROMPT.contains(t)));
 }
 
 /// Prefill, then [`STEPS`] decodes of `tokens` (greedy when `None`).
@@ -111,7 +144,7 @@ fn load(path: &Path) -> Decoder {
     common::load_decoder(path, config)
 }
 
-/// The child half: the CPU's greedy run, printed. Inert unless
+/// The child half: the CPU's run over [`replay`], printed. Inert unless
 /// [`CHILD`] is set.
 #[test]
 fn prints_cpu_rows_for_the_parent() {
@@ -119,7 +152,7 @@ fn prints_cpu_rows_for_the_parent() {
         return;
     };
     common::pin_backend(common::Backend::Cpu);
-    let (fed, rows) = run(&load(Path::new(&path)), None);
+    let (fed, rows) = run(&load(Path::new(&path)), Some(&replay()));
     let ids: Vec<String> = fed.iter().map(|t| t.to_string()).collect();
     println!("FRINK-ROWS tokens {}", ids.join(" "));
     for row in rows {
@@ -144,6 +177,15 @@ fn metal_decode_of_the_iq_kinds_matches_cpu() {
     eprintln!("skip: built without --features metal");
     #[cfg(feature = "metal")]
     metal::run_kinds(&common::iq_encode::KINDS);
+}
+
+#[test]
+#[ignore = "needs a real Metal-capable GPU; run with --features metal -- --ignored on Apple Silicon"]
+fn metal_decode_of_q4_1_q5_1_and_tq1_0_matches_cpu() {
+    #[cfg(not(feature = "metal"))]
+    eprintln!("skip: built without --features metal");
+    #[cfg(feature = "metal")]
+    metal::run_kinds(&[GgmlType::Q4_1, GgmlType::Q5_1, GgmlType::TQ1_0]);
 }
 
 #[cfg(feature = "metal")]
@@ -230,12 +272,10 @@ mod metal {
             assert!(dispatched > 0, "{dtype:?}: nothing was dispatched on Metal");
             assert_ran_on_metal(kind);
 
-            let mut distinct = tokens.clone();
-            distinct.sort_unstable();
-            distinct.dedup();
-            assert!(
-                distinct.len() >= 3,
-                "{dtype:?}: the continuation {tokens:?} is too degenerate to compare engines on"
+            assert_eq!(
+                tokens,
+                replay(),
+                "{dtype:?}: the CPU child fed another continuation"
             );
             let mut worst = 0f32;
             for (step, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
