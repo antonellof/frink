@@ -23,6 +23,7 @@
 //! The launch itself ([`crate::gpu::matvec_launch_meta`] and the
 //! `launch_*_matvec` functions) stays feature-gated.
 
+pub mod coalesced;
 pub mod codebook;
 pub mod kquant;
 pub mod legacy;

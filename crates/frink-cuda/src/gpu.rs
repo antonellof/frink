@@ -144,353 +144,6 @@ pub fn probe() -> Option<CudaInfo> {
     result.unwrap_or(None)
 }
 
-/// CUDA C source for a fused Q4_K dequant+dot kernel: mirrors
-/// `frink_quant::dot_q4_k_f32_scalar`'s exact math (144-byte
-/// super-blocks of 256 elements: 2-byte f16 `d` + 2-byte f16 `dmin` +
-/// 12 bytes of packed 6-bit scale/min pairs + 128 bytes of packed
-/// 4-bit values, 4 sub-blocks of 64 elements each). `q4_k_scale_min`
-/// is the same bit-unpacking `frink_quant::q4_k_scale_min` does.
-///
-/// Verified: compiled by NVRTC and executed on a real GPU, matching
-/// the CPU reference exactly -- see the module doc comment.
-/// Q4_K matvec with a COALESCED access pattern.
-///
-/// The kernel this replaces walks whole 144-byte super-blocks per
-/// thread (`blk += blockDim.x`), so adjacent lanes read addresses 144
-/// bytes apart and every lane in a warp touches a different cache
-/// line. Measured consequence on an RTX 3060: 19.0 GB/s of weight
-/// traffic, **5.3%** of the card's 360 GB/s, where llama.cpp reaches
-/// 60.4%. A decode matvec is a streaming read of the weights, so that
-/// percentage IS the gap, and the inner arithmetic is irrelevant while
-/// it holds (a `dp4a` port measured under 1%, #142).
-///
-/// Here one warp takes one super-block at a time and lane `l` reads
-/// `qs[4l .. 4l+4)`. Thirty-two lanes then cover the 128 quantized
-/// bytes as one contiguous run instead of 32 scattered ones.
-///
-/// The activation stays f32 on purpose. Quantizing it to int8 is what
-/// llama.cpp does, and on a real checkpoint it diverges from the CPU
-/// reference at token 4, which `frink verify` refuses. This change is
-/// meant to be token-identical.
-///
-/// Lane to data mapping, which is the part to get right:
-///   off = 4*l           byte offset into the 128 qs bytes
-///   oi  = l/8           which 32-byte group, so which sub-block PAIR
-///   low nibbles  -> activations at blk*256 + oi*64 + (off%32)
-///   high nibbles -> the same, plus 32
-/// The 32 bytes of a group carry the first 32 activations in their low
-/// nibbles and the next 32 in their high nibbles, so a lane that pairs
-/// byte `i` with activation `i` for both halves reads the wrong place.
-/// Q6_K matvec with a coalesced access pattern.
-///
-/// The kernel this replaces gives each thread a whole 210-byte
-/// super-block, so a warp's 32 loads land 210 bytes apart. Here the
-/// warp takes one super-block and lane `l` takes the index the old
-/// inner loop iterated, which makes `ql[l]`, `ql[l+32]` and `qh[l]`
-/// each contiguous across the warp.
-///
-/// Q6_K is worth doing right after Q4_K because a `Q4_K_M` checkpoint
-/// is not all Q4_K: its output tensor is usually Q6_K, so this kernel
-/// runs every token too.
-///
-/// Same arithmetic and same f32 activations as before, so it stays
-/// token-identical.
-/// CUDA C for the coalesced Q5_K matvec: one warp per row, lane `l`
-/// owning element `l` of each 32-element group, so the warp's loads of
-/// `qs`, `qh` and the activations are each contiguous.
-///
-/// Q5_K adds a fifth bit per weight over Q4_K, held in `qh` as one
-/// BIT-PLANE per group: bit `2*oi` for the group's low nibbles and bit
-/// `2*oi + 1` for its high ones. `q5_k_matvec_coalesced_row` in
-/// `coalesced_twin.rs` is the scalar twin that pins that down.
-pub const Q5_K_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
-__device__ __forceinline__ float frink_f16_to_f32_q5co(unsigned short bits) {
-    unsigned int sign = (bits >> 15) & 0x1u;
-    unsigned int exp = (bits >> 10) & 0x1Fu;
-    unsigned int mant = bits & 0x3FFu;
-    float scale;
-    if (exp == 0) {
-        scale = ldexpf((float)mant, -24);
-    } else if (exp == 31) {
-        scale = mant ? __int_as_float(0x7fc00000) : __int_as_float(0x7f800000);
-    } else {
-        scale = ldexpf((float)(mant | 0x400), (int)exp - 25);
-    }
-    return sign ? -scale : scale;
-}
-
-__device__ __forceinline__ void frink_q4_k_scale_min_q5co(
-    int j, const unsigned char* scales, unsigned char* sc, unsigned char* m
-) {
-    if (j < 4) {
-        *sc = scales[j] & 63;
-        *m = scales[j + 4] & 63;
-    } else {
-        *sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
-        *m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
-    }
-}
-
-extern "C" __global__ void q5_k_matvec_coalesced(
-    const unsigned char* weights,
-    const float* x,
-    float* out,
-    int rows,
-    int row_bytes,
-    int n_blocks_per_row
-) {
-    const int warps = blockDim.x / 32;
-    const int warp = threadIdx.x / 32;
-    const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
-
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
-    float acc = 0.0f;
-
-    for (int blk = 0; blk < n_blocks_per_row; ++blk) {
-        const unsigned char* block = row_ptr + (size_t)blk * 176;
-        const float d = frink_f16_to_f32_q5co(
-            (unsigned short)block[0] | ((unsigned short)block[1] << 8));
-        const float dmin = frink_f16_to_f32_q5co(
-            (unsigned short)block[2] | ((unsigned short)block[3] << 8));
-        const unsigned char* scales = block + 4;
-        const unsigned char* qh = block + 16;
-        const unsigned char* qs = block + 48;
-        const int x_base = blk * 256;
-        const unsigned char h = qh[lane];
-
-        #pragma unroll
-        for (int oi = 0; oi < 4; ++oi) {
-            unsigned char sc1, m1, sc2, m2;
-            frink_q4_k_scale_min_q5co(2 * oi, scales, &sc1, &m1);
-            frink_q4_k_scale_min_q5co(2 * oi + 1, scales, &sc2, &m2);
-            const float d1 = d * (float)sc1, min1 = dmin * (float)m1;
-            const float d2 = d * (float)sc2, min2 = dmin * (float)m2;
-            const unsigned char ql = qs[oi * 32 + lane];
-            const unsigned char u1 = (unsigned char)(1u << (2 * oi));
-            const unsigned char u2 = (unsigned char)(2u << (2 * oi));
-            const int xb = x_base + oi * 64;
-            const int hi1 = (h & u1) ? 16 : 0;
-            const int hi2 = (h & u2) ? 16 : 0;
-            acc += (d1 * (float)((ql & 0x0F) + hi1) - min1) * x[xb + lane];
-            acc += (d2 * (float)((ql >> 4) + hi2) - min2) * x[xb + 32 + lane];
-        }
-    }
-
-    #pragma unroll
-    for (int s = 16; s > 0; s >>= 1) {
-        acc += __shfl_down_sync(0xffffffff, acc, s);
-    }
-    if (lane == 0) out[row] = acc;
-}
-"#;
-
-/// CUDA C for the coalesced Q8_0 matvec. A Q8_0 block holds exactly 32
-/// quants, so a warp maps onto one block with no leftovers: lane `l`
-/// takes byte `l` and the warp's load is 32 contiguous bytes, against
-/// the 1088-byte stride the one-thread-per-block kernel used.
-///
-/// The quants are SIGNED; the twin has a test that fails on an
-/// unsigned read.
-pub const Q8_0_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
-__device__ __forceinline__ float frink_f16_to_f32_q8co(unsigned short bits) {
-    unsigned int sign = (bits >> 15) & 0x1u;
-    unsigned int exp = (bits >> 10) & 0x1Fu;
-    unsigned int mant = bits & 0x3FFu;
-    float scale;
-    if (exp == 0) {
-        scale = ldexpf((float)mant, -24);
-    } else if (exp == 31) {
-        scale = mant ? __int_as_float(0x7fc00000) : __int_as_float(0x7f800000);
-    } else {
-        scale = ldexpf((float)(mant | 0x400), (int)exp - 25);
-    }
-    return sign ? -scale : scale;
-}
-
-extern "C" __global__ void q8_0_matvec_coalesced(
-    const unsigned char* weights,
-    const float* x,
-    float* out,
-    int rows,
-    int row_bytes,
-    int n_blocks_per_row
-) {
-    const int warps = blockDim.x / 32;
-    const int warp = threadIdx.x / 32;
-    const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
-
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
-    float acc = 0.0f;
-
-    for (int blk = 0; blk < n_blocks_per_row; ++blk) {
-        const unsigned char* block = row_ptr + (size_t)blk * 34;
-        const float d = frink_f16_to_f32_q8co(
-            (unsigned short)block[0] | ((unsigned short)block[1] << 8));
-        const signed char q = (signed char)block[2 + lane];
-        acc += d * (float)q * x[blk * 32 + lane];
-    }
-
-    #pragma unroll
-    for (int s = 16; s > 0; s >>= 1) {
-        acc += __shfl_down_sync(0xffffffff, acc, s);
-    }
-    if (lane == 0) out[row] = acc;
-}
-"#;
-
-pub const Q6_K_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
-__device__ __forceinline__ float frink_f16_to_f32_q6co(unsigned short bits) {
-    unsigned int sign = (bits >> 15) & 0x1u;
-    unsigned int exp = (bits >> 10) & 0x1Fu;
-    unsigned int mant = bits & 0x3FFu;
-    float scale;
-    if (exp == 0) {
-        scale = ldexpf((float)mant, -24);
-    } else if (exp == 31) {
-        scale = mant ? __int_as_float(0x7fc00000) : __int_as_float(0x7f800000);
-    } else {
-        scale = ldexpf((float)(mant | 0x400), (int)exp - 25);
-    }
-    return sign ? -scale : scale;
-}
-
-extern "C" __global__ void q6_k_matvec_coalesced(
-    const unsigned char* weights,
-    const float* x,
-    float* out,
-    int rows,
-    int row_bytes,
-    int n_blocks_per_row
-) {
-    const int warps = blockDim.x / 32;
-    const int warp = threadIdx.x / 32;
-    const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
-
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
-    const int is = lane / 16;
-    float acc = 0.0f;
-
-    for (int blk = 0; blk < n_blocks_per_row; ++blk) {
-        const unsigned char* block = row_ptr + (size_t)blk * 210;
-        const float d = frink_f16_to_f32_q6co(
-            (unsigned short)block[208] | ((unsigned short)block[209] << 8));
-        const int x_base = blk * 256;
-
-        #pragma unroll
-        for (int half = 0; half < 2; ++half) {
-            const unsigned char* ql = block + half * 64;
-            const unsigned char* qh = block + 128 + half * 32;
-            const signed char* sc = (const signed char*)(block + 192 + half * 8);
-            const int xh = x_base + half * 128;
-
-            const int q1 = (int)((ql[lane] & 0x0F) | ((qh[lane] & 0x03) << 4)) - 32;
-            const int q2 = (int)((ql[lane + 32] & 0x0F) | (((qh[lane] >> 2) & 0x03) << 4)) - 32;
-            const int q3 = (int)((ql[lane] >> 4) | (((qh[lane] >> 4) & 0x03) << 4)) - 32;
-            const int q4 = (int)((ql[lane + 32] >> 4) | (((qh[lane] >> 6) & 0x03) << 4)) - 32;
-
-            acc += d * (float)sc[is] * (float)q1 * x[xh + lane];
-            acc += d * (float)sc[is + 2] * (float)q2 * x[xh + lane + 32];
-            acc += d * (float)sc[is + 4] * (float)q3 * x[xh + lane + 64];
-            acc += d * (float)sc[is + 6] * (float)q4 * x[xh + lane + 96];
-        }
-    }
-
-    #pragma unroll
-    for (int s = 16; s > 0; s >>= 1) {
-        acc += __shfl_down_sync(0xffffffff, acc, s);
-    }
-    if (lane == 0) out[row] = acc;
-}
-"#;
-
-pub const Q4_K_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
-__device__ __forceinline__ float frink_f16_to_f32_co(unsigned short bits) {
-    unsigned int sign = (bits >> 15) & 0x1u;
-    unsigned int exp = (bits >> 10) & 0x1Fu;
-    unsigned int mant = bits & 0x3FFu;
-    float scale;
-    if (exp == 0) {
-        scale = ldexpf((float)mant, -24);
-    } else if (exp == 31) {
-        scale = mant ? __int_as_float(0x7fc00000) : __int_as_float(0x7f800000);
-    } else {
-        scale = ldexpf((float)(mant | 0x400), (int)exp - 25);
-    }
-    return sign ? -scale : scale;
-}
-
-__device__ __forceinline__ void frink_q4_k_scale_min_co(
-    int j, const unsigned char* scales, unsigned char* sc, unsigned char* m
-) {
-    if (j < 4) {
-        *sc = scales[j] & 63;
-        *m = scales[j + 4] & 63;
-    } else {
-        *sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
-        *m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
-    }
-}
-
-extern "C" __global__ void q4_k_matvec_coalesced(
-    const unsigned char* weights,
-    const float* x,
-    float* out,
-    int rows,
-    int row_bytes,
-    int n_blocks_per_row
-) {
-    const int warps = blockDim.x / 32;
-    const int warp = threadIdx.x / 32;
-    const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
-
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
-    const int off = 4 * lane;
-    const int oi = lane / 8;
-    const int within = off % 32;
-
-    float acc = 0.0f;
-    for (int blk = 0; blk < n_blocks_per_row; ++blk) {
-        const unsigned char* block = row_ptr + (size_t)blk * 144;
-        const float d = frink_f16_to_f32_co(
-            (unsigned short)block[0] | ((unsigned short)block[1] << 8));
-        const float dmin = frink_f16_to_f32_co(
-            (unsigned short)block[2] | ((unsigned short)block[3] << 8));
-        const unsigned char* scales = block + 4;
-        const unsigned char* qs = block + 16;
-
-        unsigned char sc1, m1, sc2, m2;
-        frink_q4_k_scale_min_co(2 * oi, scales, &sc1, &m1);
-        frink_q4_k_scale_min_co(2 * oi + 1, scales, &sc2, &m2);
-        const float d1 = d * (float)sc1, min1 = dmin * (float)m1;
-        const float d2 = d * (float)sc2, min2 = dmin * (float)m2;
-
-        // The whole warp's 32 loads cover qs[0..128) contiguously.
-        const uchar4 w = *(const uchar4*)(qs + off);
-        const int xb = blk * 256 + oi * 64 + within;
-        const unsigned char wb[4] = { w.x, w.y, w.z, w.w };
-        #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            acc += (d1 * (float)(wb[i] & 0x0F) - min1) * x[xb + i];
-            acc += (d2 * (float)(wb[i] >> 4) - min2) * x[xb + 32 + i];
-        }
-    }
-
-    #pragma unroll
-    for (int s = 16; s > 0; s >>= 1) {
-        acc += __shfl_down_sync(0xffffffff, acc, s);
-    }
-    if (lane == 0) out[row] = acc;
-}
-"#;
-
 /// Process-wide CUDA device handle, created once and reused for every
 /// kernel launch. Before this existed, `launch_matvec` called
 /// `CudaDevice::new(0)` on *every single call* -- a fresh CUDA context
@@ -637,57 +290,10 @@ fn launch_matvec(
         .map_err(|e| CudaError::Launch(format!("{e:?}")))
 }
 
-/// Enqueues one matvec kernel on the shared device's default stream:
-/// ensures the module is compiled/loaded, fetches the function, pins
-/// the (process-resident) weight buffer, allocates the output, and
-/// launches — **without** any host synchronization. `d_x` is an
-/// already-on-device activation slice (uploaded once by the caller and
-/// reused across chained matvecs, e.g. the fused dense FFN), so no
-/// per-call HtoD of the activation happens here. Returns the device
-/// output slice plus the resident-weight `Arc`, which the caller must
-/// keep alive until it syncs (the kernel reads that buffer
-/// asynchronously). This is the single per-launch primitive shared by
-/// [`launch_matvec`], [`launch_matvec_multi`] and
-/// [`launch_dense_ffn_swiglu`].
-/// The coalesced matvec kernel for `fn_name`, or `None` if that quant
-/// kind still runs the old one-thread-per-super-block kernel.
-///
-/// This is the ONLY place a coalesced kernel is named. Four launchers
-/// that each hard-coded one kind is exactly the shape this repo keeps
-/// getting bitten by: structures that must agree with nothing enforcing
-/// it. `every_coalesced_kernel_is_reachable_from_the_table` fails if a
-/// kernel const is added and this table is not updated, so a kernel
-/// cannot sit in the file unreachable.
-fn coalesced_matvec_kernel(fn_name: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    match fn_name {
-        "q4_k_matvec" => Some((
-            Q4_K_MATVEC_COALESCED_KERNEL_SRC,
-            "frink_q4_k_coalesced",
-            "q4_k_matvec_coalesced",
-        )),
-        "q5_k_matvec" => Some((
-            Q5_K_MATVEC_COALESCED_KERNEL_SRC,
-            "frink_q5_k_coalesced",
-            "q5_k_matvec_coalesced",
-        )),
-        "q6_k_matvec" => Some((
-            Q6_K_MATVEC_COALESCED_KERNEL_SRC,
-            "frink_q6_k_coalesced",
-            "q6_k_matvec_coalesced",
-        )),
-        "q8_0_matvec" => Some((
-            Q8_0_MATVEC_COALESCED_KERNEL_SRC,
-            "frink_q8_0_coalesced",
-            "q8_0_matvec_coalesced",
-        )),
-        _ => None,
-    }
-}
-
-/// How many warps a coalesced matvec block carries. Eight keeps enough
-/// rows in flight per SM to hold loads outstanding, which is the thing
-/// those kernels exist to fix.
-const COALESCED_WARPS_PER_BLOCK: usize = 8;
+/// How many warps a coalesced matvec block carries; one holder, in
+/// `matvec_kinds::coalesced`, so the host check launches the geometry
+/// this file does.
+const COALESCED_WARPS_PER_BLOCK: usize = crate::matvec_kinds::coalesced::WARPS_PER_BLOCK;
 
 /// Which kernel a matvec actually runs, and the geometry that kernel
 /// needs.
@@ -711,36 +317,73 @@ fn matvec_launch_plan(
     kernel_src: &'static str,
     module_name: &'static str,
     rows: usize,
-) -> (
-    &'static str,
-    &'static str,
-    &'static str,
-    cudarc::driver::LaunchConfig,
-) {
-    match coalesced_matvec_kernel(fn_name) {
-        Some((src, module, entry)) => (
-            src,
-            module,
-            entry,
-            cudarc::driver::LaunchConfig {
+    width: MatvecWidth,
+) -> MatvecPlan {
+    match coalesced_kind(fn_name) {
+        Some(kind) => MatvecPlan {
+            source: PlanSource::Coalesced(kind, width),
+            module: kind.module(width),
+            entry: kind.entry,
+            // The same grid at both widths: one row per warp. Width
+            // changes what a warp does inside its row, not which row
+            // it owns, so the A/B varies exactly one thing.
+            cfg: cudarc::driver::LaunchConfig {
                 grid_dim: (rows.div_ceil(COALESCED_WARPS_PER_BLOCK) as u32, 1, 1),
                 block_dim: ((COALESCED_WARPS_PER_BLOCK * 32) as u32, 1, 1),
                 shared_mem_bytes: 0,
             },
-        ),
-        None => (
-            kernel_src,
-            module_name,
-            fn_name,
-            cudarc::driver::LaunchConfig {
+        },
+        None => MatvecPlan {
+            source: PlanSource::Static(kernel_src),
+            module: module_name,
+            entry: fn_name,
+            cfg: cudarc::driver::LaunchConfig {
                 grid_dim: (rows as u32, 1, 1),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 256 * std::mem::size_of::<f32>() as u32,
             },
-        ),
+        },
     }
 }
 
+/// What [`matvec_launch_plan`] decided: the NVRTC module and entry
+/// point to launch, where its text comes from, and its geometry.
+struct MatvecPlan {
+    source: PlanSource,
+    module: &'static str,
+    entry: &'static str,
+    cfg: cudarc::driver::LaunchConfig,
+}
+
+/// A block-per-row kernel is a literal; a coalesced one is generated
+/// per width ([`CoalescedKind::source`]), and only on a module-cache
+/// miss.
+enum PlanSource {
+    Static(&'static str),
+    Coalesced(&'static CoalescedKind, MatvecWidth),
+}
+
+impl MatvecPlan {
+    fn text(&self) -> String {
+        match self.source {
+            PlanSource::Static(src) => src.to_string(),
+            PlanSource::Coalesced(kind, width) => kind.source(width),
+        }
+    }
+}
+
+/// Enqueues one matvec kernel on the shared device's default stream:
+/// ensures the module is compiled/loaded, fetches the function, pins
+/// the (process-resident) weight buffer, allocates the output, and
+/// launches — **without** any host synchronization. `d_x` is an
+/// already-on-device activation slice (uploaded once by the caller and
+/// reused across chained matvecs, e.g. the fused dense FFN), so no
+/// per-call HtoD of the activation happens here. Returns the device
+/// output slice plus the resident-weight `Arc`, which the caller must
+/// keep alive until it syncs (the kernel reads that buffer
+/// asynchronously). This is the single per-launch primitive shared by
+/// [`launch_matvec`], [`launch_matvec_multi`] and
+/// [`launch_dense_ffn_swiglu`].
 fn enqueue_matvec(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launch: &MatvecLaunch<'_>,
@@ -752,16 +395,36 @@ fn enqueue_matvec(
     ),
     CudaError,
 > {
+    // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
+    enqueue_matvec_at(dev, launch, d_x, MatvecWidth::from_env())
+}
+
+/// [`enqueue_matvec`] at an explicit width, so the hardware test can
+/// hold both widths against their twins whatever the environment says.
+fn enqueue_matvec_at(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    launch: &MatvecLaunch<'_>,
+    d_x: &cudarc::driver::CudaSlice<f32>,
+    width: MatvecWidth,
+) -> Result<
+    (
+        cudarc::driver::CudaSlice<f32>,
+        std::sync::Arc<ResidentCudaWeights>,
+    ),
+    CudaError,
+> {
     use cudarc::driver::LaunchAsync;
 
-    let (src, module, entry, cfg) = matvec_launch_plan(
+    let plan = matvec_launch_plan(
         launch.fn_name,
         launch.kernel_src,
         launch.module_name,
         launch.rows,
+        width,
     );
+    let (module, entry, cfg) = (plan.module, plan.entry, plan.cfg);
 
-    ensure_module_loaded(dev, src, module, entry)?;
+    ensure_module_loaded_lazy(dev, module, entry, || plan.text())?;
     let func = dev.get_func(module, entry).ok_or_else(|| {
         CudaError::KernelCompile(format!("function '{entry}' not found after load_ptx"))
     })?;
@@ -925,6 +588,11 @@ pub(crate) fn resident_f32(
 // family; `gpu.rs` keeps the device plumbing. Re-exported so every
 // existing path still resolves -- a refactor that moves a definition
 // should not move a public name.
+use crate::matvec_kinds::coalesced::{coalesced_kind, CoalescedKind, MatvecWidth};
+pub use crate::matvec_kinds::coalesced::{
+    Q4_K_MATVEC_COALESCED_KERNEL_SRC, Q5_K_MATVEC_COALESCED_KERNEL_SRC,
+    Q6_K_MATVEC_COALESCED_KERNEL_SRC, Q8_0_MATVEC_COALESCED_KERNEL_SRC,
+};
 pub use crate::matvec_kinds::codebook::{
     IQ4_NL_MATVEC_KERNEL_SRC, IQ4_XS_MATVEC_KERNEL_SRC, MXFP4_MATVEC_KERNEL_SRC,
 };
@@ -1734,84 +1402,69 @@ mod tests {
         (weights, x, expected)
     }
 
-    /// Every coalesced kernel against its scalar twin, on a real
-    /// device. The twins prove the lane mapping without a GPU; this
-    /// proves the CUDA C, the vector loads and the warp-shuffle
-    /// reduction, none of which a twin covers.
+    /// Every coalesced kernel, at BOTH widths, against its scalar twin
+    /// on a real device. The twins prove the lane mapping without a GPU
+    /// and `tools/matvec_host_check` runs the CUDA C text on a host
+    /// CPU; this proves NVRTC accepts it and that the vector loads, the
+    /// alignment they assume and the warp-shuffle reduction hold on
+    /// hardware, none of which the other two can see.
     ///
-    /// One test over the table rather than one test per kind, so a new
-    /// kind cannot be added with its hardware check quietly left out.
+    /// Walks [`crate::matvec_kinds::coalesced::COALESCED`] rather than a
+    /// list of its own, so a new kind cannot be added with its hardware
+    /// check quietly left out. Block counts 3 and 12: 3 is fewer than a
+    /// wide warp's blocks per trip for every kind (so some lanes idle),
+    /// 12 is a 3072-wide K-quant row.
     ///
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware -- verifies every coalesced matvec against its scalar twin"]
-    fn every_coalesced_matvec_matches_its_twin() {
-        type Twin = fn(&[u8], &[f32], usize) -> f32;
-        let cases: &[(&str, usize, usize, u32, Twin)] = &[
-            (
-                "Q4_K",
-                144,
-                256,
-                7,
-                crate::coalesced_twin::q4_k_matvec_coalesced_row,
-            ),
-            (
-                "Q5_K",
-                176,
-                256,
-                17,
-                crate::coalesced_twin::q5_k_matvec_coalesced_row,
-            ),
-            (
-                "Q6_K",
-                210,
-                256,
-                11,
-                crate::coalesced_twin::q6_k_matvec_coalesced_row,
-            ),
-            (
-                "Q8_0",
-                34,
-                32,
-                23,
-                crate::coalesced_twin::q8_0_matvec_coalesced_row,
-            ),
-        ];
+    #[ignore = "requires real CUDA hardware. The WIDE width (the default since #133) has NEVER executed on a GPU; the narrow width passed on an RTX 3060/3070. Run with --ignored and record the result"]
+    fn every_coalesced_matvec_matches_its_twin_at_both_widths() {
+        use crate::matvec_kinds::coalesced::{MatvecWidth, COALESCED};
         let rows = 37usize; // not a multiple of the warps per block
-        let n_blocks_per_row = 3usize;
-        for (kind, block_bytes, per_block, seed, twin) in cases {
-            let row_bytes = n_blocks_per_row * block_bytes;
-            let cols = n_blocks_per_row * per_block;
-            let weights = pseudo_bytes(*seed, rows * row_bytes);
-            let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
-            // Enter through the ordinary kernel identity, not the
-            // coalesced one, so this exercises the ROUTING too: if
-            // `matvec_launch_plan` stopped substituting the coalesced
-            // kernel, the result would match a dequantize-then-dot
-            // reference but not the coalesced twin's lane order.
-            let (src, module, fn_name) = super::matvec_launch_meta(kind)
-                .unwrap_or_else(|| panic!("{kind} has no matvec kernel"));
-            let got = super::launch_matvec(
-                src,
-                module,
-                fn_name,
-                &weights,
-                &x,
-                rows,
-                row_bytes,
-                n_blocks_per_row,
-            )
-            .unwrap_or_else(|e| panic!("{kind}: {e:?}"));
-            assert_eq!(got.len(), rows, "{kind}");
-            for r in 0..rows {
-                let row = &weights[r * row_bytes..(r + 1) * row_bytes];
-                let want = twin(row, &x, n_blocks_per_row);
-                assert!(
-                    !(want.is_nan() ^ got[r].is_nan()),
-                    "{kind} row {r}: GPU={} twin={want}",
-                    got[r]
-                );
-                assert_close_relative(got[r], want, r);
+        let dev = super::shared_device().expect("device");
+        for kind in COALESCED {
+            let twin = crate::coalesced_twin::twin_for(kind.entry)
+                .unwrap_or_else(|| panic!("{} has no twin", kind.entry));
+            let mv = crate::matvec_kinds::KINDS
+                .iter()
+                .find(|m| m.fn_name == kind.base_fn)
+                .expect("routed from a MatvecKind");
+            let mm = crate::mul_mm::kind_by_name(mv.name).expect("geometry");
+            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+                for (n_blocks_per_row, seed) in [(3usize, 7u32), (12, 23)] {
+                    let row_bytes = n_blocks_per_row * mm.block_bytes;
+                    let cols = n_blocks_per_row * mm.block_elems;
+                    let weights = pseudo_bytes(seed, rows * row_bytes);
+                    let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
+                    // Enter through the ordinary kernel identity, not the
+                    // coalesced one, so this exercises the ROUTING too.
+                    let launch = super::MatvecLaunch {
+                        kernel_src: mv.src,
+                        module_name: mv.module_name,
+                        fn_name: mv.fn_name,
+                        weights: &weights,
+                        rows,
+                        row_bytes,
+                        n_blocks_per_row,
+                    };
+                    let d_x = dev.htod_copy(x.clone()).expect("upload");
+                    let (d_out, _w) = super::enqueue_matvec_at(&dev, &launch, &d_x, width)
+                        .unwrap_or_else(|e| panic!("{} {width:?}: {e:?}", mv.name));
+                    let got = dev.dtoh_sync_copy(&d_out).expect("download");
+                    assert_eq!(got.len(), rows, "{}", mv.name);
+                    let lanes = kind.lanes(width);
+                    for r in 0..rows {
+                        let row = &weights[r * row_bytes..(r + 1) * row_bytes];
+                        let want = twin(row, &x, n_blocks_per_row, lanes);
+                        assert!(
+                            !(want.is_nan() ^ got[r].is_nan()),
+                            "{} {width:?} row {r}: GPU={} twin={want}",
+                            mv.name,
+                            got[r]
+                        );
+                        assert_close_relative(got[r], want, r);
+                    }
+                }
             }
         }
     }
@@ -1820,88 +1473,71 @@ mod tests {
     /// indexes as if it had one row per warp while getting one row per
     /// block, and returns wrong numbers rather than failing. So the
     /// kernel and its geometry are chosen together, and this checks
-    /// they stay that way -- on the host, with no GPU.
+    /// they stay that way at both widths -- on the host, with no GPU.
     #[test]
     fn the_plan_pairs_each_kernel_with_its_own_geometry() {
+        use crate::matvec_kinds::coalesced::MatvecWidth;
         let rows = 37usize; // not a multiple of the warps per block
 
         for kind in ["Q4_K", "Q5_K", "Q6_K", "Q8_0"] {
             let (src, module, fn_name) = super::matvec_launch_meta(kind).expect("kernel");
-            let (plan_src, plan_module, entry, cfg) =
-                super::matvec_launch_plan(fn_name, src, module, rows);
-            assert!(
-                entry.ends_with("_coalesced"),
-                "{kind}: plan chose {entry}, not the coalesced kernel"
-            );
-            assert!(
-                plan_src.contains(entry) && plan_module.ends_with("_coalesced"),
-                "{kind}: plan's source and module do not match {entry}"
-            );
-            let warps = super::COALESCED_WARPS_PER_BLOCK as u32;
-            assert_eq!(cfg.block_dim, (warps * 32, 1, 1), "{kind}: block_dim");
-            assert_eq!(cfg.shared_mem_bytes, 0, "{kind}: needs no shared memory");
-            // Every row must land in some warp, including the tail.
-            assert!(
-                cfg.grid_dim.0 * warps >= rows as u32,
-                "{kind}: {} blocks x {warps} warps does not cover {rows} rows",
-                cfg.grid_dim.0
-            );
-            assert!(
-                (cfg.grid_dim.0 - 1) * warps < rows as u32,
-                "{kind}: {} blocks is more than the tail needs",
-                cfg.grid_dim.0
-            );
+            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+                let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+                let ck = super::coalesced_kind(fn_name).expect("coalesced");
+                assert!(
+                    plan.entry.ends_with("_coalesced"),
+                    "{kind}: plan chose {}, not the coalesced kernel",
+                    plan.entry
+                );
+                assert_eq!(
+                    plan.module,
+                    ck.module(width),
+                    "{kind} {width:?}: module key"
+                );
+                let text = plan.text();
+                assert!(
+                    text.contains(&format!("void {}(", plan.entry)),
+                    "{kind}: plan's source does not define {}",
+                    plan.entry
+                );
+                assert!(
+                    text.starts_with(&format!("#define FX_LANES {}\n", ck.lanes(width))),
+                    "{kind} {width:?}: source compiled for the wrong width"
+                );
+                let cfg = plan.cfg;
+                let warps = super::COALESCED_WARPS_PER_BLOCK as u32;
+                assert_eq!(cfg.block_dim, (warps * 32, 1, 1), "{kind}: block_dim");
+                assert_eq!(cfg.shared_mem_bytes, 0, "{kind}: needs no shared memory");
+                // Every row must land in some warp, including the tail.
+                assert!(
+                    cfg.grid_dim.0 * warps >= rows as u32,
+                    "{kind}: {} blocks x {warps} warps does not cover {rows} rows",
+                    cfg.grid_dim.0
+                );
+                assert!(
+                    (cfg.grid_dim.0 - 1) * warps < rows as u32,
+                    "{kind}: {} blocks is more than the tail needs",
+                    cfg.grid_dim.0
+                );
+            }
         }
 
         // A kind with no coalesced kernel keeps the old geometry, and
-        // keeps its own kernel rather than silently getting another's.
+        // keeps its own kernel rather than silently getting another's,
+        // whatever the width.
         let (src, module, fn_name) = super::matvec_launch_meta("Q4_0").expect("kernel");
-        let (plan_src, plan_module, entry, cfg) =
-            super::matvec_launch_plan(fn_name, src, module, rows);
-        assert_eq!(entry, fn_name);
-        assert!(std::ptr::eq(plan_src, src) && std::ptr::eq(plan_module, module));
-        assert_eq!(cfg.grid_dim, (rows as u32, 1, 1), "one block per row");
-        assert_eq!(cfg.block_dim, (256, 1, 1));
-        assert!(
-            cfg.shared_mem_bytes > 0,
-            "the block-per-row kernels reduce through shared memory"
-        );
-    }
-
-    /// A coalesced kernel the table does not name is dead code that
-    /// reads as coverage. The entry points are derived from this file,
-    /// not restated, so adding a kernel without routing it fails here.
-    #[test]
-    fn every_coalesced_kernel_is_reachable_from_the_table() {
-        let src = include_str!("gpu.rs");
-        let mut found = 0usize;
-        for line in src.lines() {
-            let Some(rest) = line.strip_prefix(r#"extern "C" __global__ void "#) else {
-                continue;
-            };
-            let Some(entry) = rest.split('(').next() else {
-                continue;
-            };
-            let Some(base) = entry.strip_suffix("_coalesced") else {
-                continue;
-            };
-            found += 1;
-            let routed = super::coalesced_matvec_kernel(base).unwrap_or_else(|| {
-                panic!("kernel {entry} is not reachable: no table row for {base}")
-            });
-            assert_eq!(
-                routed.2, entry,
-                "table row for {base} names the wrong entry point"
-            );
+        for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+            let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+            assert_eq!(plan.entry, fn_name);
+            assert!(std::ptr::eq(plan.module, module));
+            assert_eq!(plan.text(), src);
+            assert_eq!(plan.cfg.grid_dim, (rows as u32, 1, 1), "one block per row");
+            assert_eq!(plan.cfg.block_dim, (256, 1, 1));
             assert!(
-                routed.0.contains(entry),
-                "table row for {base} points at a source that does not define {entry}"
+                plan.cfg.shared_mem_bytes > 0,
+                "the block-per-row kernels reduce through shared memory"
             );
         }
-        assert!(
-            found >= 4,
-            "expected at least four coalesced kernels, found {found}"
-        );
     }
 
     #[test]
