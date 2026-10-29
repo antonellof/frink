@@ -68,8 +68,15 @@ const MM_UNIT: &str = "minimax_01_unit_scale";
 /// ~3: the `phimoe` / `orion` class. The KL is 1e-9 and below and the
 /// deltas take either sign, which is what says reduction order rather
 /// than a disagreement about the graph; the four sabotages above each
-/// move the logits by more than 3, so the margin is four orders wide.
-const TOL: f32 = 2e-4;
+/// move the logits by more than 3.
+///
+/// 5e-4, up from 2e-4, since the goldens became CI's answer (ADR 0011: a
+/// portable AVX2 libllama on x86_64, not an arm64 native one). The two
+/// libllama builds alone differ by 1.6e-4 (`minimax_01`) and 1.9e-4
+/// (`minimax_01_output`), and frink on x86_64 CI then sits 2.35e-4 and
+/// 2.59e-4 from the new goldens on the prefill path (arm64: inside
+/// 2e-4). The sabotages are still almost four orders over the line.
+const TOL: f32 = 5e-4;
 
 const MINIMAX_01_GOLDEN: [f32; 48] = [
     0.66824585,
