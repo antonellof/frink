@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/arctic_wscale_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-arctic-fixture",
+    name: "frink-arctic-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/olmo_clamped_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-olmo-fixture",
+    name: "frink-olmo-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

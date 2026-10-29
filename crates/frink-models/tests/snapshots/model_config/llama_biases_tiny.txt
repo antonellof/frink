@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/llama_biases_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-llama-fixture",
+    name: "frink-llama-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

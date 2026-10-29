@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/lfm2moe_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-lfm2moe-fixture",
+    name: "frink-lfm2moe-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

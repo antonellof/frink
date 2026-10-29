@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/mamba_dtbcrms_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-mamba-fixture",
+    name: "frink-mamba-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

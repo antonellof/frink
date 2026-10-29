@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/chatglm_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-chatglm-fixture",
+    name: "frink-chatglm-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

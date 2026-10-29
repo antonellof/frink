@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/gptoss_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-gptoss-fixture",
+    name: "frink-gptoss-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/deci_kv_only_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-deci-kv-only-fixture",
+    name: "frink-deci-kv-only-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

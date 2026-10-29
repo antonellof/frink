@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/gptneox_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-gptneox-fixture",
+    name: "frink-gptneox-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,

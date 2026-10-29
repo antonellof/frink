@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/arcee_gated_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-arcee-fixture",
+    name: "frink-arcee-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,
@@ -85,4 +85,4 @@ cfg.layer[1].shape: LayerShape { attention: Gqa { n_heads: 4, n_kv_heads: 2 }, f
 cfg.layer[1].ffn_acts: LayerFfnActs { routed: ReluSqr, dense: ReluSqr }
 cfg.layer[1].kv_dtype: F32
 cfg.layer[1].cache_geometry: (2, 6, 6)
-decoder: REFUSED: architecture 'ferrox-arcee-fixture' requires unimplemented feature: blk.0.ffn_gate.weight is present but this architecture's FFN is ungated (ReluSqr: LLM_FFN_RELU_SQR under LLM_FFN_SEQ with a null gate, arcee.cpp:123-128, or ggml_xielu over ffn_up alone, apertus.cpp:129-142)
+decoder: REFUSED: architecture 'frink-arcee-fixture' requires unimplemented feature: blk.0.ffn_gate.weight is present but this architecture's FFN is ungated (ReluSqr: LLM_FFN_RELU_SQR under LLM_FFN_SEQ with a null gate, arcee.cpp:123-128, or ggml_xielu over ffn_up alone, apertus.cpp:129-142)

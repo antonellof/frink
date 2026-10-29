@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/granite-moe_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-granite-moe-fixture",
+    name: "frink-granite-moe-fixture",
     kv_dtype: F32,
     n_layers: 2,
     n_mtp_blocks: 0,

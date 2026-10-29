@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/cohere2moe_normw_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-cohere2moe-fixture",
+    name: "frink-cohere2moe-fixture",
     kv_dtype: F32,
     n_layers: 4,
     n_mtp_blocks: 0,

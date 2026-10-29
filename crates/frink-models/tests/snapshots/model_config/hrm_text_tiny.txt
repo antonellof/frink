@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/hrm_text_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-hrm-text-fixture",
+    name: "frink-hrm-text-fixture",
     kv_dtype: F32,
     n_layers: 8,
     n_mtp_blocks: 0,

@@ -1,6 +1,6 @@
 fixture: crates/frink-models/tests/fixtures/phimoe_plain_tiny.gguf
 config: ModelConfig {
-    name: "ferrox-phimoe-fixture",
+    name: "frink-phimoe-fixture",
     kv_dtype: F32,
     n_layers: 3,
     n_mtp_blocks: 0,
