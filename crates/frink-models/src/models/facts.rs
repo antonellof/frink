@@ -133,6 +133,9 @@ pub struct FfnFacts {
     pub xielu: bool,
     /// `act_layers::reads_swiglu_clamps`.
     pub reads_swiglu_clamps: bool,
+    /// `act_layers::CLAMP_BEFORE_SILU`: the clamped SwiGLU clamps the gate
+    /// BEFORE the SiLU (`ggml_swiglu_clamp`).
+    pub clamp_before_silu: bool,
 }
 
 /// Norm rows (`norm`, `sub_norms`).
@@ -182,6 +185,9 @@ pub struct TopologyFacts {
     /// `parallel_residual`: attention and FFN read the same layer input
     /// and are summed into one residual add.
     pub parallel_residual: Option<&'static crate::parallel_residual::ParallelResidual>,
+    /// `layer_shapes::PER_LAYER_SHAPE_ARCHS`: llama.cpp reads the head and
+    /// FFN counts per layer; the note says where.
+    pub per_layer_shapes: Option<&'static str>,
     /// `rope_finetuned::ROPE_GATED_ON_FINETUNED`: a file declaring
     /// `rope.scaling.finetuned = false` rotates nothing.
     pub rope_gated_on_finetuned: bool,
@@ -226,6 +232,8 @@ pub struct TensorFacts {
     /// `position_embd`: a learned position table added to the
     /// embeddings, whether it is REQUIRED, and the llama.cpp lines.
     pub position_embd: Option<(Presence, &'static str)>,
+    /// `attn_gate::ATTN_GATE_ARCHS`: the gate on the attention output.
+    pub attn_gate: Option<crate::attn_gate::AttnGateSpec>,
     /// `qkv_fused::QKV_TENSOR_CREATORS`: which Q/K/V biases the graph
     /// creates, and how.
     pub qkv_tensors: crate::qkv_fused::QkvTensors,
@@ -314,6 +322,7 @@ impl ArchFacts {
             reglu: false,
             xielu: false,
             reads_swiglu_clamps: false,
+            clamp_before_silu: false,
         },
         norm: NormFacts {
             norm_by_rms_eps_key: false,
@@ -334,6 +343,7 @@ impl ArchFacts {
             parallel_ssm: false,
             alibi: None,
             parallel_residual: None,
+            per_layer_shapes: None,
             rope_gated_on_finetuned: false,
             reads_nextn: false,
         },
@@ -352,6 +362,7 @@ impl ArchFacts {
             ffn_bias: None,
             output_bias: None,
             position_embd: None,
+            attn_gate: None,
             qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
             attn_norm_2_feeds_attention: false,
             parallel_dense: None,
@@ -416,7 +427,8 @@ impl ArchFacts {
                 gelu_ungated: crate::capability::uses_gelu_ungated_from_table(arch),
                 reglu: crate::capability::uses_reglu(arch),
                 xielu: crate::act_layers::uses_xielu(arch),
-                reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(arch),
+                reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps_from_table(arch),
+                clamp_before_silu: crate::act_layers::clamp_before_silu_from_table(arch),
             },
             norm: NormFacts {
                 // No table: `cohere2moe` was the only row.
@@ -438,13 +450,15 @@ impl ArchFacts {
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
-                reads_rope_pattern: crate::rope_layers::reads_rope_pattern(arch),
+                // No table: `granite_swa` was the only row.
+                reads_rope_pattern: false,
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
                 // No table: the five ALiBi graphs are in `crate::models`.
                 alibi: None,
                 // No table: all eight graphs are in `crate::models`.
                 parallel_residual: None,
+                per_layer_shapes: crate::layer_shapes::per_layer_shapes_from_table(arch),
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
                     .contains(&arch),
                 reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
@@ -472,6 +486,7 @@ impl ArchFacts {
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
                 // No table: `gpt2`, `starcoder` and `mpt` are in `crate::models`.
                 position_embd: None,
+                attn_gate: crate::attn_gate::attn_gate_spec_from_table(arch),
                 qkv_tensors: crate::qkv_fused::qkv_tensors_from_table(arch),
                 // No table: `falcon` was the only row.
                 attn_norm_2_feeds_attention: false,

@@ -92,7 +92,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("glm4", "src/models/glm4.cpp:28"),
     ("glm5-next", "src/models/glm5-next.cpp:76"),
     ("hy-v3", "src/models/hy-v3.cpp:74"),
-    ("mellum", "src/models/mellum.cpp:79"),
     ("mimo2", "src/models/mimo2.cpp:38"),
     ("mistral4", "src/models/models.h:1624 (deepseek2.cpp:88)"),
     (
