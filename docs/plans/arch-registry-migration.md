@@ -116,7 +116,8 @@ eligibility test so a new field forces a Metal decision.
   (`HparamRules`). `rope_layers::PER_LAYER_ROPE_GATES` keeps its
   `exaone4` row: it is a census of llama.cpp's graphs that the rule is
   checked against, not a row the loader reads. Divergences found and
-  filed, not fixed: #440, #441.
+  filed, not fixed in the move: #440, #441 (fixed since, with #439 and
+  #446).
 
 - `kolibri1` (#414), outside the step order: the first architecture
   ADDED in `crate::models` rather than moved there

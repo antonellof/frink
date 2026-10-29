@@ -187,7 +187,8 @@ frink's.
   lossless and tested, but the server cannot reach it; see
   [`plans/server-speculative-decoding.md`](plans/server-speculative-decoding.md).
   A multi-token-prediction drafter is a second `Drafter` impl for the
-  seventeen architectures whose MTP blocks frink already skips by name.
+  architectures whose MTP blocks frink already skips by name
+  (`mtp_blocks::NEXTN_READERS`).
 - **Quantized safetensors, and quantizing on load.** Reading FP8
   blockwise, GPTQ, AWQ, MXFP4 and NVFP4 checkpoints directly, and
   quantizing a BF16 checkpoint while loading it rather than converting

@@ -214,6 +214,62 @@ const GRANITEMOE_GOLDEN: [f32; 48] = [
     0.3787539,
 ];
 
+/// `granitemoe_norope_tiny.gguf`: `granitemoe_tiny.gguf` plus
+/// `rope.scaling.finetuned = false`. libllama's answer is the rotated
+/// one, bit for bit (#439): `granite-moe.cpp`'s `load_arch_hparams`
+/// never reads the key, so the switch `granite.cpp:33-37` builds from it
+/// stays at the all-ones seed.
+const GRANITEMOE_NOROPE_GOLDEN: [f32; 48] = [
+    -0.18181351,
+    0.036202192,
+    -0.00089810713,
+    -0.20761596,
+    -0.0577685,
+    0.03013968,
+    -0.21684515,
+    -0.008914097,
+    0.13303457,
+    -0.44153872,
+    -0.1307926,
+    0.16704307,
+    0.09496286,
+    -0.041438863,
+    0.15549271,
+    -0.20929816,
+    -0.18375571,
+    0.2420918,
+    -0.01620405,
+    0.042574324,
+    0.26279458,
+    0.049937963,
+    0.2108588,
+    -0.19250788,
+    -0.046461165,
+    0.15700065,
+    0.21241191,
+    -0.17370479,
+    -0.06468272,
+    -0.2718286,
+    0.010240785,
+    -0.30038166,
+    -0.16452256,
+    0.01389374,
+    -0.19321552,
+    -0.0070547187,
+    0.05246648,
+    -0.25962797,
+    -0.2188357,
+    0.1500749,
+    -0.12813823,
+    -0.12928225,
+    0.105589524,
+    -0.0389446,
+    0.047136985,
+    0.047886096,
+    -0.04052823,
+    0.3787539,
+];
+
 const GRANITE_NOROPE_GOLDEN: [f32; 48] = [
     0.23052013,
     0.09288454,
@@ -483,6 +539,30 @@ fn a_granite_file_declaring_rope_finetuned_false_runs_unrotated_as_llama_cpp_doe
 fn the_same_fixture_without_that_key_loads_and_rotates() {
     let d = load_graph_fixture("granite");
     assert_eq!(d.config.rope_layout, RopeLayout::Norm);
+}
+
+/// ... but NOT for `granitemoe`, which runs granite's graph without
+/// granite's hparam loader (#439).
+///
+/// `granite-moe.cpp:3-19` reads the four multipliers and the shared
+/// expert width and nothing else, so `rope_pattern` keeps the all-ones
+/// seed (`llama-model.cpp:1464`) and `granite.cpp:140,216`'s
+/// `has_rope(il)` is true on every layer whatever the file declares.
+/// libllama's logits for the file declaring `false` are bit-identical
+/// to its logits for the file without the key (measured, and pinned by
+/// the first assertion), and frink must rotate it the same way.
+#[test]
+fn a_granitemoe_file_declaring_rope_finetuned_false_still_rotates_as_llama_cpp_does() {
+    assert_eq!(
+        GRANITEMOE_NOROPE_GOLDEN, GRANITEMOE_GOLDEN,
+        "libllama ignores the key on granitemoe"
+    );
+    assert_all_three_paths_match("granitemoe_norope", &GRANITEMOE_NOROPE_GOLDEN);
+    let d = load_graph_fixture("granitemoe_norope");
+    assert_ne!(
+        d.config.rope_layers,
+        frink_models::rope_layers::RopeLayers::Never
+    );
 }
 
 /// `{arch}.logit_scale` is REQUIRED (`granite.cpp:7` reads it with no

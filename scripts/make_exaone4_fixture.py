@@ -59,11 +59,28 @@ exercised too rather than being a no-op at this size.
 The rule itself is `frink-models/src/rope_layers.rs`, shared with
 `exaone-moe`, `smollm3`, `smallthinker`, `afmoe` and `llama4`.
 
+Two variants of the 64-layer file, both against libllama at the pin:
+
+  * `--no-window` drops `attention.sliding_window`. `:6` pins `n_swa =
+    4096` BEFORE `:14` reads the key as OPTIONAL, so the file still
+    slides, at 4096, and its full-attention layers still rotate nothing
+    (#440). Over this prompt a 4096 window masks nothing; what the
+    variant tells apart is the rotation, which is the visible half.
+  * `--mtp` appends ONE NextN/MTP block (`blk.64`, with the `nextn.*`
+    head) and writes `nextn_predict_layers = 1`, so `block_count` is
+    65. The common loader reads that key BEFORE `load_arch_hparams`
+    (`llama-model.cpp:1411`), so `:4`'s `n_layer()` is the TRUNK, 64,
+    and the file is the 32B graph; the tensor loader creates the block
+    with `TENSOR_SKIP` (`:38-68`), so libllama's logits are the plain
+    64-layer file's (#441). The block's weights are drawn after every
+    other tensor so the trunk is byte-identical to `--layers 64`.
+
 Weights are pseudo-random from a fixed seed so the file is byte-stable.
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \\
         python3 scripts/make_exaone4_fixture.py OUT.gguf [--layers 30|64]
+        [--no-window] [--mtp]
 
 The golden values that go with it are produced by llama.cpp itself
 (see `scripts/gptoss_reference_logits.cpp`), not by this script.
@@ -118,7 +135,9 @@ def widths(n_layer: int) -> dict:
     }
 
 
-def main(out_path: str, n_layer: int = DEFAULT_N_LAYER) -> None:
+def main(
+    out_path: str, n_layer: int = DEFAULT_N_LAYER, window: bool = True, mtp: bool = False
+) -> None:
     rng = np.random.default_rng(0x0E4A04)
     shapes = widths(n_layer)
     N_EMBD = shapes["n_embd"]
@@ -136,7 +155,9 @@ def main(out_path: str, n_layer: int = DEFAULT_N_LAYER) -> None:
 
     w = gguf.GGUFWriter(out_path, ARCH)
     w.add_name("frink-exaone4-fixture")
-    w.add_block_count(n_layer)
+    w.add_block_count(n_layer + (1 if mtp else 0))
+    if mtp:
+        w.add_nextn_predict_layers(1)
     w.add_context_length(CTX)
     w.add_embedding_length(N_EMBD)
     w.add_feed_forward_length(N_FF)
@@ -147,7 +168,7 @@ def main(out_path: str, n_layer: int = DEFAULT_N_LAYER) -> None:
     w.add_layer_norm_rms_eps(RMS_EPS)
     w.add_rope_freq_base(ROPE_BASE)
     w.add_rope_dimension_count(HEAD_DIM)
-    if n_layer == SWA_N_LAYER:
+    if n_layer == SWA_N_LAYER and window:
         w.add_sliding_window(SWA_WINDOW)
     w.add_file_type(gguf.LlamaFileType.ALL_F32)
 
@@ -199,6 +220,27 @@ def main(out_path: str, n_layer: int = DEFAULT_N_LAYER) -> None:
     w.add_tensor("output_norm.weight", rnd(N_EMBD))
     w.add_tensor("output.weight", rnd(N_VOCAB, N_EMBD))
 
+    if mtp:
+        # `exaone4.cpp:38-68` at `i = n_layer`: the attention set, the
+        # dense FFN and the post norms with no `rope_freqs`, plus the
+        # `nextn.*` head. All TENSOR_SKIP when no MTP context is open.
+        p = f"blk.{n_layer}."
+        w.add_tensor(p + "attn_q.weight", rnd(n_embd_q, N_EMBD))
+        w.add_tensor(p + "attn_k.weight", rnd(n_embd_kv, N_EMBD))
+        w.add_tensor(p + "attn_v.weight", rnd(n_embd_kv, N_EMBD))
+        w.add_tensor(p + "attn_q_norm.weight", rnd(HEAD_DIM) + 1.0)
+        w.add_tensor(p + "attn_k_norm.weight", rnd(HEAD_DIM) + 1.0)
+        w.add_tensor(p + "attn_output.weight", rnd(N_EMBD, n_embd_q))
+        w.add_tensor(p + "post_attention_norm.weight", rnd(N_EMBD) + 1.0)
+        w.add_tensor(p + "ffn_gate.weight", rnd(N_FF, N_EMBD))
+        w.add_tensor(p + "ffn_up.weight", rnd(N_FF, N_EMBD))
+        w.add_tensor(p + "ffn_down.weight", rnd(N_EMBD, N_FF))
+        w.add_tensor(p + "post_ffw_norm.weight", rnd(N_EMBD) + 1.0)
+        w.add_tensor(p + "nextn.eh_proj.weight", rnd(N_EMBD, 2 * N_EMBD))
+        w.add_tensor(p + "nextn.enorm.weight", rnd(N_EMBD) + 1.0)
+        w.add_tensor(p + "nextn.hnorm.weight", rnd(N_EMBD) + 1.0)
+        w.add_tensor(p + "nextn.shared_head_norm.weight", rnd(N_EMBD) + 1.0)
+
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
@@ -213,4 +255,7 @@ if __name__ == "__main__":
         i = args.index("--layers")
         n_layer = int(args[i + 1])
         del args[i : i + 2]
-    main(args[0] if args else "exaone4-fixture.gguf", n_layer)
+    window = "--no-window" not in args
+    mtp = "--mtp" in args
+    args = [a for a in args if a not in ("--no-window", "--mtp")]
+    main(args[0] if args else "exaone4-fixture.gguf", n_layer, window, mtp)

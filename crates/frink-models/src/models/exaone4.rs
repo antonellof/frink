@@ -2,24 +2,23 @@
 //!
 //! - **Post-norm only**, the same topology as `olmo2`
 //!   ([`NormSites::POST_NORM_ONLY`]).
-//! - **SWA by layer count.** `:4-12` switch STANDARD SWA on only when
-//!   `n_layer() == 64` (the 32B), with a period-4 seed, and seed the
-//!   sliding layers' RoPE base AND scale from the model's. The test is
-//!   equality, so a 63- or 65-layer file gets no window either; and it
-//!   runs before the NextN blocks are subtracted, which is why the
-//!   loader hands it `block_count` ([`swa_window_override`]).
+//! - **SWA by layer count.** `:4-11` switch STANDARD SWA on only when
+//!   `n_layer() == 64` (the 32B), seed `n_swa = 4096` and a period-4
+//!   pattern, and seed the sliding layers' RoPE base AND scale from the
+//!   model's; `:14` then reads `attention.sliding_window` as OPTIONAL,
+//!   so a 64-layer file without the key slides at 4096 (#440). The test
+//!   is equality, so a 63- or 65-layer file gets no window. `n_layer()`
+//!   is the TRUNK: the common loader reads `nextn_predict_layers` before
+//!   `load_arch_hparams` (`llama-model.cpp:1411,1571`), so a 64-layer
+//!   trunk with an MTP block appended is the 32B graph (#441), and the
+//!   loader hands [`swa_window_override`] the trunk.
 //! - **RoPE on the sliding layers only** (`:111`, `use_rope =
 //!   is_swa(il) || swa_type == NONE`), so the 32B's full-attention
 //!   layers rotate nothing and the 1.2B rotates everything
 //!   ([`rope_layers`]).
-//! - **NextN blocks** are tensors of the trailing `nextn` layers
-//!   (`:39-68`), subtracted from the layer count.
-//!
-//! Two divergences from the pin are carried over unchanged and filed:
-//! `:6` pins `n_swa = 4096` before the optional key, so a 64-layer file
-//! WITHOUT the key slides upstream and not here (#440); and the NextN
-//! count is now read for every architecture (`llama-model.cpp:1261`,
-//! #441).
+//! - **NextN blocks** are tensors of the trailing `nextn` layers,
+//!   created with `TENSOR_SKIP` (`:38-68`) and subtracted from the
+//!   layer count.
 //!
 //! Evidence: `tests/post_norm_only_graphs.rs` (1.2B shape) and
 //! `tests/no_rope_layer_graphs.rs` (the 64-layer shape), against
@@ -31,14 +30,19 @@ use crate::capability::{SwaPattern, SwaWindowOverride};
 use crate::norm_sites::NormSites;
 use crate::rope_layers::RopeLayers;
 
-/// `exaone4.cpp:4`: the file's window only on the 64-layer model.
-pub fn swa_window_override(_arch: &str, block_count: usize) -> SwaWindowOverride {
-    if block_count == 64 {
-        SwaWindowOverride::Honour
+/// `exaone4.cpp:4-14`: on the 64-layer trunk, 4096 unless the file
+/// declares a window; below or above it, no window whatever the file
+/// says.
+pub fn swa_window_override(_arch: &str, n_layers: usize) -> SwaWindowOverride {
+    if n_layers == 64 {
+        SwaWindowOverride::Seed(SEEDED_WINDOW)
     } else {
         SwaWindowOverride::Drop
     }
 }
+
+/// `exaone4.cpp:6`.
+pub const SEEDED_WINDOW: usize = 4096;
 
 /// `exaone4.cpp:111`.
 pub fn rope_layers(_arch: &str, _n_layers: usize, has_window: bool, _dense: usize) -> RopeLayers {
@@ -77,6 +81,7 @@ pub const DEF: ModelDef = ModelDef {
     facts: FACTS,
     evidence: Some(
         "tests/post_norm_only_graphs.rs and tests/no_rope_layer_graphs.rs: the 1.2B and the \
-         64-layer shapes against libllama's logits",
+         64-layer shapes against libllama's logits, the latter also without its window key \
+         and with an MTP block appended",
     ),
 };

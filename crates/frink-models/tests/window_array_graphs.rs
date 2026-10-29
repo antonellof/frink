@@ -177,6 +177,59 @@ const MELLUM_GOLDEN: [f32; 48] = [
     -0.067254916,
 ];
 
+/// `mellum_mtp_tiny.gguf`: `mellum_tiny.gguf` with one MTP block
+/// appended. libllama's answer is the trunk's, bit for bit (#441).
+const MELLUM_MTP_GOLDEN: [f32; 48] = [
+    0.060756013,
+    -0.023824722,
+    0.20276277,
+    -0.08673769,
+    -0.17752253,
+    0.16671993,
+    -0.049065586,
+    -0.14727482,
+    -0.23216516,
+    0.018855155,
+    -0.15827064,
+    -0.13220614,
+    0.017678097,
+    0.44898403,
+    0.18785386,
+    -0.060248606,
+    0.18946445,
+    0.09642051,
+    0.009634852,
+    -0.22297539,
+    -0.1649667,
+    0.3061224,
+    -0.31932747,
+    -0.063845895,
+    -0.42996672,
+    -0.00028830767,
+    0.4683508,
+    -0.33105162,
+    0.21087095,
+    -0.16849121,
+    -0.39124924,
+    0.124670506,
+    0.019993221,
+    -0.48215437,
+    -0.43157175,
+    -0.56464714,
+    0.34288388,
+    0.11505209,
+    0.18613203,
+    -0.30828017,
+    0.1446941,
+    -0.335675,
+    -0.043562084,
+    -0.14170834,
+    0.27802056,
+    0.03002052,
+    0.1744021,
+    -0.067254916,
+];
+
 /// Every (fixture, golden) pair this suite audits, for the KL report.
 const ROWS: [(&str, &[f32]); 4] = [
     ("exaone_moe_array", &EXAONE_MOE_GOLDEN),
@@ -240,6 +293,19 @@ fn mellum_matches_llama_cpp_on_all_three_paths() {
         [true, true, false, true],
         "libllama's load_tensors reports is_swa = 1, 1, 0, 1"
     );
+}
+
+/// An MTP block appended to the same file is skipped, as libllama skips
+/// it (#441): `mellum.cpp:79-89` create it `TENSOR_SKIP`, the common
+/// loader has already subtracted it from `n_layer()`, and the logits
+/// are the four-layer file's. frink refused this file until the census
+/// was re-measured at the pin.
+#[test]
+fn mellum_with_an_mtp_block_matches_llama_cpp() {
+    assert_eq!(MELLUM_MTP_GOLDEN, MELLUM_GOLDEN);
+    assert_all_three_paths_match("mellum_mtp", &MELLUM_MTP_GOLDEN);
+    let d = load_graph_fixture("mellum_mtp");
+    assert_eq!((d.config.n_layers, d.config.n_mtp_blocks), (4, 1));
 }
 
 /// Sabotage: keeping the seeded period-4 layout in place of the file's

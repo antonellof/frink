@@ -61,6 +61,7 @@ gptoss_graph.rs:GOLDEN_LOGITS logits $F/gptoss_tiny.gguf @GRAPH
 granite_family_graphs.rs:GRANITE_GOLDEN logits $F/granite_tiny.gguf @GRAPH
 granite_family_graphs.rs:GRANITEMOE_GOLDEN logits $F/granitemoe_tiny.gguf @GRAPH
 granite_family_graphs.rs:GRANITE_NOROPE_GOLDEN logits $F/granite_norope_tiny.gguf @GRAPH
+granite_family_graphs.rs:GRANITEMOE_NOROPE_GOLDEN logits $F/granitemoe_norope_tiny.gguf @GRAPH
 granite_hybrid_graphs.rs:GH_GOLDEN logits $F/granitehybrid_tiny.gguf @GRAPH
 granite_hybrid_graphs.rs:GH_ROPE_GOLDEN logits $F/granitehybrid_rope_tiny.gguf @GRAPH
 granite_hybrid_graphs.rs:GH_MOE_GOLDEN logits $F/granitehybrid_moe_tiny.gguf @GRAPH
@@ -100,9 +101,13 @@ nemotron_h_graphs.rs:NH_GOLDEN logits $F/nemotron_h_tiny.gguf @GRAPH
 nemotron_h_graphs.rs:NH_BIASES_GOLDEN logits $F/nemotron_h_biases_tiny.gguf @GRAPH
 nemotron_h_graphs.rs:NH_OUTPUT_GOLDEN logits $F/nemotron_h_output_tiny.gguf @GRAPH
 nemotron_h_graphs.rs:NH_MOE_GOLDEN logits $F/nemotron_h_moe_tiny.gguf @GRAPH
+nemotron_h_graphs.rs:NH_MOE_MTP_GOLDEN logits $F/nemotron_h_moe_mtp_tiny.gguf @GRAPH
 no_rope_layer_graphs.rs:EXAONE4_32B_GOLDEN logits $F/exaone4_32b_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:EXAONE4_32B_NOWINDOW_GOLDEN logits $F/exaone4_32b_nowindow_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:EXAONE4_32B_MTP_GOLDEN logits $F/exaone4_32b_mtp_tiny.gguf @GRAPH
 no_rope_layer_graphs.rs:SMOLLM3_GOLDEN logits $F/smollm3_tiny.gguf @GRAPH
 no_rope_layer_graphs.rs:MAPLE_GOLDEN logits $F/maple_tiny.gguf @GRAPH
+no_rope_layer_graphs.rs:MAPLE_MODEL_ROPE_GOLDEN logits $F/maple_model_rope_tiny.gguf @GRAPH
 olmo_graphs.rs:OLMO_GOLDEN logits $F/olmo_tiny.gguf @GRAPH
 olmo_graphs.rs:OLMO_CLAMPED_GOLDEN logits $F/olmo_clamped_tiny.gguf @GRAPH
 one_match_arm_graphs.rs:DEEPSEEK_GOLDEN logits $F/deepseek_tiny.gguf @GRAPH
@@ -158,6 +163,7 @@ sub_norm_graphs.rs:BITNET_SCALES_GOLDEN_HEAD logits $F/bitnet_scales_tiny.gguf @
 ungated_ffn_graphs.rs:ARCEE_GOLDEN logits $F/arcee_tiny.gguf @GRAPH
 window_array_graphs.rs:EXAONE_MOE_MTP_GOLDEN logits $F/exaone_moe_mtp_tiny.gguf @GRAPH
 window_array_graphs.rs:MELLUM_GOLDEN logits $F/mellum_tiny.gguf @GRAPH
+window_array_graphs.rs:MELLUM_MTP_GOLDEN logits $F/mellum_mtp_tiny.gguf @GRAPH
 fixtures/decode_steps/cohere2.txt decode REF_DECODE_STEPS=32 $F/cohere2_tiny.gguf @GRAPH
 fixtures/decode_steps/glm4.txt decode REF_DECODE_STEPS=32 $F/glm4_tiny.gguf @GRAPH
 fixtures/decode_steps/granitehybrid.txt decode REF_DECODE_STEPS=32 $F/granitehybrid_tiny.gguf @GRAPH

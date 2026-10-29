@@ -68,7 +68,12 @@ SEEDS = {"starcoder2": 0x5C02, "codeshell": 0xC0DE, "jais2": 0x3A15, "llama": 0x
 KV_HEADS = {"starcoder2": N_HEAD_KV, "codeshell": N_HEAD_KV, "jais2": N_HEAD, "llama": N_HEAD_KV}
 
 
-def main(arch: str, out_path: str, spelled: str | None = None) -> None:
+def main(arch: str, out_path: str, spelled: str | None = None, nextn: bool = False) -> None:
+    # `nextn` appends one more block with a `nextn.eh_proj` head and
+    # writes `nextn_predict_layers = 1`: refusal evidence (#441). The
+    # common loader subtracts it (`llama-model.cpp:1411`) but llama's
+    # tensor loader creates only `0..n_layer()`, so libllama fails on the
+    # extra tensors (`wrong number of tensors`) and frink refuses.
     # `spelled` writes a DIFFERENT architecture string into the file
     # while keeping this row's seed, shapes and weights. That is how an
     # alias is evidenced: a file byte-identical to the row it aliases
@@ -88,7 +93,10 @@ def main(arch: str, out_path: str, spelled: str | None = None) -> None:
 
     w = gguf.GGUFWriter(out_path, spelled or arch)
     w.add_name(f"frink-{arch}-fixture")
-    w.add_block_count(N_LAYER)
+    n_block = N_LAYER + (1 if nextn else 0)
+    w.add_block_count(n_block)
+    if nextn:
+        w.add_nextn_predict_layers(1)
     w.add_context_length(CTX)
     w.add_embedding_length(N_EMBD)
     w.add_feed_forward_length(N_FF)
@@ -128,8 +136,10 @@ def main(arch: str, out_path: str, spelled: str | None = None) -> None:
 
     n_embd_q = N_HEAD * HEAD_DIM
     n_embd_kv = n_head_kv * HEAD_DIM
-    for il in range(N_LAYER):
+    for il in range(n_block):
         p = f"blk.{il}."
+        if il >= N_LAYER:
+            w.add_tensor(p + "nextn.eh_proj.weight", rnd(N_EMBD, 2 * N_EMBD))
         w.add_tensor(p + "attn_norm.weight", norm_w())
         if layer_norm:
             w.add_tensor(p + "attn_norm.bias", away_from_zero(N_EMBD))
@@ -176,5 +186,6 @@ if __name__ == "__main__":
         default=None,
         help="write this architecture string instead, keeping the row's weights",
     )
+    ap.add_argument("--nextn", action="store_true", help="append one NextN/MTP block")
     args = ap.parse_args()
-    main(args.arch, args.out, args.spelled)
+    main(args.arch, args.out, args.spelled, args.nextn)

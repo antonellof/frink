@@ -53,11 +53,11 @@ impl ArchFacts {
         // architecture, with the reason that frink's `n_layers` IS
         // `block_count` and it would run the MTP head as decoder layers.
         // `crate::mtp_blocks::trunk_layers` subtracts the blocks now for
-        // exactly the seventeen graphs whose `load_arch_hparams` reads the
-        // key (`NEXTN_READERS`, measured) and still refuses a nonzero value
-        // on any other -- where llama.cpp itself would run every block and
-        // then fail on the unread `nextn.*` tensors. One place decides both
-        // halves, so the reader table and the refusal cannot drift apart.
+        // exactly the graphs whose tensor loader creates them
+        // (`NEXTN_READERS`, measured) and still refuses a nonzero value
+        // on any other -- where llama.cpp subtracts too and then fails on
+        // the trailing blocks' tensors. One place decides both halves, so
+        // the reader table and the refusal cannot drift apart.
         // `{arch}.attention.sliding_window_pattern` WAS refused here,
         // with the reason "not implemented in the generic decoder".
         // That reason was false, and had been for some time: the
