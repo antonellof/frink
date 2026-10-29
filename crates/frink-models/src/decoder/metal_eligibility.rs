@@ -405,4 +405,16 @@ impl Decoder {
     pub(super) fn moe_packed_q4(moe: &MoeWeights) -> Option<frink_metal::gpu::MoePackedQ4<'_>> {
         moe.packed_q4.as_ref().map(MoePackedQ4Planes::view)
     }
+
+    /// [`Self::moe_packed_q4`], only when every plane has a `mul_mv_id`
+    /// kernel. The one fence the host-routed prefill and both fused
+    /// decode launches take: a layer packed in a kind with no id kernel
+    /// runs one matvec per expert instead (#448). The fused prefill
+    /// stack fences on `mul_mm_id` itself (`PrefillMoeMetal::is_supported`).
+    #[cfg(feature = "metal")]
+    pub(super) fn moe_packed_id(moe: &MoeWeights) -> Option<frink_metal::gpu::MoePackedQ4<'_>> {
+        Self::moe_packed_q4(moe).filter(|p| {
+            frink_metal::gpu::moe_packed_mul_mv_id_supported(p.gate_kind, p.up_kind, p.down_kind)
+        })
+    }
 }

@@ -1,5 +1,5 @@
 //! Fixture encoders for the quant kinds `frink_quant` loads but does
-//! not write (Q2_K, Q3_K, IQ4_NL, MXFP4), shared by the suites that
+//! not write (Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4), shared by the suites that
 //! store a synthetic model in them. Each is a plain quantizer: it only
 //! has to be a valid packing of SOME weights, and
 //! `metal_low_k_quant_decode`'s round-trip test holds them to
@@ -128,39 +128,82 @@ pub fn mxfp4_row(row: &[f32]) -> Vec<u8> {
     out
 }
 
+/// The IQ4 codebook (ggml `kvalues_iq4nl`), shared by IQ4_NL and IQ4_XS.
+const KVALUES_IQ4: [f32; 16] = [
+    -127.0, -104.0, -83.0, -65.0, -49.0, -35.0, -22.0, -10.0, 1.0, 13.0, 25.0, 38.0, 53.0, 69.0,
+    89.0, 113.0,
+];
+
+/// The nearest codebook entry to `v` at scale `d`.
+fn iq4_code(v: f32, d: f32) -> u8 {
+    (0..16u8)
+        .min_by(|&a, &b| {
+            let da = (KVALUES_IQ4[a as usize] * d - v).abs();
+            let db = (KVALUES_IQ4[b as usize] * d - v).abs();
+            da.total_cmp(&db)
+        })
+        .expect("sixteen codes")
+}
+
+/// One row of f32 as IQ4_XS blocks (256 weights, 136 bytes): a `half`
+/// super-scale `d`, then per 32-weight sub-block a 6-bit scale `ls`
+/// (low nibble in `scales_l`, top two bits in `scales_h`) read as
+/// `d * (ls - 32)`, and sixteen bytes of codes laid out as IQ4_NL's.
+/// Each sub-block's scale puts its largest magnitude at `-127`.
+pub fn iq4_xs_row(row: &[f32]) -> Vec<u8> {
+    assert!(row.len().is_multiple_of(256), "IQ4_XS needs whole blocks");
+    let mut out = Vec::with_capacity(row.len() / 256 * 136);
+    for block in row.as_chunks::<256>().0 {
+        let want: Vec<f32> = block
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|s| s.iter().fold(0f32, |m, v| m.max(v.abs())) / 127.0)
+            .collect();
+        let d = f16::from_f32(want.iter().copied().fold(0f32, f32::max) / 31.0);
+        let df = d.to_f32();
+        let mut blk = [0u8; 136];
+        blk[0..2].copy_from_slice(&d.to_le_bytes());
+        let mut scales_h = 0u16;
+        for (ib, sub) in block.as_chunks::<32>().0.iter().enumerate() {
+            let s = if df > 0.0 {
+                (want[ib] / df).round().clamp(0.0, 31.0)
+            } else {
+                0.0
+            };
+            let ls = s as u8 + 32;
+            blk[4 + ib / 2] |= (ls & 0xF) << (4 * (ib % 2));
+            scales_h |= u16::from(ls >> 4) << (2 * ib);
+            let dl = df * s;
+            for j in 0..16 {
+                blk[8 + 16 * ib + j] = iq4_code(sub[j], dl) | (iq4_code(sub[j + 16], dl) << 4);
+            }
+        }
+        blk[2..4].copy_from_slice(&scales_h.to_le_bytes());
+        out.extend_from_slice(&blk);
+    }
+    out
+}
+
 /// One row of f32 as IQ4_NL blocks: `d` puts the block's largest
 /// magnitude at the codebook's end (`-127`), then each value's nearest
 /// code, low nibble element `j`, high nibble `j + 16`.
 pub fn iq4_nl_row(row: &[f32]) -> Vec<u8> {
-    const KVALUES: [f32; 16] = [
-        -127.0, -104.0, -83.0, -65.0, -49.0, -35.0, -22.0, -10.0, 1.0, 13.0, 25.0, 38.0, 53.0,
-        69.0, 89.0, 113.0,
-    ];
     assert!(row.len().is_multiple_of(32), "IQ4_NL needs whole blocks");
     let mut out = Vec::with_capacity(row.len() / 32 * 18);
     for block in row.as_chunks::<32>().0 {
         let amax = block.iter().fold(0f32, |m, v| m.max(v.abs()));
         let d = f16::from_f32(amax / 127.0);
-        let df = d.to_f32();
-        let code = |v: f32| {
-            (0..16u8)
-                .min_by(|&a, &b| {
-                    let da = (KVALUES[a as usize] * df - v).abs();
-                    let db = (KVALUES[b as usize] * df - v).abs();
-                    da.total_cmp(&db)
-                })
-                .expect("sixteen codes")
-        };
         out.extend_from_slice(&d.to_le_bytes());
         for j in 0..16 {
-            out.push(code(block[j]) | (code(block[j + 16]) << 4));
+            out.push(iq4_code(block[j], d.to_f32()) | (iq4_code(block[j + 16], d.to_f32()) << 4));
         }
     }
     out
 }
 
 /// `w`, a whole number of `cols`-wide rows, as `dtype`: the four kinds
-/// above, and Q8_0 through `frink_quant`'s own encoder.
+/// above, and Q8_0, Q5_K and Q6_K through `frink_quant`'s own encoders.
 pub fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
     let mut out = Vec::new();
     match dtype {
@@ -177,6 +220,13 @@ pub fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
         }
         GgmlType::IQ4NL => w.chunks_exact(cols).for_each(|r| out.extend(iq4_nl_row(r))),
         GgmlType::MXFP4 => w.chunks_exact(cols).for_each(|r| out.extend(mxfp4_row(r))),
+        GgmlType::IQ4XS => w.chunks_exact(cols).for_each(|r| out.extend(iq4_xs_row(r))),
+        GgmlType::Q5K => w.chunks_exact(cols).for_each(|r| {
+            frink_quant::encode_row_q5_k(r, None, &mut out).expect("whole blocks");
+        }),
+        GgmlType::Q6K => w.chunks_exact(cols).for_each(|r| {
+            frink_quant::encode_row_q6_k(r, None, &mut out).expect("whole blocks");
+        }),
         GgmlType::Q8_0 => w.chunks_exact(cols).for_each(|r| {
             frink_quant::encode_row_q8_0(r, &mut out).expect("whole blocks");
         }),

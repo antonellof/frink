@@ -50,6 +50,20 @@ fn every_kind_has_both_id_paths() {
     }
 }
 
+/// The decode stack's refusal names the first plane with no id kernel,
+/// so a pack it cannot run is refused before encoding (#448), and a
+/// pack of these kinds is not. Runs without a device.
+#[test]
+fn the_decode_stack_refuses_exactly_the_packs_with_no_id_kernel() {
+    use crate::gpu::moe_packed_mul_mv_id_missing as missing;
+    for kind in KINDS {
+        assert_eq!(missing(kind, kind, kind), None, "{kind}");
+    }
+    assert_eq!(missing("Q4_1", "Q4_0", "Q4_0"), Some("Q4_1"));
+    assert_eq!(missing("Q4_0", "Q4_1", "Q4_0"), Some("Q4_1"));
+    assert_eq!(missing("Q4_0", "Q4_0", "PTQ1_0"), Some("PTQ1_0"));
+}
+
 /// `(block bytes, block elems, CPU dequant)`.
 type Kind = (
     usize,
@@ -63,6 +77,9 @@ fn kind(name: &str) -> Kind {
         "Q3_K" => (110, 256, frink_quant::dequant_q3_k),
         "IQ4_NL" => (18, 32, frink_quant::dequant_iq4_nl),
         "MXFP4" => (17, 32, frink_quant::dequant_mxfp4_gguf),
+        "Q5_K" => (176, 256, frink_quant::dequant_q5_k),
+        "Q6_K" => (210, 256, frink_quant::dequant_q6_k),
+        "IQ4_XS" => (136, 256, frink_quant::dequant_iq4_xs),
         other => panic!("{other}"),
     }
 }
@@ -82,7 +99,17 @@ fn blocks(name: &str, n_blocks: usize, seed: u32) -> Vec<u8> {
             }
             "Q3_K" => w[at + 108..at + 110].copy_from_slice(&h(0.003 + 0.0005 * (b % 4) as f32)),
             "IQ4_NL" => w[at..at + 2].copy_from_slice(&h(0.004 + 0.001 * (b % 9) as f32)),
-            _ => w[at] = 118 + (b % 6) as u8,
+            // The three with 6-bit (or 6-bit-like) sub-block scales take
+            // a smaller super-scale, so the activations stay inside the
+            // `half` range `mul_mm_id` stages them in.
+            "IQ4_XS" => w[at..at + 2].copy_from_slice(&h(1e-4 + 2e-5 * (b % 9) as f32)),
+            "Q5_K" => {
+                w[at..at + 2].copy_from_slice(&h(1e-4 + 2e-5 * (b % 3) as f32));
+                w[at + 2..at + 4].copy_from_slice(&h(5e-5 + 1e-5 * (b % 5) as f32));
+            }
+            "Q6_K" => w[at + 208..at + 210].copy_from_slice(&h(1e-4 + 2e-5 * (b % 4) as f32)),
+            "MXFP4" => w[at] = 118 + (b % 6) as u8,
+            other => panic!("{other}"),
         }
     }
     w
@@ -218,10 +245,9 @@ fn routing(n_tokens: usize, top_k: usize, n_experts: usize, crowd: bool) -> (Vec
 #[ignore = "needs a real Metal GPU"]
 fn id_kernels_match_the_cpu_moe_ffn() {
     // 3 and 5 blocks a row; 6 experts. Every pack is built first and
-    // lives to the end: `gpu::moe_packed_resident` caches the device
-    // planes by the gate plane's address (sound for the mmap-backed
-    // planes the loader builds), so a pack freed and reallocated at
-    // the same address would read the previous kind's planes.
+    // lives to the end, so no two kinds' planes share an address; the
+    // device-plane cache's handling of one that does (#449) is
+    // `a_packed_plane_reused_at_the_same_address_is_rebuilt`'s.
     let n_experts = 6usize;
     let packs: Vec<(&str, usize, usize, Pack)> = KINDS
         .into_iter()
@@ -271,4 +297,51 @@ fn id_kernels_match_the_cpu_moe_ffn() {
             eprintln!("{name} {path}: max |metal - cpu| = {worst:.3e} (max |out| {scale:.3e})");
         }
     }
+}
+
+/// The packed planes' device copy follows the host bytes, not the host
+/// address (#449). The address reuse is forced rather than hoped for:
+/// the planes are overwritten in place, which is what an allocator
+/// handing a freed plane's address to the next one looks like to a
+/// cache keyed on it.
+#[test]
+#[ignore = "needs a real Metal GPU"]
+fn a_packed_plane_reused_at_the_same_address_is_rebuilt() {
+    use crate::gpu::{moe_packed_resident, shared_metal};
+    use objc2_metal::MTLBuffer;
+
+    let device_bytes = |r: &crate::gpu::ResidentWeightBuffer, len: usize| -> Vec<u8> {
+        // SAFETY: an owned plane's entry is a StorageModeShared buffer
+        // holding a copy of exactly the `len` host bytes at
+        // `weight_offset`, and no GPU work is in flight against it.
+        unsafe {
+            std::slice::from_raw_parts(
+                (r.buffer.contents().as_ptr() as *const u8).add(r.weight_offset),
+                len,
+            )
+            .to_vec()
+        }
+    };
+    let device = &shared_metal().expect("metal device").device;
+    let mut pack = Pack::new("IQ4_NL", 4, 64, 64);
+    let first = pack.gate.clone();
+    let bound = moe_packed_resident(device, &pack.view("IQ4_NL")).expect("first bind");
+    assert_eq!(device_bytes(&bound.gate, first.len()), first);
+
+    let ptr = pack.gate.as_ptr();
+    for (dst, src) in pack
+        .gate
+        .iter_mut()
+        .zip(blocks("IQ4_NL", first.len() / 18, 99))
+    {
+        *dst = src;
+    }
+    assert_eq!(pack.gate.as_ptr(), ptr, "the address is the one cached");
+    assert_ne!(pack.gate, first);
+    let again = moe_packed_resident(device, &pack.view("IQ4_NL")).expect("second bind");
+    assert_eq!(
+        device_bytes(&again.gate, pack.gate.len()),
+        pack.gate,
+        "the cache served the previous plane's bytes at a reused address"
+    );
 }

@@ -4,17 +4,18 @@
 //! ggml's `kernel_mul_mv_id` is one template over the plain matvec's
 //! `_impl`: slot `tgpig.z` reads its expert id, offsets the weights to
 //! that expert, the activation to its token and the output to its slot,
-//! and runs the same body. The Q2_K, Q3_K, IQ4_NL and MXFP4 matvecs are
-//! written as such an `_impl` (`crate::q2_k`, `crate::q3_k`,
-//! `crate::codebook4`), so their id kernels are generated here from
+//! and runs the same body. The Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K
+//! and IQ4_XS matvecs are written as such an `_impl` (`crate::q2_k`,
+//! `crate::q3_k`, `crate::codebook4`, `crate::k_quant_mv`), so their id
+//! kernels are generated here from
 //! that one function: the dequant and the dot exist once per kind, and
 //! the decode matvec's own kernel-vs-CPU tests cover the body the id
 //! kernel runs.
 //!
 //! Each `_impl` takes `(weights, x, out, row_bytes, n_blocks_per_row,
 //! n_rows, tgpig, tiisg, sgitg, table)`; `table` is 32 floats of
-//! threadgroup memory the codebook formats stage their values in and
-//! the K-quants ignore. The entries' buffer layout is the one
+//! threadgroup memory the codebook formats (IQ4_NL, MXFP4, IQ4_XS)
+//! stage their values in and the K-quants ignore. The entries' buffer layout is the one
 //! `gpu::encode_moe_matvec_id` and `gpu::encode_moe_down_id` bind.
 
 use crate::gpu::matvec_launch_meta;
@@ -92,13 +93,16 @@ fn kind_entry(kind: &str) -> Option<(&'static str, &'static str)> {
         "Q3_K" => Some((crate::q3_k::q3_k_matvec_src(), "q3_k")),
         "IQ4_NL" => Some((crate::codebook4::codebook4_matvec_src(), "iq4_nl")),
         "MXFP4" => Some((crate::codebook4::codebook4_matvec_src(), "mxfp4")),
+        "Q5_K" => Some((crate::k_quant_mv::q5_k_matvec_src(), "q5_k")),
+        "Q6_K" => Some((crate::k_quant_mv::q6_k_matvec_src(), "q6_k")),
+        "IQ4_XS" => Some((crate::k_quant_mv::iq4_xs_matvec_src(), "iq4_xs")),
         _ => None,
     }
 }
 
 /// The kinds [`dispatch`] answers for.
 #[cfg(test)]
-pub(crate) const KINDS: [&str; 4] = ["Q2_K", "Q3_K", "IQ4_NL", "MXFP4"];
+pub(crate) const KINDS: [&str; 7] = ["Q2_K", "Q3_K", "IQ4_NL", "MXFP4", "Q5_K", "Q6_K", "IQ4_XS"];
 
 /// One generated id kernel's launch: source, entry point, rows per
 /// threadgroup (the decode matvec's, from `matvec_launch_meta`) and
@@ -115,6 +119,12 @@ pub(crate) fn dispatch(kind: &str, down: bool) -> Option<crate::gpu::MoeMatvecId
         ("iq4_nl", true) => "iq4_nl_moe_down_id",
         ("mxfp4", false) => "mxfp4_moe_matvec_id",
         ("mxfp4", true) => "mxfp4_moe_down_id",
+        ("q5_k", false) => "q5_k_moe_matvec_id",
+        ("q5_k", true) => "q5_k_moe_down_id",
+        ("q6_k", false) => "q6_k_moe_matvec_id",
+        ("q6_k", true) => "q6_k_moe_down_id",
+        ("iq4_xs", false) => "iq4_xs_moe_matvec_id",
+        ("iq4_xs", true) => "iq4_xs_moe_down_id",
         _ => return None,
     };
     Some(crate::gpu::MoeMatvecIdDispatch {

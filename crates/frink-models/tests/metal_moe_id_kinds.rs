@@ -1,5 +1,7 @@
-//! A MoE model with Q2_K, Q3_K, IQ4_NL or MXFP4 experts runs its experts
-//! through Metal's fused id kernels, and answers as the CPU does (#405).
+//! A MoE model with Q2_K, Q3_K, IQ4_NL, MXFP4, Q5_K, Q6_K or IQ4_XS
+//! experts runs its experts through Metal's fused id kernels, and
+//! answers as the CPU does (#405, #448). A pack in a kind with no id
+//! kernel falls back to one matvec per expert instead of failing.
 //!
 //! The fused MoE kernels (`mul_mv_id` for decode and short prefills,
 //! `mul_mm_id` once an expert gathers eight tokens) had entries for
@@ -50,15 +52,18 @@ const CHILD: &str = "FRINK_MOE_ID_KINDS_CHILD";
 
 /// The kinds under test.
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
-const KINDS: [GgmlType; 4] = [
+const KINDS: [GgmlType; 7] = [
     GgmlType::Q2K,
     GgmlType::Q3K,
     GgmlType::IQ4NL,
     GgmlType::MXFP4,
+    GgmlType::Q5K,
+    GgmlType::Q6K,
+    GgmlType::IQ4XS,
 ];
 
-/// The IQ4_NL and MXFP4 fixture encoders pack the weights `frink_quant`
-/// decodes back (`metal_low_k_quant_decode` holds the Q2_K and Q3_K
+/// The IQ4_NL, IQ4_XS and MXFP4 fixture encoders pack the weights
+/// `frink_quant` decodes back (`metal_low_k_quant_decode` holds the Q2_K and Q3_K
 /// ones to the same).
 #[test]
 fn the_codebook_encoders_round_trip_through_the_cpu_dequant() {
@@ -69,6 +74,7 @@ fn the_codebook_encoders_round_trip_through_the_cpu_dequant() {
     for (dtype, dequant) in [
         (GgmlType::IQ4NL, frink_quant::dequant_iq4_nl as Dequant),
         (GgmlType::MXFP4, frink_quant::dequant_mxfp4_gguf as Dequant),
+        (GgmlType::IQ4XS, frink_quant::dequant_iq4_xs as Dequant),
     ] {
         let back = dequant(&quant_encode::encode(dtype, 1024, &v)).expect("whole blocks");
         let dot: f64 = v.iter().zip(&back).map(|(a, b)| f64::from(a * b)).sum();
@@ -127,6 +133,21 @@ fn moe_experts_of_each_kind_run_the_id_kernels_and_match_cpu() {
     eprintln!("skip: built without --features metal");
     #[cfg(feature = "metal")]
     metal::run_all();
+}
+
+/// A layer packed in a kind with no id kernel (#448). No loader builds
+/// one, so the Q8_0 fixture's planes are relabelled Q4_1, which has no
+/// Metal kernel of any kind. The fused decode stack used to encode it
+/// and fail with `CommandFailed`; it must fence it out as the prefill
+/// does, so the run is the one-matvec-per-expert run, dispatch for
+/// dispatch, and matches the CPU.
+#[test]
+#[ignore = "needs a real Metal-capable GPU; run with --features metal -- --ignored on Apple Silicon"]
+fn a_pack_with_no_id_kernel_falls_back_on_decode() {
+    #[cfg(not(feature = "metal"))]
+    eprintln!("skip: built without --features metal");
+    #[cfg(feature = "metal")]
+    metal::run_fallback();
 }
 
 #[cfg(feature = "metal")]
@@ -212,10 +233,8 @@ mod metal {
         let baseline = load(&baseline_path);
         assert_packed(&baseline, "Q8_0");
 
-        // Every decoder lives to the end: the Metal MoE launch caches a
-        // pack's device planes by the gate plane's address, so a model
-        // freed and another mapped at the same address would read the
-        // first one's experts.
+        // Every decoder lives to the end, so no two kinds' planes share
+        // an address and each count is its own model's.
         let mut keep = Vec::new();
         for dtype in KINDS {
             let path = synthetic_llama::write_moe("metal_moe_id", dtype, quant_encode::encode);
@@ -223,7 +242,11 @@ mod metal {
                 GgmlType::Q2K => "Q2_K",
                 GgmlType::Q3K => "Q3_K",
                 GgmlType::IQ4NL => "IQ4_NL",
-                _ => "MXFP4",
+                GgmlType::MXFP4 => "MXFP4",
+                GgmlType::Q5K => "Q5_K",
+                GgmlType::Q6K => "Q6_K",
+                GgmlType::IQ4XS => "IQ4_XS",
+                other => panic!("{other:?}"),
             };
             let (tokens, cpu) = cpu_rows(&path);
             let d = load(&path);
@@ -268,5 +291,58 @@ mod metal {
             std::fs::remove_file(path).ok();
         }
         std::fs::remove_file(&baseline_path).ok();
+    }
+
+    pub fn run_fallback() {
+        if frink_metal::gpu::probe().is_none() {
+            eprintln!("skip: no Metal GPU detected");
+            return;
+        }
+        common::pin_backend(common::Backend::Metal);
+        frink_models::set_metal_greedy_argmax(false);
+        let path =
+            synthetic_llama::write_moe("metal_moe_no_id", GgmlType::Q8_0, quant_encode::encode);
+        let (tokens, cpu) = cpu_rows(&path);
+
+        let mut relabelled = load(&path);
+        for layer in &mut relabelled.layers {
+            layer.moe.packed_q4 = layer.moe.packed_q4.take().map(|p| p.relabelled("Q4_1"));
+        }
+        assert_packed(&relabelled, "Q4_1");
+        let ((prefill, decode), gpu) = counted(&relabelled, &tokens);
+
+        let mut unpacked = load(&path);
+        for layer in &mut unpacked.layers {
+            layer.moe.packed_q4 = None;
+        }
+        let ((loop_prefill, loop_decode), _) = counted(&unpacked, &tokens);
+        let ((id_prefill, id_decode), _) = counted(&load(&path), &tokens);
+
+        let mut worst = 0f32;
+        for (step, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
+            let delta = common::worst_vs(g, c);
+            assert!(
+                delta <= TOL,
+                "relabelled Q4_1 step {step}: max |metal - cpu| = {delta} > {TOL}"
+            );
+            worst = worst.max(delta);
+        }
+        eprintln!(
+            "metal-moe-no-id: prefill {prefill} (per-expert {loop_prefill}, id {id_prefill}), \
+             decode {decode} (per-expert {loop_decode}, id {id_decode}), \
+             worst |metal - cpu| = {worst:.3e}"
+        );
+        assert_ne!(
+            (loop_prefill, loop_decode),
+            (id_prefill, id_decode),
+            "the counter cannot tell the per-expert path from the id path"
+        );
+        assert_eq!(
+            (prefill, decode),
+            (loop_prefill, loop_decode),
+            "a pack with no id kernel did not take the per-expert path"
+        );
+        drop((relabelled, unpacked));
+        std::fs::remove_file(&path).ok();
     }
 }
