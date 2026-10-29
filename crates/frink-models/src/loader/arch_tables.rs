@@ -27,8 +27,7 @@ use frink_moe::GatingFunction;
 /// reaching here -- but the list is what a later admission would trust.
 pub(crate) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
     "afmoe",
-    // cohere2moe.cpp:27-29: the key read optional, SIGMOID when absent.
-    "cohere2moe",
+    // `cohere2moe` is in `crate::models::cohere2moe` (#403 step 7b).
     "deepseek2",
     "glm4moe",
     "laguna",
@@ -96,8 +95,6 @@ pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
     "bailingmoe2",
-    // `cohere2moe.cpp:19-20` read both the norm and the scale.
-    "cohere2moe",
     "deepseek",
     // `dots1` is in `crate::models::dots1` (#403 step 6).
     "exaone-moe",
@@ -130,7 +127,6 @@ pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "afmoe",
     "bailingmoe",
     "bailingmoe2",
-    "cohere2moe",
     // `dots1` is in `crate::models::dots1` (#403 step 6).
     "exaone-moe",
     "glm4moe",

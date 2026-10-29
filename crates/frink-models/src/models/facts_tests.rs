@@ -36,7 +36,16 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(crate::router_input::ROUTER_INPUT_TABLE.iter().map(|r| r.0));
     names.extend(crate::layer_shapes::PURE_RECURRENT.iter().map(|r| r.0));
     names.extend(crate::rope_layers::ROPE_PATTERN_READERS.iter().map(|r| r.0));
-    names.extend(crate::norm::NORM_BY_RMS_EPS_KEY.iter().map(|r| r.0));
+    names.extend(
+        crate::swa_layers::PER_LAYER_ARRAY_READERS
+            .iter()
+            .map(|r| r.0),
+    );
+    names.extend(
+        crate::swa_layers::LOAD_SWA_PATTERN_CALLERS
+            .iter()
+            .map(|r| r.0),
+    );
     names.extend(crate::capability::LOGIT_SOFTCAP_ARCHITECTURES);
     names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
     names.extend(crate::act_layers::XIELU_ARCHITECTURES);
@@ -50,11 +59,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(crate::capability::PER_HEAD_DISTINCT_QK_NORM);
     names.extend(
         crate::attn_gate::Q_INTERLEAVED_GATE_ARCHS
-            .iter()
-            .map(|r| r.0),
-    );
-    names.extend(
-        crate::parallel_dense_ffn::SHARED_EXPERT_SUM_SCALE
             .iter()
             .map(|r| r.0),
     );
@@ -206,7 +210,10 @@ fn the_facts_agree_with_every_public_lookup() {
             profile,
             audited: cap::is_audited_generic(name),
             moe: MoeFacts {
-                sigmoid_by_default: t::SIGMOID_GATING_ARCHITECTURES.contains(&name),
+                sigmoid_by_default: def
+                    .map_or(t::SIGMOID_GATING_ARCHITECTURES.contains(&name), |f| {
+                        f.moe.sigmoid_by_default
+                    }),
                 gating_literal: def.map_or(
                     t::GATING_LITERAL_ARCHITECTURES
                         .iter()
@@ -253,6 +260,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 rope_base_key_unread: def.and_then(|f| f.swa.rope_base_key_unread),
                 // No legacy table: only a definition states it.
                 chunked: def.and_then(|f| f.swa.chunked),
+                pattern_key_read: crate::swa_layers::pattern_key_read(name),
             },
             ffn: FfnFacts {
                 // No legacy table: only a definition states it.
@@ -265,9 +273,8 @@ fn the_facts_agree_with_every_public_lookup() {
                 reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(name),
             },
             norm: NormFacts {
-                norm_by_rms_eps_key: crate::norm::NORM_BY_RMS_EPS_KEY
-                    .iter()
-                    .any(|(a, _)| *a == name),
+                // No legacy table: only a definition states it.
+                norm_by_rms_eps_key: def.is_some_and(|f| f.norm.norm_by_rms_eps_key),
                 block_sub_norms: crate::sub_norms::block_sub_norms(name),
             },
             scaling: ScalingFacts {

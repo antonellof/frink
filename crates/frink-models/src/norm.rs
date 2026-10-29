@@ -385,22 +385,10 @@ pub fn post_norm_eps(arch: &str, model_eps: f32) -> f32 {
         .map_or(model_eps, |(_, eps)| *eps)
 }
 
-/// The ONE graph of 155 whose norm function is decided by the FILE:
-/// `cohere2moe.cpp:4-11` read both epsilon keys as optional, zero the
-/// RMS one when it is absent, and `:166,314` pick `LLM_NORM` when
-/// `f_norm_rms_eps == 0.0f` and `LLM_NORM_RMS` otherwise. Every real
-/// export writes `attention.layer_norm_epsilon` alone
-/// (`conversion/base.py:1354-1355` from `layer_norm_eps`), so the
-/// architecture's default is the weighted LayerNorm
-/// (`capability::WEIGHTED_LAYER_NORM`) and a file carrying a nonzero
-/// `attention.layer_norm_rms_epsilon` switches to RMS; measured
-/// (`grep -n 'f_norm_rms_eps == 0' src/models/*.cpp`).
-pub const NORM_BY_RMS_EPS_KEY: &[(&str, &str)] =
-    &[("cohere2moe", "src/models/cohere2moe.cpp:4-11,166")];
-
 /// [`norm_function`] with what the file declares for
-/// `attention.layer_norm_rms_epsilon`, for [`NORM_BY_RMS_EPS_KEY`];
-/// every other architecture ignores the argument.
+/// `attention.layer_norm_rms_epsilon`, for an architecture whose norm
+/// that key decides (`cohere2moe`, `crate::models::cohere2moe`); every
+/// other architecture ignores the argument.
 pub fn norm_function_for_file(arch: &str, declared_rms_eps: Option<f32>) -> NormFunction {
     let facts = crate::models::ArchFacts::of(arch);
     file_norm_function(

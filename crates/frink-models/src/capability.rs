@@ -1381,8 +1381,9 @@ pub fn uses_non_parametric_rms_norm(arch: &str) -> bool {
 /// third is `cohere2` (Command-R7B), the same graph with a window
 /// (`cohere2.cpp:78,147`); `tests/cohere2_graphs.rs`.
 ///
-/// `dbrx` states its row in `crate::models::dbrx` (#403 step 6).
-pub const WEIGHTED_LAYER_NORM: &[&str] = &["command-r", "cohere2", "cohere2moe", "mpt"];
+/// `dbrx`, `command-r`, `cohere2` and `cohere2moe` state their rows in
+/// `crate::models` (#403 steps 6 and 7b).
+pub const WEIGHTED_LAYER_NORM: &[&str] = &["mpt"];
 
 /// Does this architecture normalise with a weighted LayerNorm? Its
 /// norm-site row's function, which is [`WEIGHTED_LAYER_NORM`] or its
@@ -3684,9 +3685,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // the two `load_swa_pattern` callers this table missed (#420).
         "gemma-embedding2" => last_dense(6),
         "muse-glimmer" => last_dense(4),
-        // src/models/cohere2.cpp:5 (`exaone4` and `olmo2`, the same
-        // period, state it in `crate::models`)
-        "cohere2" => last_dense(4),
         // Added after an audit found this table covered 6 architectures
         // where llama.cpp hardcodes a period for 17. A MISSING entry is
         // not neutral: with no period, every layer gets windowed, so a
@@ -3725,9 +3723,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // src/models/laguna.cpp:39-41 (its own comment: "XS.2: FULL at
         // il%4==0"). LIVE: `laguna` is on the generic GQA path.
         "laguna" => dense_first(4),
-        // src/models/cohere2moe.cpp:31-33. `DedicatedOnly` today
-        // (parallel attention+FFN residual), so latent.
-        "cohere2moe" => dense_first(4),
         // src/models/modern-bert.cpp:8-10. Deferred (encoder scope), so
         // latent.
         "modern-bert" => dense_first(3),
@@ -3758,8 +3753,6 @@ pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
         "afmoe"
-            | "cohere2"
-            | "cohere2moe"
             | "dflash"
             | "exaone-moe"
             | "gemma2"
@@ -3808,8 +3801,6 @@ pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
         "afmoe"          // afmoe.cpp:22
-            | "cohere2"     // cohere2.cpp:10
-            | "cohere2moe"  // cohere2moe.cpp:39
             | "dflash"      // dflash.cpp:59, :71
             | "exaone-moe"  // exaone-moe.cpp:10
             | "gemma2"      // gemma2.cpp:11

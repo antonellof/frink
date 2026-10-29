@@ -179,9 +179,6 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("granite_swa", "src/models/granite-swa.cpp:17"),
     // Landed upstream after the 2026-09-19 pin.
     ("lfm3", "src/models/lfm3.cpp:13"),
-    // Also after it. `crate::models::kolibri1` cannot state this row:
-    // `ArchFacts` does not carry the pattern read yet.
-    ("kolibri1", "src/models/kolibri1.cpp:17"),
 ];
 
 /// `LLAMA_MAX_LAYERS` (`llama-hparams.h:11`): the longest array `get_arr`
@@ -193,28 +190,30 @@ pub const LLAMA_MAX_LAYERS: usize = 512;
 /// registry's `SwaFacts::default_layout`).
 pub const LOAD_SWA_PATTERN_CALLERS: &[(&str, &str)] = &[
     ("afmoe", "src/models/afmoe.cpp:17"),
-    ("cohere2", "src/models/cohere2.cpp:5"),
-    ("cohere2moe", "src/models/cohere2moe.cpp:28"),
     ("exaone-moe", "src/models/exaone-moe.cpp:6"),
-    ("exaone4", "src/models/exaone4.cpp:7"),
     ("gemma-embedding", "src/models/gemma-embedding.cpp:5"),
     ("gemma-embedding2", "src/models/gemma-embedding2.cpp:5"),
     ("gemma2", "src/models/gemma2.cpp:6"),
     ("gemma3", "src/models/gemma3.cpp:7"),
     ("gemma3n", "src/models/gemma3n.cpp:5"),
-    ("gpt-oss", "src/models/openai-moe.cpp:9"),
     ("laguna", "src/models/laguna.cpp:42"),
-    ("llama4", "src/models/llama4.cpp:19"),
     ("mellum", "src/models/mellum.cpp:16"),
     ("modern-bert", "src/models/modern-bert.cpp:11"),
     ("muse-glimmer", "src/models/muse-glimmer.cpp:13"),
-    ("olmo2", "src/models/olmo2.cpp:9"),
     ("plamo3", "src/models/plamo3.cpp:9"),
     ("smallthinker", "src/models/smallthinker.cpp:9"),
 ];
 
 /// THE table, derived from the two censuses above.
 pub fn pattern_key_read(arch: &str) -> PatternKeyRead {
+    crate::models::ArchFacts::of(arch).swa.pattern_key_read
+}
+
+/// [`pattern_key_read`] from the two tables alone, for
+/// `ArchFacts::from_tables` (the `crate::models` architectures state
+/// theirs: `cohere2`, `cohere2moe`, `exaone4`, `gpt-oss`, `llama4` and
+/// `olmo2` call `load_swa_pattern`, `kolibri1` reads the array).
+pub(crate) fn pattern_key_read_from_table(arch: &str) -> PatternKeyRead {
     if PER_LAYER_ARRAY_READERS.iter().any(|(a, _)| *a == arch) {
         PatternKeyRead::PerLayerBool
     } else if LOAD_SWA_PATTERN_CALLERS.iter().any(|(a, _)| *a == arch) {

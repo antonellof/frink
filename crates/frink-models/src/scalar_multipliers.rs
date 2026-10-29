@@ -542,8 +542,6 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     ("granite_swa", MultiplierSupport::GRANITE),
     ("minicpm", MultiplierSupport::MINICPM),
     ("talkie", MultiplierSupport::TALKIE),
-    ("command-r", MultiplierSupport::COMMAND_R),
-    ("cohere2", MultiplierSupport::COHERE2),
     ("minimax-01", MultiplierSupport::MINIMAX_01),
     // `muse-glimmer.cpp:8` reads `logit_scale` REQUIRED and `:186`
     // MULTIPLIES by it, which is `cohere2`'s shape rather than
@@ -552,9 +550,8 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     // `hrm-text.cpp:8` reads `embedding_scale` OPTIONAL and
     // `build_inp_embd` applies it; the other three it never reads.
     ("hrm_text", MultiplierSupport::EMBEDDING_ONLY),
-    // `cohere2moe.cpp:14,287-289`: the same REQUIRED key, multiplied
-    // when nonzero.
-    ("cohere2moe", MultiplierSupport::COHERE2),
+    // `command-r`, `cohere2` and `cohere2moe` are in `crate::models`
+    // (#403 step 7b).
 ];
 
 /// Which multipliers frink applies for `arch`.

@@ -110,6 +110,9 @@ pub struct SwaFacts {
     /// `chunked_swa`: the literal chunk and the lines, for a CHUNKED
     /// window (`llama4`).
     pub chunked: Option<(usize, &'static str)>,
+    /// `swa_layers::pattern_key_read`: how the graph reads
+    /// `attention.sliding_window_pattern`.
+    pub pattern_key_read: crate::swa_layers::PatternKeyRead,
 }
 
 /// FFN rows, in the order the loader tests them.
@@ -297,6 +300,7 @@ impl ArchFacts {
             rope_scale_follows_model: false,
             rope_base_key_unread: None,
             chunked: None,
+            pattern_key_read: crate::swa_layers::PatternKeyRead::Unread,
         },
         ffn: FfnFacts {
             length_counts_gate_and_up: false,
@@ -397,6 +401,7 @@ impl ArchFacts {
                 rope_base_key_unread: None,
                 // No table: `llama4` was the only row.
                 chunked: None,
+                pattern_key_read: crate::swa_layers::pattern_key_read_from_table(arch),
             },
             ffn: FfnFacts {
                 // No table: `qwen` was the only row (`crate::models::qwen`).
@@ -409,9 +414,8 @@ impl ArchFacts {
                 reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(arch),
             },
             norm: NormFacts {
-                norm_by_rms_eps_key: crate::norm::NORM_BY_RMS_EPS_KEY
-                    .iter()
-                    .any(|(a, _)| *a == arch),
+                // No table: `cohere2moe` was the only row.
+                norm_by_rms_eps_key: false,
                 block_sub_norms: crate::sub_norms::block_sub_norms(arch),
             },
             scaling: ScalingFacts {
@@ -433,7 +437,8 @@ impl ArchFacts {
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
                 learned_positions: crate::position_embd::learned_positions(arch),
-                parallel_residual: crate::parallel_residual::parallel_residual_from_table(arch),
+                // No table: all eight graphs are in `crate::models`.
+                parallel_residual: None,
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
                     .contains(&arch),
                 reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
@@ -452,9 +457,8 @@ impl ArchFacts {
                 per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(arch),
                 post_norms_both_or_neither: crate::norm_sites::post_norms_both_or_neither(arch),
-                shared_expert_sum_scale: crate::parallel_dense_ffn::shared_expert_sum_scale_row(
-                    arch,
-                ),
+                // No table: `cohere2moe` was the only row.
+                shared_expert_sum_scale: None,
                 weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(arch),
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
