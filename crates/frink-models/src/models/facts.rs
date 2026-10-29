@@ -77,6 +77,9 @@ pub struct MoeFacts {
     /// legacy table names the other rule: every tabled row is
     /// `BiasAfterGating`, `build_moe_ffn`'s own.
     pub selection: SelectionRule,
+    /// `moe_interleave`: the llama.cpp lines when the loader honours
+    /// `interleave_moe_layer_step` (`llama4`).
+    pub interleave_step_honoured: Option<&'static str>,
 }
 
 /// Sliding-window rows (`capability`, `swa_geometry`).
@@ -104,6 +107,9 @@ pub struct SwaFacts {
     /// file's key is dead. `None` where the key is read (the base loader
     /// does not read it; each graph's `load_arch_hparams` does or not).
     pub rope_base_key_unread: Option<&'static str>,
+    /// `chunked_swa`: the literal chunk and the lines, for a CHUNKED
+    /// window (`llama4`).
+    pub chunked: Option<(usize, &'static str)>,
 }
 
 /// FFN rows, in the order the loader tests them.
@@ -136,7 +142,7 @@ pub struct NormFacts {
 }
 
 /// Metadata-multiplier rows (`scalar_multipliers`, `capability`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScalingFacts {
     /// `scalar_multipliers::multiplier_support`.
     pub multipliers: MultiplierSupport,
@@ -151,6 +157,9 @@ pub struct ScalingFacts {
     /// `rope_scaling::YARN_BETA_READERS`: the YaRN `beta_fast` /
     /// `beta_slow` keys are read (dead metadata everywhere else).
     pub reads_yarn_beta: bool,
+    /// `attn_temperature`: a LITERAL attention temperature, read from no
+    /// key (`llama4`).
+    pub attn_temperature_literal: Option<crate::attn_temperature::AttnTemperature>,
 }
 
 /// Layer-topology rows read at config time.
@@ -230,6 +239,9 @@ pub struct HparamRules {
     /// value the graph throws on, a REQUIRED tensor the generic loader
     /// treats as optional. `(file, arch, n_layers)`; `None` loads.
     pub load_checks: fn(&dyn TensorSource, &str, usize) -> Option<String>,
+    /// `weightless_qk_norm(arch, n_experts)`: Q and K normed with no
+    /// weight (`llama4.cpp:43`).
+    pub weightless_qk_norm: fn(&str, usize) -> bool,
 }
 
 /// [`HparamRules::load_checks`] for an architecture with none.
@@ -244,6 +256,7 @@ impl HparamRules {
         attention_scale_override: crate::capability::attention_scale_override,
         rope_layers: crate::rope_layers::rope_layers_from_table,
         load_checks: no_load_checks,
+        weightless_qk_norm: crate::weightless_qk_norm::no_weightless_qk_norm,
     };
 }
 
@@ -262,6 +275,7 @@ impl ArchFacts {
             routed_weight_before_ffn: false,
             router_input: RouterInput::NormedFfnInput,
             selection: SelectionRule::BiasAfterGating,
+            interleave_step_honoured: None,
         },
         swa: SwaFacts {
             default_layout: None,
@@ -273,6 +287,7 @@ impl ArchFacts {
             rope_base_follows_model: false,
             rope_scale_follows_model: false,
             rope_base_key_unread: None,
+            chunked: None,
         },
         ffn: FfnFacts {
             length_counts_gate_and_up: false,
@@ -293,6 +308,7 @@ impl ArchFacts {
             embeddings_scaled_by_sqrt_n_embd: false,
             clamp_kqv: None,
             reads_yarn_beta: false,
+            attn_temperature_literal: None,
         },
         topology: TopologyFacts {
             pure_recurrent_block: None,
@@ -345,9 +361,12 @@ impl ArchFacts {
                 reads_expert_weights_scale: t::EXPERT_WEIGHTS_SCALE_READERS.contains(&arch),
                 no_topk_renormalize: t::NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&arch),
                 leading_dense_key_is_inert: t::LEADING_DENSE_KEY_IS_INERT.contains(&arch),
-                routed_weight_before_ffn: crate::routed_weight_site::weight_before_ffn(arch),
+                // No table: `llama4` was the only row.
+                routed_weight_before_ffn: false,
                 router_input: crate::router_input::router_input(arch),
                 selection: SelectionRule::BiasAfterGating,
+                // No table: `llama4` was the only row.
+                interleave_step_honoured: None,
             },
             swa: SwaFacts {
                 default_layout: crate::capability::default_swa_layout_from_table(arch),
@@ -364,6 +383,8 @@ impl ArchFacts {
                 rope_scale_follows_model:
                     crate::capability::swa_rope_scale_follows_model_from_table(arch),
                 rope_base_key_unread: None,
+                // No table: `llama4` was the only row.
+                chunked: None,
             },
             ffn: FfnFacts {
                 // No table: `qwen` was the only row (`crate::models::qwen`).
@@ -391,6 +412,8 @@ impl ArchFacts {
                 }),
                 clamp_kqv: crate::clamp_kqv::clamp_row_from_table(arch),
                 reads_yarn_beta: crate::loader::rope_scaling::YARN_BETA_READERS.contains(&arch),
+                // No table: `llama4` was the only row.
+                attn_temperature_literal: None,
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
@@ -403,7 +426,8 @@ impl ArchFacts {
                 reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
             },
             tensors: TensorFacts {
-                gpt_oss_layers: arch == "gpt-oss",
+                // No table: `gpt-oss` states it in `crate::models::gpt_oss`.
+                gpt_oss_layers: false,
                 norm_sites: NormSites::with_function(
                     arch,
                     crate::norm::norm_function_from_table(arch),

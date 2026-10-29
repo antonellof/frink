@@ -359,8 +359,9 @@ impl ModelConfig {
         // The interleave step the loader honours (`crate::moe_interleave`,
         // `llama4.cpp:64`), read here because the shared-expert probe
         // below needs the first layer it makes MoE.
-        let moe_interleave_step = crate::moe_interleave::interleave_step(
+        let moe_interleave_step = crate::moe_interleave::interleave_step_for(
             &arch,
+            facts.moe.interleave_step_honoured,
             metadata_u64_any(file, &[key("interleave_moe_layer_step")]),
             n_experts,
         )
@@ -490,8 +491,9 @@ impl ModelConfig {
         // records what building the fixture found: llama.cpp cannot load
         // such a file either, because its own tensor loader has no step
         // in it.
-        if let Some(reason) = crate::moe_interleave::interleave_step_refusal(
+        if let Some(reason) = crate::moe_interleave::interleave_step_refusal_for(
             &arch,
+            facts.moe.interleave_step_honoured,
             metadata_u64_any(file, &[key("interleave_moe_layer_step")]),
         ) {
             return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
@@ -618,7 +620,8 @@ impl ModelConfig {
         // the branch the file takes, whatever nonzero value it declares
         // and whether it declares one at all; a declared ZERO is the
         // branch libllama aborts on, refused there by name.
-        let swa_chunked = crate::chunked_swa::chunked_window(&arch, declared_window)?;
+        let swa_chunked =
+            crate::chunked_swa::chunked_window_for(&arch, facts.swa.chunked, declared_window)?;
         let sliding_window = swa_chunked.or(sliding_window);
         let swa_chunked = swa_chunked.is_some();
 
@@ -934,8 +937,9 @@ impl ModelConfig {
         // that value rather than the key. Before this existed the key
         // loaded and was silently dropped on the one generic-path
         // architecture whose graph applies it.
-        let attn_temperature = crate::attn_temperature::resolve_attn_temperature(
+        let attn_temperature = crate::attn_temperature::resolve_attn_temperature_for(
             &arch,
+            facts.scaling.attn_temperature_literal,
             crate::attn_temperature::DeclaredTemperature {
                 scale: metadata_f32_any(file, &[key("attention.temperature_scale")]),
                 length: metadata_u64_any(file, &[key("attention.temperature_length")]),
@@ -1258,7 +1262,7 @@ impl ModelConfig {
             skip_stream: facts.topology.skip_stream,
             parallel_ssm: facts.topology.parallel_ssm,
             swa_chunked,
-            weightless_qk_norm: crate::weightless_qk_norm::weightless_qk_norm(&arch, n_experts),
+            weightless_qk_norm: (facts.rules.weightless_qk_norm)(&arch, n_experts),
             hidden_dim,
             n_heads,
             n_kv_heads,

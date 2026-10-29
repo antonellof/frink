@@ -258,6 +258,15 @@ pub fn sliding_layers_rotate(has_sliding_window: bool) -> RopeLayers {
     }
 }
 
+/// llama.cpp's default `n_no_rope_layer_step` (4): one layer in four
+/// unrotated, at `phase` of each period.
+pub fn default_no_rope_every(phase: NoRopePhase) -> RopeLayers {
+    RopeLayers::NoRopeEvery {
+        step: step(LLAMA_CPP_DEFAULT_NO_ROPE_STEP),
+        phase,
+    }
+}
+
 /// [`rope_layers`] from this table alone, for `HparamRules::LEGACY`.
 pub fn rope_layers_from_table(
     arch: &str,
@@ -265,10 +274,7 @@ pub fn rope_layers_from_table(
     has_sliding_window: bool,
     n_dense_lead: usize,
 ) -> RopeLayers {
-    let no_rope_every = |phase| RopeLayers::NoRopeEvery {
-        step: step(LLAMA_CPP_DEFAULT_NO_ROPE_STEP),
-        phase,
-    };
+    let no_rope_every = default_no_rope_every;
     match arch {
         // `exaone4.cpp:4-9` switches the whole SWA machinery on inside
         // `if (hparams.n_layer() == 64)` and :116 then gates RoPE on it,
@@ -345,9 +351,8 @@ pub fn rope_layers_from_table(
         // aborts on it; every other Llama-4 keeps the default 4 and
         // :145-146 skips `(il + 1) % 4 == 0`, which is exactly the
         // full-attention layer of its 3-chunked-1-full period. LIVE
-        // since 2026-09-14 (`tests/llama4_graphs.rs`); the chunked
-        // window is frink's `sliding_window` with `swa_chunked` set.
-        "llama4" if has_sliding_window => no_rope_every(NoRopePhase::LastOfPeriod),
+        // since 2026-09-14 (`tests/llama4_graphs.rs`). `llama4`'s rule is
+        // `crate::models::llama4`'s (#403 step 6b).
         _ => RopeLayers::All,
     }
 }

@@ -41,7 +41,7 @@
 //!
 //! So `mistral3` is the ONLY generic-path reader of a KEY, and
 //! [`resolve_attn_temperature`] is written for the two that read one.
-//! `llama4` seeds LITERALS ([`LITERAL_ATTN_TEMPERATURE`]) on the
+//! `llama4` seeds LITERALS ([`LLAMA4`]) on the
 //! branch every real export takes (`llama4.cpp:13-17`; the other
 //! branch is refused by name in `crate::chunked_swa`) and gates the
 //! multiply on `!use_rope` (`:175` is an `else if` on the RoPE branch),
@@ -195,20 +195,15 @@ pub const ATTN_TEMPERATURE_READERS: &[(&str, FloorSource, &str)] = &[
     ),
 ];
 
-/// The graphs that seed the three constants from LITERALS rather than
-/// keys, with the values and the line. One of 155 (`grep -n
-/// f_attn_temp_scale src/models/*.cpp`): the three assignments at
-/// `llama4.cpp:15-17`, on the chunked branch its files take.
-pub const LITERAL_ATTN_TEMPERATURE: &[(&str, AttnTemperature, &str)] = &[(
-    "llama4",
-    AttnTemperature {
-        scale: 0.1,
-        floor_scale: NonZeroU32::new(8192).unwrap(),
-        offset: 1.0,
-        unrotated_layers_only: true,
-    },
-    "src/models/llama4.cpp:15-17,175-176",
-)];
+/// `llama4.cpp:15-17,175-176`: a LITERAL temperature, read from no key
+/// (scale 0.1 over a floor of 8192, offset 1, on the unrotated layers
+/// only). `crate::models::llama4` states it; it is the one such graph.
+pub const LLAMA4: AttnTemperature = AttnTemperature {
+    scale: 0.1,
+    floor_scale: NonZeroU32::new(8192).unwrap(),
+    offset: 1.0,
+    unrotated_layers_only: true,
+};
 
 /// What the file declares, gathered by the loader.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -270,14 +265,28 @@ pub fn resolve_attn_temperature(
     arch: &str,
     declared: DeclaredTemperature,
 ) -> Result<Option<AttnTemperature>, AttnTemperatureError> {
+    resolve_attn_temperature_for(
+        arch,
+        crate::models::ArchFacts::of(arch)
+            .scaling
+            .attn_temperature_literal,
+        declared,
+    )
+}
+
+/// [`resolve_attn_temperature`] given the literal row (`ArchFacts`);
+/// the key readers ([`ATTN_TEMPERATURE_READERS`]) are still keyed on
+/// `arch`.
+pub fn resolve_attn_temperature_for(
+    arch: &str,
+    literal: Option<AttnTemperature>,
+    declared: DeclaredTemperature,
+) -> Result<Option<AttnTemperature>, AttnTemperatureError> {
     // The literal seeders first: the file's keys are not read for them
     // (`llama4.cpp:3-26` reads no `temperature_*` key), so a declared
     // value is dead metadata as it is on every non-reader.
-    if let Some((_, literal, _)) = LITERAL_ATTN_TEMPERATURE
-        .iter()
-        .find(|(name, _, _)| *name == arch)
-    {
-        return Ok(Some(*literal));
+    if let Some(literal) = literal {
+        return Ok(Some(literal));
     }
     let Some((_, floor_source, _)) = ATTN_TEMPERATURE_READERS
         .iter()
@@ -333,13 +342,16 @@ mod tests {
         let got = resolve_attn_temperature("llama4", declared)
             .unwrap()
             .expect("llama4 always scales");
-        assert_eq!(got, LITERAL_ATTN_TEMPERATURE[0].1);
+        assert_eq!(got, LLAMA4);
         assert!(got.unrotated_layers_only);
         assert_eq!(got.scale_at(8190), 1.0);
         assert!(got.scale_at(8191) > 1.0);
         for (name, _, _) in ATTN_TEMPERATURE_READERS {
             assert!(
-                !LITERAL_ATTN_TEMPERATURE.iter().any(|(n, _, _)| n == name),
+                crate::models::ArchFacts::of(name)
+                    .scaling
+                    .attn_temperature_literal
+                    .is_none(),
                 "{name} reads a key and cannot also seed a literal"
             );
         }

@@ -11,11 +11,13 @@ pub mod dbrx;
 pub mod dots1;
 pub mod exaone4;
 pub mod facts;
+pub mod gpt_oss;
 pub mod granite;
 pub mod granite_moe;
 pub mod grok;
 pub mod kolibri1;
 pub mod llama;
+pub mod llama4;
 pub mod olmo;
 pub mod olmo2;
 pub mod olmoe;
@@ -70,6 +72,8 @@ pub const REGISTRY: &[ModelDef] = &[
     phimoe::DEF,
     dbrx::DEF,
     grok::DEF,
+    gpt_oss::DEF,
+    llama4::DEF,
 ];
 
 /// The registry entry naming `arch`.

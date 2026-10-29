@@ -76,7 +76,6 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("codeshell", Presence::Required),
     ("deci", Presence::Optional),
     ("ernie4_5", Presence::Optional),
-    ("gpt-oss", Presence::Required),
     ("gpt2", Presence::Required),
     // `granite-swa.cpp:79`, optional as every Granite row's is.
     ("granite_swa", Presence::Optional),

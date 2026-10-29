@@ -153,6 +153,13 @@ eligibility test so a new field forces a Metal decision.
   `phimoe`'s dropped window is a rule in its file. Step 6b is `gpt-oss`
   and `llama4`, whose rows also sit behind `attn_temperature`,
   `chunked_swa`, `moe_interleave` and `weightless_qk_norm`.
+- Step 6b: `models/gpt_oss.rs` (`src/models/openai-moe.cpp`) and
+  `models/llama4.rs`. The four single-row resolvers `chunked_swa`,
+  `moe_interleave`, `attn_temperature` (its literal) and
+  `routed_weight_site` lost their only row and their tables are
+  deleted; each now takes its row from `ArchFacts` (`*_for`), and
+  `weightless_qk_norm` and `llama4`'s per-layer RoPE are
+  `HparamRules`. Divergence found and filed, not fixed: #458.
 
 What step 2 changed about the target design:
 
