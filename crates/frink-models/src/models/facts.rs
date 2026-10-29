@@ -109,7 +109,8 @@ pub struct SwaFacts {
 /// FFN rows, in the order the loader tests them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FfnFacts {
-    /// `FFN_LENGTH_COUNTS_GATE_AND_UP`.
+    /// `feed_forward_length` counts gate and up together, so each FFN
+    /// matrix is half as wide (`crate::models::qwen`).
     pub length_counts_gate_and_up: bool,
     /// `capability::uses_geglu`.
     pub geglu: bool,
@@ -201,6 +202,8 @@ pub struct TensorFacts {
     /// `proj_bias::FFN_BIAS_CREATORS`: the dense FFN biases, and
     /// whether `ffn_gate.bias` is among them.
     pub ffn_bias: Option<(Presence, bool)>,
+    /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
+    pub output_bias: Option<Presence>,
 }
 
 /// The decisions that are code rather than rows: each takes a
@@ -307,6 +310,7 @@ impl ArchFacts {
             qk_norm_after_rope: false,
             attn_out_bias: None,
             ffn_bias: None,
+            output_bias: None,
         },
         rules: HparamRules::LEGACY,
     };
@@ -355,7 +359,8 @@ impl ArchFacts {
                 rope_base_key_unread: None,
             },
             ffn: FfnFacts {
-                length_counts_gate_and_up: t::FFN_LENGTH_COUNTS_GATE_AND_UP.contains(&arch),
+                // No table: `qwen` was the only row (`crate::models::qwen`).
+                length_counts_gate_and_up: false,
                 geglu: crate::capability::uses_geglu(arch),
                 relu_sqr: crate::capability::uses_relu_sqr(arch),
                 gelu_ungated: crate::capability::uses_gelu_ungated(arch),
@@ -407,6 +412,7 @@ impl ArchFacts {
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
+                output_bias: crate::proj_bias::output_presence_from_table(arch),
             },
             rules: HparamRules::LEGACY,
         }
