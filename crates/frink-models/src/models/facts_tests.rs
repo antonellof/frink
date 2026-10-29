@@ -32,7 +32,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(t::EXPERT_WEIGHTS_NORM_READERS);
     names.extend(t::EXPERT_WEIGHTS_SCALE_READERS);
     names.extend(t::NO_TOPK_RENORMALIZE_ARCHITECTURES);
-    names.extend(t::FFN_LENGTH_COUNTS_GATE_AND_UP);
     names.extend(t::LEADING_DENSE_KEY_IS_INERT);
     names.extend(crate::router_input::ROUTER_INPUT_TABLE.iter().map(|r| r.0));
     names.extend(crate::layer_shapes::PURE_RECURRENT.iter().map(|r| r.0));
@@ -81,6 +80,7 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(crate::mtp_blocks::NEXTN_READERS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::ATTN_OUT_BIAS_CREATORS.iter().map(|r| r.0));
     names.extend(crate::proj_bias::FFN_BIAS_CREATORS.iter().map(|r| r.0));
+    names.extend(crate::proj_bias::OUTPUT_BIAS_CREATORS.iter().map(|r| r.0));
     names.sort_unstable();
     names.dedup();
     names
@@ -203,7 +203,13 @@ fn the_facts_agree_with_every_public_lookup() {
                         f.moe.reads_expert_weights_norm
                     }),
                 reads_expert_weights_scale: t::EXPERT_WEIGHTS_SCALE_READERS.contains(&name),
-                no_topk_renormalize: t::NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&name),
+                // A table with no public lookup: the definition's
+                // statement, else the table (`no_registry_name_remains_in_a_legacy_table`
+                // holds the table empty for registry names).
+                no_topk_renormalize: def
+                    .map_or(t::NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&name), |f| {
+                        f.moe.no_topk_renormalize
+                    }),
                 leading_dense_key_is_inert: def
                     .map_or(t::LEADING_DENSE_KEY_IS_INERT.contains(&name), |f| {
                         f.moe.leading_dense_key_is_inert
@@ -226,7 +232,8 @@ fn the_facts_agree_with_every_public_lookup() {
                 rope_base_key_unread: def.and_then(|f| f.swa.rope_base_key_unread),
             },
             ffn: FfnFacts {
-                length_counts_gate_and_up: t::FFN_LENGTH_COUNTS_GATE_AND_UP.contains(&name),
+                // No legacy table: only a definition states it.
+                length_counts_gate_and_up: def.is_some_and(|f| f.ffn.length_counts_gate_and_up),
                 geglu: cap::uses_geglu(name),
                 relu_sqr: cap::uses_relu_sqr(name),
                 gelu_ungated: cap::uses_gelu_ungated(name),
@@ -283,6 +290,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&name),
                 attn_out_bias: crate::proj_bias::attn_out_presence(name),
                 ffn_bias: crate::proj_bias::ffn_presence(name),
+                output_bias: crate::proj_bias::output_presence(name),
             },
             rules: HparamRules {
                 swa_window_override: cap::swa_window_override,

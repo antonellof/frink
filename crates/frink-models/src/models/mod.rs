@@ -15,6 +15,11 @@ pub mod kolibri1;
 pub mod llama;
 pub mod olmo;
 pub mod olmo2;
+pub mod qwen;
+pub mod qwen2;
+pub mod qwen2moe;
+pub mod qwen3;
+pub mod qwen3moe;
 mod refused_keys;
 
 #[cfg(test)]
@@ -49,6 +54,11 @@ pub const REGISTRY: &[ModelDef] = &[
     olmo::DEF,
     olmo2::DEF,
     exaone4::DEF,
+    qwen::DEF,
+    qwen2::DEF,
+    qwen2moe::DEF,
+    qwen3::DEF,
+    qwen3moe::DEF,
     kolibri1::DEF,
 ];
 

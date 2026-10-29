@@ -208,31 +208,9 @@ pub(super) const DEDICATED_OWNS_ITS_BEHAVIOUR: &[(&str, &str)] = &[
 // `llama4.cpp:228` passes `false` beside its SIGMOID literal
 // (`GATING_LITERAL_ARCHITECTURES`): the top-k sigmoid scores weight
 // the experts unrenormalised.
+// `qwen2moe` states its row in `crate::models::qwen2moe` (#403 step 4).
 pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] =
-    &["deepseek", "jamba", "llama4", "olmoe", "qwen2moe"];
-
-/// Architectures whose `{arch}.feed_forward_length` counts the gate and
-/// the up projection TOGETHER, so each FFN matrix is half as wide as the
-/// key says.
-///
-/// Qwen-1 (`QWenLMHeadModel`, GGUF string `qwen` -- not `qwen2` and not
-/// `qwen3`) is the only one. HF's `QWenMLP` sets
-/// `ff_dim_in = config.intermediate_size // 2` and builds `w1` and `w2`
-/// at that width; `conversion/qwen.py`'s `QwenModel` inherits the base
-/// `set_gguf_parameters`, which writes `intermediate_size` through
-/// unchanged (`conversion/base.py:1206`); and `src/models/qwen.cpp:33-35`
-/// therefore creates `ffn_gate`, `ffn_up` and `ffn_down` at `n_ff / 2`.
-///
-/// **This costs no logits and is still worth fixing.** frink loads the
-/// dense FFN by tensor NAME and uses each matrix's own shape, so the
-/// forward pass was always right; what was wrong was `expert_ffn_dim`,
-/// which is what every memory estimate and `frink inspect-plan` row
-/// prices the FFN from. That is this repo's dominant bug shape --
-/// `ModelConfig` and the weights disagreeing about one number with
-/// nothing comparing them -- so
-/// `the_declared_ffn_width_matches_the_matrices_that_load`
-/// (tests/one_match_arm_graphs.rs) now compares them.
-pub(crate) const FFN_LENGTH_COUNTS_GATE_AND_UP: &[&str] = &["qwen"];
+    &["deepseek", "jamba", "llama4", "olmoe"];
 
 /// Architectures whose checkpoints carry `{arch}.leading_dense_block_count`
 /// while their reference graph never branches on it: **every** layer is
