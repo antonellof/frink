@@ -682,8 +682,8 @@ The committed goldens are CI's answer. libllama is built with
 and F16C baseline, AVX-512 off), so every GitHub runner gives the same
 answer. Any other host's build differs from it in the last bits, up to
 about 4e-4 on these fixtures, so a local run reports goldens it would
-rewrite that are only that host's arithmetic. Locally, pass
-`--golden-tol 1e-3` to see only moves bigger than that spread; when CI's
+rewrite that are only that host's arithmetic. Locally, run
+`scripts/oracle.sh --golden-tol 1e-3` to see only moves bigger than that spread; when CI's
 `oracle` job rewrites goldens, commit the files from its
 `oracle-rewritten-goldens` artifact, never a laptop's rewrite.
 
