@@ -662,6 +662,7 @@ built):
 ```bash
 scripts/oracle.sh                       # llama.cpp at tools/llama_cpp_pin
 scripts/oracle.sh --llama-ref master    # drift report; add --report-only to exit 0
+scripts/oracle.sh --golden-tol 1e-3     # on a laptop: ignore the ISA spread
 ```
 
 It builds libllama at the pin under `target/oracle/<sha>/` (from a
@@ -675,6 +676,16 @@ one `tools/oracle/fixtures.tsv` expects. `tools/oracle/goldens.tsv` says
 which dumper invocation answers each golden; a golden or fixture with no
 row fails `tests/oracle_manifest.rs`, so nothing is added outside the
 oracle's reach.
+
+The committed goldens are CI's answer. libllama is built with
+`GGML_NATIVE=OFF` at a fixed instruction set (on x86-64 the AVX2, FMA
+and F16C baseline, AVX-512 off), so every GitHub runner gives the same
+answer. Any other host's build differs from it in the last bits, up to
+about 4e-4 on these fixtures, so a local run reports goldens it would
+rewrite that are only that host's arithmetic. Locally, pass
+`--golden-tol 1e-3` to see only moves bigger than that spread; when CI's
+`oracle` job rewrites goldens, commit the files from its
+`oracle-rewritten-goldens` artifact, never a laptop's rewrite.
 
 ### The reference dumper
 

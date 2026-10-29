@@ -64,22 +64,38 @@ if [[ "$HEAD" != "$SHA" ]]; then
   exit 1
 fi
 
-if ! ls "$BUILD"/bin/libllama.* >/dev/null 2>&1; then
-  # Metal and BLAS off: the reference is llama.cpp's plain CPU path,
-  # the one frink's CPU path is cross-validated against, on every OS.
-  #
-  # GGML_NATIVE stays ON, its default, because it moves the answer:
-  # measured on an M2 Pro at the pin, a GGML_NATIVE=OFF build differs
-  # from a native one by up to 3.9e-4 on `bloom` and 2.2e-4 on
-  # `minimax_01` (the native build reproduces the committed goldens to
-  # 3e-7). A native build is tied to its CPU, so the CI cache key names
-  # the runner's CPU model.
+# Metal and BLAS off: the reference is llama.cpp's plain CPU path,
+# the one frink's CPU path is cross-validated against, on every OS.
+#
+# GGML_NATIVE OFF and a FIXED instruction set. The answer is a
+# function of the ISA ggml is compiled for: its dot products reduce in
+# an order set by the SIMD width, and on the pin a native M2 Pro build
+# and a portable one differ by up to 3.9e-4 (`bloom`). GitHub's
+# ubuntu runners are not one CPU model, so a native build would answer
+# differently from runner to runner. On x86-64 the set is the
+# AVX2 baseline every runner has (SSE4.2, AVX, AVX2, BMI2, FMA, F16C),
+# with AVX-512, AVX-VNNI and AMX off even where the runner has them.
+# The goldens are this build's answer on CI (scripts/oracle.sh); any
+# other host's build differs from it in the last bits.
+isa=(-DGGML_NATIVE=OFF -DGGML_CPU_ALL_VARIANTS=OFF -DGGML_BACKEND_DL=OFF)
+if [[ "$(uname -m)" == x86_64 ]]; then
+  isa+=(-DGGML_SSE42=ON -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_BMI2=ON
+    -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_AVX_VNNI=OFF -DGGML_AVX512=OFF
+    -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF
+    -DGGML_AMX_TILE=OFF -DGGML_AMX_INT8=OFF -DGGML_AMX_BF16=OFF)
+fi
+# A build made with other flags (an older native one) is rebuilt.
+STAMP="$BUILD/oracle-cmake-flags"
+if [[ "$(cat "$STAMP" 2>/dev/null || true)" != "${isa[*]}" ]] ||
+  ! ls "$BUILD"/bin/libllama.* >/dev/null 2>&1; then
+  rm -rf "$BUILD"
   cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF \
     -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
     -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
-    -DGGML_METAL=OFF -DGGML_BLAS=OFF >/dev/null
+    -DGGML_METAL=OFF -DGGML_BLAS=OFF "${isa[@]}" >/dev/null
   cmake --build "$BUILD" --target llama -j "$(getconf _NPROCESSORS_ONLN)" >/dev/null
+  printf '%s\n' "${isa[*]}" > "$STAMP"
 fi
 
 LLAMA_CPP_PREFIX="$BUILD" LLAMA_CPP_SOURCE="$SRC" LLAMA_LOGITS_OUT="$WORK/llama_logits" \

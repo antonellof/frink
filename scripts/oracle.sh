@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The llama.cpp oracle (ADR 0001, ADR 0011), the same on CI and a laptop.
+# The llama.cpp oracle (ADR 0001, ADR 0011), the same script on CI and a laptop.
 #
 #   scripts/oracle.sh [--llama-ref <sha|master>] [--report-only] [--summary FILE]
+#                     [--golden-tol T]
 #
 # 1. builds libllama at the pin (tools/llama_cpp_pin) or --llama-ref, CPU
 #    only, under target/oracle/<sha>/, and the two reference dumpers;
@@ -17,6 +18,15 @@
 #
 # --report-only (the scheduled run against master) does all of it and
 # exits 0, leaving the diff and the summary as the report.
+#
+# ONLY CI'S ANSWER IS COMMITTED. libllama is built portable at a fixed
+# ISA (tools/oracle/llama_build.sh), so every GitHub runner gives the
+# same answer, but another host (an arm64 laptop, an AVX-512 box) gives
+# its own, up to ~4e-4 away on these fixtures. Run locally, a golden
+# rewrite at the default --golden-tol (3e-6) is that host's last bits,
+# not a finding: pass `--golden-tol 1e-3` to see only moves bigger
+# than the ISA spread, and when CI's oracle job rewrites goldens, take
+# its `oracle-rewritten-goldens` artifact rather than a local rewrite.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,11 +34,13 @@ cd "$ROOT"
 REF=""
 REPORT_ONLY=0
 SUMMARY="${GITHUB_STEP_SUMMARY:-}"
+GOLDEN_TOL=3e-6
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --llama-ref) REF="$2"; shift 2 ;;
     --report-only) REPORT_ONLY=1; shift ;;
     --summary) SUMMARY="$2"; shift 2 ;;
+    --golden-tol) GOLDEN_TOL="$2"; shift 2 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -58,7 +70,11 @@ cargo build --release -p frink-cli
 
 status=0
 python3 tools/oracle/fixtures.py "$WORK/src" || status=1
-python3 tools/oracle/goldens.py "$WORK" --summary "$WORK/summary.md" || status=1
+if [[ -z "${CI:-}" && "$GOLDEN_TOL" == 3e-6 ]]; then
+  note "Not CI: a golden rewrite at tol 3e-6 may be this host's ISA, not llama.cpp." \
+    "Commit only CI's answer; see the header of scripts/oracle.sh." ""
+fi
+python3 tools/oracle/goldens.py "$WORK" --tol "$GOLDEN_TOL" --summary "$WORK/summary.md" || status=1
 python3 tools/oracle/parity.py target/release/frink "$WORK/llama_logits" \
   --summary "$WORK/summary.md" || status=1
 

@@ -5,6 +5,8 @@ name: llama.cpp master drift
 # SHA tested, the goldens that moved, the fixtures whose `frink parity`
 # outcome changed, and the frink tests that go red against the
 # regenerated goldens. Moving the pin (ADR 0011) starts from that list.
+# The runner, libllama flags and cache key match ci.yml's `oracle` job,
+# so a moved golden here is llama.cpp's change, not the runner's.
 
 on:
   schedule:
@@ -17,7 +19,7 @@ env:
 jobs:
   drift:
     name: oracle against llama.cpp master
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,11 +32,11 @@ jobs:
         id: key
         run: |
           echo "sha=$(git ls-remote https://github.com/ggml-org/llama.cpp refs/heads/master | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "cpu=$(grep -m1 'model name' /proc/cpuinfo | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          echo "cc=$({ cc --version; c++ --version; cmake --version; } | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
           path: |
             target/oracle/${{ steps.key.outputs.sha }}/src
             target/oracle/${{ steps.key.outputs.sha }}/build
-          key: libllama-${{ runner.os }}-${{ steps.key.outputs.cpu }}-${{ steps.key.outputs.sha }}-${{ hashFiles('tools/oracle/llama_build.sh') }}
+          key: libllama-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.cc }}-${{ steps.key.outputs.sha }}-${{ hashFiles('tools/oracle/llama_build.sh') }}
       - run: bash scripts/oracle.sh --llama-ref ${{ steps.key.outputs.sha }} --report-only

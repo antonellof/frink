@@ -11,12 +11,14 @@ so `git diff` afterwards is the list of goldens that are not libllama's
 current answer. Exit status is 1 only when a dumper could not answer
 at all; a rewrite is left for the caller's diff to report.
 
-Why a tolerance and not bit equality: the checked-in goldens were
-written on one machine and CI runs on another. ggml's CPU dot products
-reduce in an order that depends on the SIMD width, so two correct
-builds of one commit differ in the last bits. The default is a tenth of
-`GRAPH_TOL` (3e-5), the line every graph test holds frink to: a golden
-within it of libllama's answer cannot move any of those verdicts.
+Why a tolerance and not bit equality: the checked-in goldens are CI's
+answer (the portable, fixed-ISA libllama of tools/oracle/llama_build.sh
+on a GitHub ubuntu runner), and the tolerance leaves room for a printed
+literal's rounding. The default is a tenth of `GRAPH_TOL` (3e-5), the
+line every graph test holds frink to: a golden within it of libllama's
+answer cannot move any of those verdicts. Another host's libllama
+answers differently in the last bits (up to ~4e-4 here), so a local run
+passes a looser `--tol` and never commits its own rewrite.
 """
 
 import argparse
