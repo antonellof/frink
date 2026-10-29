@@ -78,34 +78,6 @@ pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] = &[
     "qwen3next",
 ];
 
-/// Architectures that store their **pre-FFN** norm under
-/// `blk.N.attn_output_norm.weight` (`LLM_TENSOR_ATTN_OUT_NORM`) and carry
-/// no `blk.N.ffn_norm`.
-///
-/// `dbrx`: `dbrx.cpp:34` creates `attn_out_norm` and no `ffn_norm`, and
-/// `:110-113` norms `ffn_inp` -- the post-attention residual -- with it,
-/// which is the same slot `gpt-oss` keeps under the other name. Its
-/// norm FUNCTION is a weighted LayerNorm
-/// (`capability::WEIGHTED_LAYER_NORM`); that is [`NormFunction`]'s
-/// business, not this list's.
-pub const PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM: &[&str] = &["dbrx"];
-
-/// Architectures whose **post-attention** norm (Gemma-2's
-/// `post_attention_norm` slot) is stored as `blk.N.attn_output_norm` and
-/// whose **post-FFN** norm is `blk.N.layer_output_norm`
-/// (`LLM_TENSOR_LAYER_OUT_NORM`, `llama-arch.cpp:421`) with
-/// `post_ffw_norm` as the fallback spelling -- both REQUIRED.
-///
-/// `grok`: `grok.cpp:62` creates `attn_out_norm` as required and
-/// `:143-146` applies it to the attention output BEFORE the residual
-/// add (`ffn_inp = add(cur, inpSA)` at :148), which is the post-norm
-/// slot and not `dbrx`'s pre-FFN one -- `grok` has its own `ffn_norm`
-/// at :64. `:75-78` create `ffn_post_norm` from `LAYER_OUT_NORM` when
-/// present (`conversion/grok.py`'s Grok-1 mapping, `rms_norm_3`) and
-/// from `FFN_POST_NORM` otherwise (Grok-2's `post_moe_norm`), required
-/// either way, and `:185-188` apply it before the FFN residual add.
-pub const POST_NORMS_UNDER_GROK_NAMES: &[&str] = &["grok"];
-
 /// Architectures whose OPTIONAL second pre-norm `blk.N.attn_norm_2`
 /// feeds ATTENTION when present, with `attn_norm` moving to the FFN.
 ///
@@ -430,18 +402,8 @@ impl NormSites {
             sites.ffn = Some(StoredNorm::required(&["post_attention_norm"]));
             sites.post_attn = None;
         }
-        if PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM.contains(&arch) {
-            sites.ffn = Some(StoredNorm::required(&["attn_output_norm"]));
-        }
         if ONE_NORM_PER_LAYER.contains(&arch) {
             sites.ffn = Some(StoredNorm::required(&["attn_norm"]));
-        }
-        if POST_NORMS_UNDER_GROK_NAMES.contains(&arch) {
-            sites.post_attn = Some(StoredNorm::required(&["attn_output_norm"]));
-            sites.post_ffn = Some(StoredNorm::required(&[
-                "layer_output_norm",
-                "post_ffw_norm",
-            ]));
         }
         sites
     }

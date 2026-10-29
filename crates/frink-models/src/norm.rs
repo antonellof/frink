@@ -429,12 +429,10 @@ pub fn file_norm_function(
 pub(crate) fn norm_function_from_table(arch: &str) -> NormFunction {
     if crate::capability::uses_non_parametric_rms_norm(arch) {
         NormFunction::RmsNoParams
-    } else if crate::capability::uses_weighted_layer_norm(arch) {
+    } else if crate::capability::WEIGHTED_LAYER_NORM.contains(&arch) {
         NormFunction::LayerNorm
     } else if crate::capability::uses_biased_layer_norm(arch) {
         NormFunction::LayerNormBias
-    } else if crate::capability::uses_biased_rms_norm(arch) {
-        NormFunction::RmsBias
     } else {
         NormFunction::Rms
     }

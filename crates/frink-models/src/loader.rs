@@ -30,7 +30,7 @@ mod layer_parts;
 mod model_config;
 #[cfg(feature = "metal")]
 mod moe_planes;
-mod rope_scaling;
+pub(crate) mod rope_scaling;
 mod sampling_metadata;
 mod tensor_audit;
 mod tensors;

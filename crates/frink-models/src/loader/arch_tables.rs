@@ -102,7 +102,7 @@ pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
     // `cohere2moe.cpp:19-20` read both the norm and the scale.
     "cohere2moe",
     "deepseek",
-    "dots1",
+    // `dots1` is in `crate::models::dots1` (#403 step 6).
     "exaone-moe",
     // `glm4-moe.cpp:13-14` read both the scale and the norm.
     "glm4moe",
@@ -134,7 +134,7 @@ pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     "bailingmoe",
     "bailingmoe2",
     "cohere2moe",
-    "dots1",
+    // `dots1` is in `crate::models::dots1` (#403 step 6).
     "exaone-moe",
     "glm4moe",
     "laguna",
@@ -208,9 +208,9 @@ pub(super) const DEDICATED_OWNS_ITS_BEHAVIOUR: &[(&str, &str)] = &[
 // `llama4.cpp:228` passes `false` beside its SIGMOID literal
 // (`GATING_LITERAL_ARCHITECTURES`): the top-k sigmoid scores weight
 // the experts unrenormalised.
-// `qwen2moe` states its row in `crate::models::qwen2moe` (#403 step 4).
-pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] =
-    &["deepseek", "jamba", "llama4", "olmoe"];
+// `qwen2moe` and `olmoe` state their rows in `crate::models` (#403
+// steps 4 and 6).
+pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] = &["deepseek", "jamba", "llama4"];
 
 /// Architectures whose checkpoints carry `{arch}.leading_dense_block_count`
 /// while their reference graph never branches on it: **every** layer is

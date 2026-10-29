@@ -139,6 +139,19 @@ eligibility test so a new field forces a Metal decision.
   `rope_layers::rope_layers`). Two of its rows stay in legacy tables
   the facts do not carry yet: the sliding-window array read
   (`swa_layers::PER_LAYER_ARRAY_READERS`) and the catalog row.
+- Step 5: skipped. The triage reads (0, 0, 8, 1), so no row is one
+  match arm or one fixture away.
+- Step 6a: `models/olmoe.rs`, `dots1.rs`, `phimoe.rs`, `dbrx.rs`,
+  `grok.rs`. Their rows left the MoE routing tables, `proj_bias`,
+  `clamp_kqv` (`CLAMP_KQV_REQUIRED` emptied and deleted),
+  `scalar_multipliers`, `LOGIT_SOFTCAP_ARCHITECTURES`, `uses_geglu`,
+  `WEIGHTED_LAYER_NORM`, `BIASED_RMS_NORM`,
+  `PRE_FFN_NORM_IS_ATTN_OUTPUT_NORM` and `POST_NORMS_UNDER_GROK_NAMES`
+  (all three emptied and deleted; the norm predicates derive from the
+  norm-site row), `YARN_BETA_READERS` and the parallel dense FFN table.
+  `phimoe`'s dropped window is a rule in its file. Step 6b is `gpt-oss`
+  and `llama4`, whose rows also sit behind `attn_temperature`,
+  `chunked_swa`, `moe_interleave` and `weightless_qk_norm`.
 
 What step 2 changed about the target design:
 

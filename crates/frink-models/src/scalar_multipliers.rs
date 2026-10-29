@@ -541,7 +541,6 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     // 2026-08-04 pin.
     ("granite_swa", MultiplierSupport::GRANITE),
     ("minicpm", MultiplierSupport::MINICPM),
-    ("grok", MultiplierSupport::GROK),
     ("talkie", MultiplierSupport::TALKIE),
     ("command-r", MultiplierSupport::COMMAND_R),
     ("cohere2", MultiplierSupport::COHERE2),

@@ -77,7 +77,7 @@ pub enum DensePresence {
 
 /// One architecture whose routed layers sum a dense FFN with the
 /// experts.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParallelDenseFfn {
     pub arch: &'static str,
     pub presence: DensePresence,
@@ -86,21 +86,22 @@ pub struct ParallelDenseFfn {
     pub lines: &'static str,
 }
 
-/// The two graphs, with the lines.
-pub const PARALLEL_DENSE_FFN_ARCHITECTURES: &[ParallelDenseFfn] = &[
-    ParallelDenseFfn {
-        arch: "grok",
-        presence: DensePresence::Optional,
-        sum_scale: Some(FRAC_1_SQRT_2),
-        lines: "src/models/grok.cpp:66-68,171-184",
-    },
-    ParallelDenseFfn {
-        arch: "arctic",
-        presence: DensePresence::Required,
-        sum_scale: None,
-        lines: "src/models/arctic.cpp:38-42,118-154",
-    },
-];
+/// Grok's row, stated by `crate::models::grok` (#403 step 6): the
+/// dense triple OPTIONAL, the sum scaled by `1/sqrt(2)`.
+pub const GROK: ParallelDenseFfn = ParallelDenseFfn {
+    arch: "grok",
+    presence: DensePresence::Optional,
+    sum_scale: Some(FRAC_1_SQRT_2),
+    lines: "src/models/grok.cpp:66-68,171-184",
+};
+
+/// The graphs not yet in `crate::models`, with the lines.
+pub const PARALLEL_DENSE_FFN_ARCHITECTURES: &[ParallelDenseFfn] = &[ParallelDenseFfn {
+    arch: "arctic",
+    presence: DensePresence::Required,
+    sum_scale: None,
+    lines: "src/models/arctic.cpp:38-42,118-154",
+}];
 
 /// The SAME scale on the SAME sum, under the `_shexp` names: a graph
 /// whose routed layers carry a real shared expert and scale
@@ -139,6 +140,12 @@ pub fn sum_scale_on_layer(row: Option<f32>, has_shared_expert: bool) -> Option<f
 /// The row for an architecture, or `None` for one whose routed layers
 /// have no dense branch.
 pub fn parallel_dense_ffn(arch: &str) -> Option<&'static ParallelDenseFfn> {
+    crate::models::ArchFacts::of(arch).tensors.parallel_dense
+}
+
+/// [`parallel_dense_ffn`] from [`PARALLEL_DENSE_FFN_ARCHITECTURES`]
+/// alone, for `ArchFacts::from_tables`.
+pub(crate) fn parallel_dense_ffn_from_table(arch: &str) -> Option<&'static ParallelDenseFfn> {
     PARALLEL_DENSE_FFN_ARCHITECTURES
         .iter()
         .find(|row| row.arch == arch)
