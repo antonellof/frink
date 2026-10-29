@@ -35,8 +35,23 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     names.extend(t::LEADING_DENSE_KEY_IS_INERT);
     names.extend(crate::router_input::ROUTER_INPUT_TABLE.iter().map(|r| r.0));
     names.extend(crate::layer_shapes::PURE_RECURRENT.iter().map(|r| r.0));
-    names.extend(crate::rope_layers::ROPE_PATTERN_READERS.iter().map(|r| r.0));
-    names.extend(crate::norm::NORM_BY_RMS_EPS_KEY.iter().map(|r| r.0));
+    names.extend(crate::attn_gate::ATTN_GATE_ARCHS.iter().map(|r| r.0));
+    names.extend(crate::act_layers::CLAMP_BEFORE_SILU.iter().map(|r| r.0));
+    names.extend(
+        crate::layer_shapes::PER_LAYER_SHAPE_ARCHS
+            .iter()
+            .map(|r| r.0),
+    );
+    names.extend(
+        crate::swa_layers::PER_LAYER_ARRAY_READERS
+            .iter()
+            .map(|r| r.0),
+    );
+    names.extend(
+        crate::swa_layers::LOAD_SWA_PATTERN_CALLERS
+            .iter()
+            .map(|r| r.0),
+    );
     names.extend(crate::capability::LOGIT_SOFTCAP_ARCHITECTURES);
     names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
     names.extend(crate::act_layers::XIELU_ARCHITECTURES);
@@ -53,17 +68,11 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
             .iter()
             .map(|r| r.0),
     );
-    names.extend(
-        crate::parallel_dense_ffn::SHARED_EXPERT_SUM_SCALE
-            .iter()
-            .map(|r| r.0),
-    );
     {
         use crate::norm_sites as ns;
         names.extend(ns::POST_NORMS_BOTH_OR_NEITHER.iter().map(|r| r.0));
         for table in [
             ns::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
-            ns::EMBEDDING_NORM_ARCHITECTURES,
             ns::WEIGHTLESS_EMBEDDING_NORM,
             ns::NO_OUTPUT_NORM,
             ns::OUTPUT_NORM_UNDER_EMBEDDING_NAME,
@@ -73,7 +82,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
         }
     }
     names.extend(crate::rope_finetuned::ROPE_GATED_ON_FINETUNED);
-    names.extend(crate::clamp_kqv::CLAMPED_QKV_ARCHITECTURES);
     names.extend(crate::loader::rope_scaling::YARN_BETA_READERS);
     names.extend(
         crate::parallel_dense_ffn::PARALLEL_DENSE_FFN_ARCHITECTURES
@@ -206,7 +214,10 @@ fn the_facts_agree_with_every_public_lookup() {
             profile,
             audited: cap::is_audited_generic(name),
             moe: MoeFacts {
-                sigmoid_by_default: t::SIGMOID_GATING_ARCHITECTURES.contains(&name),
+                sigmoid_by_default: def
+                    .map_or(t::SIGMOID_GATING_ARCHITECTURES.contains(&name), |f| {
+                        f.moe.sigmoid_by_default
+                    }),
                 gating_literal: def.map_or(
                     t::GATING_LITERAL_ARCHITECTURES
                         .iter()
@@ -253,6 +264,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 rope_base_key_unread: def.and_then(|f| f.swa.rope_base_key_unread),
                 // No legacy table: only a definition states it.
                 chunked: def.and_then(|f| f.swa.chunked),
+                pattern_key_read: crate::swa_layers::pattern_key_read(name),
             },
             ffn: FfnFacts {
                 // No legacy table: only a definition states it.
@@ -263,11 +275,12 @@ fn the_facts_agree_with_every_public_lookup() {
                 reglu: cap::uses_reglu(name),
                 xielu: crate::act_layers::uses_xielu(name),
                 reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(name),
+                clamp_before_silu: crate::act_layers::clamp_form(name)
+                    == frink_moe::ClampForm::BeforeSilu,
             },
             norm: NormFacts {
-                norm_by_rms_eps_key: crate::norm::NORM_BY_RMS_EPS_KEY
-                    .iter()
-                    .any(|(a, _)| *a == name),
+                // No legacy table: only a definition states it.
+                norm_by_rms_eps_key: def.is_some_and(|f| f.norm.norm_by_rms_eps_key),
                 block_sub_norms: crate::sub_norms::block_sub_norms(name),
             },
             scaling: ScalingFacts {
@@ -296,9 +309,17 @@ fn the_facts_agree_with_every_public_lookup() {
                 reads_rope_pattern: crate::rope_layers::reads_rope_pattern(name),
                 skip_stream: crate::skip_stream::has_skip_stream(name),
                 parallel_ssm: crate::mamba2::parallel_with_attention(name),
-                learned_positions: crate::position_embd::learned_positions(name),
+                // No legacy table: only a definition states it.
+                alibi: def.and_then(|f| f.topology.alibi),
                 rope_gated_on_finetuned: crate::rope_finetuned::unrotated(name, Some(false)),
                 parallel_residual: crate::parallel_residual::parallel_residual(name),
+                per_layer_shapes: def.map_or(
+                    crate::layer_shapes::PER_LAYER_SHAPE_ARCHS
+                        .iter()
+                        .find(|r| r.0 == name)
+                        .map(|r| r.1),
+                    |f| f.topology.per_layer_shapes,
+                ),
                 reads_nextn: crate::mtp_blocks::reads_nextn(name),
             },
             tensors: TensorFacts {
@@ -320,6 +341,9 @@ fn the_facts_agree_with_every_public_lookup() {
                 attn_out_bias: crate::proj_bias::attn_out_presence(name),
                 ffn_bias: crate::proj_bias::ffn_presence(name),
                 output_bias: crate::proj_bias::output_presence(name),
+                // No legacy table: only a definition states it.
+                position_embd: def.and_then(|f| f.tensors.position_embd),
+                attn_gate: crate::attn_gate::attn_gate_spec(name),
                 qkv_tensors: crate::qkv_fused::qkv_tensors(name),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
                 attn_norm_2_feeds_attention: crate::norm_sites::attn_norm_2_feeds_attention(name),

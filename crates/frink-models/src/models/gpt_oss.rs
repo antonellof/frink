@@ -26,6 +26,7 @@ use crate::proj_bias::Presence;
 
 pub const FACTS: ArchFacts = ArchFacts {
     swa: SwaFacts {
+        pattern_key_read: crate::swa_layers::PatternKeyRead::ArrayThenScalar,
         default_layout: Some(SwaPattern {
             period: 2,
             dense_first: false,

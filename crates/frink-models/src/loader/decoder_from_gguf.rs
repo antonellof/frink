@@ -128,6 +128,7 @@ impl Decoder {
         let position_embd = crate::position_embd::load_position_embd(
             &file,
             &arch,
+            facts.tensors.position_embd,
             config.hidden_dim,
             metadata_u64_any(&file, &[format!("{arch}.context_length")]).map(|v| v as usize),
         )?;

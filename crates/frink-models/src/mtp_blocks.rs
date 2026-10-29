@@ -81,7 +81,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("bailingmoe2", "src/models/bailingmoe2.cpp:35"),
     ("bailingmoe3", "src/models/bailingmoe3.cpp:122"),
     ("clef", "src/models/clef.cpp:27 (qwen35.cpp:125)"),
-    ("cohere2moe", "src/models/cohere2moe.cpp:131"),
     ("deepseek2", "src/models/deepseek2.cpp:88"),
     ("deepseek32", "src/models/deepseek32.cpp:81"),
     ("deepseek4", "src/models/deepseek4.cpp:101"),
@@ -93,7 +92,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("glm4", "src/models/glm4.cpp:28"),
     ("glm5-next", "src/models/glm5-next.cpp:76"),
     ("hy-v3", "src/models/hy-v3.cpp:74"),
-    ("mellum", "src/models/mellum.cpp:79"),
     ("mimo2", "src/models/mimo2.cpp:38"),
     ("mistral4", "src/models/models.h:1624 (deepseek2.cpp:88)"),
     (

@@ -124,6 +124,15 @@ pub struct AttnGateSpec {
     pub lines: &'static str,
 }
 
+/// `spark2_5`'s gate (`spark2-5.cpp:41,97-105`): sigmoid, per head,
+/// REQUIRED. Stated by `crate::models::spark2_5` (#403 step 9a).
+pub const SPARK2_5: AttnGateSpec = AttnGateSpec {
+    act: GateAct::Sigmoid,
+    widths: &[GateWidth::PerHead],
+    presence: GatePresence::Required,
+    lines: "src/models/spark2-5.cpp:41,97-105",
+};
+
 /// The three architectures whose graph gates its softmax attention
 /// output through `LLM_TENSOR_ATTN_GATE`. See the module doc for the
 /// three that store a different thing under the same name.
@@ -188,15 +197,7 @@ pub const ATTN_GATE_ARCHS: &[(&str, AttnGateSpec)] = &[
             lines: "src/models/muse-glimmer.cpp:46,100-135",
         },
     ),
-    (
-        "spark2_5",
-        AttnGateSpec {
-            act: GateAct::Sigmoid,
-            widths: &[GateWidth::PerHead],
-            presence: GatePresence::Required,
-            lines: "src/models/spark2-5.cpp:41,97-105",
-        },
-    ),
+    // `spark2_5` is in `crate::models::spark2_5` ([`SPARK2_5`]).
     // Landed upstream after the 2026-09-19 pin: `lfm3.cpp:77` creates
     // the tensor REQUIRED at `{n_embd, n_head}` on every attention
     // layer, and `:132-139` project it from the `attn_norm` output
@@ -281,6 +282,12 @@ pub const GDN_Z_GATE_ARCHS: &[(&str, &str)] = &[
 /// none -- for which a file carrying `blk.N.attn_gate.weight` is
 /// refused by `loader::assert_every_tensor_consumed`, not honoured.
 pub fn attn_gate_spec(arch: &str) -> Option<AttnGateSpec> {
+    crate::models::ArchFacts::of(arch).tensors.attn_gate
+}
+
+/// [`attn_gate_spec`] from [`ATTN_GATE_ARCHS`] alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn attn_gate_spec_from_table(arch: &str) -> Option<AttnGateSpec> {
     ATTN_GATE_ARCHS
         .iter()
         .find(|(n, _)| *n == arch)
@@ -515,17 +522,28 @@ mod tests {
     /// corner again.
     #[test]
     fn the_table_covers_the_softmax_gates_and_excludes_the_gdn_z_gates() {
-        let names: Vec<&str> = ATTN_GATE_ARCHS.iter().map(|(n, _)| *n).collect();
+        // The table's rows and the `crate::models` definitions' gates.
+        let mut names: Vec<&str> = ATTN_GATE_ARCHS
+            .iter()
+            .map(|(n, _)| *n)
+            .chain(
+                crate::models::REGISTRY
+                    .iter()
+                    .filter(|d| d.facts.tensors.attn_gate.is_some())
+                    .flat_map(|d| d.names.iter().copied()),
+            )
+            .collect();
+        names.sort_unstable();
         assert_eq!(
             names,
             [
                 "afmoe",
-                "laguna",
-                "step35",
                 "hrm_text",
+                "laguna",
+                "lfm3",
                 "muse-glimmer",
                 "spark2_5",
-                "lfm3"
+                "step35"
             ]
         );
         for (arch, spec) in ATTN_GATE_ARCHS {

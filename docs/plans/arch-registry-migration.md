@@ -171,6 +171,43 @@ eligibility test so a new field forces a Metal decision.
   `NormSites::for_layer` takes the row. Step 7b is the Cohere graphs
   (`command-r`, `cohere2`, `cohere2moe`), whose rows also span the SWA,
   multiplier, MoE and MTP tables.
+- Step 7b: `models/command_r.rs`, `cohere2.rs`, `cohere2moe.rs`. The
+  last three parallel-residual rows moved, so `PARALLEL_RESIDUAL_GRAPHS`
+  is deleted; so are `NORM_BY_RMS_EPS_KEY` and `SHARED_EXPERT_SUM_SCALE`
+  (cohere2moe only). `cohere2`'s and `cohere2moe`'s per-layer RoPE are
+  `HparamRules`. `SwaFacts::pattern_key_read` is new: #463 had added
+  `swa_layers`' two reader tables after `exaone4`, `gpt-oss`, `llama4`,
+  `olmo2` and `kolibri1` moved, and the guard did not list them, so
+  those five rows sat in a legacy table. They are in their files now,
+  both tables are in `behaviour_table_names`, and
+  `the_registry_pattern_readers_are_pinned` holds the census. Divergence
+  found and filed, not fixed: #464.
+- Step 8: the ALiBi graphs (`models/bloom.rs`, `refact.rs`,
+  `baichuan.rs`, `mpt.rs`, `jais.rs`) and the learned positions
+  (`gpt2.rs`, `starcoder.rs`; `mpt` has both). `ALIBI_ARCHITECTURES`,
+  `LEARNED_POSITION_CREATORS`, `EMBEDDING_NORM_ARCHITECTURES`,
+  `CLAMPED_QKV_ARCHITECTURES` and `WEIGHTED_LAYER_NORM` emptied and are
+  deleted; `TopologyFacts::learned_positions` gave way to
+  `TensorFacts::position_embd` (the bool was the same fact).
+  Each ALiBi file's rule is one `const ALIBI` that both the bias and its
+  `HparamRules::rope_layers` read (`alibi::alibi_rope_layers`), so the
+  two still cannot disagree about Baichuan's layer count. `jais`'s
+  `1 / head_dim` became its `attention_scale_override` rule, and that
+  public lookup answers through the registry like the others.
+- Step 9a: the first SWA batch, `models/gemma2.rs`, `gemma3.rs`,
+  `mellum.rs`, `plamo3.rs`, `maple.rs`, `spark2_5.rs`, `granite_swa.rs`.
+  New facts: `TensorFacts::attn_gate`, `FfnFacts::clamp_before_silu`,
+  `TopologyFacts::per_layer_shapes` (the `attn_gate`, `act_layers` and
+  `layer_shapes` tables, each with a census that spans table and
+  registry). The Gemma-2/3 27B attention scale is
+  `capability::gemma_27b_attention_scale`, each file's rule calling it with
+  its own `case`. A family-derived fact is a row like any other: the
+  Gemma definitions state `embeddings_scaled_by_sqrt_n_embd`, which the
+  legacy path computed from the catalog family. `ROPE_PATTERN_READERS`
+  (granite_swa only) is deleted. Divergences found and filed: #470.
+  9b is `afmoe`, `exaone-moe`, `laguna`, `smallthinker`, `muse-glimmer`;
+  9c `step35`, `mimo2`, `lfm3`. `gemma3n`, `gemma-embedding` and
+  `dflash` stay in the legacy tables until audited (risk 3).
 
 What step 2 changed about the target design:
 

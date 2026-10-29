@@ -1306,13 +1306,13 @@ impl ModelConfig {
                 facts.topology.parallel_residual,
                 n_layers,
             ),
-            learned_positions: facts.topology.learned_positions,
+            learned_positions: facts.tensors.position_embd.is_some(),
             attn_value_scale: crate::attn_value_scale::resolve_attn_value_scale(
                 &arch,
                 file.metadata_f32(&key("attention.value_scale")),
             ),
-            alibi_max_bias: crate::alibi::max_alibi_bias(
-                &arch,
+            alibi_max_bias: crate::alibi::max_alibi_bias_for(
+                facts.topology.alibi,
                 n_layers,
                 file.metadata_f32(&key("attention.max_alibi_bias")),
             ),

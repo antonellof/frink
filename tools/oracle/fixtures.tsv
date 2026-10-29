@@ -30,6 +30,8 @@ cohere2_nowindow_tiny                    both-fail                    make_coher
 cohere2_pattern_tiny                     match                        make_cohere2_fixture.py OUT --pattern-key
 cohere2_tiny                             match                        make_cohere2_fixture.py OUT
 cohere2moe_mtp_tiny                      match                        make_cohere2moe_fixture.py OUT --mtp
+cohere2moe_nodense_tiny                  both-fail                    make_cohere2moe_fixture.py OUT --no-dense-lead  # refusal evidence: cohere2moe.cpp:15 reads leading_dense_block_count REQUIRED (#464)
+cohere2moe_noeps_tiny                    both-fail                    make_cohere2moe_fixture.py OUT --no-eps  # refusal evidence: cohere2moe.cpp:4-9 throws without a norm epsilon (#464)
 cohere2moe_normw_tiny                    match                        make_cohere2moe_fixture.py OUT --norm-w
 cohere2moe_rms_tiny                      match                        make_cohere2moe_fixture.py OUT --rms
 cohere2moe_tiny                          match                        make_cohere2moe_fixture.py OUT

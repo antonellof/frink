@@ -29,6 +29,7 @@ use crate::norm_sites::NormSites;
 
 pub const FACTS: ArchFacts = ArchFacts {
     swa: SwaFacts {
+        pattern_key_read: crate::swa_layers::PatternKeyRead::ArrayThenScalar,
         default_layout: Some(SwaPattern {
             period: 4,
             dense_first: false,

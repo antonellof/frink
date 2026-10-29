@@ -46,13 +46,10 @@
 pub const PER_HEAD_LAYER_NORM_QK: &[(&str, bool, &str)] = &[
     // `stablelm` (optional) states its row in `crate::models::stablelm`
     // (#403 step 7a).
-    ("command-r", true, "src/models/command-r.cpp:28-31,80,87"),
+    // `command-r` (required) is in `crate::models::command_r`.
     ("chameleon", true, "src/models/chameleon.cpp:33-35,91-102"),
-    // Not per head: `{n_embd}` with a bias, one LayerNorm over the whole
-    // projection (`mpt.cpp:52-56,106-115`, optional; MPT-7B has none,
-    // some fine-tunes set `qk_ln`). The same refusal for the same
-    // reason: a LayerNorm where frink's QK norm is an RMSNorm.
-    ("mpt", false, "src/models/mpt.cpp:52-56,106-115"),
+    // `mpt` (one LayerNorm over the whole projection) is in
+    // `crate::models::mpt`.
 ];
 
 /// Whether `arch` applies its `attn_q_norm` / `attn_k_norm` as the

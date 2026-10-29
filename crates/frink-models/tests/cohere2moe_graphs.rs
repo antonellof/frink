@@ -365,3 +365,29 @@ fn every_cohere2moe_seam_is_visible_in_the_logits() {
     let rms = load_graph_fixture(C2M_RMS);
     assert!(worst_vs(&decode(&rms), &C2M_GOLDEN) > 1e-2);
 }
+
+/// The two throws in `cohere2moe.cpp`'s `load_arch_hparams` no table
+/// states (#464), refused by name as libllama refuses the same files:
+/// `cohere2moe_noeps_tiny.gguf` (`missing Cohere2 MoE norm epsilon`,
+/// `:4-9`) and `cohere2moe_nodense_tiny.gguf` (`key not found in model:
+/// cohere2moe.leading_dense_block_count`, `:15`), both measured.
+#[test]
+fn a_cohere2moe_file_missing_a_required_hparam_is_refused_by_name() {
+    for (name, needle) in [
+        ("cohere2moe_noeps", "cohere2moe.cpp:4-9"),
+        ("cohere2moe_nodense", "cohere2moe.cpp:15"),
+    ] {
+        let path = format!(
+            "{}/tests/fixtures/{name}_tiny.gguf",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+        match frink_models::ModelConfig::from_gguf(&file) {
+            Err(frink_models::LoadError::UnsupportedFeature(arch, msg)) => {
+                assert_eq!(arch, "cohere2moe", "{name}");
+                assert!(msg.contains(needle), "{name}: {msg}");
+            }
+            other => panic!("{name} must be refused, got {other:?}"),
+        }
+    }
+}
