@@ -98,6 +98,42 @@ eligibility test so a new field forces a Metal decision.
   step 2 on: a resolver that is a row plus arithmetic splits as the
   three above did, and a file reader stays loader code taking its row.
 
+- Step 2: `models/llama.rs`, `models/granite.rs`, `models/granite_moe.rs`
+  (`granitemoe` and the `granite-moe` alias) and `models::REGISTRY`.
+  Their rows left `scalar_multipliers::MULTIPLIER_ARCHITECTURES`,
+  `rope_finetuned::ROPE_GATED_ON_FINETUNED` and both `proj_bias`
+  creator tables. `models/tests.rs` holds the three registry guards
+  (each name resolves once, audited if and only if it has evidence, no
+  registry name in a behaviour table) and keeps the catalog fields to
+  the catalog.
+
+What step 2 changed about the target design:
+
+- `ModelDef` is `{ names, source, facts, evidence }` for now. `profile`
+  needs the catalog to be `const` (step 11), and `plan` waits for
+  `layer_plan` (step 13); `ArchFacts::of` fills `profile` and `audited`
+  from `capability.rs` until then.
+- Reading the facts in the loaders is not enough. A public name-keyed
+  lookup whose row moves (`multiplier_support`, `attn_out_presence`,
+  `ffn_presence`, `rope_finetuned::unrotated`) has other readers
+  (`rope_scaling`'s YaRN default, tests, `capability.rs`), so it now
+  answers through `ArchFacts::of`, and `from_tables` reads a
+  `_from_table` twin so the two cannot recurse. Every later step does
+  this for each table it empties.
+- A family's rows are not all in the routed tables. Two of granite's
+  three sat behind step 1's "still direct" resolvers and were split
+  here (`unrotated_for`, the `proj_bias` loaders taking their row);
+  later families will split the resolvers their rows touch.
+- `llama-embed` stays outside the registry: it keeps its catalog row on
+  the config side and reaches `llama`'s definition on the decoder side
+  through `canonical_architecture`, so `ModelDef.names` holds raw names
+  only.
+- Found while reading `granite-moe.cpp`: its hparam loader does not read
+  `rope.scaling.finetuned`, so llama.cpp rotates a `granitemoe` file
+  declaring `false` and frink does not. No converter writes the key for
+  it. Kept unchanged here (this step is a refactor) and recorded in
+  `models/granite_moe.rs`.
+
 ## Risks
 
 1. Raw versus canonical names must be reproduced exactly by

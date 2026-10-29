@@ -86,7 +86,7 @@ impl Decoder {
         // The tensor-table rows, from the CANONICAL name above
         // (`crate::models::facts`); `family` / `memory` below still come
         // from the raw one.
-        let facts = crate::models::ArchFacts::from_tables(&arch);
+        let facts = crate::models::ArchFacts::of(&arch);
         let is_gpt_oss = facts.tensors.gpt_oss_layers;
         // A `<projection>.scale` companion is a multiply llama.cpp
         // applies and frink does not; refused by name here, before
@@ -305,6 +305,7 @@ impl Decoder {
                         o_bias: crate::proj_bias::load_attn_out_bias(
                             &file,
                             &arch,
+                            facts.tensors.attn_out_bias,
                             l,
                             config.hidden_dim,
                         )?,
@@ -652,6 +653,7 @@ impl Decoder {
                     let bias = crate::proj_bias::load_dense_ffn_bias(
                         &file,
                         &arch,
+                        facts.tensors.ffn_bias,
                         l,
                         config.hidden_dim,
                         shape.ffn_dim,
@@ -811,7 +813,7 @@ impl Decoder {
 
         // The RAW name (an alias keeps its own catalog row), and "llama"
         // for a file with none, as before.
-        let raw_facts = crate::models::ArchFacts::from_tables(
+        let raw_facts = crate::models::ArchFacts::of(
             file.metadata_str("general.architecture").unwrap_or("llama"),
         );
         let family = raw_facts
