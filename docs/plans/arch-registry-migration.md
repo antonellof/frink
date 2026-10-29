@@ -106,6 +106,17 @@ eligibility test so a new field forces a Metal decision.
   (each name resolves once, audited if and only if it has evidence, no
   registry name in a behaviour table) and keeps the catalog fields to
   the catalog.
+- Step 3: `models/olmo.rs`, `models/olmo2.rs`, `models/exaone4.rs`.
+  Their rows left `capability.rs` (`POST_NORM_ONLY_ARCHITECTURES` and
+  `NON_PARAMETRIC_LAYER_NORM`, now empty and deleted; the two
+  predicates derive from the norm-site row), `default_swa_layout`, the
+  two SWA RoPE follow lists, `swa_window_override`, `rope_layers`,
+  `swa_geometry`, `clamp_kqv` and `mtp_blocks::NEXTN_READERS`.
+  `exaone4`'s two code-shaped rules are functions in its file
+  (`HparamRules`). `rope_layers::PER_LAYER_ROPE_GATES` keeps its
+  `exaone4` row: it is a census of llama.cpp's graphs that the rule is
+  checked against, not a row the loader reads. Divergences found and
+  filed, not fixed: #440, #441.
 
 What step 2 changed about the target design:
 
