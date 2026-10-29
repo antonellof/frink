@@ -78,7 +78,7 @@ fn metadata() -> BTreeMap<String, GgufValue> {
     .collect()
 }
 
-fn tensors(dtype: GgmlType) -> Vec<Tensor> {
+fn tensors(dtype: GgmlType, embd: GgmlType) -> Vec<Tensor> {
     let mut seed = 0u64;
     let mut matrix = |name: String, rows: usize, cols: usize, dtype: GgmlType| {
         seed += 1;
@@ -107,7 +107,7 @@ fn tensors(dtype: GgmlType) -> Vec<Tensor> {
         "token_embd.weight".to_string(),
         N_VOCAB,
         N_EMBD,
-        GgmlType::F32,
+        embd,
     )];
     for l in 0..N_LAYER {
         out.push(norm(format!("blk.{l}.attn_norm.weight"), 2 * l as u64));
@@ -137,7 +137,13 @@ fn tensors(dtype: GgmlType) -> Vec<Tensor> {
 /// by `encode`, and returns its path. `tag` names the file, so two
 /// suites never share one.
 pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
-    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype)
+    write_with_embd(tag, dtype, GgmlType::F32, encode)
+}
+
+/// [`write`] with the token embedding stored as `embd` rather than F32,
+/// for the suites that exercise a backend's embedding gather.
+pub fn write_with_embd(tag: &str, dtype: GgmlType, embd: GgmlType, encode: Encode) -> PathBuf {
+    let encoded: Vec<(TensorPlan, Vec<u8>)> = tensors(dtype, embd)
         .into_iter()
         .map(|t| {
             let shape = if t.rows == 1 {
@@ -165,7 +171,10 @@ pub fn write(tag: &str, dtype: GgmlType, encode: Encode) -> PathBuf {
     // keeps two concurrent runs apart.
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(&dir).expect("create the fixture directory");
-    let path = dir.join(format!("{tag}_{dtype:?}-{}.gguf", std::process::id()));
+    let path = dir.join(format!(
+        "{tag}_{dtype:?}_{embd:?}-{}.gguf",
+        std::process::id()
+    ));
     let file = std::fs::File::create(&path).expect("create the fixture");
     let mut w = GgufWriter::create(file, &metadata(), plan).expect("write the header");
     for (p, bytes) in &encoded {

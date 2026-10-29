@@ -16,7 +16,7 @@ const PINNED: &[(Backend, Op, usize)] = &[
     (Backend::Cuda, Op::GetRows, 23),
     (Backend::Metal, Op::Matvec, 11),
     (Backend::Metal, Op::Gemm, 11),
-    (Backend::Metal, Op::GetRows, 21),
+    (Backend::Metal, Op::GetRows, 11),
     (Backend::Vulkan, Op::Matvec, 22),
     (Backend::Vulkan, Op::Gemm, 23),
     (Backend::Vulkan, Op::GetRows, 23),
