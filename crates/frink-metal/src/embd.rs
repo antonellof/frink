@@ -117,22 +117,9 @@ kernel void get_rows_q6_k(
 }
 "#;
 
-/// Which embedding quant we can gather on Metal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbdKind {
-    Q4K,
-    Q6K,
-}
-
-impl EmbdKind {
-    pub fn from_fn_name(fn_name: &str) -> Option<Self> {
-        match fn_name {
-            "q4_k_matvec" => Some(Self::Q4K),
-            "q6_k_matvec" => Some(Self::Q6K),
-            _ => None,
-        }
-    }
-}
+/// Which embedding quant we can gather on Metal. Defined in the ungated
+/// [`crate::embd_kinds`] so the kernel coverage matrix can read it.
+pub use crate::embd_kinds::EmbdKind;
 
 /// Encode a single-row embedding gather into `out` (length `n_cols`).
 #[allow(clippy::too_many_arguments)]
@@ -231,6 +218,19 @@ pub fn launch_get_rows(
 mod tests {
     use super::*;
     use frink_quant::{dequant_q4_k, dequant_q6_k, Q4_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES};
+
+    /// Each gather is keyed by the matvec kernel the Metal table really
+    /// resolves for its kind, so the decode path's `from_fn_name` and
+    /// the coverage matrix's `from_kind_name` cannot disagree. Runs
+    /// without a device.
+    #[test]
+    fn every_gather_is_keyed_by_its_kinds_matvec_kernel() {
+        for k in EmbdKind::ALL {
+            let meta = crate::gpu::matvec_launch_meta(k.kind_name())
+                .unwrap_or_else(|| panic!("{k:?}: a gather for a kind with no matvec kernel"));
+            assert_eq!(meta.1, k.matvec_fn_name(), "{k:?}");
+        }
+    }
 
     #[test]
     #[ignore = "needs a real Metal GPU"]

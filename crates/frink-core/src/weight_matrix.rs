@@ -357,10 +357,20 @@ pub fn cuda_matvec_kind_supported(kind: QuantKind) -> bool {
 /// quantized to Q8/Q8_K, int8xint8 dots) rather than the much slower f32
 /// dequant-dot. `cols` matters: the K-quant kernels need a whole number
 /// of 256-element super-blocks, the legacy ones 32-element blocks.
+///
+/// This is a hand list beside the `match *kind` arms in
+/// [`WeightMatrix::apply_cpu`] and [`WeightMatrix::apply_batch`], so
+/// `kernel_matrix::tests::the_cpu_int_dot_table_is_the_dispatch` runs
+/// both entry points for every kind and fails when this disagrees with
+/// the path they actually took. IQ4_XS is why: its `iq4_xs_q8` arms
+/// landed in both and this list was not told, so the registry and the
+/// load-time log called an integer path "f32 dequant-dot".
 pub fn cpu_int_dot_kind_supported(kind: QuantKind, cols: usize) -> bool {
     match kind {
         QuantKind::Q8_0 | QuantKind::Q4_0 => cols.is_multiple_of(32),
-        QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K => cols.is_multiple_of(256),
+        QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K | QuantKind::IQ4XS => {
+            cols.is_multiple_of(256)
+        }
         _ => false,
     }
 }
@@ -903,7 +913,7 @@ impl WeightMatrix {
         }
     }
 
-    fn block_bytes_per_row(&self, kind: QuantKind, cols: usize) -> usize {
+    pub(crate) fn block_bytes_per_row(&self, kind: QuantKind, cols: usize) -> usize {
         match kind {
             QuantKind::Q8_0 => {
                 (cols / frink_quant::Q8_0_BLOCK_ELEMS) * frink_quant::Q8_0_BLOCK_BYTES
@@ -1159,7 +1169,7 @@ impl WeightMatrix {
         rows.saturating_mul(cols) < 256_000
     }
 
-    fn dot(kind: QuantKind, row: &[u8], x: &[f32]) -> f32 {
+    pub(crate) fn dot(kind: QuantKind, row: &[u8], x: &[f32]) -> f32 {
         match kind {
             QuantKind::Q8_0 => frink_quant::dot_q8_0_f32(row, x),
             QuantKind::Q4_0 => frink_quant::dot_q4_0_f32(row, x),
@@ -3810,7 +3820,7 @@ impl WeightMatrix {
         role: &'static str,
         loc: &'static std::panic::Location<'static>,
     ) {
-        use crate::kernel_registry::{op, Backend, Lookup, Outcome};
+        use crate::kernel_registry::{host_fallback, op, Backend, Lookup, Outcome};
 
         let kind = self.quant_kind();
         let cols = self.cols();
@@ -3869,7 +3879,7 @@ impl WeightMatrix {
                     // An accelerator kernel exists for this format.
                     _ if matvec => Outcome::Hit,
                     // No kernel: the whole matvec runs on the host.
-                    Some(_) => Outcome::slow_path("CPU apply_cpu"),
+                    Some(_) => Outcome::slow_path(host_fallback::MATVEC),
                     // F32 has no quantized kernel by construction, and a
                     // lone small F32 matvec (an MoE router) is host work
                     // on purpose -- see `apply_gpu`.
@@ -3890,7 +3900,7 @@ impl WeightMatrix {
                     // comes from the backend instead of from an arm
                     // here that a new variant would fall through.
                     (false, true, _) => Outcome::slow_path(gemm_fallback),
-                    (false, false, Some(_)) => Outcome::slow_path("CPU apply_batch"),
+                    (false, false, Some(_)) => Outcome::slow_path(host_fallback::BATCH),
                     (false, false, None) => Outcome::by_design("CPU f32 GEMM"),
                 },
             );
@@ -3954,7 +3964,7 @@ impl WeightMatrix {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// The task floor is **work-aware**, which is the whole reason
     /// [`crate::par::with_op_work`] exists: a row count alone cannot
@@ -4170,7 +4180,7 @@ mod tests {
     /// The override is process-global, so the guard serializes on a
     /// mutex: two tests forcing opposite values concurrently would
     /// otherwise see each other's setting.
-    pub(super) struct ForceIntDot {
+    pub(crate) struct ForceIntDot {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -4186,7 +4196,7 @@ mod tests {
     static INT_DOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl ForceIntDot {
-        pub(super) fn new(on: bool) -> Self {
+        pub(crate) fn new(on: bool) -> Self {
             let lock = INT_DOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             Self::set(on);
             Self { _lock: lock }

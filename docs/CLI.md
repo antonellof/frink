@@ -397,6 +397,7 @@ llama.cpp does at load, and the same prompt reads about 143 t/s.
 # Always reports the largest context that fits and the arithmetic:
 ./target/release/frink inspect-plan model.gguf --backend metal --ctk f16
 ./target/release/frink caps
+./target/release/frink caps --kernels      # kernel coverage per kind and backend
 ./target/release/frink archs
 ./target/release/frink presets
 ./target/release/frink smoke glm-5.2
@@ -410,6 +411,14 @@ llama.cpp does at load, and the same prompt reads about 143 t/s.
   `--concurrency N` (default 1) budgets that many caches.
 - `inspect-plan --expert-cache-bytes N` streams routed experts through
   a bounded cache of `N` bytes instead of counting them fully resident.
+- `inspect-plan` ends with the kernel coverage of the file's quantized
+  tensors on `--backend`: one line per kind and op that falls back to
+  the host (or, on CPU, has no integer `vec_dot`).
+- `caps --kernels` prints the kernel coverage matrix: for every quant
+  kind, backend and op, whether a kernel runs it or it falls back to
+  the host. It reads the dispatch tables, not this host, so it is the
+  same on every machine. `caps --kernels --write PATH` writes it to
+  `PATH`; it is how `docs/KERNELS.md` is regenerated.
 - `archs --write PATH` writes the manifest to `PATH` instead of
   printing it; it is how `docs/manifests/architecture_manifest.md` is
   regenerated.

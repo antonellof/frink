@@ -23,7 +23,11 @@ frink-quant = { workspace = true }
 # agree about one set, with only a `#[cfg(feature = "cuda")]` test
 # between them, is this repo's dominant bug shape; it is now one table.
 frink-cuda = { workspace = true }
-frink-metal = { workspace = true, optional = true }
+# Unconditional for the same reason as frink-cuda above: the kernel
+# coverage matrix (`kernel_matrix`) reads the Metal embedding-gather
+# table (`frink_metal::embd_kinds`) on every build. Only the kernels
+# behind it are gated on `metal`.
+frink-metal = { workspace = true }
 frink-vulkan = { workspace = true, optional = true }
 # The host KV store keeps K/V at f16 by default, as llama.cpp's
 # `llama_context_default_params` does (`crate::kv_store`).
@@ -76,7 +80,7 @@ argv = ["dep:clap"]
 cuda = ["frink-cuda/cuda", "dep:cudarc"]
 # Propagates to frink-metal's `metal` feature (Apple Silicon only;
 # see frink-metal's Cargo.toml). Shares WeightMatrix::apply_gpu with CUDA.
-metal = ["dep:frink-metal", "frink-metal/metal"]
+metal = ["frink-metal/metal"]
 # Propagates to frink-vulkan's `vulkan` feature, which pulls in `ash`
 # with its `loaded` feature: `libvulkan` is opened with dlopen at
 # RUNTIME, so this builds on a machine with no driver, no Vulkan SDK

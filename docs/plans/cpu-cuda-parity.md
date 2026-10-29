@@ -279,37 +279,23 @@ either pool: a fixed cost of about 60 ms per token (#128).
 
 ## Coverage: which kinds have a kernel
 
-frink has 21 `QuantKind`s. llama.cpp implements all of them on both
-CPU and CUDA. frink does not, and this table is the parity gap that a
-tok/s column cannot show.
+llama.cpp implements every `QuantKind` on CPU, CUDA and Metal. frink
+does not, and that is the parity gap a tok/s column cannot show.
 
-| kind | CPU fast path | CUDA matvec | CUDA GEMM | Metal |
-|---|---|---|---|---|
-| Q8_0 | yes | yes | yes | yes |
-| Q4_0 | yes | yes | yes | yes |
-| Q4_K | yes | yes | **new** | yes |
-| Q5_K | yes | yes | **new** | yes |
-| Q6_K | yes | yes | **new** | yes |
-| Q5_0 | no | **new** | **new** | yes |
-| IQ4_NL | yes | **new, unverified** | **new, unverified** | **no** |
-| IQ4_XS | yes | **new, unverified** | **new, unverified** | matvec+GEMM |
-| Q2_K | yes | **new, unverified** | **new, unverified** | **no** |
-| Q3_K | yes | **new, unverified** | **new, unverified** | **no** |
-| Q4_1, Q5_1, Q8_1 | no | **no** | **no** | **no** |
-| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | IQ1_M only | **no** | **no** | **no** |
-| MXFP4 | yes | **new, unverified** | **new, unverified** | **no** |
+The table that used to sit here was prose and drifted. It is now
+[`docs/KERNELS.md`](../KERNELS.md), generated from the dispatch tables
+by `frink caps --kernels` and checked by a test (#405,
+[ADR 0010](../adr/0010-coverage-before-speed.md)). A `HOST` cell there
+means the tensor is decoded on the host and the GPU is idle for that
+matmul. It still answers correctly, which is why this never surfaced
+as a bug.
 
-"no" means the tensor is decoded on the host and the GPU is idle for
-that matmul. It still answers correctly, which is why this never
-surfaced as a bug.
-
-"new, unverified" means the kernel exists, its arithmetic is checked
-against `frink_quant` by a Rust twin, and for the GEMM the emitted
-CUDA C is executed on a host CPU and compared to that twin bit for bit
-(`crates/frink-cuda/tools/mul_mm_host_check/run.sh`, 75,042 positions
-over eleven kinds and three shapes each, zero mismatches on 2026-09-09).
-**No GPU has run it.** `cargo test -p frink-cuda --features cuda --
---ignored` on a real device is the exit criterion, plus a bench row.
+How a new CUDA kernel is verified before a GPU runs it: its arithmetic
+is checked against `frink_quant` by a Rust twin, and for the GEMM the
+emitted CUDA C is executed on a host CPU and compared to that twin bit
+for bit (`crates/frink-cuda/tools/mul_mm_host_check/run.sh`). `cargo
+test -p frink-cuda --features cuda -- --ignored` on a real device is
+the exit criterion, plus a bench row.
 
 ## The four kinds of gap, and why the distinction matters
 
@@ -681,5 +667,5 @@ all, which is honest and temporary.
 | 4 fixed per-token cost | #128 | named: rayon's cold submit |
 | 5 x86 decode | #127 | **done**: default was wrong, 6.8x to 1.4x; 1.04x to 1.17x on Zen 2 (2026-09-15) |
 | 5b x86 prefill | | 1.0x to 1.4x on the K-quants after #159; Q5_K gate (#257) and IQ4_XS (#258) closed 2026-09-15; small Q8_0 models 1.5x to 2.1x remain |
-| 6 kernel coverage | | Q4_K/Q5_K/Q6_K, Q5_0, Q2_K/Q3_K/IQ4_NL/IQ4_XS/MXFP4 on CUDA, verified on hardware 2026-09-15; 10 kinds still host-only |
+| 6 kernel coverage | | Q4_K/Q5_K/Q6_K, Q5_0, Q2_K/Q3_K/IQ4_NL/IQ4_XS/MXFP4 on CUDA, verified on hardware 2026-09-15; the kinds still host-only are in [`docs/KERNELS.md`](../KERNELS.md) |
 | 7 ledger | #126 | **done**: three hosts, and a committed-receipt check |

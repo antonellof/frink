@@ -58,6 +58,13 @@ recurrent state cannot be rolled back to a middle position.
 | **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15), and a resident dense prefill stack (norms, QKV bias, QK norm, RoPE, causal GQA, SwiGLU, residuals on the device; K/V rows back to the host cache) |
 | **Vulkan** | `Q8_0` matvec only, no GEMM (`--features vulkan`). A beachhead rather than a full backend: see below |
 
+Which quant kinds each backend runs, per op (matvec for decode, GEMM
+for prefill, `get_rows` for the embedding), and which fall back to the
+host, is [`KERNELS.md`](KERNELS.md). It is generated from the dispatch
+tables by `frink caps --kernels` and a test fails when it drifts. A
+fallback also prints a `NO KERNEL` line at load, and `frink inspect-plan`
+lists the tensors of one GGUF that would take one.
+
 Vulkan is a single kernel. `--features vulkan` gives a `Q8_0` matvec
 and nothing else. It reports no GEMM for any kind, so a prefill lands on
 the host, and it claims no other quantization. It ran on real hardware

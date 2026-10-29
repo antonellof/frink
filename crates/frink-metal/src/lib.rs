@@ -110,4 +110,7 @@ pub mod norm;
 #[cfg(feature = "metal")]
 pub mod embd;
 
+/// Which kinds [`embd`] gathers, compiled on every build.
+pub mod embd_kinds;
+
 pub use capability::MetalProfile;
