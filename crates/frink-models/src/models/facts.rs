@@ -175,6 +175,9 @@ pub struct TopologyFacts {
     pub parallel_ssm: bool,
     /// `position_embd::learned_positions`.
     pub learned_positions: bool,
+    /// `parallel_residual`: attention and FFN read the same layer input
+    /// and are summed into one residual add.
+    pub parallel_residual: Option<&'static crate::parallel_residual::ParallelResidual>,
     /// `rope_finetuned::ROPE_GATED_ON_FINETUNED`: a file declaring
     /// `rope.scaling.finetuned = false` rotates nothing.
     pub rope_gated_on_finetuned: bool,
@@ -219,6 +222,9 @@ pub struct TensorFacts {
     /// `qkv_fused::QKV_TENSOR_CREATORS`: which Q/K/V biases the graph
     /// creates, and how.
     pub qkv_tensors: crate::qkv_fused::QkvTensors,
+    /// A present `blk.N.attn_norm_2` feeds attention and `attn_norm`
+    /// moves to the FFN (`falcon.cpp:35-36,79-85,124`).
+    pub attn_norm_2_feeds_attention: bool,
     /// `parallel_dense_ffn`: a dense FFN summed with the routed experts.
     pub parallel_dense: Option<&'static crate::parallel_dense_ffn::ParallelDenseFfn>,
 }
@@ -319,6 +325,7 @@ impl ArchFacts {
             skip_stream: false,
             parallel_ssm: false,
             learned_positions: false,
+            parallel_residual: None,
             rope_gated_on_finetuned: false,
             reads_nextn: false,
         },
@@ -337,6 +344,7 @@ impl ArchFacts {
             ffn_bias: None,
             output_bias: None,
             qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
+            attn_norm_2_feeds_attention: false,
             parallel_dense: None,
         },
         rules: HparamRules::LEGACY,
@@ -395,7 +403,7 @@ impl ArchFacts {
                 length_counts_gate_and_up: false,
                 geglu: crate::capability::uses_geglu_from_table(arch),
                 relu_sqr: crate::capability::uses_relu_sqr(arch),
-                gelu_ungated: crate::capability::uses_gelu_ungated(arch),
+                gelu_ungated: crate::capability::uses_gelu_ungated_from_table(arch),
                 reglu: crate::capability::uses_reglu(arch),
                 xielu: crate::act_layers::uses_xielu(arch),
                 reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps(arch),
@@ -425,6 +433,7 @@ impl ArchFacts {
                 skip_stream: crate::skip_stream::has_skip_stream(arch),
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
                 learned_positions: crate::position_embd::learned_positions(arch),
+                parallel_residual: crate::parallel_residual::parallel_residual_from_table(arch),
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
                     .contains(&arch),
                 reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
@@ -436,7 +445,9 @@ impl ArchFacts {
                     arch,
                     crate::norm::norm_function_from_table(arch),
                 ),
-                per_head_layer_norm_qk: crate::qk_layer_norm::per_head_layer_norm_lines(arch),
+                per_head_layer_norm_qk: crate::qk_layer_norm::per_head_layer_norm_lines_from_table(
+                    arch,
+                ),
                 per_head_scalar_qk_gain: crate::capability::uses_per_head_scalar_qk_gain(arch),
                 per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(arch),
@@ -450,6 +461,8 @@ impl ArchFacts {
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
                 qkv_tensors: crate::qkv_fused::qkv_tensors_from_table(arch),
+                // No table: `falcon` was the only row.
+                attn_norm_2_feeds_attention: false,
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn_from_table(arch),
             },
             rules: HparamRules::LEGACY,

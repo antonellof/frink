@@ -44,7 +44,8 @@
 /// The three graphs, with the lines, and whether the tensor is
 /// required.
 pub const PER_HEAD_LAYER_NORM_QK: &[(&str, bool, &str)] = &[
-    ("stablelm", false, "src/models/stablelm.cpp:34-35,84-97"),
+    // `stablelm` (optional) states its row in `crate::models::stablelm`
+    // (#403 step 7a).
     ("command-r", true, "src/models/command-r.cpp:28-31,80,87"),
     ("chameleon", true, "src/models/chameleon.cpp:33-35,91-102"),
     // Not per head: `{n_embd}` with a bias, one LayerNorm over the whole
@@ -57,7 +58,7 @@ pub const PER_HEAD_LAYER_NORM_QK: &[(&str, bool, &str)] = &[
 /// Whether `arch` applies its `attn_q_norm` / `attn_k_norm` as the
 /// per-head LayerNorm.
 pub fn uses_per_head_layer_norm_qk(arch: &str) -> bool {
-    PER_HEAD_LAYER_NORM_QK.iter().any(|(n, _, _)| *n == arch)
+    per_head_layer_norm_lines(arch).is_some()
 }
 
 /// The refusal reason for layer `l` of `arch` when it carries a Q or K
@@ -70,6 +71,13 @@ pub fn per_head_layer_norm_refusal(arch: &str, l: usize, has_q_or_k_norm: bool) 
 
 /// `arch`'s [`PER_HEAD_LAYER_NORM_QK`] row: the llama.cpp lines.
 pub fn per_head_layer_norm_lines(arch: &str) -> Option<&'static str> {
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .per_head_layer_norm_qk
+}
+
+/// [`per_head_layer_norm_lines`] from [`PER_HEAD_LAYER_NORM_QK`] alone.
+pub(crate) fn per_head_layer_norm_lines_from_table(arch: &str) -> Option<&'static str> {
     PER_HEAD_LAYER_NORM_QK
         .iter()
         .find(|(n, _, _)| *n == arch)

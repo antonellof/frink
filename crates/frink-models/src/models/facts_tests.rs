@@ -298,15 +298,13 @@ fn the_facts_agree_with_every_public_lookup() {
                 parallel_ssm: crate::mamba2::parallel_with_attention(name),
                 learned_positions: crate::position_embd::learned_positions(name),
                 rope_gated_on_finetuned: crate::rope_finetuned::unrotated(name, Some(false)),
+                parallel_residual: crate::parallel_residual::parallel_residual(name),
                 reads_nextn: crate::mtp_blocks::reads_nextn(name),
             },
             tensors: TensorFacts {
                 gpt_oss_layers: name == "gpt-oss",
                 norm_sites: crate::norm_sites::NormSites::for_arch(name),
-                per_head_layer_norm_qk: crate::qk_layer_norm::PER_HEAD_LAYER_NORM_QK
-                    .iter()
-                    .find(|r| r.0 == name)
-                    .map(|r| r.2),
+                per_head_layer_norm_qk: crate::qk_layer_norm::per_head_layer_norm_lines(name),
                 per_head_scalar_qk_gain: cap::uses_per_head_scalar_qk_gain(name),
                 per_head_distinct_qk_norm: cap::uses_per_head_distinct_qk_norm(name),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(name),
@@ -324,6 +322,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 output_bias: crate::proj_bias::output_presence(name),
                 qkv_tensors: crate::qkv_fused::qkv_tensors(name),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
+                attn_norm_2_feeds_attention: crate::norm_sites::attn_norm_2_feeds_attention(name),
             },
             rules: HparamRules {
                 swa_window_override: cap::swa_window_override,

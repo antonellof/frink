@@ -79,12 +79,10 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("gpt2", Presence::Required),
     // `granite-swa.cpp:79`, optional as every Granite row's is.
     ("granite_swa", Presence::Optional),
-    ("gptneox", Presence::Required),
     ("granitehybrid", Presence::Optional),
     ("granite-hybrid", Presence::Optional),
     ("jais", Presence::Required),
     ("mpt", Presence::Optional),
-    ("phi2", Presence::Required),
     ("jais2", Presence::Required),
     ("minicpm", Presence::Optional),
     ("mistral3", Presence::Optional),
@@ -104,7 +102,6 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
     ("codeshell", Presence::Required, false),
     ("deci", Presence::Optional, true),
     ("gpt2", Presence::Required, false),
-    ("gptneox", Presence::Required, false),
     // `granite-swa.cpp:100-102`, the dense branch only (its MoE branch
     // creates no expert biases, as `granite.cpp`'s does not).
     ("granite_swa", Presence::Optional, true),
@@ -117,7 +114,6 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
     ("mpt", Presence::Optional, false),
     ("nemotron", Presence::Optional, false),
     ("nemotron_h", Presence::Optional, false),
-    ("phi2", Presence::Required, false),
     ("starcoder", Presence::Required, false),
     ("starcoder2", Presence::Required, false),
 ];
@@ -129,9 +125,8 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
 /// `qwen2.cpp:27` (optional, `:147-148`), and `qwen2vl` / `dream` /
 /// `wavtokenizer-dec` on no engine here.
 pub const OUTPUT_BIAS_CREATORS: &[(&str, Presence)] = &[
-    ("phi2", Presence::Required),
-    // `qwen2` and `phimoe` state their rows in `crate::models` (#403
-    // steps 4 and 6).
+    // `qwen2`, `phimoe` and `phi2` state their rows in `crate::models`
+    // (#403 steps 4, 6 and 7a).
 ];
 
 /// Whether `arch`'s graph creates `output.bias`, through the registry.

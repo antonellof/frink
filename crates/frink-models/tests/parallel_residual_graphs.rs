@@ -64,10 +64,10 @@ use common::{
     assert_decoder_matches_on_all_three_paths, graph_caches, kl_vs_golden, load_graph_fixture,
     worst_vs, GRAPH_PROMPT, GRAPH_TOL,
 };
-use frink_models::capability::{resolve_architecture, ArchPath, BIASED_LAYER_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::config::RopeLayout;
 use frink_models::norm::NormOp;
-use frink_models::parallel_residual::{ParallelNorm, PARALLEL_RESIDUAL_GRAPHS};
+use frink_models::parallel_residual::{parallel_residual_rows, ParallelNorm};
 use frink_models::{Decoder, FfnActivation};
 
 const GPTNEOX: &str = "gptneox";
@@ -300,7 +300,7 @@ fn the_loaded_layers_are_the_graphs() {
             })
         ));
     }
-    assert!(BIASED_LAYER_NORM.contains(&GPTNEOX));
+    assert!(frink_models::capability::uses_biased_layer_norm(GPTNEOX));
 
     let d = load_graph_fixture(GPTNEOX);
     assert!(d.config.parallel_residual);
@@ -428,7 +428,7 @@ fn every_generic_path_row_of_the_table_has_a_golden() {
         "cohere2",
         "cohere2moe",
     ];
-    for row in PARALLEL_RESIDUAL_GRAPHS {
+    for row in parallel_residual_rows() {
         let generic = matches!(
             resolve_architecture(row.arch),
             Some(ArchPath::GenericGqa { .. })

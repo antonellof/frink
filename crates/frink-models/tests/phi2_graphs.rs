@@ -39,11 +39,11 @@ use common::{
     assert_all_three_paths_match_within, assert_decoder_matches_on_all_three_paths, graph_caches,
     kl_vs_golden, load_graph_fixture, worst_vs, GRAPH_PROMPT,
 };
-use frink_models::capability::{resolve_architecture, ArchPath, BIASED_LAYER_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::config::RopeLayout;
 use frink_models::norm::NormOp;
 use frink_models::parallel_residual::ParallelNorm;
-use frink_models::proj_bias::{Presence, OUTPUT_BIAS_CREATORS};
+use frink_models::proj_bias::{output_presence, Presence};
 use frink_models::{Decoder, FfnActivation};
 
 const PHI2: &str = "phi2";
@@ -146,8 +146,8 @@ fn the_loaded_decoder_is_the_graph() {
             rope: RopeLayout::Neox
         })
     ));
-    assert!(BIASED_LAYER_NORM.contains(&PHI2));
-    assert!(OUTPUT_BIAS_CREATORS.contains(&(PHI2, Presence::Required)));
+    assert!(frink_models::capability::uses_biased_layer_norm(PHI2));
+    assert_eq!(output_presence(PHI2), Some(Presence::Required));
     for name in [PHI2, PHI2_FUSED] {
         let d = load_graph_fixture(name);
         let bias = d.output_bias.as_ref().expect("phi2.cpp:22: REQUIRED");

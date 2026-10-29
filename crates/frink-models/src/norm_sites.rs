@@ -74,24 +74,6 @@ use frink_gguf::{GgufError, TensorSource};
 pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] =
     &["seed_oss", "glm4moe", "qwen35", "qwen35moe", "qwen3next"];
 
-/// Architectures whose OPTIONAL second pre-norm `blk.N.attn_norm_2`
-/// feeds ATTENTION when present, with `attn_norm` moving to the FFN.
-///
-/// `falcon`: `falcon.cpp:35-36` create `attn_norm_2` / its bias
-/// `TENSOR_NOT_REQUIRED` (Falcon-40B and 180B have them, Falcon-7B does
-/// not), `:79-85` norm the layer input with it for attention when it is
-/// there and take `attn_norm`'s output otherwise, and `:124` hands the
-/// FFN `attn_norm(x)` either way. So a 40B layer is the two-norm
-/// parallel residual (`crate::parallel_residual`, `TwoNorms`) with the
-/// tensor NAMES crossed relative to `gptneox`: the attention slot is
-/// `attn_norm_2` and the pre-FFN slot is `attn_norm`. Decided PER LAYER
-/// by tensor presence, which is why it is [`NormSites::for_layer`] and
-/// not a row of [`NormSites::for_arch`]. Measured: `grep -l attn_norm_2
-/// src/models/*.cpp` over all 155 is `falcon`, `bert`, `jina-bert-v2`
-/// (encoders, a post-norm there), `rwkv6` / `rwkv7` / `eagle3` (other
-/// engines); one generic-path graph.
-pub const ATTN_NORM_2_FEEDS_ATTENTION: &[&str] = &["falcon"];
-
 /// Architectures that norm the TOKEN EMBEDDINGS before layer 0, with
 /// the model-level `token_embd_norm` pair (`LLM_TENSOR_TOKEN_EMBD_NORM`,
 /// spelled without a `blk.` prefix).
@@ -349,6 +331,14 @@ pub struct NormSites {
     pub embedding: Option<StoredNorm>,
 }
 
+/// Whether `arch`'s optional `attn_norm_2` feeds attention, through the
+/// registry (`falcon`, `crate::models::falcon`).
+pub fn attn_norm_2_feeds_attention(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .attn_norm_2_feeds_attention
+}
+
 impl NormSites {
     /// The row for `arch`, with the architecture's own norm function:
     /// its `crate::models` definition, else the legacy tables.
@@ -406,10 +396,13 @@ impl NormSites {
 
     /// This layer's row: the per-architecture row, with the two
     /// pre-norm slots crossed for a layer that carries `attn_norm_2` on
-    /// an architecture in [`ATTN_NORM_2_FEEDS_ATTENTION`]. Every other
-    /// layer of every other architecture gets the row unchanged.
-    pub fn for_layer(&self, arch: &str, file: &impl TensorSource, layer: usize) -> Self {
-        if !ATTN_NORM_2_FEEDS_ATTENTION.contains(&arch)
+    /// an architecture whose `attn_norm_2` feeds attention
+    /// (`TensorFacts::attn_norm_2_feeds_attention`, `falcon` alone:
+    /// `falcon.cpp:35-36,79-85,124`). Decided per layer by tensor
+    /// presence. Every other layer of every other architecture gets the
+    /// row unchanged.
+    pub fn for_layer(&self, crossed: bool, file: &impl TensorSource, layer: usize) -> Self {
+        if !crossed
             || file
                 .find_tensor(&format!("blk.{layer}.attn_norm_2.weight"))
                 .is_none()
@@ -466,20 +459,16 @@ mod tests {
         let row = NormSites::for_arch("falcon");
         assert_eq!(row.function, NormFunction::LayerNormBias);
         let seven_b = StubSource::with_tensors(&["blk.0.attn_norm.weight"]);
-        assert_eq!(row.for_layer("falcon", &seven_b, 0), row);
+        assert_eq!(row.for_layer(true, &seven_b, 0), row);
         let forty_b = StubSource::with_tensors(&["blk.1.attn_norm_2.weight"]);
-        assert_eq!(
-            row.for_layer("falcon", &forty_b, 0),
-            row,
-            "layer 0 has none"
-        );
-        let crossed = row.for_layer("falcon", &forty_b, 1);
+        assert_eq!(row.for_layer(true, &forty_b, 0), row, "layer 0 has none");
+        let crossed = row.for_layer(true, &forty_b, 1);
         assert_eq!(crossed.attn, Some(StoredNorm::required(&["attn_norm_2"])));
         assert_eq!(crossed.ffn, Some(StoredNorm::required(&["attn_norm"])));
         assert_eq!(crossed.output, row.output);
         // The name alone does nothing on another architecture.
         let llama = NormSites::for_arch("llama");
-        assert_eq!(llama.for_layer("llama", &forty_b, 1), llama);
+        assert_eq!(llama.for_layer(false, &forty_b, 1), llama);
     }
 
     /// `lfm3.cpp:53-55` throws on a layer with one post norm; the

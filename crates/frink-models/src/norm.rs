@@ -431,7 +431,7 @@ pub(crate) fn norm_function_from_table(arch: &str) -> NormFunction {
         NormFunction::RmsNoParams
     } else if crate::capability::WEIGHTED_LAYER_NORM.contains(&arch) {
         NormFunction::LayerNorm
-    } else if crate::capability::uses_biased_layer_norm(arch) {
+    } else if crate::capability::BIASED_LAYER_NORM.contains(&arch) {
         NormFunction::LayerNormBias
     } else {
         NormFunction::Rms

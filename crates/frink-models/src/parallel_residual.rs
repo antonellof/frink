@@ -93,7 +93,7 @@ pub enum ParallelWhen {
 }
 
 /// One graph that builds the parallel residual.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParallelResidual {
     pub arch: &'static str,
     /// The arm a parallel layer takes when `second_norm` is absent or
@@ -109,38 +109,54 @@ pub struct ParallelResidual {
     pub lines: &'static str,
 }
 
-/// The eight graphs, with the lines. Only the `stablelm` row is on the
-/// generic path today; the others are recorded so the seam that serves
-/// the shape is sized from the table and not from one graph.
+/// `stablelm`'s row, stated by `crate::models::stablelm` (#403 step 7a).
+pub const STABLELM: ParallelResidual = ParallelResidual {
+    arch: "stablelm",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::FfnNormAbsent,
+    second_norm: None,
+    lines: "src/models/stablelm.cpp:38-39,129-138,147",
+};
+
+/// `gptneox`'s row, stated by `crate::models::gptneox` (#403 step 7a).
+pub const GPTNEOX: ParallelResidual = ParallelResidual {
+    arch: "gptneox",
+    norm: ParallelNorm::TwoNorms,
+    when: ParallelWhen::ParallelResidualKey,
+    second_norm: None,
+    lines: "src/models/gptneox.cpp:5,143-166",
+};
+
+/// `phi2`'s row, stated by `crate::models::phi2` (#403 step 7a).
+pub const PHI2: ParallelResidual = ParallelResidual {
+    arch: "phi2",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::Always,
+    second_norm: None,
+    lines: "src/models/phi2.cpp:67,108,116-117",
+};
+
+/// `falcon`'s row, stated by `crate::models::falcon` (#403 step 7a).
+pub const FALCON: ParallelResidual = ParallelResidual {
+    arch: "falcon",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::Always,
+    second_norm: Some("attn_norm_2"),
+    lines: "src/models/falcon.cpp:35-36,79-85,124-135",
+};
+
+/// `plamo`'s row, stated by `crate::models::plamo` (#403 step 7a).
+pub const PLAMO: ParallelResidual = ParallelResidual {
+    arch: "plamo",
+    norm: ParallelNorm::SharedNorm,
+    when: ParallelWhen::Always,
+    second_norm: None,
+    lines: "src/models/plamo.cpp:59-64,97-98,111-112",
+};
+
+/// The graphs not yet in `crate::models`, with the lines; the census of
+/// all eight is [`parallel_residual_rows`].
 pub const PARALLEL_RESIDUAL_GRAPHS: &[ParallelResidual] = &[
-    ParallelResidual {
-        arch: "stablelm",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::FfnNormAbsent,
-        second_norm: None,
-        lines: "src/models/stablelm.cpp:38-39,129-138,147",
-    },
-    ParallelResidual {
-        arch: "gptneox",
-        norm: ParallelNorm::TwoNorms,
-        when: ParallelWhen::ParallelResidualKey,
-        second_norm: None,
-        lines: "src/models/gptneox.cpp:5,143-166",
-    },
-    ParallelResidual {
-        arch: "phi2",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::Always,
-        second_norm: None,
-        lines: "src/models/phi2.cpp:67,108,116-117",
-    },
-    ParallelResidual {
-        arch: "falcon",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::Always,
-        second_norm: Some("attn_norm_2"),
-        lines: "src/models/falcon.cpp:35-36,79-85,124-135",
-    },
     ParallelResidual {
         arch: "command-r",
         norm: ParallelNorm::SharedNorm,
@@ -162,24 +178,44 @@ pub const PARALLEL_RESIDUAL_GRAPHS: &[ParallelResidual] = &[
         second_norm: None,
         lines: "src/models/cohere2moe.cpp:222-266",
     },
-    ParallelResidual {
-        arch: "plamo",
-        norm: ParallelNorm::SharedNorm,
-        when: ParallelWhen::Always,
-        second_norm: None,
-        lines: "src/models/plamo.cpp:59-64,97-98,111-112",
-    },
 ];
 
 /// The row for an architecture, or `None` for a sequential graph.
 pub fn parallel_residual(arch: &str) -> Option<&'static ParallelResidual> {
+    crate::models::ArchFacts::of(arch)
+        .topology
+        .parallel_residual
+}
+
+/// [`parallel_residual`] from [`PARALLEL_RESIDUAL_GRAPHS`] alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn parallel_residual_from_table(arch: &str) -> Option<&'static ParallelResidual> {
     PARALLEL_RESIDUAL_GRAPHS.iter().find(|row| row.arch == arch)
+}
+
+/// Every row: the table's and the `crate::models` definitions'.
+pub fn parallel_residual_rows() -> impl Iterator<Item = &'static ParallelResidual> {
+    PARALLEL_RESIDUAL_GRAPHS.iter().chain(
+        crate::models::REGISTRY
+            .iter()
+            .filter_map(|d| d.facts.topology.parallel_residual),
+    )
 }
 
 /// Whether layer `l` of `arch` in `file` is a parallel layer, by the
 /// row's rule. `false` for a graph not in the table.
 pub fn layer_is_parallel(file: &impl TensorSource, arch: &str, l: usize) -> bool {
-    let Some(row) = parallel_residual(arch) else {
+    layer_is_parallel_for(file, arch, parallel_residual(arch), l)
+}
+
+/// [`layer_is_parallel`] given the row (`ArchFacts`).
+pub fn layer_is_parallel_for(
+    file: &impl TensorSource,
+    arch: &str,
+    row: Option<&ParallelResidual>,
+    l: usize,
+) -> bool {
+    let Some(row) = row else {
         return false;
     };
     match row.when {
@@ -197,10 +233,20 @@ pub fn layer_is_parallel(file: &impl TensorSource, arch: &str, l: usize) -> bool
 /// for a parallel layer, `None` for a sequential one (every graph not in
 /// the table, and a table row whose rule does not fire on this layer).
 pub fn layer_parallel_norm(file: &impl TensorSource, arch: &str, l: usize) -> Option<ParallelNorm> {
-    let row = parallel_residual(arch)?;
-    if !layer_is_parallel(file, arch, l) {
+    layer_parallel_norm_for(file, arch, parallel_residual(arch), l)
+}
+
+/// [`layer_parallel_norm`] given the row (`ArchFacts`).
+pub fn layer_parallel_norm_for(
+    file: &impl TensorSource,
+    arch: &str,
+    row: Option<&ParallelResidual>,
+    l: usize,
+) -> Option<ParallelNorm> {
+    if !layer_is_parallel_for(file, arch, row, l) {
         return None;
     }
+    let row = row?;
     let has_second = row.second_norm.is_some_and(|name| {
         file.find_tensor(&format!("blk.{l}.{name}.weight"))
             .is_some()
@@ -215,7 +261,17 @@ pub fn layer_parallel_norm(file: &impl TensorSource, arch: &str, l: usize) -> Op
 /// Whether any trunk layer of `arch` in `file` is parallel: the
 /// model-level fact the fused Metal launches refuse on.
 pub fn model_has_parallel_layer(file: &impl TensorSource, arch: &str, n_layers: usize) -> bool {
-    (0..n_layers).any(|l| layer_is_parallel(file, arch, l))
+    model_has_parallel_layer_for(file, arch, parallel_residual(arch), n_layers)
+}
+
+/// [`model_has_parallel_layer`] given the row (`ArchFacts`).
+pub fn model_has_parallel_layer_for(
+    file: &impl TensorSource,
+    arch: &str,
+    row: Option<&ParallelResidual>,
+    n_layers: usize,
+) -> bool {
+    (0..n_layers).any(|l| layer_is_parallel_for(file, arch, row, l))
 }
 
 #[cfg(test)]
@@ -228,7 +284,7 @@ mod tests {
     /// makes their `when` a recorded fact rather than a live rule.
     #[test]
     fn every_row_is_a_registered_architecture_and_the_generic_ones_are_audited() {
-        for row in PARALLEL_RESIDUAL_GRAPHS {
+        for row in parallel_residual_rows() {
             assert!(
                 crate::capability::resolve_profile(row.arch).is_some(),
                 "`{}` ({}) is not a registered architecture",
@@ -262,11 +318,11 @@ mod tests {
     /// The rows are distinct, so a graph cannot be given two rules.
     #[test]
     fn no_architecture_has_two_rows() {
-        let mut names: Vec<&str> = PARALLEL_RESIDUAL_GRAPHS.iter().map(|r| r.arch).collect();
+        let mut names: Vec<&str> = parallel_residual_rows().map(|r| r.arch).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), PARALLEL_RESIDUAL_GRAPHS.len());
-        assert_eq!(PARALLEL_RESIDUAL_GRAPHS.len(), 8, "the measured reach");
+        assert_eq!(names.len(), parallel_residual_rows().count());
+        assert_eq!(parallel_residual_rows().count(), 8, "the measured reach");
     }
 
     /// A graph not in the table is sequential on every layer, whatever

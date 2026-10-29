@@ -117,10 +117,6 @@ fn every_architecture_keyed_behaviour_table_names_a_real_generic_row() {
             "PRE_FFN_NORM_IS_POST_ATTENTION_NORM",
             crate::norm_sites::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
         ),
-        (
-            "ATTN_NORM_2_FEEDS_ATTENTION",
-            crate::norm_sites::ATTN_NORM_2_FEEDS_ATTENTION,
-        ),
         ("LEADING_DENSE_KEY_IS_INERT", LEADING_DENSE_KEY_IS_INERT),
         (
             "QK_NORM_AFTER_ROPE_ARCHITECTURES",
@@ -173,10 +169,6 @@ fn the_layer_shape_tables_only_name_audited_architectures() {
         (
             "PRE_FFN_NORM_IS_POST_ATTENTION_NORM",
             crate::norm_sites::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
-        ),
-        (
-            "ATTN_NORM_2_FEEDS_ATTENTION",
-            crate::norm_sites::ATTN_NORM_2_FEEDS_ATTENTION,
         ),
         ("LEADING_DENSE_KEY_IS_INERT", LEADING_DENSE_KEY_IS_INERT),
         (

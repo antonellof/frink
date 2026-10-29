@@ -60,7 +60,7 @@ use common::{
     graph_fixture_path, kl_vs_golden, load_graph_fixture, worst_vs, GRAPH_PROMPT, GRAPH_TOL,
 };
 use frink_gguf::TensorSource;
-use frink_models::capability::{resolve_architecture, ArchPath, BIASED_LAYER_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::config::{ModelConfig, RopeLayout};
 use frink_models::loader::LoadError;
 use frink_models::norm::NormOp;
@@ -210,7 +210,7 @@ fn report_kl_against_llama_cpp() {
 /// biases, SwiGLU.
 #[test]
 fn the_loaded_layers_are_the_graph() {
-    assert!(BIASED_LAYER_NORM.contains(&STABLELM));
+    assert!(frink_models::capability::uses_biased_layer_norm(STABLELM));
     assert!(matches!(
         resolve_architecture(STABLELM),
         Some(ArchPath::GenericGqa {

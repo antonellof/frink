@@ -71,8 +71,8 @@ pub enum QkvTensors {
 /// 'ATTN_(QKV|Q|K|V) *, *"(weight|bias)"'`). Not here because frink does
 /// not run them on this loader: `modern-bert`, `neo-bert`, `cogvlm`
 /// (deferred), `gemma4` (its own engine), `granite-switch`, `lfm2`'s
-/// decision head and the MLA graphs (refused or dedicated). `qwen` and
-/// `dbrx` state theirs in `crate::models`.
+/// decision head and the MLA graphs (refused or dedicated). `qwen`,
+/// `dbrx`, `falcon` and `gptneox` state theirs in `crate::models`.
 pub const QKV_TENSOR_CREATORS: &[(&str, QkvTensors, &str)] = &[
     ("bailingmoe2", QkvTensors::Fused(None), "bailingmoe2.cpp:46"),
     ("bitnet", QkvTensors::SplitUnbiased, "bitnet.cpp:26-28"),
@@ -81,16 +81,10 @@ pub const QKV_TENSOR_CREATORS: &[(&str, QkvTensors, &str)] = &[
         QkvTensors::Fused(Some(Presence::Required)),
         "bloom.cpp:44-45",
     ),
-    ("falcon", QkvTensors::Fused(None), "falcon.cpp:38"),
     (
         "gpt2",
         QkvTensors::Fused(Some(Presence::Required)),
         "gpt2.cpp:37-38",
-    ),
-    (
-        "gptneox",
-        QkvTensors::Fused(Some(Presence::Required)),
-        "gptneox.cpp:66-67",
     ),
     (
         "jais",
@@ -117,8 +111,8 @@ pub fn qkv_tensors(arch: &str) -> QkvTensors {
     crate::models::ArchFacts::of(arch).tensors.qkv_tensors
 }
 
-/// [`QkvTensors`] for `arch` from [`QKV_TENSOR_CREATORS`] alone (`qwen` and
-/// `dbrx` are in `crate::models`).
+/// [`QkvTensors`] for `arch` from [`QKV_TENSOR_CREATORS`] alone (`qwen`,
+/// `dbrx`, `falcon` and `gptneox` are in `crate::models`).
 pub(crate) fn qkv_tensors_from_table(arch: &str) -> QkvTensors {
     QKV_TENSOR_CREATORS
         .iter()

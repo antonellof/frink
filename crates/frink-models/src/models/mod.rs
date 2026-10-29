@@ -11,7 +11,9 @@ pub mod dbrx;
 pub mod dots1;
 pub mod exaone4;
 pub mod facts;
+pub mod falcon;
 pub mod gpt_oss;
+pub mod gptneox;
 pub mod granite;
 pub mod granite_moe;
 pub mod grok;
@@ -21,13 +23,16 @@ pub mod llama4;
 pub mod olmo;
 pub mod olmo2;
 pub mod olmoe;
+pub mod phi2;
 pub mod phimoe;
+pub mod plamo;
 pub mod qwen;
 pub mod qwen2;
 pub mod qwen2moe;
 pub mod qwen3;
 pub mod qwen3moe;
 mod refused_keys;
+pub mod stablelm;
 
 #[cfg(test)]
 mod tests;
@@ -74,6 +79,11 @@ pub const REGISTRY: &[ModelDef] = &[
     grok::DEF,
     gpt_oss::DEF,
     llama4::DEF,
+    stablelm::DEF,
+    gptneox::DEF,
+    phi2::DEF,
+    falcon::DEF,
+    plamo::DEF,
 ];
 
 /// The registry entry naming `arch`.
