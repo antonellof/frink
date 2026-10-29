@@ -279,23 +279,37 @@ either pool: a fixed cost of about 60 ms per token (#128).
 
 ## Coverage: which kinds have a kernel
 
-llama.cpp implements every `QuantKind` on CPU, CUDA and Metal. frink
-does not, and that is the parity gap a tok/s column cannot show.
+frink has 21 `QuantKind`s. llama.cpp implements all of them on both
+CPU and CUDA. frink does not, and this table is the parity gap that a
+tok/s column cannot show.
 
-The table that used to sit here was prose and drifted. It is now
-[`docs/KERNELS.md`](../KERNELS.md), generated from the dispatch tables
-by `frink caps --kernels` and checked by a test (#405,
-[ADR 0010](../adr/0010-coverage-before-speed.md)). A `HOST` cell there
-means the tensor is decoded on the host and the GPU is idle for that
-matmul. It still answers correctly, which is why this never surfaced
-as a bug.
+| kind | CPU fast path | CUDA matvec | CUDA GEMM | Metal |
+|---|---|---|---|---|
+| Q8_0 | yes | yes | yes | yes |
+| Q4_0 | yes | yes | yes | yes |
+| Q4_K | yes | yes | **new** | yes |
+| Q5_K | yes | yes | **new** | yes |
+| Q6_K | yes | yes | **new** | yes |
+| Q5_0 | no | **new** | **new** | yes |
+| IQ4_NL | yes | **new, unverified** | **new, unverified** | **no** |
+| IQ4_XS | yes | **new, unverified** | **new, unverified** | matvec+GEMM |
+| Q2_K | yes | **new, unverified** | **new, unverified** | **no** |
+| Q3_K | yes | **new, unverified** | **new, unverified** | **no** |
+| Q4_1, Q5_1, Q8_1 | no | **no** | **no** | **no** |
+| IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S | IQ1_M only | **no** | **no** | **no** |
+| MXFP4 | yes | **new, unverified** | **new, unverified** | **no** |
 
-How a new CUDA kernel is verified before a GPU runs it: its arithmetic
-is checked against `frink_quant` by a Rust twin, and for the GEMM the
-emitted CUDA C is executed on a host CPU and compared to that twin bit
-for bit (`crates/frink-cuda/tools/mul_mm_host_check/run.sh`). `cargo
-test -p frink-cuda --features cuda -- --ignored` on a real device is
-the exit criterion, plus a bench row.
+"no" means the tensor is decoded on the host and the GPU is idle for
+that matmul. It still answers correctly, which is why this never
+surfaced as a bug.
+
+"new, unverified" means the kernel exists, its arithmetic is checked
+against `frink_quant` by a Rust twin, and for the GEMM the emitted
+CUDA C is executed on a host CPU and compared to that twin bit for bit
+(`crates/frink-cuda/tools/mul_mm_host_check/run.sh`, 75,042 positions
+over eleven kinds and three shapes each, zero mismatches on 2026-09-09).
+**No GPU has run it.** `cargo test -p frink-cuda --features cuda --
+--ignored` on a real device is the exit criterion, plus a bench row.
 
 ## The four kinds of gap, and why the distinction matters
 
@@ -428,6 +442,23 @@ end, so the first hardware step is per-kernel time (`nsys`), not tok/s.
 If matvec time is a minority of the token, the next lever is the ~3
 host round trips per layer, whatever this change measures.
 
+**Update, 2026-10-28 (stacked on the wide matvec, unverified on
+hardware).** Counted from the code, a dense Llama decode token made
+**141 host waits, 85 uploads and 141 downloads** (Llama-3.2-3B, 28
+layers): five synchronous round trips per layer (q/k/v, `wo`, the fused
+FFN) with both RMSNorms, RoPE, the KV push, the attention and both
+residual adds on the host between them, plus the lm_head. A decode token
+now runs the resident stack the batched prefill already had, at one row
+(`frink_cuda::prefill`, one body, ADR 0004): matvec projections, a
+split-key one-row attention kernel (`frink_cuda::decode_attn`, the shape
+of llama.cpp's `flash_attn_combine_results`) over a per-sequence device
+KV mirror (`KvCache::cuda_attn`), norm weights resident, and ONE
+download per run carrying the hidden row and every layer's K/V rows.
+Expected: **2 waits, 2 uploads, 2 downloads** per token (the stack and
+the lm_head). `FRINK_CUDA_COUNT=1` prints the real counts per token, and
+`FRINK_CUDA_DECODE=host` restores the per-op path for the A/B. The
+arithmetic and the commands to run are in the PR.
+
 **A dead API that should still go.** 
 `frink-cuda/src/gpu.rs` defines `DeviceAct` / `upload_act` /
 `matvec_into` / `download_act`, whose doc says they exist "so a
@@ -478,18 +509,6 @@ the pool per operation.
 **Exit:** one predicate, shared by every call site, with the crossover
 measured on both aarch64 and x86 rather than guessed. `spin` stops
 being a user-visible knob.
-
-**Per operation was the wrong grain for decode (#27).** Counted, not
-timed, on one layer at Llama-3.2-3B's widths: the per-operation default
-opened eleven regions in a decode step, four to six on the pool and the
-rest on rayon, with six scheduler changes, and Q/K/V and gate/up forked
-and raced each other for the pool, so both schedulers ran at once. A
-single-token CPU decode step now picks one scheduler for the whole step
-from its widest layer matvec (`frink_core::par::decode_step`), which is
-exactly one of the two measured configurations: nine regions, all on
-the pool, at 1B and 3B widths; all on rayon at 135M's. Prefill and
-engines that do not report a layer width keep the per-operation rule.
-The A/B on a quiet host is still owed.
 
 ### 4. Find the 60 ms (#128)  [NAMED 2026-09-10: rayon's cold submit]
 
@@ -698,5 +717,5 @@ all, which is honest and temporary.
 | 4 fixed per-token cost | #128 | named: rayon's cold submit |
 | 5 x86 decode | #127 | **done**: default was wrong, 6.8x to 1.4x; 1.04x to 1.17x on Zen 2 (2026-09-15) |
 | 5b x86 prefill | | 1.0x to 1.4x on the K-quants after #159; Q5_K gate (#257) and IQ4_XS (#258) closed 2026-09-15; small Q8_0 models 1.5x to 2.1x remain |
-| 6 kernel coverage | | Q4_K/Q5_K/Q6_K, Q5_0, Q2_K/Q3_K/IQ4_NL/IQ4_XS/MXFP4 on CUDA, verified on hardware 2026-09-15; the kinds still host-only are in [`docs/KERNELS.md`](../KERNELS.md) |
+| 6 kernel coverage | | Q4_K/Q5_K/Q6_K, Q5_0, Q2_K/Q3_K/IQ4_NL/IQ4_XS/MXFP4 on CUDA, verified on hardware 2026-09-15; 10 kinds still host-only |
 | 7 ledger | #126 | **done**: three hosts, and a committed-receipt check |

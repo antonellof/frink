@@ -8,6 +8,7 @@ use super::kernels::{
     CAUSAL_GQA_PREFILL_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS,
     ROPE_ROWS_KERNEL_SRC,
 };
+use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
 use cudarc::driver::{
     CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig,
@@ -254,6 +255,112 @@ pub(crate) fn enqueue_causal_gqa_prefill(
             ),
         )
         .map_err(|e| launch_err("causal_gqa_prefill", e))?;
+    }
+    Ok(out)
+}
+
+/// Attention for ONE query row (`crate::decode_attn`): the keys split
+/// into chunks of [`decode_attn::CHUNK`], one block per (head, chunk),
+/// and a second launch merging the chunks. `k_all` / `v_all` hold at
+/// least `start_pos + 1` rows; the query is at position `start_pos`.
+/// Returns `[n_heads, head_dim]`. Two launches and two scratch
+/// allocations, no host sync.
+pub(crate) fn enqueue_decode_attn(
+    dev: &Arc<CudaDevice>,
+    q: &CudaSlice<f32>,
+    k_all: &CudaSlice<f32>,
+    v_all: &CudaSlice<f32>,
+    args: &AttnArgs,
+) -> Result<CudaSlice<f32>, CudaError> {
+    let AttnArgs {
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        start_pos,
+        window,
+        scale,
+        softcap,
+    } = *args;
+    if !decode_attn::head_dim_ok(head_dim) {
+        return Err(CudaError::Unsupported(format!(
+            "decode_attn: head_dim {head_dim} (the kernel takes a multiple of 4 up to 256)"
+        )));
+    }
+    let seq_len = start_pos + 1;
+    let (lo, hi) = decode_attn::key_range(seq_len, window);
+    let n_chunks = decode_attn::n_chunks(hi - lo);
+    debug_assert!(q.len() >= n_heads * head_dim);
+    debug_assert!(k_all.len() >= seq_len * n_kv_heads * head_dim);
+    debug_assert!(v_all.len() >= seq_len * n_kv_heads * head_dim);
+    let src = decode_attn::DECODE_ATTN_KERNEL_SRC;
+    // One translation unit, loaded as two modules: `load_ptx`
+    // registers only the entry points it is told, one per module here.
+    let partial = func_for(dev, src, decode_attn::PARTIAL)?;
+    let combine = func_for(dev, src, decode_attn::COMBINE)?;
+    let mut part = dev
+        .alloc_zeros::<f32>(decode_attn::scratch_len(n_heads, n_chunks, head_dim))
+        .map_err(|e| launch_err("decode_attn scratch alloc", e))?;
+    let mut out = dev
+        .alloc_zeros::<f32>(n_heads * head_dim)
+        .map_err(|e| launch_err("decode_attn alloc", e))?;
+    let (grid, block) = decode_attn::geometry::partial(n_heads, n_chunks);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: block,
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float* x3, float*, int x6, float x2) matched
+    // positionally. The grid is exactly n_heads x n_chunks, so every
+    // block's (head, chunk) is in range; every key index is in
+    // `lo..seq_len`, rows the K/V buffers cover (debug asserts above,
+    // the stack's reserve before it); the `float4` views need
+    // `head_dim % 4 == 0` (checked above) on buffers cudarc allocates
+    // 256-byte aligned; the scratch is allocated at exactly
+    // `scratch_len`, every slot the kernel writes.
+    unsafe {
+        partial
+            .launch(
+                cfg,
+                (
+                    q,
+                    k_all,
+                    v_all,
+                    &mut part,
+                    n_heads as i32,
+                    n_kv_heads as i32,
+                    head_dim as i32,
+                    lo as i32,
+                    hi as i32,
+                    n_chunks as i32,
+                    scale,
+                    softcap.filter(|c| *c > 0.0).unwrap_or(0.0),
+                ),
+            )
+            .map_err(|e| launch_err("decode_attn_partial", e))?;
+    }
+    let (grid, block) = decode_attn::geometry::combine(n_heads, head_dim);
+    let cfg = LaunchConfig {
+        grid_dim: grid,
+        block_dim: block,
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float*, float*, int x3) matched positionally;
+    // one block per head and one thread per channel, both in range by
+    // construction; the scratch holds the `n_chunks` slots per head the
+    // partial launch wrote, ordered before this on the same stream.
+    unsafe {
+        combine
+            .launch(
+                cfg,
+                (
+                    &part,
+                    &mut out,
+                    n_heads as i32,
+                    head_dim as i32,
+                    n_chunks as i32,
+                ),
+            )
+            .map_err(|e| launch_err("decode_attn_combine", e))?;
     }
     Ok(out)
 }

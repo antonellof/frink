@@ -58,14 +58,10 @@ pub fn launch_mul_mm(
     .map_err(|e| CudaError::Unsupported(e.to_string()))?;
 
     let dev = shared_device()?;
-    let d_x = dev
-        .htod_copy(x_batch[..batch * n_cols].to_vec())
-        .map_err(|e| CudaError::Launch(format!("mul_mm activation upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "mul_mm activation upload", &x_batch[..batch * n_cols])?;
     let (d_out, d_weights) =
         enqueue_mul_mm(&dev, kind, weights, &d_x, n_rows, n_cols, batch, row_bytes)?;
-    let out = dev
-        .dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("mul_mm output download: {e:?}")))?;
+    let out = crate::xfer::dtoh(&dev, "mul_mm output download", &d_out)?;
     drop(d_weights);
     Ok(out)
 }

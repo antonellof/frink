@@ -253,11 +253,13 @@ pub(crate) fn ensure_module_loaded_lazy_for_arch(
 /// process-wide and persistent (see `shared_device`/`ensure_module_loaded`) --
 /// quantized weight buffers are also cached by host pointer+length
 /// (`resident_cuda_weights`) so decode does not re-upload multi-GB
-/// matrices every token. Activations still upload per call, and that is
-/// deliberate: keeping them device-resident between matmuls was tried
-/// (PR #136) and measured 22% SLOWER on a GTX 1080, because decode is
-/// kernel-bound at ~90% utilization rather than host-bound. See
-/// `docs/plans/cpu-cuda-parity.md` step 2.
+/// matrices every token. Activations upload per call HERE: this is the
+/// one-matrix launch a lone projection takes (the lm_head, a layer the
+/// resident stack declines). Chaining only adjacent matmuls was tried
+/// (PR #136) and measured 22% SLOWER on a GTX 1080, because norms,
+/// RoPE and attention sat on the host between them; a dense decode
+/// layer now runs whole on the device instead (`crate::prefill`, at one
+/// row). See `docs/plans/cpu-cuda-parity.md` step 2.
 #[allow(clippy::too_many_arguments)] // shared internal launch plumbing; each parameter is a distinct, clearly-named buffer/shape value, not something worth bundling into a struct for one private callee.
 fn launch_matvec(
     kernel_src: &'static str,
@@ -272,9 +274,7 @@ fn launch_matvec(
     // Which kernel actually runs is `enqueue_matvec`'s decision, so
     // every caller gets the same one -- see `matvec_launch_plan`.
     let dev = shared_device()?;
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("{e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "matvec x upload", x)?;
     let launch = MatvecLaunch {
         kernel_src,
         module_name,
@@ -286,8 +286,7 @@ fn launch_matvec(
     };
     // `_weights` holds the resident-weight Arc alive until the DtoH sync.
     let (d_out, _weights) = enqueue_matvec(&dev, &launch, &d_x)?;
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("{e:?}")))
+    crate::xfer::dtoh(&dev, "matvec out download", &d_out)
 }
 
 /// How many warps a coalesced matvec block carries; one holder, in
@@ -384,7 +383,7 @@ impl MatvecPlan {
 /// asynchronously). This is the single per-launch primitive shared by
 /// [`launch_matvec`], [`launch_matvec_multi`] and
 /// [`launch_dense_ffn_swiglu`].
-fn enqueue_matvec(
+pub(crate) fn enqueue_matvec(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launch: &MatvecLaunch<'_>,
     d_x: &cudarc::driver::CudaSlice<f32>,
@@ -452,137 +451,9 @@ fn enqueue_matvec_at(
     Ok((d_out, d_weights))
 }
 
-pub(crate) struct ResidentCudaWeights {
-    pub(crate) slice: cudarc::driver::CudaSlice<u8>,
-    #[allow(dead_code)] // Kept for diagnostics / future eviction logic.
-    nbytes: usize,
-    /// What the bytes at the key looked like when they were uploaded.
-    /// A host buffer can be freed and its address handed to a different
-    /// buffer of the same length, and `(pointer, len)` cannot tell the
-    /// two apart: the tensor-core `mul_mm` hardware test multiplied one
-    /// fixture's weights by another fixture's activations for exactly
-    /// that reason (2026-09-17), and a merged LoRA or any other
-    /// short-lived matrix could do the same in a server. Production
-    /// weights are one mmap for the life of the process, which is why
-    /// nothing had noticed. This is the same identity hazard
-    /// `frink-metal/src/resident_act.rs` (#166) closed for
-    /// activations, closed the cheap way for weights: a sample of the
-    /// bytes, compared on every hit.
-    fingerprint: WeightFingerprint,
-}
-
-/// A cheap sample of a weight buffer: its first and last 64 bytes and
-/// 64 from the middle. Not a hash of the whole tensor (that is
-/// gigabytes per token); enough that a different buffer at the same
-/// address is caught unless it agrees on 192 sampled bytes.
-#[derive(PartialEq, Eq, Clone, Debug)]
-struct WeightFingerprint {
-    head: [u8; 64],
-    mid: [u8; 64],
-    tail: [u8; 64],
-}
-
-impl WeightFingerprint {
-    fn of(bytes: &[u8]) -> Self {
-        fn take(bytes: &[u8], at: usize) -> [u8; 64] {
-            let mut out = [0u8; 64];
-            let at = at.min(bytes.len());
-            let n = (bytes.len() - at).min(64);
-            out[..n].copy_from_slice(&bytes[at..at + n]);
-            out
-        }
-        Self {
-            head: take(bytes, 0),
-            mid: take(bytes, bytes.len() / 2),
-            tail: take(bytes, bytes.len().saturating_sub(64)),
-        }
-    }
-}
-
-// SAFETY: slices live on the process-wide shared CudaDevice and are
-// only read by kernels; same sharing model as Metal's ResidentWeightBuffer.
-unsafe impl Send for ResidentCudaWeights {}
-unsafe impl Sync for ResidentCudaWeights {}
-
-type CudaWeightCacheKey = (usize, usize);
-type CudaWeightCacheMap =
-    std::collections::HashMap<CudaWeightCacheKey, std::sync::Arc<ResidentCudaWeights>>;
-
-static CUDA_WEIGHT_CACHE: std::sync::Mutex<Option<CudaWeightCacheMap>> =
-    std::sync::Mutex::new(None);
-
-pub(crate) fn resident_cuda_weights(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    weights: &[u8],
-) -> Result<std::sync::Arc<ResidentCudaWeights>, CudaError> {
-    let key = (weights.as_ptr() as usize, weights.len());
-    let fingerprint = WeightFingerprint::of(weights);
-    let mut guard = CUDA_WEIGHT_CACHE.lock().unwrap();
-    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
-    if let Some(cached) = cache.get(&key) {
-        if cached.fingerprint == fingerprint {
-            return Ok(cached.clone());
-        }
-        // Same address and length, different bytes: the buffer this
-        // entry was uploaded from is gone. Re-upload rather than serve
-        // another tensor's weights.
-        cache.remove(&key);
-    }
-    let slice = dev
-        .htod_copy(weights.to_vec())
-        .map_err(|e| CudaError::Launch(format!("{e:?}")))?;
-    let cached = std::sync::Arc::new(ResidentCudaWeights {
-        slice,
-        nbytes: weights.len(),
-        fingerprint,
-    });
-    cache.insert(key, cached.clone());
-    Ok(cached)
-}
-
-/// A model-owned f32 vector resident on the device: norm weights, QKV
-/// biases, RoPE divisors, which the resident prefill stack used to
-/// upload again for every layer of every step (three to seven pageable
-/// `htod_copy`s per layer, each a `cudaMalloc` and a synchronous copy
-/// between the kernels that should have been back to back). Keyed and
-/// checked exactly as [`resident_cuda_weights`]: the same
-/// `(pointer, len)` key, the same byte fingerprint on every hit, for
-/// the same reason.
-pub(crate) struct ResidentF32 {
-    pub(crate) slice: cudarc::driver::CudaSlice<f32>,
-    fingerprint: WeightFingerprint,
-}
-
-type F32CacheMap = std::collections::HashMap<CudaWeightCacheKey, std::sync::Arc<ResidentF32>>;
-
-static CUDA_F32_CACHE: std::sync::Mutex<Option<F32CacheMap>> = std::sync::Mutex::new(None);
-
-pub(crate) fn resident_f32(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    values: &[f32],
-) -> Result<std::sync::Arc<ResidentF32>, CudaError> {
-    // SAFETY: an f32 slice viewed as its bytes, for the fingerprint
-    // only; same length in bytes, same lifetime, never written.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(values.as_ptr() as *const u8, std::mem::size_of_val(values))
-    };
-    let key = (values.as_ptr() as usize, values.len());
-    let fingerprint = WeightFingerprint::of(bytes);
-    let mut guard = CUDA_F32_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    let cache = guard.get_or_insert_with(std::collections::HashMap::new);
-    if let Some(cached) = cache.get(&key) {
-        if cached.fingerprint == fingerprint {
-            return Ok(cached.clone());
-        }
-        cache.remove(&key);
-    }
-    let slice = dev
-        .htod_copy(values.to_vec())
-        .map_err(|e| CudaError::Launch(format!("{e:?}")))?;
-    let cached = std::sync::Arc::new(ResidentF32 { slice, fingerprint });
-    cache.insert(key, cached.clone());
-    Ok(cached)
-}
+// The resident weight cache moved to `crate::resident`; re-exported
+// here so `crate::gpu::resident_cuda_weights` still resolves.
+pub(crate) use crate::resident::{resident_cuda_f32, resident_cuda_weights, ResidentCudaWeights};
 
 // The kernel TEXT moved to `matvec_kinds`, one module per format
 // family; `gpu.rs` keeps the device plumbing. Re-exported so every
@@ -785,6 +656,7 @@ pub fn launch_q6_k_matvec(
 /// never a temporary `to_vec()` copy. [`resident_cuda_weights`] keys by
 /// pointer+length; a per-call clone would miss the cache and re-upload
 /// multi-GB matrices every QKV fuse (the Vast ~2 tok/s failure mode).
+#[derive(Clone, Copy)]
 pub struct MatvecLaunch<'a> {
     pub kernel_src: &'static str,
     pub module_name: &'static str,
@@ -810,9 +682,7 @@ pub fn launch_matvec_multi(
 
     let dev = shared_device()?;
 
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("x upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "x upload", x)?;
 
     // Hold weight Arcs + device outs until after all launches so kernels
     // can overlap before any host sync (llama: sync only at graph edge).
@@ -828,9 +698,7 @@ pub fn launch_matvec_multi(
 
     let mut results = Vec::with_capacity(d_outs.len());
     for (i, d_out) in d_outs.into_iter().enumerate() {
-        let out = dev.dtoh_sync_copy(&d_out).map_err(|e| {
-            CudaError::Launch(format!("output download {}: {e:?}", launches[i].fn_name))
-        })?;
+        let out = crate::xfer::dtoh(&dev, launches[i].fn_name, &d_out)?;
         results.push(out);
     }
 
@@ -967,15 +835,9 @@ pub fn launch_fused_add_rmsnorm(
             )
         })?;
 
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm x upload: {e:?}")))?;
-    let d_residual = dev
-        .htod_copy(residual.to_vec())
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm residual upload: {e:?}")))?;
-    let d_weight = dev
-        .htod_copy(weight.to_vec())
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm weight upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "fused_add_rmsnorm x upload", x)?;
+    let d_residual = crate::xfer::htod(&dev, "fused_add_rmsnorm residual upload", residual)?;
+    let d_weight = crate::xfer::htod(&dev, "fused_add_rmsnorm weight upload", weight)?;
     let mut d_out = dev
         .alloc_zeros::<f32>(n)
         .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm out alloc: {e:?}")))?;
@@ -994,8 +856,7 @@ pub fn launch_fused_add_rmsnorm(
         .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm launch: {e:?}")))?;
     }
 
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("fused_add_rmsnorm download: {e:?}")))
+    crate::xfer::dtoh(&dev, "fused_add_rmsnorm download", &d_out)
 }
 
 /// Fused dense SwiGLU FFN entirely on-device: uploads `x` once, runs
@@ -1021,9 +882,7 @@ pub fn launch_dense_ffn_swiglu(
 ) -> Result<Vec<f32>, CudaError> {
     let dev = shared_device()?;
 
-    let d_x = dev
-        .htod_copy(x.to_vec())
-        .map_err(|e| CudaError::Launch(format!("ffn x upload: {e:?}")))?;
+    let d_x = crate::xfer::htod(&dev, "ffn x upload", x)?;
 
     // Bind the resident-weight Arcs (`_wg`/`_wu`/`_wd`) for the whole
     // function so every kernel's weight buffer outlives the final sync.
@@ -1032,31 +891,7 @@ pub fn launch_dense_ffn_swiglu(
     let d_act = silu_mul_device(&dev, &d_gate, &d_up, gate.rows)?;
     let (d_out, _wd) = enqueue_matvec(&dev, down, &d_act)?;
 
-    dev.dtoh_sync_copy(&d_out)
-        .map_err(|e| CudaError::Launch(format!("ffn out download: {e:?}")))
-}
-
-#[cfg(test)]
-mod fingerprint_tests {
-    use super::WeightFingerprint;
-
-    #[test]
-    fn a_buffer_that_differs_anywhere_sampled_has_a_different_fingerprint() {
-        let base: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
-        let f = WeightFingerprint::of(&base);
-        assert_eq!(f, WeightFingerprint::of(&base.clone()));
-        for at in [0usize, 63, 500, 531, 936, 999] {
-            let mut other = base.clone();
-            other[at] ^= 0xff;
-            assert_ne!(f, WeightFingerprint::of(&other), "byte {at} is sampled");
-        }
-        // Short buffers are sampled whole.
-        let short = vec![1u8, 2, 3];
-        assert_ne!(
-            WeightFingerprint::of(&short),
-            WeightFingerprint::of(&[1u8, 2, 4])
-        );
-    }
+    crate::xfer::dtoh(&dev, "ffn out download", &d_out)
 }
 
 #[cfg(test)]

@@ -625,7 +625,7 @@ impl Decoder {
             // caches at once. `fused_through` is how many layers that
             // consumed; every `continue` below is a `for`, so it cannot
             // spin.
-            // `fused_through` is only ever written under `metal`; the
+            // `fused_through` is only ever written under `metal` or `cuda`; the
             // binding is unconditional so the loop reads the same either
             // way.
             #[allow(unused_mut, unused_assignments)]
@@ -650,6 +650,20 @@ impl Decoder {
                     self.fused_recurrent_run(l, &mut hidden, kv_caches, &mut pending_qkv)
                 {
                     fused_through = end;
+                    continue;
+                }
+                // A run of dense layers on the device with the residual
+                // resident across them and ONE wait at the end, instead
+                // of five round trips per layer (#133). The same stack
+                // the batched prefill takes, at one row; it declines
+                // before touching any cache, and the body below then
+                // runs the layer. `FRINK_CUDA_DECODE=host` is the A/B.
+                #[cfg(feature = "cuda")]
+                if let Some((h_out, run_len)) =
+                    self.try_cuda_dense_stack(l, &hidden, pos, 1, kv_caches)
+                {
+                    hidden = h_out;
+                    fused_through = l + run_len;
                     continue;
                 }
                 let cache = &mut kv_caches[l];
@@ -1230,6 +1244,9 @@ impl Decoder {
         let final_normed = self.final_norm.apply(&hidden, self.config.rms_norm_eps);
 
         let logits = self.logits_from_normed(&final_normed);
+        // `FRINK_CUDA_COUNT=1`: this token's syncs and copies.
+        #[cfg(feature = "cuda")]
+        frink_cuda::counters::step_end(frink_cuda::counters::StepKind::Decode);
         // Clear dense-stack activation TLS after lm_head (may have consumed it).
         // Keep MoE scratch buffers alive across tokens — `moe_decode_seed`
         // overwrites `h` each token; clearing here forced full realloc.
