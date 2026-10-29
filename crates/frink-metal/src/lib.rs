@@ -72,6 +72,10 @@ pub mod codebook4;
 #[cfg(feature = "metal")]
 mod moe_mv_id;
 
+/// The Q5_K, Q6_K and IQ4_XS decode matvecs, as `_impl` functions.
+#[cfg(feature = "metal")]
+mod k_quant_mv;
+
 /// The KV wire format: dtypes, append and dequant kernels. Split from
 /// `attn` so the store and the softmax are separate concepts.
 #[cfg(feature = "metal")]

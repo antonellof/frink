@@ -302,6 +302,17 @@ impl MoePackedQ4Planes {
         }
     }
 
+    /// The same planes, every role labelled `kind`. No loader builds a
+    /// pack in a kind the id kernels lack, so this is how a test reaches
+    /// the decoder's fallback for one (#448); nothing else calls it.
+    #[doc(hidden)]
+    pub fn relabelled(mut self, kind: &'static str) -> Self {
+        self.gate_kind = kind;
+        self.up_kind = kind;
+        self.down_kind = kind;
+        self
+    }
+
     pub fn view(&self) -> frink_metal::gpu::MoePackedQ4<'_> {
         frink_metal::gpu::MoePackedQ4 {
             gate: self.gate.as_slice(),

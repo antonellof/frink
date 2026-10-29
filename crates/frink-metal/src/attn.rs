@@ -3714,6 +3714,17 @@ pub fn launch_moe_decode_stack(
     assert!(!layers.is_empty());
     assert_eq!(layers.len(), kvs.len());
     assert!(top_k > 0 && top_k <= 8);
+    // Every layer's experts need an id kernel, checked before anything
+    // is encoded: an encode that failed halfway used to leave the
+    // command buffer half-built and return a bare `CommandFailed` (#448).
+    for layer in layers {
+        let p = &layer.packed;
+        if let Some(kind) =
+            crate::gpu::moe_packed_mul_mv_id_missing(p.gate_kind, p.up_kind, p.down_kind)
+        {
+            return Err(MetalError::NoMoeIdKernel(kind));
+        }
+    }
     let hidden_dim = layers[0].packed.hidden_rows;
     let head_dim = kvs[0].head_dim;
     let n_kv_heads = kvs[0].n_kv_heads;
