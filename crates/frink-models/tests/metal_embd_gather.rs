@@ -33,7 +33,8 @@ const CHILD: &str = "FRINK_EMBD_GATHER_CHILD";
 /// `frink_quant`'s row encoders for Q8_0 (a 32-element kind) and Q5_K
 /// (a 256-element one), neither of which the gather covered before, and
 /// the fixture's for IQ2_XXS and IQ1_M (the gathers built on the IQ
-/// grids, the second with no `half` scale field).
+/// grids, the second with no `half` scale field), Q4_1 (a 32-element
+/// kind with a min) and TQ1_0 (the 256-element trit block).
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -41,11 +42,11 @@ fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
         match dtype {
             GgmlType::Q8_0 => frink_quant::encode_row_q8_0(row, &mut out),
             GgmlType::Q5K => frink_quant::encode_row_q5_k(row, None, &mut out),
-            GgmlType::IQ2XXS | GgmlType::IQ1M => {
+            GgmlType::IQ2XXS | GgmlType::IQ1M | GgmlType::Q4_1 | GgmlType::TQ1_0 => {
                 out.extend(common::quant_encode::encode(dtype, cols, row));
                 Some(())
             }
-            other => panic!("this suite encodes Q8_0, Q5_K, IQ2_XXS and IQ1_M, not {other:?}"),
+            other => panic!("this suite does not encode {other:?}"),
         }
         .expect("whole blocks");
     }
@@ -168,6 +169,8 @@ mod metal {
             GgmlType::Q5K,
             GgmlType::IQ2XXS,
             GgmlType::IQ1M,
+            GgmlType::Q4_1,
+            GgmlType::TQ1_0,
         ] {
             let quant = synthetic_llama::write_with_embd("metal_embd_gather", dtype, dtype, encode);
             let f32_embd =

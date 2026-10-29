@@ -1,6 +1,6 @@
-//! The kernel-vs-CPU check the `Q2_K` and `Q3_K` kernels run (#405):
-//! one harness, so the two kinds are held to the same shapes and the
-//! same bounds.
+//! The kernel-vs-CPU check the `Q2_K`, `Q3_K` and generated kernels run
+//! (#405): one harness, so every kind is held to the same shapes and
+//! the same bounds.
 //!
 //! The reference is `frink_quant`'s dequant (the CPU path, itself held
 //! to ggml's `dequantize_row_*`), dotted in f64. Each output is held to
@@ -30,6 +30,9 @@ type GemmFn = fn(&[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, MetalEr
 pub(crate) struct CheckKind {
     pub name: &'static str,
     pub block_bytes: usize,
+    /// Elements per block (256 for the K-quants and the IQ and trit
+    /// formats, 32 for the legacy ones).
+    pub block_elems: usize,
     /// The CPU dequant of whole blocks.
     pub dequant: fn(&[u8]) -> Result<Vec<f32>, frink_quant::QuantError>,
     /// `n_blocks` blocks of realistic bytes from a seed.
@@ -119,7 +122,7 @@ fn compare(label: &str, got: &[f32], want: &[(f64, f64)], rel: f64) -> (f64, f64
 /// The matvec against the CPU dequant, over [`MATVEC_SHAPES`].
 pub(crate) fn check_matvec(kind: &CheckKind) {
     for (s, &(rows, cols)) in MATVEC_SHAPES.iter().enumerate() {
-        let n_blocks = cols / 256;
+        let n_blocks = cols / kind.block_elems;
         let row_bytes = n_blocks * kind.block_bytes;
         let weights = (kind.blocks)(s as u32 + 1, rows * n_blocks);
         let x = activations(cols, 1);
@@ -134,7 +137,7 @@ pub(crate) fn check_matvec(kind: &CheckKind) {
 /// The simdgroup GEMM against the CPU dequant, over [`GEMM_SHAPES`].
 pub(crate) fn check_gemm(kind: &CheckKind) {
     for (s, &(rows, cols, batch)) in GEMM_SHAPES.iter().enumerate() {
-        let n_blocks = cols / 256;
+        let n_blocks = cols / kind.block_elems;
         let row_bytes = n_blocks * kind.block_bytes;
         let weights = (kind.blocks)(s as u32 + 101, rows * n_blocks);
         let xs = activations(cols, batch);

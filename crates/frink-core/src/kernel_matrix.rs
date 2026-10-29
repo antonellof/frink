@@ -83,6 +83,10 @@ pub enum Cell {
     /// CPU only: no integer `vec_dot` for this kind, so the weight is
     /// dequantized into an f32 dot. The CPU column's slow tier.
     F32Dot,
+    /// Accelerators only: the kind is ggml's activation format with no
+    /// weight path ([`QuantKind::is_activation_format`]), so there is no
+    /// reference kernel to match and no weight to expect. Not a fallback.
+    NotApplicable,
 }
 
 impl Cell {
@@ -93,6 +97,7 @@ impl Cell {
             Cell::Loop(_) => "loop",
             Cell::Host(_) => "HOST",
             Cell::F32Dot => "f32",
+            Cell::NotApplicable => "n/a",
         }
     }
 
@@ -164,7 +169,12 @@ impl KernelMatrix {
              - `HOST`: the work runs on the host CPU and the backend is idle for it.\n  \
              The output is still correct, which is why it reads as a slow row.\n\
              - `f32` (CPU only): no integer `vec_dot` for this kind, so the weight\n  \
-             is dequantized into an f32 dot.\n\n",
+             is dequantized into an f32 dot.\n\
+             - `n/a` (accelerators only): ggml defines the kind only as the\n  \
+             activation side of an integer dot (`Q8_1`: no `to_float`, no kernel\n  \
+             on any backend, no quantizer writes it), so there is no reference\n  \
+             kernel to match. Not counted as a host fallback; frink's CPU still\n  \
+             reads such a weight.\n\n",
         );
 
         s.push_str("## Host fallbacks\n\n");
@@ -234,6 +244,9 @@ impl KernelMatrix {
 
 /// The matvec and GEMM cells for one kind on one backend.
 fn matmul_cells(backend: Backend, kind: QuantKind) -> (Cell, Cell) {
+    if backend.is_accelerator() && kind.is_activation_format() {
+        return (Cell::NotApplicable, Cell::NotApplicable);
+    }
     if !backend.is_accelerator() {
         let tier = if cpu_int_dot_kind_supported(kind, PROBE_COLS) {
             Cell::Kernel
@@ -269,6 +282,9 @@ fn matmul_cells(backend: Backend, kind: QuantKind) -> (Cell, Cell) {
 /// The embedding gather. Exhaustive over [`Backend`] with no `_` arm, so
 /// a new backend has to say whether it gathers on the device.
 fn get_rows_cell(backend: Backend, kind: QuantKind) -> Cell {
+    if backend.is_accelerator() && kind.is_activation_format() {
+        return Cell::NotApplicable;
+    }
     match backend {
         Backend::Cpu => Cell::Kernel,
         Backend::Metal => match frink_metal::embd_kinds::EmbdKind::from_kind_name(kind.name()) {

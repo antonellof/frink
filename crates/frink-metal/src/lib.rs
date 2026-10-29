@@ -73,6 +73,15 @@ pub mod codebook4;
 #[cfg(feature = "metal")]
 pub mod iq;
 
+/// Q4_1, Q5_1 and TQ1_0: the decode matvec built on each kind's GEMM
+/// dequant functor.
+#[cfg(feature = "metal")]
+pub mod dq_mv;
+
+/// The one table of kinds whose every entry point is generated.
+#[cfg(feature = "metal")]
+mod gen_kinds;
+
 /// The IQ grid and sign tables as MSL, from `frink_quant::iq_tables`.
 #[cfg(feature = "metal")]
 mod iq_grids;

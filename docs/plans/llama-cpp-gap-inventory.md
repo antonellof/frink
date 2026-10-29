@@ -305,9 +305,9 @@ CUDA `weight_matrix.rs:500-506` + `crates/frink-cuda/src/gpu.rs:140,208,306,403,
 | F16 | Y Y Y | dequant only `quant/lib.rs:224` | N | **N** |
 | BF16 | Y Y Y | dequant only `quant/lib.rs:206` | N | **N** |
 | Q4_0 | Y Y Y | Y | Y `cuda/gpu.rs:208` | Y / Y |
-| Q4_1 | Y Y Y | Y `quant/lib.rs:4373` | N | **N / N** |
+| Q4_1 | Y Y Y | Y `quant/lib.rs:4373` | N | Y / Y `metal/src/dq_mv.rs` (#405) |
 | Q5_0 | Y Y Y | Y `quant/lib.rs:4450` | N | **N** / Y (see §2.5) |
-| Q5_1 | Y Y Y | Y `quant/lib.rs:4518` | N | **N / N** |
+| Q5_1 | Y Y Y | Y `quant/lib.rs:4518` | N | Y / Y `metal/src/dq_mv.rs` (#405) |
 | Q8_0 | Y Y Y | Y | Y `cuda/gpu.rs:140` | Y / Y |
 | Q2_K | Y Y Y | Y `quant/lib.rs:4670` | N | **N / N** |
 | Q3_K | Y Y Y | Y `quant/lib.rs:4805` | N | **N / N** |
@@ -319,7 +319,7 @@ CUDA `weight_matrix.rs:500-506` + `crates/frink-cuda/src/gpu.rs:140,208,306,403,
 | IQ4_XS | Y Y Y | Y `quant/lib.rs:4962` | N | Y `gpu.rs:4820` / Y |
 | **MXFP4** | Y Y Y (`mmq.cuh:74`, `mmvq.cu:19`, `mul_mm_mxfp4_f32`) | Y `quant/lib.rs:5081` | N | **N / N** -- this is why gpt-oss decodes on CPU |
 | NVFP4 | Y Y N | **N**, sized and refused `gguf/lib.rs:178-182` | N | N |
-| TQ1_0 / TQ2_0 | Y (`ggml-cpu/quants.c:107,113`) N N | **N**, sized and refused `gguf/lib.rs:163-176` | N | N |
+| TQ1_0 / TQ2_0 | Y (`ggml-cpu/quants.c:107,113`) N N (Metal refuses TQ1_0 for `mul_mat` and `get_rows`) | TQ1_0 Y `quant/ternary.rs`; TQ2_0 **N**, sized and refused | N | TQ1_0 Y / Y `metal/src/dq_mv.rs` (#405), held to ggml's CPU dequant; TQ2_0 N |
 | Q1_0 / Q2_0 | Y Y Y (`mmq.cuh:62`, `mul_mv_q1_0_f32`) | **N**, sized and refused `gguf/lib.rs:183-186` | N | N |
 
 **Totals.** Quantized matvec types: llama.cpp CUDA **24**, Metal **22**,
