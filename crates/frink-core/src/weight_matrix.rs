@@ -196,11 +196,12 @@ impl QuantKind {
             QuantKind::Ptq1_0 => Some("PTQ1_0"),
             QuantKind::Q2K => Some("Q2_K"),
             QuantKind::Q3K => Some("Q3_K"),
+            QuantKind::IQ4NL => Some("IQ4_NL"),
+            QuantKind::Mxfp4Gguf => Some("MXFP4"),
             // No Metal matvec kernel: scalar host paths only.
             QuantKind::Q4_1
             | QuantKind::Q5_1
             | QuantKind::Q8_1
-            | QuantKind::IQ4NL
             | QuantKind::IQ1S
             | QuantKind::IQ2XXS
             | QuantKind::IQ3XXS
@@ -208,7 +209,6 @@ impl QuantKind {
             | QuantKind::IQ2S
             | QuantKind::IQ3S
             | QuantKind::IQ1M
-            | QuantKind::Mxfp4Gguf
             | QuantKind::Tq1_0 => None,
         }
     }
@@ -1357,13 +1357,14 @@ impl WeightMatrix {
         })
     }
 
+    /// IQ4_NL left this list when Metal gained its GEMM (CUDA already
+    /// had one): it is no longer a kind whose batch is N matvecs.
     #[cfg(any(feature = "metal", feature = "cuda"))]
     pub fn prefers_gpu_batch(&self) -> bool {
         !matches!(
             self.base(),
             WeightMatrix::Quantized {
-                kind: QuantKind::IQ4NL
-                    | QuantKind::IQ1S
+                kind: QuantKind::IQ1S
                     | QuantKind::IQ2XXS
                     | QuantKind::IQ3XXS
                     | QuantKind::IQ2XS

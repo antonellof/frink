@@ -2298,6 +2298,16 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 ]
                 .concat(),
                 1,
+            )
+            .replacen(
+                "// @FRINK_CODEBOOK4_FUNCTORS@",
+                crate::codebook4::CODEBOOK4_DEQUANT_MSL,
+                1,
+            )
+            .replacen(
+                "// @FRINK_CODEBOOK4_ENTRIES@",
+                crate::codebook4::CODEBOOK4_GEMM_ENTRIES_MSL,
+                1,
             );
         Box::leak(src.into_boxed_str())
     });
@@ -2307,6 +2317,7 @@ const K_QUANT_MUL_MM_SG_KERNEL_BODY: &str = r#"
 using namespace metal;
 
 // @FRINK_TERNARY_FUNCTOR@
+// @FRINK_CODEBOOK4_FUNCTORS@
 
 // @FRINK_LOW_K_FUNCTORS@
 
@@ -3272,6 +3283,7 @@ MUL_MM_SG_ENTRY(q5_0_mul_mm_sg, Q5_0Dequant)
 MUL_MM_SG_ENTRY(iq4_xs_mul_mm_sg, IQ4XSDequant)
 // @FRINK_TERNARY_ENTRIES@
 // @FRINK_LOW_K_ENTRIES@
+// @FRINK_CODEBOOK4_ENTRIES@
 MUL_MM_ID_ENTRY(q4_0_mul_mm_id, Q4_0Dequant)
 MUL_MM_ID_ENTRY(q4_k_mul_mm_id, Q4KDequant)
 MUL_MM_ID_ENTRY(q8_0_mul_mm_id, Q8_0Dequant)
@@ -3614,6 +3626,8 @@ pub fn mul_mm_sg_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "PTQ1_0" => Some(("ptq1_0_mul_mm_sg", 28, 128)),
         "Q2_K" => Some(("q2_k_mul_mm_sg", 84, 256)),
         "Q3_K" => Some(("q3_k_mul_mm_sg", 110, 256)),
+        "IQ4_NL" => Some(("iq4_nl_mul_mm_sg", 18, 32)),
+        "MXFP4" => Some(("mxfp4_mul_mm_sg", 17, 32)),
         _ => None,
     }
 }
@@ -4160,6 +4174,30 @@ pub(crate) fn mul_mm_sg_aligned_fn(fn_name: &str) -> Option<&'static str> {
         "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_a",
         "q2_k_mul_mm_sg_f16" => "q2_k_mul_mm_sg_f16_a",
         "q3_k_mul_mm_sg_f16" => "q3_k_mul_mm_sg_f16_a",
+        "iq4_nl_mul_mm_sg" => "iq4_nl_mul_mm_sg_a",
+        "iq4_nl_mul_mm_sg_f16" => "iq4_nl_mul_mm_sg_f16_a",
+        "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_a",
+        "mxfp4_mul_mm_sg_f16" => "mxfp4_mul_mm_sg_f16_a",
+        _ => return None,
+    })
+}
+
+/// The half-activation sibling of a `*_mul_mm_sg` entry point
+/// (`MUL_MM_SG_F16_ENTRY`). One table for the fused prefill encode and
+/// its pipeline warm-up, which each kept a copy.
+pub(crate) fn mul_mm_sg_f16_fn(fn_name: &str) -> Option<&'static str> {
+    Some(match fn_name {
+        "q4_k_mul_mm_sg" => "q4_k_mul_mm_sg_f16",
+        "q5_k_mul_mm_sg" => "q5_k_mul_mm_sg_f16",
+        "q6_k_mul_mm_sg" => "q6_k_mul_mm_sg_f16",
+        "q8_0_mul_mm_sg" => "q8_0_mul_mm_sg_f16",
+        "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
+        "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
+        "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
+        "iq4_nl_mul_mm_sg" => "iq4_nl_mul_mm_sg_f16",
+        "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_f16",
+        "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
+        "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
         _ => return None,
     })
 }
@@ -4201,18 +4239,7 @@ pub(crate) fn encode_mul_mm_sg_f16(
     out_buf: &ProtocolObject<dyn MTLBuffer>,
     batch_size: usize,
 ) -> Result<(), MetalError> {
-    let fn_f16: &'static str = match l.fn_name {
-        "q4_k_mul_mm_sg" => "q4_k_mul_mm_sg_f16",
-        "q5_k_mul_mm_sg" => "q5_k_mul_mm_sg_f16",
-        "q6_k_mul_mm_sg" => "q6_k_mul_mm_sg_f16",
-        "q8_0_mul_mm_sg" => "q8_0_mul_mm_sg_f16",
-        "q4_0_mul_mm_sg" => "q4_0_mul_mm_sg_f16",
-        "q5_0_mul_mm_sg" => "q5_0_mul_mm_sg_f16",
-        "iq4_xs_mul_mm_sg" => "iq4_xs_mul_mm_sg_f16",
-        "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
-        "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
-        _ => return Err(MetalError::CommandFailed),
-    };
+    let fn_f16 = mul_mm_sg_f16_fn(l.fn_name).ok_or(MetalError::CommandFailed)?;
     let (fn_pick, smem) = mul_mm_sg_variant(fn_f16, l.rows, batch_size);
     let pipeline = ensure_pipeline(device, *K_QUANT_MUL_MM_SG_KERNEL_SRC, fn_pick)?;
     unsafe {
@@ -5143,6 +5170,7 @@ pub fn launch_ptq1_0_matvec(
 /// below holds the two together.
 pub const MATVEC_KINDS: &[&str] = &[
     "F32", "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
+    "IQ4_NL", "MXFP4",
 ];
 
 pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usize, usize, usize)> {
@@ -5175,6 +5203,20 @@ pub fn matvec_launch_meta(kind: &str) -> Option<(&'static str, &'static str, usi
             110,
             256,
             crate::q3_k::ROWS_PER_TG,
+        )),
+        "IQ4_NL" => Some((
+            crate::codebook4::codebook4_matvec_src(),
+            "iq4_nl_matvec",
+            18,
+            32,
+            4,
+        )),
+        "MXFP4" => Some((
+            crate::codebook4::codebook4_matvec_src(),
+            "mxfp4_matvec",
+            17,
+            32,
+            4,
         )),
         _ => None,
     }
@@ -7592,6 +7634,8 @@ pub(crate) fn encode_matvec_with_offsets(
         "ptq1_0_matvec" => (32usize, 0usize), // NR rows per simdgroup
         // Q2_K (NR=4) and Q3_K (NR=2): 2 simdgroups x 32 lanes, simd_sum only.
         "q2_k_matvec" | "q3_k_matvec" => (64usize, 0usize),
+        // ggml IQ4_NL / MXFP4: 2 simdgroups x 2 rows, codebook in TG memory.
+        "iq4_nl_matvec" | "mxfp4_matvec" => crate::codebook4::CODEBOOK4_MATVEC_TG,
         _ if rows_per_tg > 1 => (32usize, 256 * 4),
         _ => {
             let tg = n_blocks_per_row.next_power_of_two().clamp(32, 256);
@@ -7865,6 +7909,7 @@ mod tests {
         // the GEMM table's kinds all have a matvec.
         for kind in [
             "Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K", "IQ4_XS", "PTQ1_0", "Q2_K", "Q3_K",
+            "IQ4_NL", "MXFP4",
         ] {
             assert!(mul_mm_sg_meta(kind).is_some(), "{kind} has no GEMM row");
             assert!(
