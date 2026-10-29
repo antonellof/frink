@@ -434,7 +434,7 @@ impl BackendCaps for Vulkan {
     /// `apply_batch_with_acts` has a CUDA arm and a Metal arm. So a
     /// prefill against a Vulkan-resident kind runs on the host, and
     /// this names the host path rather than inventing a GPU one.
-    const GEMM_FALLBACK: &'static str = "CPU apply_batch";
+    const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
     /// Exactly one kind, because there is exactly one shader:
     /// `frink_vulkan::q8_0_shader`.

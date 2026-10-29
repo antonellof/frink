@@ -12,6 +12,7 @@ mod bench_llama;
 mod bench_model;
 mod bench_render;
 mod bench_suite;
+mod caps;
 mod chat;
 mod cli_output;
 mod download;
@@ -211,7 +212,17 @@ enum Commands {
     /// RAM, SIMD flags, and CUDA device info if built with --features
     /// cuda). See frink-cuda's docs for exactly what is and isn't
     /// verified about the CUDA fields.
-    Caps,
+    ///
+    /// --kernels prints the kernel coverage matrix instead: for every
+    /// quant kind, backend and op, whether a kernel runs it or it falls
+    /// back to the host. Derived from the dispatch tables, not this
+    /// host. --write PATH writes it to a file (docs/KERNELS.md).
+    Caps {
+        #[arg(long)]
+        kernels: bool,
+        #[arg(long)]
+        write: Option<String>,
+    },
     /// Run a tiny synthetic forward-pass smoke test for a preset
     /// (random weights, small dims) to prove the pipeline executes.
     Smoke {
@@ -735,6 +746,15 @@ fn main() -> anyhow::Result<()> {
             let fit = report.auto_context(ctx_cap);
             println!("  {fit}");
             println!("  {}", budget.caveat());
+            if let Ok(file) = ShardedGguf::open(&path) {
+                let tensors: Vec<_> = file
+                    .tensors()
+                    .map(|(_, t)| (t.name.as_str(), t.dtype))
+                    .collect();
+                for line in caps::plan_lines(&tensors, backend) {
+                    println!("{line}");
+                }
+            }
             if strict {
                 if let Err(e) = report.check_strict() {
                     eprintln!("{e}");
@@ -769,40 +789,7 @@ fn main() -> anyhow::Result<()> {
                 print!("{report}");
             }
         }
-        Commands::Caps => {
-            let profile = frink_cuda::HardwareProfile::detect();
-            println!("Hardware capabilities (detected, not assumed):");
-            println!("  CPU logical cores : {}", profile.cpu_logical_cores);
-            if profile.host_ram_total_bytes > 0 {
-                println!(
-                    "  Host RAM total    : {:.2} GiB",
-                    profile.host_ram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-            } else {
-                println!("  Host RAM total    : could not detect (non-Linux host?)");
-            }
-            println!("  SIMD              : {}", profile.simd.label());
-            println!(
-                "    avx2={} avx512f={} fma={} neon={}",
-                profile.simd.avx2, profile.simd.avx512f, profile.simd.fma, profile.simd.neon
-            );
-            if profile.cuda_available {
-                println!(
-                    "  CUDA              : {} device(s), first = {:?}, {:.2} GiB VRAM",
-                    profile.cuda_device_count,
-                    profile.cuda_device_name,
-                    profile.cuda_vram_total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-                );
-            } else {
-                println!("  CUDA              : not available (no device found, or built without --features cuda)");
-            }
-            let metal = frink_metal::MetalProfile::detect();
-            if metal.available {
-                println!("  Metal             : {:?}", metal.device_name);
-            } else {
-                println!("  Metal             : not available (no device found, or built without --features metal)");
-            }
-        }
+        Commands::Caps { kernels, write } => caps::run(kernels, write)?,
         Commands::Smoke { preset, steps } => {
             let base_cfg = preset_by_name(&preset)?;
             println!(
