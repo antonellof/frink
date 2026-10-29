@@ -42,7 +42,7 @@
 
 mod common;
 use common::{
-    assert_all_three_paths_match, graph_caches, kl_vs_golden, load_graph_fixture, worst_vs,
+    assert_all_three_paths_match_within, graph_caches, kl_vs_golden, load_graph_fixture, worst_vs,
     GRAPH_PROMPT,
 };
 use frink_models::layer_loops::{HrmStream, LayerLoops, LoopNorm};
@@ -64,6 +64,17 @@ const HRM_DEEP: &str = "hrm_text_deep";
 /// order over the arm64 number, comfortably over the x86 one at this
 /// depth, and three orders under every sabotage below.
 const HRM_DEEP_TOL: f32 = 5e-4;
+
+/// The two-stack fixture's line: the same effect, one stack less.
+///
+/// It held the suite default (3e-5) against an arm64 NATIVE libllama's
+/// golden. The golden is now CI's answer (ADR 0011: a portable AVX2
+/// libllama on x86_64), and the two libllama builds alone differ by
+/// 2.3e-5 on this fixture. frink then sits 4.0e-5 (arm64) and 4.2e-5
+/// (x86_64 CI) from it, on the prefill path only, so the line is 1e-4:
+/// over both, and under the deep fixture's 5e-4. Scaling `zL`'s init
+/// row by 1.001 (in `frink_models::hrm`) moves this fixture by 7.1e-2.
+const HRM_TOL: f32 = 1e-4;
 
 /// llama.cpp's logits for `hrm_text_tiny.gguf` over [`GRAPH_PROMPT`].
 const HRM_GOLDEN: [f32; 48] = [
@@ -171,7 +182,7 @@ const HRM_DEEP_GOLDEN: [f32; 48] = [
 
 #[test]
 fn hrm_text_matches_llama_cpp_on_all_three_paths() {
-    assert_all_three_paths_match(HRM, &HRM_GOLDEN);
+    assert_all_three_paths_match_within(HRM, &HRM_GOLDEN, HRM_TOL);
 }
 
 /// The number in the report, so it can be regenerated rather than
@@ -180,7 +191,7 @@ fn hrm_text_matches_llama_cpp_on_all_three_paths() {
 /// twice against two different cache slots.
 #[test]
 fn the_deep_schedule_matches_llama_cpp_on_all_three_paths() {
-    common::assert_all_three_paths_match_within(HRM_DEEP, &HRM_DEEP_GOLDEN, HRM_DEEP_TOL);
+    assert_all_three_paths_match_within(HRM_DEEP, &HRM_DEEP_GOLDEN, HRM_DEEP_TOL);
 }
 
 #[test]
