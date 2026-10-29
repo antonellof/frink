@@ -22,10 +22,13 @@
 //! aligned, the `half` scale's own alignment, like Q4_0's.
 //!
 //! The prefill GEMM stages the dequantized weights as `half`, as
-//! ggml's `kernel_mul_mm_mxfp4_f32` does. Its `mul_mm_id` (the MoE
-//! indexed GEMM) stages MXFP4 as `bfloat` where the device has it; this
-//! module has no `mul_mm_id` or `mul_mv_id` entry, see
-//! `crate::gpu::mul_mm_id_meta`.
+//! ggml's `kernel_mul_mm_mxfp4_f32` does. The MoE indexed GEMM
+//! (`mul_mm_id`) instantiates the same functor and so stages `half`
+//! too, where ggml's stages MXFP4 as `bfloat` on devices that have it:
+//! `half` holds every E2M1 value times any scale up to 2^13, and the
+//! rounding is the plain GEMM's, which its tests bound. The MoE
+//! matvec (`mul_mv_id`) is generated from the matvec `_impl` below
+//! (`crate::moe_mv_id`).
 
 use crate::gpu::{MatvecEpilogue, MetalError};
 
@@ -92,6 +95,10 @@ MUL_MM_SG_ENTRY(iq4_nl_mul_mm_sg, IQ4NLDequant)
 MUL_MM_SG_F16_ENTRY(iq4_nl_mul_mm_sg_f16, IQ4NLDequant)
 MUL_MM_SG_ENTRY(mxfp4_mul_mm_sg, MXFP4Dequant)
 MUL_MM_SG_F16_ENTRY(mxfp4_mul_mm_sg_f16, MXFP4Dequant)
+MUL_MM_ID_ENTRY(iq4_nl_mul_mm_id, IQ4NLDequant)
+MUL_MM_ID_F16_ENTRY(iq4_nl_mul_mm_id_f16, IQ4NLDequant)
+MUL_MM_ID_ENTRY(mxfp4_mul_mm_id, MXFP4Dequant)
+MUL_MM_ID_F16_ENTRY(mxfp4_mul_mm_id_f16, MXFP4Dequant)
 "#;
 
 /// The matvec translation unit: both entry points, one body.
@@ -100,7 +107,8 @@ pub fn codebook4_matvec_src() -> &'static str {
     static SRC: LazyLock<&'static str> = LazyLock::new(|| {
         Box::leak(
             format!(
-                "#include <metal_stdlib>\nusing namespace metal;\n{CODEBOOK4_DEQUANT_MSL}\n{CODEBOOK4_MATVEC_BODY_MSL}"
+                "#include <metal_stdlib>\nusing namespace metal;\n{CODEBOOK4_DEQUANT_MSL}\n{}\n{CODEBOOK4_MATVEC_BODY_MSL}",
+                crate::moe_mv_id::MOE_MV_ID_MSL
             )
             .into_boxed_str(),
         )
@@ -202,6 +210,9 @@ kernel void NAME(                                                           \
 
 CODEBOOK4_MATVEC_ENTRY(iq4_nl_matvec, CB4IQ4NL)
 CODEBOOK4_MATVEC_ENTRY(mxfp4_matvec, CB4MXFP4)
+
+MOE_MV_ID_ENTRIES(iq4_nl, codebook4_matvec_impl<CB4IQ4NL>)
+MOE_MV_ID_ENTRIES(mxfp4, codebook4_matvec_impl<CB4MXFP4>)
 "#;
 
 /// Threadgroup threads and table bytes for the two matvecs, read by

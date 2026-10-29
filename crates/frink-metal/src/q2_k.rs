@@ -51,6 +51,8 @@ struct Q2KDequant {
 pub const Q2_K_GEMM_ENTRIES_MSL: &str = r#"
 MUL_MM_SG_ENTRY(q2_k_mul_mm_sg, Q2KDequant)
 MUL_MM_SG_F16_ENTRY(q2_k_mul_mm_sg_f16, Q2KDequant)
+MUL_MM_ID_ENTRY(q2_k_mul_mm_id, Q2KDequant)
+MUL_MM_ID_F16_ENTRY(q2_k_mul_mm_id_f16, Q2KDequant)
 "#;
 
 /// Rows one threadgroup owns: four per simdgroup, two simdgroups.
@@ -68,16 +70,19 @@ pub const ROWS_PER_TG: usize = 8;
 /// last real row (its result is dropped at the store), so a ragged last
 /// threadgroup never reads past the matrix.
 const Q2_K_MATVEC_BODY_MSL: &str = r#"
-kernel void q2_k_matvec(
-    device const uchar* weights [[buffer(0)]],
-    device const float* x [[buffer(1)]],
-    device float* out [[buffer(2)]],
-    constant uint& row_bytes [[buffer(3)]],
-    constant uint& n_blocks_per_row [[buffer(4)]],
-    constant uint& n_rows [[buffer(5)]],
-    uint tgpig [[threadgroup_position_in_grid]],
-    uint tiisg [[thread_index_in_simdgroup]],
-    uint sgitg [[simdgroup_index_in_threadgroup]]
+// `table` is the id kernels' shared argument (`crate::moe_mv_id`); a
+// K-quant stages nothing in it.
+static inline void q2_k_matvec_impl(
+    device const uchar* weights,
+    device const float* x,
+    device float* out,
+    uint row_bytes,
+    uint n_blocks_per_row,
+    uint n_rows,
+    uint tgpig,
+    uint tiisg,
+    uint sgitg,
+    threadgroup float* table
 ) {
     constexpr uint NR = 4u;
     constexpr uint NSG = 2u;
@@ -136,6 +141,23 @@ kernel void q2_k_matvec(
         }
     }
 }
+
+kernel void q2_k_matvec(
+    device const uchar* weights [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& row_bytes [[buffer(3)]],
+    constant uint& n_blocks_per_row [[buffer(4)]],
+    constant uint& n_rows [[buffer(5)]],
+    uint tgpig [[threadgroup_position_in_grid]],
+    uint tiisg [[thread_index_in_simdgroup]],
+    uint sgitg [[simdgroup_index_in_threadgroup]]
+) {
+    q2_k_matvec_impl(weights, x, out, row_bytes, n_blocks_per_row, n_rows,
+                       tgpig, tiisg, sgitg, nullptr);
+}
+
+MOE_MV_ID_ENTRIES(q2_k, q2_k_matvec_impl)
 "#;
 
 /// The matvec translation unit: the shared decode text, then the body.
@@ -146,7 +168,8 @@ pub fn q2_k_matvec_src() -> &'static str {
     static SRC: LazyLock<&'static str> = LazyLock::new(|| {
         Box::leak(
             format!(
-                "#include <metal_stdlib>\nusing namespace metal;\n{Q2_K_DEQUANT_MSL}\n{Q2_K_MATVEC_BODY_MSL}"
+                "#include <metal_stdlib>\nusing namespace metal;\n{Q2_K_DEQUANT_MSL}\n{}\n{Q2_K_MATVEC_BODY_MSL}",
+                crate::moe_mv_id::MOE_MV_ID_MSL
             )
             .into_boxed_str(),
         )

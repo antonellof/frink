@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 mod backend;
+pub mod quant_encode;
 pub mod synthetic_llama;
 #[allow(unused_imports)]
 pub use backend::{backend, pin_backend, tolerance, Backend, METAL_GOLDEN_TOL};

@@ -4,7 +4,7 @@
 //! MXFP4 matvec every expert product of a Metal decode ran on the host
 //! with the GPU idle. `gptoss_tiny.gguf` is an all-F32 file, so it never
 //! reached that gap; this test re-stores the fixture's routed expert
-//! gate and up projections as MXFP4 in memory (a nearest-value E2M1 quantizer below, any byte
+//! gate and up projections as MXFP4 in memory (the nearest-value E2M1 quantizer in `common::quant_encode`, any byte
 //! pattern being a valid block) and runs the same decode twice:
 //!
 //! - in a CPU-pinned child process, which prints its logits, and
@@ -33,41 +33,7 @@ const PROMPT: [usize; 6] = [3, 7, 11, 19, 23, 5];
 
 const CHILD: &str = "FRINK_GPTOSS_MXFP4_CHILD";
 
-/// E2M1, as `frink_quant` and ggml's Metal shaders read it.
-const E2M1: [f32; 16] = [
-    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
-];
-
-/// One row of f32 as GGUF MXFP4 blocks: an E8M0 exponent putting the
-/// block's largest magnitude at or under 6, then each value's nearest
-/// E2M1 code, low nibble element `j`, high nibble `j + 16`.
-fn mxfp4_row(row: &[f32]) -> Vec<u8> {
-    assert!(row.len().is_multiple_of(32), "MXFP4 needs whole blocks");
-    let mut out = Vec::with_capacity(row.len() / 32 * 17);
-    for block in row.as_chunks::<32>().0 {
-        let amax = block.iter().fold(0f32, |m, v| m.max(v.abs()));
-        let e = if amax == 0.0 {
-            1
-        } else {
-            ((amax / 6.0).log2().ceil() as i32 + 127).clamp(1, 254)
-        };
-        let d = f32::from_bits((e as u32) << 23);
-        let code = |v: f32| {
-            (0..16u8)
-                .min_by(|&a, &b| {
-                    let da = (E2M1[a as usize] * d - v).abs();
-                    let db = (E2M1[b as usize] * d - v).abs();
-                    da.total_cmp(&db)
-                })
-                .expect("sixteen codes")
-        };
-        out.push(e as u8);
-        for j in 0..16 {
-            out.push(code(block[j]) | (code(block[j + 16]) << 4));
-        }
-    }
-    out
-}
+use common::quant_encode::mxfp4_row;
 
 fn to_mxfp4(m: &mut WeightMatrix) {
     let WeightMatrix::F32(t) = m else {
