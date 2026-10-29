@@ -127,6 +127,11 @@ nobody is working on and whose files no open branch is editing.
 - Agents implement and open a PR. They do not tag, publish,
   force-push, rent hardware or benchmark. A kernel merges only after
   its hardware tests ran on real hardware.
+- Clean cargo output often. Each `target/` is 10 to 40 GB and the
+  laptop disk is shared by every worktree. Run `df -h .` before a full
+  build and delete `target/` dirs of finished worktrees when under
+  30 GB free. Delete your own worktree's `target/` once your PR is
+  green or merged. Only ever delete `target/`, never source.
 
 ## Layout
 
