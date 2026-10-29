@@ -24,7 +24,8 @@
 //! the name (`mtp_blocks::trunk_layers`, `kv_head_dims`, `clamp_kqv`,
 //! `swa_geometry::rotary_widths`, the decoder's `load_*` helpers, ...).
 
-use frink_moe::GatingFunction;
+use frink_gguf::TensorSource;
+use frink_moe::{GatingFunction, SelectionRule};
 
 use crate::capability::{ArchProfile, DecoderFamily, SwaPattern, SwaWindowOverride};
 use crate::layer_shapes::ZeroKvLayer;
@@ -72,6 +73,10 @@ pub struct MoeFacts {
     pub routed_weight_before_ffn: bool,
     /// `router_input::router_input`.
     pub router_input: RouterInput,
+    /// Where `exp_probs_b` enters the top-k ([`SelectionRule`]). No
+    /// legacy table names the other rule: every tabled row is
+    /// `BiasAfterGating`, `build_moe_ffn`'s own.
+    pub selection: SelectionRule,
 }
 
 /// Sliding-window rows (`capability`, `swa_geometry`).
@@ -94,6 +99,11 @@ pub struct SwaFacts {
     pub rope_base_follows_model: bool,
     /// `capability::swa_rope_scale_follows_model`.
     pub rope_scale_follows_model: bool,
+    /// The llama.cpp line where `arch` seeds the sliding layers' RoPE
+    /// base from the model's and never reads `rope.freq_base_swa`, so a
+    /// file's key is dead. `None` where the key is read (the base loader
+    /// does not read it; each graph's `load_arch_hparams` does or not).
+    pub rope_base_key_unread: Option<&'static str>,
 }
 
 /// FFN rows, in the order the loader tests them.
@@ -210,6 +220,16 @@ pub struct HparamRules {
     pub attention_scale_override: fn(&str, usize, usize, usize, usize) -> Option<f32>,
     /// `rope_layers::rope_layers(arch, n_layers, has_window, n_dense_lead)`.
     pub rope_layers: fn(&str, usize, bool, usize) -> RopeLayers,
+    /// The refusals in the architecture's own `load_arch_hparams` and
+    /// `load_arch_tensors` that no table states: a REQUIRED key, a
+    /// value the graph throws on, a REQUIRED tensor the generic loader
+    /// treats as optional. `(file, arch, n_layers)`; `None` loads.
+    pub load_checks: fn(&dyn TensorSource, &str, usize) -> Option<String>,
+}
+
+/// [`HparamRules::load_checks`] for an architecture with none.
+pub fn no_load_checks(_: &dyn TensorSource, _: &str, _: usize) -> Option<String> {
+    None
 }
 
 impl HparamRules {
@@ -218,6 +238,7 @@ impl HparamRules {
         swa_window_override: crate::capability::swa_window_override_from_table,
         attention_scale_override: crate::capability::attention_scale_override,
         rope_layers: crate::rope_layers::rope_layers_from_table,
+        load_checks: no_load_checks,
     };
 }
 
@@ -235,6 +256,7 @@ impl ArchFacts {
             leading_dense_key_is_inert: false,
             routed_weight_before_ffn: false,
             router_input: RouterInput::NormedFfnInput,
+            selection: SelectionRule::BiasAfterGating,
         },
         swa: SwaFacts {
             default_layout: None,
@@ -245,6 +267,7 @@ impl ArchFacts {
             layers_drop_rope_factors: None,
             rope_base_follows_model: false,
             rope_scale_follows_model: false,
+            rope_base_key_unread: None,
         },
         ffn: FfnFacts {
             length_counts_gate_and_up: false,
@@ -317,10 +340,11 @@ impl ArchFacts {
                 leading_dense_key_is_inert: t::LEADING_DENSE_KEY_IS_INERT.contains(&arch),
                 routed_weight_before_ffn: crate::routed_weight_site::weight_before_ffn(arch),
                 router_input: crate::router_input::router_input(arch),
+                selection: SelectionRule::BiasAfterGating,
             },
             swa: SwaFacts {
                 default_layout: crate::capability::default_swa_layout_from_table(arch),
-                window_required: crate::swa_geometry::window_required(arch),
+                window_required: crate::swa_geometry::window_required_from_table(arch),
                 rope_base_required: crate::swa_geometry::swa_rope_base_required(arch),
                 layers_unscaled_rope: crate::swa_geometry::swa_layers_unscaled_rope_from_table(
                     arch,
@@ -332,6 +356,7 @@ impl ArchFacts {
                 ),
                 rope_scale_follows_model:
                     crate::capability::swa_rope_scale_follows_model_from_table(arch),
+                rope_base_key_unread: None,
             },
             ffn: FfnFacts {
                 // No table: `qwen` was the only row (`crate::models::qwen`).

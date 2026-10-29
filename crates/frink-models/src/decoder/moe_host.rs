@@ -278,7 +278,8 @@ impl Decoder {
     /// them: grouped selection when the checkpoint declares expert
     /// groups; the biased/scaled port when the layer carries
     /// `exp_probs_b` or the model carries a non-unit
-    /// `expert_weights_scale`; otherwise the plain top-k this decoder has
+    /// `expert_weights_scale` (the bias added where `config.moe.selection`
+    /// says, `frink_moe::SelectionRule`); otherwise the plain top-k this decoder has
     /// always used. The last arm is kept rather than folded into
     /// `route_top_k_biased` so that every checkpoint without those two
     /// features routes through byte-identical code to before.
@@ -308,6 +309,7 @@ impl Decoder {
                 frink_moe::route_top_k_biased(
                     router_logits,
                     layer.moe.exp_probs_bias.as_deref(),
+                    config.moe.selection,
                     config.moe.n_experts_active,
                     config.moe.gating,
                     config.moe.norm_topk_prob,

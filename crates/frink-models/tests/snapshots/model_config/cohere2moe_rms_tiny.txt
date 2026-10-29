@@ -24,6 +24,7 @@ config: ModelConfig {
         norm_topk_prob: false,
         expert_group_count: None,
         expert_group_used_count: None,
+        selection: BiasAfterGating,
         expert_weights_scale: 1.0,
         routed_weight_before_ffn: false,
     },

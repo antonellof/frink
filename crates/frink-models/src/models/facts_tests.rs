@@ -94,12 +94,23 @@ fn assert_rules_agree(name: &str, a: HparamRules, b: HparamRules) {
         swa_window_override: wa,
         attention_scale_override: sa,
         rope_layers: ra,
+        load_checks: ca,
     } = a;
     let HparamRules {
         swa_window_override: wb,
         attention_scale_override: sb,
         rope_layers: rb,
+        load_checks: cb,
     } = b;
+    // An empty file: every check that reads a key or a tensor answers.
+    let empty = crate::test_source::StubSource::with_tensors(&[]);
+    for n_layers in [0, 1, 4] {
+        assert_eq!(
+            ca(&empty, name, n_layers),
+            cb(&empty, name, n_layers),
+            "{name}: load_checks({n_layers})"
+        );
+    }
     for n_layers in [1, 4, 26, 40, 46, 62, 63, 64, 65] {
         assert_eq!(
             wa(name, n_layers),
@@ -174,6 +185,10 @@ fn the_facts_agree_with_every_public_lookup() {
     use crate::capability as cap;
     for name in every_tabled_name() {
         let profile = cap::resolve_profile(name);
+        // A row no public lookup answers for: the registry entry's, else
+        // the table's. `no_registry_name_remains_in_a_legacy_table` holds
+        // the table to nothing for a registry name.
+        let def = crate::models::find(name).map(|d| d.facts);
         let want = ArchFacts {
             profile,
             audited: cap::is_audited_generic(name),
@@ -183,18 +198,27 @@ fn the_facts_agree_with_every_public_lookup() {
                     .iter()
                     .find(|(n, _)| *n == name)
                     .map(|(_, g)| *g),
-                reads_expert_weights_norm: t::EXPERT_WEIGHTS_NORM_READERS.contains(&name),
+                reads_expert_weights_norm: def
+                    .map_or(t::EXPERT_WEIGHTS_NORM_READERS.contains(&name), |f| {
+                        f.moe.reads_expert_weights_norm
+                    }),
                 reads_expert_weights_scale: t::EXPERT_WEIGHTS_SCALE_READERS.contains(&name),
                 // A table with no public lookup: the definition's
                 // statement, else the table (`no_registry_name_remains_in_a_legacy_table`
                 // holds the table empty for registry names).
-                no_topk_renormalize: crate::models::find(name).map_or_else(
-                    || t::NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&name),
-                    |d| d.facts.moe.no_topk_renormalize,
-                ),
-                leading_dense_key_is_inert: t::LEADING_DENSE_KEY_IS_INERT.contains(&name),
+                no_topk_renormalize: def
+                    .map_or(t::NO_TOPK_RENORMALIZE_ARCHITECTURES.contains(&name), |f| {
+                        f.moe.no_topk_renormalize
+                    }),
+                leading_dense_key_is_inert: def
+                    .map_or(t::LEADING_DENSE_KEY_IS_INERT.contains(&name), |f| {
+                        f.moe.leading_dense_key_is_inert
+                    }),
                 routed_weight_before_ffn: crate::routed_weight_site::weight_before_ffn(name),
                 router_input: crate::router_input::router_input(name),
+                selection: def.map_or(frink_moe::SelectionRule::BiasAfterGating, |f| {
+                    f.moe.selection
+                }),
             },
             swa: SwaFacts {
                 default_layout: cap::default_swa_layout(name),
@@ -205,11 +229,11 @@ fn the_facts_agree_with_every_public_lookup() {
                 layers_drop_rope_factors: crate::swa_geometry::swa_layers_drop_rope_factors(name),
                 rope_base_follows_model: cap::swa_rope_base_follows_model(name),
                 rope_scale_follows_model: cap::swa_rope_scale_follows_model(name),
+                rope_base_key_unread: def.and_then(|f| f.swa.rope_base_key_unread),
             },
             ffn: FfnFacts {
                 // No legacy table: only a definition states it.
-                length_counts_gate_and_up: crate::models::find(name)
-                    .is_some_and(|d| d.facts.ffn.length_counts_gate_and_up),
+                length_counts_gate_and_up: def.is_some_and(|f| f.ffn.length_counts_gate_and_up),
                 geglu: cap::uses_geglu(name),
                 relu_sqr: cap::uses_relu_sqr(name),
                 gelu_ungated: cap::uses_gelu_ungated(name),
@@ -272,6 +296,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 swa_window_override: cap::swa_window_override,
                 attention_scale_override: cap::attention_scale_override,
                 rope_layers: crate::rope_layers::rope_layers,
+                load_checks: def.map_or(super::no_load_checks, |f| f.rules.load_checks),
             },
         };
         assert_same(name, ArchFacts::of(name), want);

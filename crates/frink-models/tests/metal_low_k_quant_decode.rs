@@ -16,7 +16,7 @@
 //! CPU against itself.
 //!
 //! `frink_quant` has no Q2_K or Q3_K encoder (the formats are load-only
-//! there), so the fixture's encoders are here: a plain min/max
+//! there), so the fixture's encoders are in `common::quant_encode`: a plain min/max
 //! quantizer per 16-weight sub-block. They only have to be a valid
 //! packing of SOME weights; `the_fixture_encoders_round_trip_through_the_cpu_dequant`
 //! holds them to `frink_quant`'s dequant, which is what defines the
@@ -26,7 +26,6 @@ mod common;
 
 use frink_gguf::{GgmlType, ShardedGguf};
 use frink_models::{Decoder, ModelConfig};
-use half::f16;
 use std::path::Path;
 
 use common::synthetic_llama;
@@ -37,102 +36,11 @@ const STEPS: usize = 16;
 /// Set on the child: the fixture to print rows for.
 const CHILD: &str = "FRINK_LOW_K_DECODE_CHILD";
 
-/// One Q2_K block (256 weights, 84 bytes): per sub-block, the range
-/// `[min(lo, 0), hi]` in four steps.
-fn q2_k_block(v: &[f32], out: &mut Vec<u8>) {
-    let mut step = [0f32; 16];
-    let mut min = [0f32; 16];
-    for s in 0..16 {
-        let sub = &v[16 * s..16 * s + 16];
-        let lo = sub.iter().copied().fold(0f32, f32::min);
-        let hi = sub.iter().copied().fold(f32::MIN, f32::max);
-        step[s] = (hi - lo) / 3.0;
-        min[s] = -lo;
-    }
-    let d = f16::from_f32(step.iter().copied().fold(0f32, f32::max) / 15.0);
-    let dmin = f16::from_f32(min.iter().copied().fold(0f32, f32::max) / 15.0);
-    let (df, dminf) = (d.to_f32(), dmin.to_f32());
-    let mut blk = [0u8; 84];
-    for s in 0..16 {
-        let sc = if df > 0.0 {
-            (step[s] / df).round().clamp(0.0, 15.0)
-        } else {
-            0.0
-        };
-        let m = if dminf > 0.0 {
-            (min[s] / dminf).round().clamp(0.0, 15.0)
-        } else {
-            0.0
-        };
-        blk[s] = sc as u8 | ((m as u8) << 4);
-        let (dl, ml) = (df * sc, dminf * m);
-        let (n, j, h) = (s / 8, (s / 2) % 4, s % 2);
-        for l in 0..16 {
-            let raw = if dl > 0.0 {
-                ((v[16 * s + l] + ml) / dl).round().clamp(0.0, 3.0)
-            } else {
-                0.0
-            };
-            blk[16 + 32 * n + 16 * h + l] |= (raw as u8) << (2 * j);
-        }
-    }
-    blk[80..82].copy_from_slice(&d.to_le_bytes());
-    blk[82..84].copy_from_slice(&dmin.to_le_bytes());
-    out.extend_from_slice(&blk);
-}
-
-/// One Q3_K block (256 weights, 110 bytes): per sub-block, a symmetric
-/// scale putting `max |v|` at 4 steps, the value stored as `q + 4` in
-/// three bits (two in `qs`, the high one in `hmask`).
-fn q3_k_block(v: &[f32], out: &mut Vec<u8>) {
-    let mut step = [0f32; 16];
-    for s in 0..16 {
-        step[s] = v[16 * s..16 * s + 16]
-            .iter()
-            .fold(0f32, |m, x| m.max(x.abs()))
-            / 4.0;
-    }
-    let d = f16::from_f32(step.iter().copied().fold(0f32, f32::max) / 31.0);
-    let df = d.to_f32();
-    let mut blk = [0u8; 110];
-    for s in 0..16 {
-        let sc = if df > 0.0 {
-            (step[s] / df).round().clamp(0.0, 31.0)
-        } else {
-            0.0
-        };
-        let sc6 = sc as u8 + 32;
-        blk[96 + s % 8] |= (sc6 & 0xF) << (4 * (s / 8));
-        blk[104 + s % 4] |= (sc6 >> 4) << (2 * (s / 4));
-        let dl = df * sc;
-        let (n, j, h) = (s / 8, (s / 2) % 4, s % 2);
-        for l in 0..16 {
-            let q = if dl > 0.0 {
-                (v[16 * s + l] / dl).round().clamp(-4.0, 3.0)
-            } else {
-                0.0
-            };
-            let q = (q + 4.0) as u8;
-            blk[32 + 32 * n + 16 * h + l] |= (q & 3) << (2 * j);
-            blk[16 * h + l] |= (q >> 2) << (4 * n + j);
-        }
-    }
-    blk[108..110].copy_from_slice(&d.to_le_bytes());
-    out.extend_from_slice(&blk);
-}
-
 fn encode(dtype: GgmlType, cols: usize, w: &[f32]) -> Vec<u8> {
-    let block: fn(&[f32], &mut Vec<u8>) = match dtype {
-        GgmlType::Q2K => q2_k_block,
-        GgmlType::Q3K => q3_k_block,
+    match dtype {
+        GgmlType::Q2K | GgmlType::Q3K => common::quant_encode::encode(dtype, cols, w),
         other => panic!("this suite encodes Q2_K and Q3_K, not {other:?}"),
-    };
-    assert_eq!(cols % 256, 0, "a K-quant row is whole 256-weight blocks");
-    let mut out = Vec::new();
-    for chunk in w.as_chunks::<256>().0 {
-        block(chunk, &mut out);
     }
-    out
 }
 
 /// The encoders are a packing of the weights `frink_quant` decodes back,

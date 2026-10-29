@@ -175,6 +175,9 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("granite_swa", "src/models/granite-swa.cpp:17"),
     // Landed upstream after the 2026-09-19 pin.
     ("lfm3", "src/models/lfm3.cpp:13"),
+    // Also after it. `crate::models::kolibri1` cannot state this row:
+    // `ArchFacts` does not carry the pattern read yet.
+    ("kolibri1", "src/models/kolibri1.cpp:17"),
 ];
 
 /// The graphs that read `nextn_predict_layers` BEFORE the array, so

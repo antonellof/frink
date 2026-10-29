@@ -89,7 +89,7 @@ is:
 |---|---|
 | 1 | Fix what is wrong, and close the oracle's hole |
 | 2 | Model layer: audit, vocabulary, then split |
-| 3 | Close the 10 unaudited architectures, auditing outward |
+| 3 | Close the 9 unaudited architectures, auditing outward |
 | 4 | Out-of-core MoE, and one large real checkpoint |
 | 5 | CPU decode scaling |
 | 6 | Hardware reach: the backend seam, then Vulkan |
@@ -140,8 +140,8 @@ engine rather than working on it.
   (`graniteswitch`), a delta-net over a hybrid memory index
   (`qwen4exp`), a second expert bank (`grovemoe`), and the seven the
   2026-10-28 pin move brought in, less `lfm3`, which closed the same
-  day: `flint` is a tokenizer away, `kolibri1` needs a router that
-  adds its selection bias before the sigmoid, and `beam`,
+  day, and `kolibri1`, which closed the next on a second selection
+  rule: `flint` is a tokenizer away, and `beam`,
   `maion-coder`, `k2-horizon` and `muse-spark` need new code
   ([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md))
 - Real GLM-5.2, DeepSeek V4 and full Kimi, run end to end on a

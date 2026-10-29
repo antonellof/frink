@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/kolibri1_no_bias_tiny.gguf
+config: REFUSED: architecture 'kolibri1' requires unimplemented feature: `blk.0.exp_probs_b.bias` is absent; kolibri1.cpp:43-54 creates it as REQUIRED

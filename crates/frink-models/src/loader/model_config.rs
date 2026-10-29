@@ -845,19 +845,20 @@ impl ModelConfig {
         // the Gemma-3 lineage relies on that default; the architectures
         // in `swa_rope_base_follows_model` instead seed it from the
         // model's own base before the key can override.
+        // A graph that seeds the base and reads no key
+        // (`SwaFacts::rope_base_key_unread`) leaves a file's key dead.
         let rope_theta_swa = if sliding_window.is_some() {
             let fallback = if facts.swa.rope_base_follows_model {
                 rope_theta
             } else {
                 10_000.0
             };
-            Some(
-                metadata_f32_any(
-                    file,
-                    &[key("rope.freq_base_swa"), key("rope_freq_base_swa")],
-                )
-                .unwrap_or(fallback),
+            let declared = metadata_f32_any(
+                file,
+                &[key("rope.freq_base_swa"), key("rope_freq_base_swa")],
             )
+            .filter(|_| facts.swa.rope_base_key_unread.is_none());
+            Some(declared.unwrap_or(fallback))
         } else {
             None
         };
@@ -1205,6 +1206,12 @@ impl ModelConfig {
             );
         }
 
+        // The architecture's own `load_arch_hparams` / `load_arch_tensors`
+        // throws that no table states (`HparamRules::load_checks`).
+        if let Some(reason) = (facts.rules.load_checks)(file, &arch, n_layers) {
+            return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
+        }
+
         // LAST, deliberately. The generic path is a GUESS, so it has to
         // be opted into rather than fallen onto: it assumes plain GQA
         // with no ALiBi, no learned position embeddings and no
@@ -1306,6 +1313,7 @@ impl ModelConfig {
                 expert_group_used_count: metadata_u64_any(file, &[key("expert_group_used_count")])
                     .map(|v| v as usize)
                     .filter(|&c| c > 0),
+                selection: facts.moe.selection,
                 expert_weights_scale,
                 routed_weight_before_ffn: facts.moe.routed_weight_before_ffn,
             },
