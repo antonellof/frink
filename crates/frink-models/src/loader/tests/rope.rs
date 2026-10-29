@@ -161,6 +161,9 @@ fn yarn_betas_are_read_only_where_the_graph_reads_them() {
         ("qwen3", 32.0, 1.0),
         ("laguna", 8.0, 2.0),
         ("mistral3", 8.0, 2.0),
+        // `grok.cpp:26-27` read both over its own `beta_fast = 8` seed,
+        // so the declared `beta_slow` is what tells the reader apart.
+        ("grok", 8.0, 2.0),
     ] {
         let y = yarn_scaling_from_gguf(&file(arch), arch, Some(4096))
             .unwrap_or_else(|| panic!("{arch}: yarn declared"));

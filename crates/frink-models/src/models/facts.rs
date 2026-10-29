@@ -148,6 +148,9 @@ pub struct ScalingFacts {
     /// `clamp_kqv`: `None` where the graph reads no clamp, else whether
     /// the key is REQUIRED.
     pub clamp_kqv: Option<bool>,
+    /// `rope_scaling::YARN_BETA_READERS`: the YaRN `beta_fast` /
+    /// `beta_slow` keys are read (dead metadata everywhere else).
+    pub reads_yarn_beta: bool,
 }
 
 /// Layer-topology rows read at config time.
@@ -204,6 +207,8 @@ pub struct TensorFacts {
     pub ffn_bias: Option<(Presence, bool)>,
     /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
     pub output_bias: Option<Presence>,
+    /// `parallel_dense_ffn`: a dense FFN summed with the routed experts.
+    pub parallel_dense: Option<&'static crate::parallel_dense_ffn::ParallelDenseFfn>,
 }
 
 /// The decisions that are code rather than rows: each takes a
@@ -287,6 +292,7 @@ impl ArchFacts {
             logit_softcap: false,
             embeddings_scaled_by_sqrt_n_embd: false,
             clamp_kqv: None,
+            reads_yarn_beta: false,
         },
         topology: TopologyFacts {
             pure_recurrent_block: None,
@@ -311,6 +317,7 @@ impl ArchFacts {
             attn_out_bias: None,
             ffn_bias: None,
             output_bias: None,
+            parallel_dense: None,
         },
         rules: HparamRules::LEGACY,
     };
@@ -361,7 +368,7 @@ impl ArchFacts {
             ffn: FfnFacts {
                 // No table: `qwen` was the only row (`crate::models::qwen`).
                 length_counts_gate_and_up: false,
-                geglu: crate::capability::uses_geglu(arch),
+                geglu: crate::capability::uses_geglu_from_table(arch),
                 relu_sqr: crate::capability::uses_relu_sqr(arch),
                 gelu_ungated: crate::capability::uses_gelu_ungated(arch),
                 reglu: crate::capability::uses_reglu(arch),
@@ -383,6 +390,7 @@ impl ArchFacts {
                     crate::capability::embeddings_scaled_by_sqrt_n_embd(arch, p.family)
                 }),
                 clamp_kqv: crate::clamp_kqv::clamp_row_from_table(arch),
+                reads_yarn_beta: crate::loader::rope_scaling::YARN_BETA_READERS.contains(&arch),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
@@ -413,6 +421,7 @@ impl ArchFacts {
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
+                parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn_from_table(arch),
             },
             rules: HparamRules::LEGACY,
         }

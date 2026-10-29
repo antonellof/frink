@@ -93,7 +93,6 @@ pub const ATTN_OUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("nemotron_h", Presence::Optional),
     ("nemotron_h_moe", Presence::Optional),
     ("pangu-embedded", Presence::Required),
-    ("phimoe", Presence::Required),
     ("starcoder", Presence::Required),
     ("starcoder2", Presence::Required),
 ];
@@ -132,8 +131,8 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
 /// `wavtokenizer-dec` on no engine here.
 pub const OUTPUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("phi2", Presence::Required),
-    ("phimoe", Presence::Required),
-    // `qwen2` states its row in `crate::models::qwen2` (#403 step 4).
+    // `qwen2` and `phimoe` state their rows in `crate::models` (#403
+    // steps 4 and 6).
 ];
 
 /// Whether `arch`'s graph creates `output.bias`, through the registry.

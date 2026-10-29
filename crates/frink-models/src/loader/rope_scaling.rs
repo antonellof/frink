@@ -35,7 +35,9 @@ pub(super) fn linear_scaling_from_gguf(file: &impl TensorSource, arch: &str) -> 
 /// `expert_weights_scale` shape again: a key honoured where upstream
 /// ignores it. `laguna`'s reading is the one that moved upstream; for it
 /// frink was already right.
-pub(super) const YARN_BETA_READERS: &[&str] = &["grok", "mistral3", "laguna"];
+///
+/// `grok` states its row in `crate::models::grok` (#403 step 6).
+pub(crate) const YARN_BETA_READERS: &[&str] = &["mistral3", "laguna"];
 
 /// The YaRN RoPE scaling a GGUF declares, or `None` when this file
 /// declares none that changes the rotation.
@@ -79,7 +81,7 @@ pub(crate) fn yarn_scaling_from_gguf(
     let factor = metadata_f32_any(file, &[key("rope.scaling.factor")])
         .filter(|f| f.is_finite() && *f > 1.0)?;
     let orig_max_pos = orig_ctx?;
-    let reads_beta = YARN_BETA_READERS.contains(&arch);
+    let reads_beta = crate::models::ArchFacts::of(arch).scaling.reads_yarn_beta;
     let beta = |suffix: &str, default: f32| -> f32 {
         if !reads_beta {
             return default;

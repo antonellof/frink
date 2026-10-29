@@ -1380,12 +1380,19 @@ pub fn uses_non_parametric_rms_norm(arch: &str) -> bool {
 /// (`crate::scalar_multipliers`); `tests/command_r_graphs.rs`. The
 /// third is `cohere2` (Command-R7B), the same graph with a window
 /// (`cohere2.cpp:78,147`); `tests/cohere2_graphs.rs`.
-pub const WEIGHTED_LAYER_NORM: &[&str] = &["dbrx", "command-r", "cohere2", "cohere2moe", "mpt"];
+///
+/// `dbrx` states its row in `crate::models::dbrx` (#403 step 6).
+pub const WEIGHTED_LAYER_NORM: &[&str] = &["command-r", "cohere2", "cohere2moe", "mpt"];
 
-/// Does this architecture normalise with a weighted LayerNorm?
-/// See [`WEIGHTED_LAYER_NORM`].
+/// Does this architecture normalise with a weighted LayerNorm? Its
+/// norm-site row's function, which is [`WEIGHTED_LAYER_NORM`] or its
+/// `crate::models` definition.
 pub fn uses_weighted_layer_norm(arch: &str) -> bool {
-    WEIGHTED_LAYER_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::LayerNorm
 }
 
 /// Architectures that normalise with a **LayerNorm with a learned
@@ -1454,20 +1461,15 @@ pub fn uses_biased_layer_norm(arch: &str) -> bool {
     BIASED_LAYER_NORM.contains(&arch)
 }
 
-/// Architectures that normalise with an **RMSNorm with a learned weight
-/// AND bias** -- `build_norm(x, w, b, LLM_NORM_RMS, il)` -- at every
-/// norm site, all REQUIRED: `phimoe` (Phi-3.5-MoE), whose tensors are
-/// `phimoe.cpp:20-21,28-29,35-36` and whose graph is `phi3`'s
-/// (`phi3.cpp:99-102,137-139,174-177` pass the bias; `phi3` never
-/// creates one). Measured: `grep -B3 LLM_NORM_RMS src/models/*.cpp |
-/// grep norm_b` is `phi3` (this row's graph), `chameleon` (passes NULL),
-/// and `deepseek32` / `glm-dsa` / `rwkv6qwen2` / `arwkv7` on other
-/// engines. [`crate::norm::NormOp::RmsBias`]; `tests/phimoe_graphs.rs`.
-pub const BIASED_RMS_NORM: &[&str] = &["phimoe"];
-
-/// See [`BIASED_RMS_NORM`].
+/// Does this architecture normalise with an RMSNorm with a learned
+/// weight AND bias? Derived from its norm-site row: `phimoe`, the one
+/// such graph, states it in `crate::models::phimoe` (#403 step 6).
 pub fn uses_biased_rms_norm(arch: &str) -> bool {
-    BIASED_RMS_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::RmsBias
 }
 
 /// How the generic `Decoder` / `ModelConfig::from_gguf` path treats a
@@ -3509,11 +3511,6 @@ pub fn swa_window_override(arch: &str, n_layers: usize) -> SwaWindowOverride {
 pub fn swa_window_override_from_table(arch: &str, _n_layers: usize) -> SwaWindowOverride {
     match arch {
         "phi3" => SwaWindowOverride::Drop,
-        // phimoe.cpp:3-10 read no window key at all, so `swa_type` stays
-        // NONE and the key `conversion/phi.py:171` writes for every
-        // export is dead metadata: libllama reports `n_swa = 0` for a
-        // file declaring one (measured, tests/phimoe_graphs.rs).
-        "phimoe" => SwaWindowOverride::Drop,
         // smallthinker.cpp:8.
         "smallthinker" => SwaWindowOverride::Pin(SMALLTHINKER_PINNED_WINDOW),
         _ => SwaWindowOverride::Honour,
@@ -3543,6 +3540,12 @@ pub fn swa_window_override_from_table(arch: &str, _n_layers: usize) -> SwaWindow
 /// listed. The Gemma lineage is GELU too and stays on the family rule,
 /// because every Gemma row IS `GemmaFamily`.
 pub fn uses_geglu(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch).ffn.geglu
+}
+
+/// [`uses_geglu`] from this list alone (`grok` is in
+/// `crate::models::grok`).
+pub(crate) fn uses_geglu_from_table(arch: &str) -> bool {
     // `spark2_5` joined on 2026-09-19 with the pin move:
     // `src/models/spark2-5.cpp:124` passes `LLM_FFN_GELU` under
     // `LLM_FFN_PAR` to `build_ffn`, i.e. a GATED GELU, and the row is
@@ -3550,7 +3553,7 @@ pub fn uses_geglu(arch: &str) -> bool {
     // it SwiGLU and a different FFN on every layer. Its golden
     // (`tests/gated_attention_graphs.rs`) holds at the same GeGLU
     // tolerance llama.cpp's f16 GELU table forces.
-    matches!(arch, "grok" | "spark2_5")
+    matches!(arch, "spark2_5")
 }
 
 /// Architectures whose FFN is the UNGATED ReLU-squared MLP:
@@ -3911,17 +3914,11 @@ pub fn attention_scale_override(
 /// logit softcaps frink implements -- `attn_logit_softcapping` on the
 /// attention scores and `final_logit_softcapping` after the lm_head.
 ///
-/// `grok`: `llama-graph.cpp:2572-2582` applies
-/// `30 * tanh(kq * f_attn_out_scale / 30)` before the softmax, which is
-/// frink's `attn_logit_softcap` over a Q pre-scaled by
-/// `ModelConfig::attention_scale`; `grok.cpp:214-218` applies the final
-/// softcap when the file declares one (default 0, off). The converter
-/// (`conversion/grok.py:34`) writes `attn_logit_softcapping` for EVERY
-/// Grok export, so without this list no real Grok file could load.
+/// `grok` states its row in `crate::models::grok` (#403 step 6).
 ///
 /// The Gemma family is not here because it is exempted as a family
 /// below; a name here is one whose graph was read for both softcaps.
-pub const LOGIT_SOFTCAP_ARCHITECTURES: &[&str] = &["grok", "muse-glimmer"];
+pub const LOGIT_SOFTCAP_ARCHITECTURES: &[&str] = &["muse-glimmer"];
 
 /// Metadata keys that, when present with a nonzero value, require math
 /// frink's generic decoder does not implement *unless* the architecture

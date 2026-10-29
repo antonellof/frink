@@ -46,10 +46,10 @@ use common::{
     assert_all_three_paths_match_within, assert_decoder_matches_on_all_three_paths, graph_caches,
     kl_vs_golden, load_graph_fixture, worst_vs, GRAPH_PROMPT,
 };
-use frink_models::capability::{resolve_architecture, ArchPath, BIASED_RMS_NORM};
+use frink_models::capability::{resolve_architecture, ArchPath};
 use frink_models::config::RopeLayout;
 use frink_models::norm::NormOp;
-use frink_models::proj_bias::{Presence, ATTN_OUT_BIAS_CREATORS, OUTPUT_BIAS_CREATORS};
+use frink_models::proj_bias::{attn_out_presence, output_presence, Presence};
 use frink_models::Decoder;
 
 const PHIMOE: &str = "phimoe";
@@ -203,9 +203,16 @@ fn report_kl_against_llama_cpp() {
 /// attn factor.
 #[test]
 fn the_loaded_decoder_is_the_graph() {
-    assert_eq!(BIASED_RMS_NORM, &[PHIMOE]);
-    assert!(ATTN_OUT_BIAS_CREATORS.contains(&(PHIMOE, Presence::Required)));
-    assert!(OUTPUT_BIAS_CREATORS.contains(&(PHIMOE, Presence::Required)));
+    // The rows live in `frink_models::models::phimoe`; the census is over
+    // the catalog, so `phimoe` stays the one biased-RMSNorm graph.
+    let biased_rms: Vec<&str> = frink_models::capability::architecture_catalog()
+        .iter()
+        .map(|p| p.gguf_name)
+        .filter(|n| frink_models::capability::uses_biased_rms_norm(n))
+        .collect();
+    assert_eq!(biased_rms, [PHIMOE]);
+    assert_eq!(attn_out_presence(PHIMOE), Some(Presence::Required));
+    assert_eq!(output_presence(PHIMOE), Some(Presence::Required));
     assert!(matches!(
         resolve_architecture(PHIMOE),
         Some(ArchPath::GenericGqa {
