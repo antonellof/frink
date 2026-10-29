@@ -271,7 +271,11 @@ impl ModelConfig {
         // itself is read below.
         let declared_rms_eps = metadata_f32_any(file, &[key("attention.layer_norm_rms_epsilon")])
             .filter(|eps| *eps != 0.0 || !facts.norm.norm_by_rms_eps_key);
-        let norm_function = crate::norm::norm_function_for_file(&arch, declared_rms_eps);
+        let norm_function = crate::norm::file_norm_function(
+            facts.norm.norm_by_rms_eps_key,
+            facts.tensors.norm_sites.function,
+            declared_rms_eps,
+        );
         let rms_norm_eps = declared_rms_eps
             .or_else(|| metadata_f32_any(file, &[key("attention.layer_norm_epsilon")]))
             .unwrap_or_else(|| {
@@ -831,8 +835,8 @@ impl ModelConfig {
         // every host body shares (`decoder/qkv_bias.rs`). See
         // `crate::clamp_kqv`, which also records that both converters
         // really write this key.
-        let clamp_kqv = crate::clamp_kqv::resolve_clamp(
-            &arch,
+        let clamp_kqv = crate::clamp_kqv::resolve_clamp_for(
+            facts.scaling.clamp_kqv,
             metadata_f32_any(file, &[key("attention.clamp_kqv")]),
         )
         .map_err(|e| LoadError::UnsupportedFeature(arch.clone(), e.message(&arch)))?;

@@ -1290,77 +1290,31 @@ pub fn is_audited_generic(arch: &str) -> bool {
     AUDITED_GENERIC_GQA.contains(&arch)
 }
 
-/// Architectures whose layers have **no pre-attention norm and no
-/// pre-FFN norm at all**: the post-norm-only residual topology.
-///
-/// ```text
-/// ffn_inp = x       + post_attn_norm(attn(x))
-/// out     = ffn_inp + post_ffn_norm(ffn(ffn_inp))
-/// ```
-///
-/// Not a family resemblance -- the two graphs were read side by side
-/// and are the same statement for statement. `src/models/olmo2.cpp`
-/// creates only `attn_q_norm`, `attn_k_norm`, `attn_post_norm` and
-/// `ffn_post_norm` per layer (:45-52) and reads the raw residual at
-/// both sublayers (`cur = inpL` at :92, `build_ffn(ffn_inp, ...)` at
-/// :169), norming each branch's OUTPUT before its residual add
-/// (:160-165, :177-182). `src/models/exaone4.cpp` is the same list
-/// (:60-67) and the same four lines (:118, :159, :152-155, :166-169).
-///
-/// Both are refused unless [`AUDITED_GENERIC_GQA`] names them, and
-/// `crate::norm::NormOp` is the one implementation they share.
-/// Adding a third name here means having read a third `*.cpp`: this
-/// list decides whether `loader.rs` demands `blk.N.attn_norm.weight`
-/// from a file, so a wrong entry is a load that fails or a norm that
-/// silently disappears.
-pub const POST_NORM_ONLY_ARCHITECTURES: &[&str] = &["olmo2", "exaone4"];
-
-/// Does this architecture read the raw residual at both sublayers?
-/// See [`POST_NORM_ONLY_ARCHITECTURES`].
+/// Does this architecture read the raw residual at both sublayers (no
+/// pre-attention and no pre-FFN norm)? Derived from its norm-site row:
+/// `olmo2` and `exaone4` state it in `crate::models` (#403 step 3).
 pub fn is_post_norm_only(arch: &str) -> bool {
-    POST_NORM_ONLY_ARCHITECTURES.contains(&arch)
+    let sites = crate::models::ArchFacts::of(arch).tensors.norm_sites;
+    sites.attn.is_none() && sites.ffn.is_none()
 }
 
-/// Architectures that normalise with a **non-parametric LayerNorm** --
-/// subtract the mean, divide by the standard deviation, no learned
-/// weight and no bias -- at every norm site.
-///
-/// `olmo` (OLMo-1), and llama.cpp has no second one. `olmo.cpp:27-35`
-/// creates Q/K/V, `attn_output` and gate/up/down and NOT ONE norm
-/// tensor, and its graph is `build_norm(x, NULL, NULL, LLM_NORM, il)`
-/// at :65-67 (pre-attention), :104-106 (pre-FFN) and :128-130 (final).
-///
-/// It is pre-norm like `llama`, so this is orthogonal to
-/// [`POST_NORM_ONLY_ARCHITECTURES`]: the difference is the norm
-/// FUNCTION, not the residual wiring, and a name cannot be on both
-/// lists (`loader.rs`'s
-/// `the_norm_slot_and_function_lists_cannot_contradict`).
-///
-/// **This list will not grow, and that is a measured claim rather than
-/// an expectation.** Every `build_norm` call in all of llama.cpp's
-/// `src/models/*.cpp` graphs was scanned for a null weight argument:
-/// three calls pass one to `LLM_NORM`, and all three are `olmo.cpp`.
-/// `talkie.cpp` passes a null weight to `LLM_NORM_RMS` at five sites,
-/// which is a non-parametric RMSNorm -- a different function, and a row
-/// this list does not serve.
-///
-/// The LayerNorm *function* with a learned weight is a different list,
-/// [`WEIGHTED_LAYER_NORM`], and it exists now because `dbrx` gave it a
-/// caller.
-pub const NON_PARAMETRIC_LAYER_NORM: &[&str] = &["olmo"];
-
-/// Does this architecture normalise without any learned parameters?
-/// See [`NON_PARAMETRIC_LAYER_NORM`].
+/// Does this architecture normalise with a non-parametric LayerNorm
+/// at every site? Derived from its norm-site row: `olmo` states it in
+/// `crate::models::olmo` (#403 step 3).
 pub fn uses_non_parametric_layer_norm(arch: &str) -> bool {
-    NON_PARAMETRIC_LAYER_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::LayerNormNoParams
 }
 
 /// Architectures that normalise with a **non-parametric RMSNorm** --
 /// `build_norm(x, nullptr, nullptr, LLM_NORM_RMS, il)` -- at every norm
 /// site: no `attn_norm`, `ffn_norm` or `output_norm` tensor in the file.
 ///
-/// The RMS twin of [`NON_PARAMETRIC_LAYER_NORM`], and measured the same
-/// way: every `build_norm` call with a null weight across all 155
+/// The RMS twin of `olmo`'s non-parametric LayerNorm
+/// (`crate::models::olmo`), and measured the same way: every `build_norm` call with a null weight across all 155
 /// graphs is `olmo.cpp` (three, `LLM_NORM`) and `talkie.cpp` (five,
 /// `LLM_NORM_RMS`: the embeddings at `:50`, `attn_norm` at `:68`, the K
 /// norm at `:90`, `ffn_norm` at `:110`, the final norm at `:137`).
@@ -3544,6 +3498,13 @@ pub const SMALLTHINKER_PINNED_WINDOW: usize = 4096;
 
 /// See [`SwaWindowOverride`].
 pub fn swa_window_override(arch: &str, n_layers: usize) -> SwaWindowOverride {
+    (crate::models::ArchFacts::of(arch).rules.swa_window_override)(arch, n_layers)
+}
+
+/// [`swa_window_override`] from this table alone, for
+/// `HparamRules::LEGACY`. `exaone4`'s layer-count gate is
+/// `crate::models::exaone4`'s rule.
+pub fn swa_window_override_from_table(arch: &str, _n_layers: usize) -> SwaWindowOverride {
     match arch {
         "phi3" => SwaWindowOverride::Drop,
         // phimoe.cpp:3-10 read no window key at all, so `swa_type` stays
@@ -3551,10 +3512,6 @@ pub fn swa_window_override(arch: &str, n_layers: usize) -> SwaWindowOverride {
         // export is dead metadata: libllama reports `n_swa = 0` for a
         // file declaring one (measured, tests/phimoe_graphs.rs).
         "phimoe" => SwaWindowOverride::Drop,
-        // exaone4.cpp:4. NOT `>= 64` and not a range: llama.cpp tests
-        // equality, so a hypothetical 63- or 65-layer EXAONE-4 gets no
-        // window there either.
-        "exaone4" if n_layers != 64 => SwaWindowOverride::Drop,
         // smallthinker.cpp:8.
         "smallthinker" => SwaWindowOverride::Pin(SMALLTHINKER_PINNED_WINDOW),
         _ => SwaWindowOverride::Honour,
@@ -3688,6 +3645,12 @@ pub fn uses_reglu(arch: &str) -> bool {
 }
 
 pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
+    crate::models::ArchFacts::of(arch).swa.default_layout
+}
+
+/// [`default_swa_layout`] from this table alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
     let last_dense = |period| {
         Some(SwaPattern {
             period,
@@ -3714,8 +3677,9 @@ pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
         // src/models/gemma-embedding.cpp:5. Deferred (embedding scope),
         // so latent rather than live.
         "gemma-embedding" => last_dense(6),
-        // src/models/cohere2.cpp:5, exaone4.cpp:7, olmo2.cpp:9
-        "cohere2" | "exaone4" | "olmo2" => last_dense(4),
+        // src/models/cohere2.cpp:5 (`exaone4` and `olmo2`, the same
+        // period, state it in `crate::models`)
+        "cohere2" => last_dense(4),
         // Added after an audit found this table covered 6 architectures
         // where llama.cpp hardcodes a period for 17. A MISSING entry is
         // not neutral: with no period, every layer gets windowed, so a
@@ -3780,6 +3744,14 @@ pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
 /// Gemma default to everything, which rotates a gpt-oss SWA layer at
 /// theta 10000 instead of its real 150000.
 pub fn swa_rope_base_follows_model(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .swa
+        .rope_base_follows_model
+}
+
+/// [`swa_rope_base_follows_model`] from this list alone (`exaone4` and
+/// `olmo2` are in `crate::models`).
+pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
         "afmoe"
@@ -3787,12 +3759,10 @@ pub fn swa_rope_base_follows_model(arch: &str) -> bool {
             | "cohere2moe"
             | "dflash"
             | "exaone-moe"
-            | "exaone4"
             | "gemma2"
             | "laguna"
             | "llama4"
             | "mellum"
-            | "olmo2"
             | "gpt-oss"
             | "smallthinker"
     )
@@ -3824,6 +3794,14 @@ pub fn swa_rope_base_follows_model(arch: &str) -> bool {
 /// Every name here is a `hparams.rope_freq_scale_train_swa =
 /// hparams.rope_freq_scale_train;` in `src/models/`, at the line given.
 pub fn swa_rope_scale_follows_model(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .swa
+        .rope_scale_follows_model
+}
+
+/// [`swa_rope_scale_follows_model`] from this list alone (`exaone4` is
+/// in `crate::models`).
+pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
         "afmoe"          // afmoe.cpp:22
@@ -3831,7 +3809,6 @@ pub fn swa_rope_scale_follows_model(arch: &str) -> bool {
             | "cohere2moe"  // cohere2moe.cpp:39
             | "dflash"      // dflash.cpp:59, :71
             | "exaone-moe"  // exaone-moe.cpp:10
-            | "exaone4"     // exaone4.cpp:12
             | "gemma2"      // gemma2.cpp:11
             | "llama4"      // llama4.cpp:24
             | "mellum"      // mellum.cpp:20

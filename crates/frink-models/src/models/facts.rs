@@ -134,6 +134,9 @@ pub struct ScalingFacts {
     /// `capability::embeddings_scaled_by_sqrt_n_embd` for the row's own
     /// family.
     pub embeddings_scaled_by_sqrt_n_embd: bool,
+    /// `clamp_kqv`: `None` where the graph reads no clamp, else whether
+    /// the key is REQUIRED.
+    pub clamp_kqv: Option<bool>,
 }
 
 /// Layer-topology rows read at config time.
@@ -152,6 +155,9 @@ pub struct TopologyFacts {
     /// `rope_finetuned::ROPE_GATED_ON_FINETUNED`: a file declaring
     /// `rope.scaling.finetuned = false` rotates nothing.
     pub rope_gated_on_finetuned: bool,
+    /// `mtp_blocks::NEXTN_READERS`: `nextn_predict_layers` blocks are
+    /// subtracted from the layer count.
+    pub reads_nextn: bool,
 }
 
 /// Decoder tensor-table rows (`Decoder::from_gguf`, canonical name).
@@ -206,9 +212,9 @@ pub struct HparamRules {
 impl HparamRules {
     /// Today's name-keyed functions.
     pub const LEGACY: Self = Self {
-        swa_window_override: crate::capability::swa_window_override,
+        swa_window_override: crate::capability::swa_window_override_from_table,
         attention_scale_override: crate::capability::attention_scale_override,
-        rope_layers: crate::rope_layers::rope_layers,
+        rope_layers: crate::rope_layers::rope_layers_from_table,
     };
 }
 
@@ -254,6 +260,7 @@ impl ArchFacts {
             multipliers: MultiplierSupport::NONE,
             logit_softcap: false,
             embeddings_scaled_by_sqrt_n_embd: false,
+            clamp_kqv: None,
         },
         topology: TopologyFacts {
             pure_recurrent_block: None,
@@ -262,6 +269,7 @@ impl ArchFacts {
             parallel_ssm: false,
             learned_positions: false,
             rope_gated_on_finetuned: false,
+            reads_nextn: false,
         },
         tensors: TensorFacts {
             gpt_oss_layers: false,
@@ -307,14 +315,19 @@ impl ArchFacts {
                 router_input: crate::router_input::router_input(arch),
             },
             swa: SwaFacts {
-                default_layout: crate::capability::default_swa_layout(arch),
+                default_layout: crate::capability::default_swa_layout_from_table(arch),
                 window_required: crate::swa_geometry::window_required(arch),
                 rope_base_required: crate::swa_geometry::swa_rope_base_required(arch),
-                layers_unscaled_rope: crate::swa_geometry::swa_layers_unscaled_rope(arch),
+                layers_unscaled_rope: crate::swa_geometry::swa_layers_unscaled_rope_from_table(
+                    arch,
+                ),
                 full_layers_rotate_half: crate::swa_geometry::full_layers_rotate_half(arch),
                 layers_drop_rope_factors: crate::swa_geometry::swa_layers_drop_rope_factors(arch),
-                rope_base_follows_model: crate::capability::swa_rope_base_follows_model(arch),
-                rope_scale_follows_model: crate::capability::swa_rope_scale_follows_model(arch),
+                rope_base_follows_model: crate::capability::swa_rope_base_follows_model_from_table(
+                    arch,
+                ),
+                rope_scale_follows_model:
+                    crate::capability::swa_rope_scale_follows_model_from_table(arch),
             },
             ffn: FfnFacts {
                 length_counts_gate_and_up: t::FFN_LENGTH_COUNTS_GATE_AND_UP.contains(&arch),
@@ -339,6 +352,7 @@ impl ArchFacts {
                 embeddings_scaled_by_sqrt_n_embd: profile.is_some_and(|p| {
                     crate::capability::embeddings_scaled_by_sqrt_n_embd(arch, p.family)
                 }),
+                clamp_kqv: crate::clamp_kqv::clamp_row_from_table(arch),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
@@ -348,10 +362,14 @@ impl ArchFacts {
                 learned_positions: crate::position_embd::learned_positions(arch),
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
                     .contains(&arch),
+                reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
             },
             tensors: TensorFacts {
                 gpt_oss_layers: arch == "gpt-oss",
-                norm_sites: NormSites::for_arch(arch),
+                norm_sites: NormSites::with_function(
+                    arch,
+                    crate::norm::norm_function_from_table(arch),
+                ),
                 per_head_layer_norm_qk: crate::qk_layer_norm::per_head_layer_norm_lines(arch),
                 per_head_scalar_qk_gain: crate::capability::uses_per_head_scalar_qk_gain(arch),
                 per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),

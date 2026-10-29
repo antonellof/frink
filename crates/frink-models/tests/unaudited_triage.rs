@@ -339,9 +339,14 @@ fn the_post_norm_group_is_three_topologies_and_only_two_of_them_closed() {
             "`{name}` is the post-norm-only topology"
         );
     }
+    // Over the catalog, since the rows live in `frink_models::models`.
     assert_eq!(
-        frink_models::capability::POST_NORM_ONLY_ARCHITECTURES,
-        &["olmo2", "exaone4"],
+        frink_models::capability::architecture_catalog()
+            .iter()
+            .map(|p| p.gguf_name)
+            .filter(|n| frink_models::capability::is_post_norm_only(n))
+            .collect::<Vec<_>>(),
+        ["olmo2", "exaone4"],
         "a third name here is a third llama.cpp graph somebody read"
     );
 
@@ -365,8 +370,12 @@ fn the_post_norm_group_is_three_topologies_and_only_two_of_them_closed() {
         "OLMo-1's norm has no parameters, which is the whole row"
     );
     assert_eq!(
-        frink_models::capability::NON_PARAMETRIC_LAYER_NORM,
-        &["olmo"],
+        frink_models::capability::architecture_catalog()
+            .iter()
+            .map(|p| p.gguf_name)
+            .filter(|n| frink_models::capability::uses_non_parametric_layer_norm(n))
+            .collect::<Vec<_>>(),
+        ["olmo"],
         "a second name here would be a second llama.cpp graph with a null-weight \
          `LLM_NORM`, and the scan over all 155 found none"
     );

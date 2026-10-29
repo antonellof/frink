@@ -72,8 +72,13 @@
 /// scaling switched off, or `None` when its sliding layers inherit the
 /// model's scaling like everyone else's.
 pub fn swa_layers_unscaled_rope(arch: &str) -> Option<&'static str> {
+    crate::models::ArchFacts::of(arch).swa.layers_unscaled_rope
+}
+
+/// [`swa_layers_unscaled_rope`] from this table alone (`olmo2` is in
+/// `crate::models::olmo2`).
+pub(crate) fn swa_layers_unscaled_rope_from_table(arch: &str) -> Option<&'static str> {
     match arch {
-        "olmo2" => Some("olmo2.cpp:120-134"),
         "mellum" => Some("mellum.cpp:128-142"),
         "laguna" => Some("laguna.cpp:48,181-193"),
         _ => None,

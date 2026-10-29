@@ -507,9 +507,14 @@ fn both_rows_are_admitted_to_the_audited_generic_path() {
     }
     // And the list is exactly these two: a third name would be a third
     // `*.cpp` somebody read, and would need a row here.
+    // Over the catalog, since the rows live in `frink_models::models`.
     assert_eq!(
-        frink_models::capability::POST_NORM_ONLY_ARCHITECTURES,
-        &ROWS[..]
+        frink_models::capability::architecture_catalog()
+            .iter()
+            .map(|p| p.gguf_name)
+            .filter(|n| frink_models::capability::is_post_norm_only(n))
+            .collect::<Vec<_>>(),
+        ROWS
     );
     // `olmo` is OLMo-1 and a different shape: pre-norm, with a
     // non-parametric LayerNorm. It is audited now too
