@@ -56,9 +56,45 @@ isProject: false
 Expands `north-star.md`'s `t1-out-of-core-execution`. Primary reference
 is `.scratch/ds4` (DwarfStar), a C engine that already ships this.
 
-## Status, 2026-10-28
+## Status, 2026-10-28 (issue #406)
 
 Read this before the corrections below, two of which no longer hold.
+
+- **The residency policy executes.** A GGUF expert store
+  (`FRINK_EXPERT_CACHE_BYTES`) now keeps its entries in the fixed slots
+  of a `SlotDevice` (`crates/frink-core/src/expert_slab.rs`): an
+  anonymous host mapping on CPU, and on Metal one Shared `MTLBuffer`
+  (`crates/frink-metal/src/expert_slab.rs`) that the CPU writes, the
+  CPU kernels read in place, and the weight cache aliases instead of
+  copying. One copy of each hot expert, counted once, by the store.
+  This closes `one-budget-not-two` for streamed experts and the device
+  half of `metal-slot-device`.
+- **Eviction ranks by real routing counts.** The store reads the
+  decoder's `MoeWeights::activation_counts` (the same `Arc`, no second
+  tally): the victim is the coldest unpinned entry, and a miss colder
+  than every evictable entry is served without being admitted. A top-k
+  is pinned in one `acquire_many`, so a decode step reads at most
+  `top_k` experts per routed layer.
+- **Evidence.** `crates/frink-models/tests/out_of_core_moe.rs` writes a
+  4-layer, 8-expert Q4_0 MoE and decodes it at 1/2, 1/4 and one slot of
+  the expert bytes: logits bit-identical to resident on the host, tokens
+  identical on Metal (logits identical between a full and a quarter
+  budget), evictions asserted, peak resident bytes asserted under the
+  budget, and a Metal launch asserted to have bound the slab. Removing
+  the pin check turns it red on both backends. On OLMoE-1B-7B Q4_0, 64
+  greedy tokens are the same text at full, half and quarter budgets.
+- **What it costs today** (M2 Pro, one unpublishable laptop run with
+  another frink process resident, file in the page cache, so a miss is
+  a copy and not an SSD read): Metal decode 133.8 tok/s resident, 40.2
+  with the store at 100%, 27.5 at 50%, 15.2 at 25%; CPU 40.0, 17.7, 6.9,
+  4.6. The 100% rows are the cost of the path, not of misses: a streamed
+  layer takes the per-layer top-k launch with host routing instead of
+  the packed whole-stack decode, and on the CPU its views are never
+  repack-cached because a reused slot has no stable identity.
+- **Still not done:** asynchronous reads, a decay window on the hotness
+  counts, the packed `mul_mv_id` and prefill paths for streamed layers,
+  a shipped hotlist, `--simulate-used-memory`, and a run on a model that
+  really exceeds RAM.
 
 - **Streaming is correct on CPU and pinned.** The OLMoE-1B-7B Q4_0
   garbage (" amongst amongst" streamed, " Paris." resident) came from the
@@ -79,17 +115,11 @@ Read this before the corrections below, two of which no longer hold.
   entry. A streamed layer still copies the expert into an `MTLBuffer`
   per use rather than holding it in a device slot, so the two-copies
   problem in "Two caches, one RAM" stands.
-- **The Metal `SlotDevice` is not started**, deliberately: it was
-  deferred on 2026-10-28 because the session doing this work could not
-  compile Metal kernels, and a slot pool whose kernels nobody ran is
-  the `CudaExpertPool` situation again. What it needs is the
-  `metal-slot-device` todo above, unchanged. The one thing to add to it:
-  slots are REUSED, so a slot's address says nothing about what it
-  holds, and a slot view must stay out of the repack cache (hand it out
-  as `WeightBytes::Shared`, which `WeightBytes::map_id` already refuses
-  to key). That is the August bug, one layer down.
-- **Not yet done:** a run on a real MoE with shared experts (Qwen1.5-MoE)
-  and any Metal run of the streamed path.
+- **The Metal `SlotDevice` landed** (above). Slots are REUSED, so a
+  slot view is handed out as `WeightBytes::Shared`, which
+  `WeightBytes::map_id` refuses to key: the August bug, one layer down,
+  stays closed.
+- **Not yet done:** a run on a real MoE with shared experts (Qwen1.5-MoE).
 
 ## Three corrections the investigation produced
 

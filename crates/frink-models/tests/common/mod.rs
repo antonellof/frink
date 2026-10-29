@@ -418,7 +418,20 @@ fn assert_prompt_matches(
 ) {
     let want = run(resident);
     let n = prompt.len();
-    for budget in [64 * 1024 * 1024u64, 1u64] {
+    // A quarter of the routed-expert bytes: small enough that the slot
+    // pool must evict and REUSE slots, the address-reuse shape the
+    // int-dot repack cache once got wrong (see `streaming_int_dot`).
+    let expert_bytes: usize = resident
+        .layers
+        .iter()
+        .map(|l| {
+            (0..l.moe.n_experts())
+                .map(|e| l.moe.expert_bytes(e))
+                .sum::<usize>()
+        })
+        .sum();
+    let quarter = (expert_bytes / 4) as u64;
+    for budget in [64 * 1024 * 1024u64, quarter, 1u64] {
         let stored = Decoder::from_gguf_with_expert_cache(fixture, cfg(), Some(budget))
             .expect("store-backed load");
         let got = run(&stored);
@@ -434,6 +447,13 @@ fn assert_prompt_matches(
                 stats.pass_throughs > 0,
                 "budget=1: every acquire should be an uncached pass-through"
             );
+        }
+        if budget == quarter {
+            assert!(
+                stats.evictions > 0,
+                "a quarter budget must evict, or slot reuse went untested: {stats:?}"
+            );
+            assert!(stats.peak_resident_bytes <= quarter, "{stats:?}");
         }
         assert_eq!(got.len(), want.len(), "budget={budget}: row count");
         for (row, (g, w)) in got.iter().zip(want.iter()).enumerate() {

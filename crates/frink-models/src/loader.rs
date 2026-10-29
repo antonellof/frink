@@ -25,6 +25,7 @@
 mod arch_tables;
 mod decoder_from_gguf;
 mod expert_source;
+mod expert_store_build;
 mod layer_parts;
 mod model_config;
 #[cfg(feature = "metal")]

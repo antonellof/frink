@@ -10,7 +10,9 @@
 //! and the SSD tier), [`expert_cache`] (which experts stay resident and
 //! the copy plans that make them so), [`expert_slots`] (the bounded
 //! slot pool behind the [`expert_slots::SlotDevice`] seam),
-//! [`expert_pool`] (the CUDA side of that seam), [`expert_budget`]
+//! [`expert_pool`] (the CUDA side of that seam), [`expert_slab`] (the
+//! host and Metal sides of it, which the store executes on),
+//! [`expert_budget`]
 //! (bytes in, expert slot count out), [`residency`],
 //! [`placement`] and [`qstar`] -- lives together in one crate on
 //! purpose: on unified memory two independent expert budgets are the
@@ -39,6 +41,7 @@ pub mod expert_cache;
 // is compiled and tested by the ordinary `cargo test` run. Everything
 // touching cudarc inside it carries its own `cuda` gate.
 pub mod expert_pool;
+pub mod expert_slab;
 pub mod expert_slots;
 pub mod expert_store;
 pub mod gdn;
