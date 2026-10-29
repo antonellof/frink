@@ -183,6 +183,14 @@ pub const OUTPUT_NORM_UNDER_EMBEDDING_NAME: &[&str] = &["lfm2", "lfm2moe"];
 /// one would be served where llama.cpp throws.
 pub const POST_NORMS_BOTH_OR_NEITHER: &[(&str, &str)] = &[("lfm3", "lfm3.cpp:53-55")];
 
+/// `arch`'s [`POST_NORMS_BOTH_OR_NEITHER`] row: the llama.cpp line.
+pub fn post_norms_both_or_neither(arch: &str) -> Option<&'static str> {
+    POST_NORMS_BOTH_OR_NEITHER
+        .iter()
+        .find(|(a, _)| *a == arch)
+        .map(|(_, line)| *line)
+}
+
 /// Why layer `layer`'s post norms cannot be served, or `None`.
 pub fn post_norm_pairing_refusal(
     arch: &str,
@@ -190,9 +198,24 @@ pub fn post_norm_pairing_refusal(
     post_attn: bool,
     post_ffn: bool,
 ) -> Option<String> {
-    let (_, line) = POST_NORMS_BOTH_OR_NEITHER
-        .iter()
-        .find(|(a, _)| *a == arch)?;
+    post_norm_pairing_refusal_for(
+        arch,
+        post_norms_both_or_neither(arch),
+        layer,
+        post_attn,
+        post_ffn,
+    )
+}
+
+/// [`post_norm_pairing_refusal`] given the row (`ArchFacts`).
+pub fn post_norm_pairing_refusal_for(
+    arch: &str,
+    row: Option<&str>,
+    layer: usize,
+    post_attn: bool,
+    post_ffn: bool,
+) -> Option<String> {
+    let line = row?;
     let (has, lacks) = if post_attn {
         ("post_attention_norm", "post_ffw_norm")
     } else {
@@ -365,26 +388,34 @@ impl NormSites {
         Self::with_function(arch, norm_function(arch))
     }
 
+    /// The row of an architecture no norm table names: RMSNorm, the
+    /// four layer sites under their usual names, `output_norm`, and no
+    /// embedding norm.
+    pub const GENERIC: Self = Self {
+        function: NormFunction::Rms,
+        attn: Some(StoredNorm::required(&["attn_norm"])),
+        ffn: Some(StoredNorm::required(&["ffn_norm"])),
+        post_attn: Some(StoredNorm::optional(&["post_attention_norm"])),
+        post_ffn: Some(StoredNorm::optional(&["post_ffw_norm"])),
+        output: Some(StoredNorm::required(&["output_norm"])),
+        embedding: None,
+    };
+
     /// The table row for `arch` under `function`: the loader's entry,
     /// which has read the file (`crate::norm::norm_function_for_file`).
     pub fn with_function(arch: &str, function: NormFunction) -> Self {
         let mut sites = Self {
             function,
-            attn: Some(StoredNorm::required(&["attn_norm"])),
-            ffn: Some(StoredNorm::required(&["ffn_norm"])),
-            post_attn: Some(StoredNorm::optional(&["post_attention_norm"])),
-            post_ffn: Some(StoredNorm::optional(&["post_ffw_norm"])),
-            output: if NO_OUTPUT_NORM.contains(&arch) {
-                None
-            } else if OUTPUT_NORM_UNDER_EMBEDDING_NAME.contains(&arch) {
-                Some(StoredNorm::required(&["token_embd_norm"]))
-            } else {
-                Some(StoredNorm::required(&["output_norm"]))
-            },
-            embedding: EMBEDDING_NORM_ARCHITECTURES
-                .contains(&arch)
-                .then_some(StoredNorm::required(&["token_embd_norm"])),
+            ..Self::GENERIC
         };
+        if NO_OUTPUT_NORM.contains(&arch) {
+            sites.output = None;
+        } else if OUTPUT_NORM_UNDER_EMBEDDING_NAME.contains(&arch) {
+            sites.output = Some(StoredNorm::required(&["token_embd_norm"]));
+        }
+        if EMBEDDING_NORM_ARCHITECTURES.contains(&arch) {
+            sites.embedding = Some(StoredNorm::required(&["token_embd_norm"]));
+        }
         if crate::capability::is_post_norm_only(arch) {
             sites.attn = None;
             sites.ffn = None;

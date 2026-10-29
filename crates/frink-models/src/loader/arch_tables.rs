@@ -282,5 +282,5 @@ pub(crate) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
 /// The audited majority is the other way round -- `qwen3moe.cpp:99,108`
 /// and `bailingmoe2.cpp:123-135` both norm first -- which is why the
 /// decoder's default is "before" and this list is the exception.
-pub(super) const QK_NORM_AFTER_ROPE_ARCHITECTURES: &[&str] =
+pub(crate) const QK_NORM_AFTER_ROPE_ARCHITECTURES: &[&str] =
     &["hunyuan-dense", "hunyuan-moe", "maincoder", "talkie"];
