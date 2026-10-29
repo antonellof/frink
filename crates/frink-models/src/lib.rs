@@ -105,7 +105,7 @@ pub mod position_embd;
 pub mod prefix_cache;
 pub mod proj_bias;
 pub mod qk_layer_norm;
-pub(crate) mod qkv_fused;
+pub mod qkv_fused;
 pub mod rank_head;
 pub mod recurrent_engine;
 pub mod rerank_pooler;

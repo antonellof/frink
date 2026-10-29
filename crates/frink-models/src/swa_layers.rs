@@ -12,7 +12,7 @@
 //! | mode | call | scalar in the file | ARRAY in the file |
 //! |---|---|---|---|
 //! | [`PatternKeyRead::ScalarPeriod`] | `get_key_or_arr(kid, swa_period, false)` | overrides the seeded period | **IGNORED**: the scalar overload returns `false` on an array when `required` is false (`llama-model-loader.cpp:490-512`), and the seeded period stands |
-//! | [`PatternKeyRead::PerLayerBool`] | `get_key_or_arr(kid, hparams.is_swa_impl, n_layer())` | **broadcast** to every layer as a bool (`:474-478`: `result[i] = value`), so `1` slides everything and `0` nothing -- NOT a period | the per-layer truth, length-checked against `n_layer()` (`:461-465`) |
+//! | [`PatternKeyRead::PerLayerBool`] | `get_arr(kid, hparams.is_swa_impl)` (required) | **refused**: `array key not found in model` (`:356-360`) | the per-layer truth at any length up to `LLAMA_MAX_LAYERS` (below) |
 //! | [`PatternKeyRead::ScalarThenArray`] | the first, then the second on `false` | a period | the per-layer truth |
 //!
 //! The census is measured, not remembered: `grep -n
@@ -37,19 +37,23 @@
 //! window_array_graphs.rs` measures that libllama's logits do not move
 //! when the array is rewritten to DISAGREE, and frink matches both.
 //!
-//! **The length is `block_count`, not the trunk.** The converters write
-//! the array at the full `block_count` with the MTP entries appended
-//! (`mimo.py:146-153`, `step3.py:164-173`). [`read_swa_layers`]
-//! therefore checks the length against `block_count` and keeps the
-//! first `n_layers` entries, and `set_swa_pattern`
-//! (`llama-hparams.cpp:19-21`) zeroes the entries past the trunk anyway.
-//! `cohere2moe`'s converter writes one entry per trunk layer
-//! (`command_r.py:98` from `layer_types`); [`ARRAY_AT_TRUNK_LENGTH`] is
-//! that one row. llama.cpp itself checks NO length here: the array is
-//! read with `get_arr` (`mimo2.cpp:12`, `step35.cpp:26`,
-//! `load_swa_pattern` at `llama-model.cpp:3952-3959`), which only caps
-//! it at `LLAMA_MAX_LAYERS`, so a length no converter writes is an
-//! over-refusal here (#452).
+//! **The array's length is not checked.** At the pin every array read
+//! goes through `get_arr` into the fixed `is_swa_impl` array
+//! (`mimo2.cpp:12`, `step35.cpp:26`, `maple.cpp:10`, ..., and
+//! `load_swa_pattern`, `llama-model.cpp:3952-3959`). `get_arr`
+//! (`llama-model-loader.cpp:352-405`) checks the element type and
+//! `length <= LLAMA_MAX_LAYERS` (`:382-384`, a throw past it), copies
+//! the file's entries from index 0, and leaves every later entry at the
+//! zero `llama-model.cpp:1465` filled it with. So entry `il` is layer
+//! `il`'s flag, a SHORTER array leaves the remaining layers full
+//! attention, and a LONGER one is read past the trunk by no graph
+//! (`is_swa` is asked only for `il < n_layer()`). [`read_swa_layers`]
+//! does exactly that (#452). The converters write `block_count` entries
+//! (`mimo.py:146-153`, `step3.py:164-173`) or one per trunk layer
+//! (`command_r.py:98`), and both read the same here.
+//!
+//! A SCALAR where only `get_arr` reads the key is `array key not found
+//! in model` (`:356-360`, `required` defaults to true), refused here.
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -148,8 +152,8 @@ pub enum PatternKeyRead {
     /// `get_key_or_arr(kid, uint32_t & swa_period, false)`: scalar
     /// honoured as the period, array ignored.
     ScalarPeriod,
-    /// `get_key_or_arr(kid, hparams.is_swa_impl, n_layer())`: array
-    /// honoured, scalar broadcast as a bool, key REQUIRED.
+    /// `get_arr(kid, hparams.is_swa_impl)`: array honoured, a scalar
+    /// or an absent key refused (REQUIRED).
     PerLayerBool,
     /// The scalar overload first, the array on its `false`. The array
     /// read is REQUIRED, so an absent key refuses.
@@ -179,19 +183,9 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("kolibri1", "src/models/kolibri1.cpp:17"),
 ];
 
-/// The graphs whose converter writes the array one entry per TRUNK
-/// layer (module doc). Every other array reader takes it at
-/// `block_count`.
-pub const ARRAY_AT_TRUNK_LENGTH: &[(&str, &str)] = &[("cohere2moe", "conversion/command_r.py:98")];
-
-/// The length `arch`'s array read passes as `n`.
-pub fn array_length(arch: &str, trunk: &TrunkLayers) -> usize {
-    if ARRAY_AT_TRUNK_LENGTH.iter().any(|(a, _)| *a == arch) {
-        trunk.n_layers
-    } else {
-        trunk.block_count
-    }
-}
+/// `LLAMA_MAX_LAYERS` (`llama-hparams.h:11`): the longest array `get_arr`
+/// accepts into `is_swa_impl`.
+pub const LLAMA_MAX_LAYERS: usize = 512;
 
 /// Every graph that tries the scalar and falls back to the array, with
 /// the line.
@@ -250,35 +244,31 @@ pub fn read_swa_layers(
         ))
     };
     let per_layer = |items: &[GgufValue]| -> Result<SwaLayers, LoadError> {
-        // `llama-model-loader.cpp:461-465`: the length must equal the
-        // `n` passed, which is `block_count` for every reader but
-        // `ARRAY_AT_TRUNK_LENGTH` (module doc).
-        let want = array_length(arch, trunk);
-        if items.len() != want {
+        // `get_arr` (`llama-model-loader.cpp:382-384`): no length check
+        // but the cap; entry `il` is layer `il`, and a layer past the
+        // array's end keeps the zero seed (module doc).
+        if items.len() > LLAMA_MAX_LAYERS {
             return Err(LoadError::UnsupportedFeature(
                 arch.to_string(),
                 format!(
-                    "{key} has {} entries where llama.cpp's read passes n_layer() = {want} \
-                     (block_count {}, trunk {}); llama.cpp refuses this too (`key has wrong \
-                     array length`, llama-model-loader.cpp:461-465)",
-                    items.len(),
-                    trunk.block_count,
-                    trunk.n_layers
+                    "{key} has {} entries; llama.cpp refuses an array longer than \
+                     LLAMA_MAX_LAYERS = {LLAMA_MAX_LAYERS} (llama-model-loader.cpp:382-384)",
+                    items.len()
                 ),
             ));
         }
-        let mut out = Vec::with_capacity(trunk.n_layers);
+        let mut out = vec![false; trunk.n_layers];
         for (il, item) in items.iter().take(trunk.n_layers).enumerate() {
             // `get_arr` admits BOOL, UINT32 and INT32 arrays into the
-            // `uint32_t` layer array (`:361-364`) and tests a bool entry
-            // as `x != 0` (`:383-387`); `as_bool` is that rule for every
+            // `uint32_t` layer array (`:368-371`) and tests a bool entry
+            // as `x != 0` (`:394-401`); `as_bool` is that rule for every
             // integer width.
-            out.push(item.as_bool().ok_or_else(|| {
+            out[il] = item.as_bool().ok_or_else(|| {
                 LoadError::UnsupportedFeature(
                     arch.to_string(),
                     format!("{key} entry {il} is not a bool or integer: {item:?}"),
                 )
-            })?);
+            })?;
         }
         Ok(SwaLayers::PerLayer(out.into()))
     };
@@ -304,19 +294,17 @@ pub fn read_swa_layers(
             // and `mimo2.cpp:12` / `step35.cpp:26` pass nothing.
             None => Err(LoadError::MissingHparam(key.to_string())),
             Some(GgufValue::Array(items)) => per_layer(items),
-            // `llama-model-loader.cpp:474-478`: the scalar is written
-            // into EVERY entry of `is_swa_impl`, and the graph tests
-            // each entry as a bool. So `6` here does not mean "period
-            // 6", it means every layer slides.
-            Some(scalar) => {
-                let every = scalar.as_bool().ok_or_else(|| {
-                    LoadError::UnsupportedFeature(
-                        arch.to_string(),
-                        format!("{key} is neither a bool, an integer nor an array: {scalar:?}"),
-                    )
-                })?;
-                Ok(SwaLayers::PerLayer(vec![every; trunk.n_layers].into()))
-            }
+            // `get_arr` refuses anything but an array
+            // (`llama-model-loader.cpp:356-360`): `array key not found in
+            // model`. The graphs pass no `required`, so it throws.
+            Some(scalar) => Err(LoadError::UnsupportedFeature(
+                arch.to_string(),
+                format!(
+                    "{key} is a scalar ({scalar:?}), and llama.cpp reads it for this \
+                     architecture only as an array (`get_arr`, required); a file with a scalar \
+                     does not load upstream"
+                ),
+            )),
         },
     }
 }
@@ -446,23 +434,34 @@ mod tests {
         assert_eq!(got, SwaLayers::period(2, false));
     }
 
-    /// The array mode honours the array, checks its length against
-    /// `block_count`, keeps the trunk's entries, and REQUIRES the key.
+    /// The array mode honours the array at ANY length up to
+    /// `LLAMA_MAX_LAYERS`, as `get_arr` does (#452): entry `il` is layer
+    /// `il`, a layer past the end is full attention, entries past the
+    /// trunk are never read. The key is REQUIRED.
     #[test]
-    fn an_array_mode_architecture_honours_the_array_at_block_count_length() {
-        // Five entries for block_count 5, trunk 4: the MTP entry is
-        // dropped, the trunk's four are kept verbatim.
+    fn an_array_mode_architecture_reads_the_array_at_any_length() {
+        // block_count 5, trunk 4: the MTP entry is dropped.
         let file = with(Some(bools(&[false, true, true, false, true])));
         let got = read_swa_layers(&file, "mimo2", KEY, &trunk(5, 4), None).unwrap();
         assert_eq!(
             got,
             SwaLayers::PerLayer(vec![false, true, true, false].into())
         );
-        // Wrong length is llama.cpp's own refusal.
-        let file = with(Some(bools(&[false, true, true, false])));
+        // Shorter than the trunk: the rest keep the zero seed.
+        let file = with(Some(bools(&[true, true])));
+        let got = read_swa_layers(&file, "mimo2", KEY, &trunk(5, 4), None).unwrap();
+        assert_eq!(
+            got,
+            SwaLayers::PerLayer(vec![true, true, false, false].into())
+        );
+        // Longer: the tail is never read, up to the cap.
+        let file = with(Some(bools(&[true; LLAMA_MAX_LAYERS])));
+        let got = read_swa_layers(&file, "mimo2", KEY, &trunk(4, 4), None).unwrap();
+        assert_eq!(got, SwaLayers::PerLayer(vec![true; 4].into()));
+        let file = with(Some(bools(&[true; LLAMA_MAX_LAYERS + 1])));
         assert!(matches!(
-            read_swa_layers(&file, "mimo2", KEY, &trunk(5, 4), None),
-            Err(LoadError::UnsupportedFeature(a, m)) if a == "mimo2" && m.contains("4 entries where llama.cpp's read passes n_layer() = 5")
+            read_swa_layers(&file, "mimo2", KEY, &trunk(4, 4), None),
+            Err(LoadError::UnsupportedFeature(a, m)) if a == "mimo2" && m.contains("LLAMA_MAX_LAYERS")
         ));
         // Absent is REQUIRED.
         assert!(matches!(
@@ -471,47 +470,39 @@ mod tests {
         ));
     }
 
-    /// `cohere2moe`'s converter writes one entry per TRUNK layer, and
-    /// the `block_count`-long spelling is refused there (#452).
+    /// `cohere2moe`'s converter writes one entry per TRUNK layer and
+    /// `mimo2`'s one per block; both read the same, as in libllama.
     #[test]
-    fn cohere2moe_s_array_is_trunk_length() {
-        assert_eq!(array_length("cohere2moe", &trunk(5, 4)), 4);
-        assert_eq!(array_length("mimo2", &trunk(5, 4)), 5);
-        let file = with(Some(bools(&[false, true, true, false])));
-        let got = read_swa_layers(&file, "cohere2moe", KEY, &trunk(5, 4), DENSE_FIRST_4).unwrap();
-        assert_eq!(
-            got,
-            SwaLayers::PerLayer(vec![false, true, true, false].into())
-        );
-        let file = with(Some(bools(&[false, true, true, false, true])));
-        assert!(matches!(
-            read_swa_layers(&file, "cohere2moe", KEY, &trunk(5, 4), DENSE_FIRST_4),
-            Err(LoadError::UnsupportedFeature(a, m)) if a == "cohere2moe" && m.contains("n_layer() = 4")
-        ));
+    fn a_trunk_length_and_a_block_count_length_array_read_alike() {
+        for arr in [
+            &[false, true, true, false][..],
+            &[false, true, true, false, true][..],
+        ] {
+            let got = read_swa_layers(
+                &with(Some(bools(arr))),
+                "cohere2moe",
+                KEY,
+                &trunk(5, 4),
+                DENSE_FIRST_4,
+            )
+            .unwrap();
+            assert_eq!(
+                got,
+                SwaLayers::PerLayer(vec![false, true, true, false].into())
+            );
+        }
     }
 
-    /// In the array mode a scalar is a broadcast BOOL, not a period:
-    /// `6` slides every layer, `0` slides none.
+    /// In the array-only mode a scalar is refused: `get_arr` throws
+    /// `array key not found in model` on a non-array value.
     #[test]
-    fn an_array_mode_architecture_broadcasts_a_scalar_as_a_bool() {
-        let got = read_swa_layers(
-            &with(Some(GgufValue::U32(6))),
-            "step35",
-            KEY,
-            &trunk(3, 3),
-            None,
-        )
-        .unwrap();
-        assert_eq!(got, SwaLayers::PerLayer(vec![true; 3].into()));
-        let got = read_swa_layers(
-            &with(Some(GgufValue::U32(0))),
-            "step35",
-            KEY,
-            &trunk(3, 3),
-            None,
-        )
-        .unwrap();
-        assert_eq!(got, SwaLayers::PerLayer(vec![false; 3].into()));
+    fn an_array_mode_architecture_refuses_a_scalar() {
+        for v in [6, 0] {
+            assert!(matches!(
+                read_swa_layers(&with(Some(GgufValue::U32(v))), "step35", KEY, &trunk(3, 3), None),
+                Err(LoadError::UnsupportedFeature(a, m)) if a == "step35" && m.contains("only as an array")
+            ));
+        }
     }
 
     /// The scalar-then-array mode takes whichever shape the file has,

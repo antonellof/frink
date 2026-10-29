@@ -11,18 +11,25 @@
 //!   memory estimate and `frink inspect-plan` row prices the FFN from
 //!   (`the_declared_ffn_width_matches_the_matrices_that_load`,
 //!   `tests/one_match_arm_graphs.rs`).
-//! - The fused `attn_qkv` carries a bias created REQUIRED (`:28`, flag
-//!   `0`); frink loads it optional, as for every fused spelling (#447).
+//! - The fused `attn_qkv` carries a bias created REQUIRED (`:27-28`,
+//!   flag `0`): a file without it is refused, as libllama refuses it
+//!   (#447).
 //!
 //! Evidence: `tests/one_match_arm_graphs.rs`, against libllama.
 
-use super::facts::{ArchFacts, FfnFacts};
+use super::facts::{ArchFacts, FfnFacts, TensorFacts};
 use super::ModelDef;
+use crate::proj_bias::Presence;
+use crate::qkv_fused::QkvBias;
 
 pub const FACTS: ArchFacts = ArchFacts {
     ffn: FfnFacts {
         length_counts_gate_and_up: true,
         ..ArchFacts::DEFAULT.ffn
+    },
+    tensors: TensorFacts {
+        qkv_bias: QkvBias::Fused(Presence::Required),
+        ..ArchFacts::DEFAULT.tensors
     },
     ..ArchFacts::DEFAULT
 };

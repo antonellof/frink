@@ -36,11 +36,20 @@ optional key (`:14`), so libllama rotates every layer at the model's
 base and scale; a reader that fell back to `llama_hparams`' defaults
 (base 10000, scale 1) would rotate the sliding layers differently.
 
+**`--swa-array short|long`** writes the window array at a length other
+than `block_count` (#452): `short` is the first two entries, `long`
+appends three. `maple.cpp:10` reads it with `get_arr`, which checks no
+length (`llama-model-loader.cpp:352-405`): entry `il` is layer `il`'s
+flag, the layers past a short array keep the zero seed and run full
+attention, and the tail of a long one is never read. So `long` answers
+the base file's logits and `short` does not.
+
 Weights are pseudo-random from a fixed seed so the file is byte-stable.
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \
         python3 scripts/make_maple_fixture.py OUT.gguf [--model-rope]
+        [--swa-array short|long]
 
 The golden values that go with it are produced by llama.cpp itself
 (see `scripts/gptoss_reference_logits.cpp`), not by this script.
@@ -84,7 +93,11 @@ CLAMP_EXP = [2.0, 0.0, 1.5, 0.0]
 
 
 def main(
-    out_path: str, no_clamp: bool = False, all_swa: bool = False, model_rope: bool = False
+    out_path: str,
+    no_clamp: bool = False,
+    all_swa: bool = False,
+    model_rope: bool = False,
+    swa_array: str | None = None,
 ) -> None:
     n_layer = len(IS_SWA)
     rng = np.random.default_rng(0x4A9E)
@@ -112,7 +125,12 @@ def main(
         w.add_rope_freq_base_swa(ROPE_BASE_SWA)
     w.add_rope_dimension_count(HEAD_DIM)
     w.add_sliding_window(SWA_WINDOW)
-    w.add_sliding_window_pattern([True] * len(IS_SWA) if all_swa else IS_SWA)
+    pattern = [True] * len(IS_SWA) if all_swa else IS_SWA
+    if swa_array == "short":
+        pattern = pattern[:2]
+    elif swa_array == "long":
+        pattern = pattern + [False, True, True]
+    w.add_sliding_window_pattern(pattern)
     w.add_expert_count(N_EXPERT)
     w.add_expert_used_count(N_EXPERT_USED)
     w.add_expert_feed_forward_length(FF_EXP)
@@ -168,4 +186,5 @@ if __name__ == "__main__":
         "--no-clamp" in sys.argv[2:],
         "--all-swa" in sys.argv[2:],
         "--model-rope" in sys.argv[2:],
+        sys.argv[sys.argv.index("--swa-array") + 1] if "--swa-array" in sys.argv else None,
     )

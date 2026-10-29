@@ -177,7 +177,12 @@ impl Decoder {
                         q_bias,
                         k_bias,
                         v_bias,
-                    } = crate::qkv_fused::load_fused_or_split_qkv(&file, l, &config)?;
+                    } = crate::qkv_fused::load_fused_or_split_qkv(
+                        &file,
+                        l,
+                        &config,
+                        facts.tensors.qkv_bias,
+                    )?;
                     let q_norm =
                         load_f32_vec_optional(&file, &format!("blk.{l}.attn_q_norm.weight"))?;
                     let k_norm =

@@ -378,6 +378,114 @@ const MAPLE_MODEL_ROPE_GOLDEN: [f32; 48] = [
     0.2756722,
 ];
 
+/// `maple_swa_short_tiny.gguf`: the window array cut to two entries.
+/// `get_arr` checks no length, so layers 2 and 3 keep the zero seed and
+/// run full attention (#452).
+const MAPLE_SWA_SHORT_GOLDEN: [f32; 48] = [
+    0.9170451,
+    -0.36543506,
+    -0.21062836,
+    -0.97631526,
+    -2.0955749,
+    2.6936138,
+    1.0502985,
+    0.8190136,
+    0.3011872,
+    3.7901585,
+    -1.6819832,
+    -1.1008003,
+    -2.770547,
+    1.9392412,
+    1.2552593,
+    -1.2288821,
+    1.5993829,
+    0.56907684,
+    -1.5354404,
+    -0.59103227,
+    -1.747711,
+    0.61552584,
+    0.14505106,
+    1.1718448,
+    -2.0797377,
+    1.1376461,
+    -0.9240891,
+    1.2114604,
+    3.3346639,
+    -0.7496854,
+    1.2863438,
+    1.1049132,
+    -2.352014,
+    -0.17587873,
+    0.538759,
+    -1.3632724,
+    0.83606064,
+    0.8126086,
+    0.88897485,
+    1.3915255,
+    4.479071,
+    0.7887421,
+    1.1859157,
+    0.17517805,
+    -0.43843153,
+    0.6480988,
+    -1.9536508,
+    -0.18973467,
+];
+
+/// `maple_swa_long_tiny.gguf`: the window array with three entries past
+/// `block_count`. Never read: libllama's answer is the base file's, bit
+/// for bit (#452).
+const MAPLE_SWA_LONG_GOLDEN: [f32; 48] = [
+    0.6486808,
+    -0.23711741,
+    -0.5294898,
+    -0.46147358,
+    -1.9501901,
+    3.4603767,
+    0.15342909,
+    0.5967338,
+    0.26974905,
+    3.5528212,
+    -1.273411,
+    -1.2770839,
+    -1.8373278,
+    2.3348446,
+    0.009929895,
+    -0.6402428,
+    2.4302635,
+    0.2994001,
+    -1.1233808,
+    -0.85524726,
+    -2.314069,
+    0.15556979,
+    0.22562456,
+    0.4092492,
+    -2.305313,
+    1.2321382,
+    -0.66026187,
+    1.2131181,
+    3.2547603,
+    -1.1485307,
+    0.2499813,
+    0.66347164,
+    -2.2737732,
+    1.6876196,
+    0.4008119,
+    -0.59180975,
+    0.7276684,
+    0.29646862,
+    0.77146876,
+    1.9338744,
+    4.3427477,
+    1.137814,
+    1.5413116,
+    -0.009805858,
+    -0.3871348,
+    0.8032818,
+    -1.3253019,
+    1.0272561,
+];
+
 fn golden(name: &str) -> &'static [f32] {
     match name {
         "exaone4_32b" => &EXAONE4_32B_GOLDEN,
@@ -570,6 +678,22 @@ fn maple_without_a_swa_rope_base_matches_llama_cpp() {
     assert_all_three_paths_match("maple_model_rope", &MAPLE_MODEL_ROPE_GOLDEN);
     let d = load_graph_fixture("maple_model_rope");
     assert_eq!(d.config.rope_theta_swa, Some(40_000.0));
+}
+
+/// A window array shorter or longer than `block_count` loads, and reads
+/// the way libllama's `get_arr` reads it (#452): entry `il` is layer
+/// `il`, layers past a short array are full attention, and a long
+/// array's tail is never read.
+#[test]
+fn maple_with_a_short_or_long_window_array_matches_llama_cpp() {
+    assert_eq!(MAPLE_SWA_LONG_GOLDEN, MAPLE_GOLDEN);
+    assert_all_three_paths_match("maple_swa_long", &MAPLE_SWA_LONG_GOLDEN);
+    assert_all_three_paths_match("maple_swa_short", &MAPLE_SWA_SHORT_GOLDEN);
+    let d = load_graph_fixture("maple_swa_short");
+    assert_eq!(
+        d.config.swa_layers,
+        frink_models::swa_layers::SwaLayers::PerLayer(vec![true, true, false, false].into())
+    );
 }
 
 // --- sabotage: each of these must move the logits by more than 1e-2 ---

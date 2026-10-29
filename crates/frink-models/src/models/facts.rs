@@ -204,6 +204,9 @@ pub struct TensorFacts {
     pub ffn_bias: Option<(Presence, bool)>,
     /// `proj_bias::OUTPUT_BIAS_CREATORS`: `output.bias` on the LM head.
     pub output_bias: Option<Presence>,
+    /// `qkv_fused::QKV_BIAS_CREATORS`: which Q/K/V biases the graph
+    /// creates, and how.
+    pub qkv_bias: crate::qkv_fused::QkvBias,
 }
 
 /// The decisions that are code rather than rows: each takes a
@@ -311,6 +314,7 @@ impl ArchFacts {
             attn_out_bias: None,
             ffn_bias: None,
             output_bias: None,
+            qkv_bias: crate::qkv_fused::QkvBias::Helper,
         },
         rules: HparamRules::LEGACY,
     };
@@ -413,6 +417,7 @@ impl ArchFacts {
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),
+                qkv_bias: crate::qkv_fused::qkv_bias_from_table(arch),
             },
             rules: HparamRules::LEGACY,
         }
