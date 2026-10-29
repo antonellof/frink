@@ -70,3 +70,18 @@ fn a_definition_leaves_the_catalog_fields_to_the_catalog() {
         assert!(def.source.starts_with("src/models/"), "{:?}", def.names);
     }
 }
+
+/// Two moved rows no fixture in `tests/snapshots/model_config/` reaches
+/// (there is no `qwen2` or `qwen2moe` fixture, and
+/// `tests/qwen2moe_paris.rs` needs a real checkpoint), so they are pinned
+/// here against the llama.cpp lines their files cite.
+#[test]
+fn the_qwen_rows_no_fixture_reaches_are_pinned() {
+    use crate::proj_bias::{output_presence, Presence};
+    // qwen2.cpp:27: `output_b`, TENSOR_NOT_REQUIRED.
+    assert_eq!(output_presence("qwen2"), Some(Presence::Optional));
+    // qwen2moe.cpp:139: `norm_w = false`.
+    assert!(ArchFacts::of("qwen2moe").moe.no_topk_renormalize);
+    // qwen3moe.cpp:144: `norm_w = true`.
+    assert!(!ArchFacts::of("qwen3moe").moe.no_topk_renormalize);
+}

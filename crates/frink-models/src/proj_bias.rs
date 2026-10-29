@@ -133,10 +133,16 @@ pub const FFN_BIAS_CREATORS: &[(&str, Presence, bool)] = &[
 pub const OUTPUT_BIAS_CREATORS: &[(&str, Presence)] = &[
     ("phi2", Presence::Required),
     ("phimoe", Presence::Required),
-    ("qwen2", Presence::Optional),
+    // `qwen2` states its row in `crate::models::qwen2` (#403 step 4).
 ];
 
-fn output_presence(arch: &str) -> Option<Presence> {
+/// Whether `arch`'s graph creates `output.bias`, through the registry.
+pub fn output_presence(arch: &str) -> Option<Presence> {
+    crate::models::ArchFacts::of(arch).tensors.output_bias
+}
+
+/// [`OUTPUT_BIAS_CREATORS`]' answer alone, for `ArchFacts::from_tables`.
+pub(crate) fn output_presence_from_table(arch: &str) -> Option<Presence> {
     OUTPUT_BIAS_CREATORS
         .iter()
         .find(|(n, _)| *n == arch)
@@ -149,9 +155,10 @@ fn output_presence(arch: &str) -> Option<Presence> {
 pub fn load_output_bias(
     file: &impl TensorSource,
     arch: &str,
+    row: Option<Presence>,
     vocab_size: usize,
 ) -> Result<Option<Vec<f32>>, LoadError> {
-    let Some(presence) = output_presence(arch) else {
+    let Some(presence) = row else {
         return Ok(None);
     };
     load_bias(file, arch, "output.bias", presence, vocab_size)

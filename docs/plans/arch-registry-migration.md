@@ -117,6 +117,13 @@ eligibility test so a new field forces a Metal decision.
   `exaone4` row: it is a census of llama.cpp's graphs that the rule is
   checked against, not a row the loader reads. Divergences found and
   filed, not fixed: #440, #441.
+- Step 4: `models/qwen.rs`, `qwen2.rs`, `qwen2moe.rs`, `qwen3.rs`,
+  `qwen3moe.rs`. Their rows left `NO_TOPK_RENORMALIZE_ARCHITECTURES`,
+  `proj_bias::OUTPUT_BIAS_CREATORS` and `FFN_LENGTH_COUNTS_GATE_AND_UP`
+  (emptied and deleted). `qwen3` and `qwen3moe` had no row in any table:
+  their facts are `ArchFacts::DEFAULT`. No snapshot fixture reaches the
+  `qwen2` and `qwen2moe` rows, so `models/tests.rs` pins them. Divergence
+  found and filed, not fixed: #447.
 
 What step 2 changed about the target design:
 
