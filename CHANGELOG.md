@@ -63,6 +63,16 @@ are the ones worth reading twice.
   GGUF's tensors exactly. Under a structured `-o`, every other line goes
   to stderr. The `llama-bench` not-accepted count falls to 31.
 
+### Fixed
+
+- **A preempted request is no longer failed partway through its
+  stream.** When it was re-admitted and the paged store could not seat
+  it (the block budget said yes, the store said no), it was finished
+  with `KvPoolExhausted` after its client had already received part of
+  the answer. It now waits at the head of the queue, with everything it
+  produced intact and without blocking the worker for `queue_wait`; a
+  fresh request still gets the retryable error (#408).
+
 ## [0.51.0] - 2026-11-06
 
 ### Changed

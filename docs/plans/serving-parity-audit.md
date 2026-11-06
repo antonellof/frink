@@ -81,6 +81,14 @@ followed by every token it had generated, then carries on.
   each slide ran and on anchor state held by the lease, and a
   recompute from tokens reproduces neither. They are not evicted; the
   job waits as before.
+- **A resumed row is never failed mid-stream for want of pages.** The
+  block budget can admit it while the paged store refuses (the radix
+  tree can pin pages the budget counts as free). A fresh row then gets
+  the retryable `KvPoolExhausted`, since it has sent nothing; a resumed
+  row goes back to the head of the line with its answer and its
+  reservation returned, and asks the store again on the next pass
+  without waiting `queue_wait`, which would stall the rows whose pages
+  it needs (`worker::Accepted::Requeue`, #408).
 - On a paged store the evicted row publishes its pages to the radix
   tree before its lease drops, so re-admission can adopt them. It
   keeps the `cached_tokens` figure from its FIRST admission: what it

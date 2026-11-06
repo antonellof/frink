@@ -127,15 +127,29 @@ pub(super) fn admit(
         // back now rather than when it was pulled off the channel.
         queue.release();
         match accept(decoder, job, config.prefill_chunk, paged) {
-            Some(prefill) => {
+            Accepted::Prefill(prefill) => {
                 snapshot.new_seqs += 1;
                 snapshot.new_tokens += prefill.answer.prompt_tokens;
-                prefills.push_back(prefill);
+                prefills.push_back(*prefill);
             }
-            // Rejected at validation (a token outside the vocabulary):
-            // it never becomes a row, so nothing else would ever give
-            // its reservation back.
-            None => budget.release(blocks),
+            // Rejected at validation (a token outside the vocabulary),
+            // or a fresh job the paged store refused: it never becomes
+            // a row, so nothing else would ever give its reservation
+            // back.
+            Accepted::Refused => budget.release(blocks),
+            // A RESUMED job the paged store could not seat right now.
+            // Its client already holds part of the answer, so it goes
+            // back to the head of the line to wait for pages rather than
+            // being failed mid-stream. Its reservation goes back too, so
+            // the budget does not count a row that is not running. The
+            // line stops here: the store is short, and admitting the
+            // jobs behind it would take the pages it is waiting for.
+            Accepted::Requeue(job) => {
+                budget.release(blocks);
+                queue.requeue();
+                waiting.push_front(*job);
+                break;
+            }
         }
     }
     // Everything still waiting has waited one more pass. Counted after
@@ -633,6 +647,28 @@ pub(super) fn apply_stop_buffer(slot: &mut Slot, piece: &str) -> bool {
     }
 }
 
+/// What [`accept`] did with a job.
+pub(super) enum Accepted {
+    /// Admitted: it prefills from here.
+    Prefill(Box<Prefill>),
+    /// Finished with an error already sent; its reservation is free.
+    Refused,
+    /// A resumed job the paged store could not seat yet, handed back
+    /// whole for the head of the queue.
+    Requeue(Box<Job>),
+}
+
+impl Accepted {
+    /// The prefill, when the job was admitted.
+    #[cfg(test)]
+    pub(super) fn into_prefill(self) -> Option<Prefill> {
+        match self {
+            Accepted::Prefill(p) => Some(*p),
+            Accepted::Refused | Accepted::Requeue(_) => None,
+        }
+    }
+}
+
 /// Validates a job and turns it into a waiting `Prefill`. No model work
 /// happens here -- every prompt token is run by `step_chunk` on the
 /// scheduler's own tick, which is the whole point of chunked prefill.
@@ -643,7 +679,7 @@ pub(super) fn accept(
     job: Job,
     chunk_size: usize,
     paged: Option<&PagedKvConfig>,
-) -> Option<Prefill> {
+) -> Accepted {
     let vocab_size = decoder.config.vocab_size;
     if let Some(&bad) = job.prompt_tokens.iter().find(|&&t| t >= vocab_size) {
         send_finished(
@@ -653,7 +689,7 @@ pub(super) fn accept(
                 vocab_size,
             }),
         );
-        return None;
+        return Accepted::Refused;
     }
 
     // ONE admission for a new request and for one coming back from a
@@ -678,6 +714,7 @@ pub(super) fn accept(
     let reported_prompt = answer
         .as_ref()
         .map_or(prompt_tokens.len(), |a| a.prompt_tokens);
+    let prompt_len = prompt_tokens.len();
     let mut run = prompt_tokens;
     if let Some(a) = answer.as_ref() {
         run.extend_from_slice(&a.generated_ids);
@@ -695,6 +732,20 @@ pub(super) fn accept(
             // may generate. The REPORTED prompt length, so a resumed
             // row asks for exactly what it was first admitted with.
             let max_seq_len = reported_prompt + params.max_tokens;
+            // A resumed row asks the store without waiting: if it cannot
+            // be seated now it goes back to the queue (below), and a
+            // retry that blocked the worker for `queue_wait` every tick
+            // would stall the very rows whose pages it is waiting for.
+            let no_wait;
+            let config = if answer.is_some() {
+                no_wait = PagedKvConfig {
+                    queue_wait: std::time::Duration::ZERO,
+                    ..config.clone()
+                };
+                &no_wait
+            } else {
+                config
+            };
             match acquire_paged_caches(
                 decoder,
                 config,
@@ -709,19 +760,39 @@ pub(super) fn accept(
                     PrefillState::new_paged(Arc::clone(decoder), &run, chunk_size, lease)
                 }
                 Err(_) => {
-                    // The block budget said yes and the store said no.
-                    // Refuse this row rather than admit one with no
-                    // pages: the two counts are meant to agree, and the
+                    // The block budget said yes and the store said no
+                    // (the radix tree can pin pages the budget counts
+                    // as free). A resumed row has streamed part of its
+                    // answer, so failing it now would end that stream
+                    // with an error: it waits for pages instead, with
+                    // everything it produced intact.
+                    if let Some(answer) = answer {
+                        run.truncate(prompt_len);
+                        return Accepted::Requeue(Box::new(Job {
+                            prompt_tokens: run,
+                            params,
+                            stop_tokens,
+                            reply,
+                            abort,
+                            blocks,
+                            skips: 0,
+                            waited: 0,
+                            answer: Some(Box::new(answer)),
+                        }));
+                    }
+                    // A fresh row has sent nothing: refuse it, with the
+                    // retryable error, rather than admit one with no
+                    // pages. The two counts are meant to agree, and the
                     // store is the one holding real memory.
                     send_finished(&reply, Err(DecodeError::KvPoolExhausted));
-                    return None;
+                    return Accepted::Refused;
                 }
             }
         }
         None => PrefillState::new(Arc::clone(decoder), &run, chunk_size),
     };
     let answer = answer.unwrap_or_else(|| Answer::fresh(&params, reported_prompt, cached_tokens));
-    Some(Prefill {
+    Accepted::Prefill(Box::new(Prefill {
         state,
         params,
         stop_tokens,
@@ -729,5 +800,5 @@ pub(super) fn accept(
         abort,
         blocks,
         answer,
-    })
+    }))
 }

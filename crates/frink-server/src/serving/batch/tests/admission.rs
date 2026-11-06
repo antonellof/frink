@@ -515,3 +515,204 @@ fn the_sequence_cap_and_the_block_cap_compose() {
     assert_eq!(budget.free(), 7, "only the admitted job reserved");
     assert_eq!(receivers.len(), 3);
 }
+
+/// A paged config whose store holds `blocks` page groups, with every one
+/// of them already taken, and the groups so the test can give them back.
+fn exhausted_paged(
+    decoder: &Decoder,
+    blocks: usize,
+    queue_wait: std::time::Duration,
+) -> (PagedKvConfig, Vec<frink_core::cache::PageGroup>) {
+    let store = Arc::new(frink_core::cache::SharedPagedKv::new(
+        decoder.layers.len(),
+        /* block_size = */ 4,
+        blocks,
+        decoder.config.n_kv_heads,
+        decoder.config.head_dim,
+    ));
+    let held: Vec<_> = std::iter::from_fn(|| store.acquire_group()).collect();
+    assert_eq!(held.len(), blocks, "the store hands out every group");
+    let config = PagedKvConfig {
+        store,
+        queue_wait,
+        radix: None,
+        anchor_token: None,
+        slide_interval: crate::policy::pool_budget::DEFAULT_SWA_EVICTION_INTERVAL,
+    };
+    (config, held)
+}
+
+/// **A resumed row the paged store cannot seat waits; it is not failed
+/// mid-stream** (#408).
+///
+/// A preempted row has already streamed part of its answer. When it
+/// comes back, the block budget can say yes while the store says no.
+/// Before this, `accept` finished it with `KvPoolExhausted`, so its
+/// client saw half an answer and then an error. Now it goes back to the
+/// head of the line with its answer intact, its reservation is returned,
+/// nothing is sent on its reply channel, and it does not block the
+/// worker for `queue_wait`. Once pages are free it is admitted and
+/// re-prefills its prompt followed by what it had generated.
+///
+/// Confirmed to FAIL when the `Requeue` arm is replaced by the old
+/// refusal (the reply channel receives `KvPoolExhausted`).
+#[test]
+fn a_resumed_row_the_paged_store_cannot_seat_waits_instead_of_failing() {
+    let decoder = tiny_decoder();
+    let config = budget_config(4, 64);
+    let budget = BlockBudget::new(
+        config.kv_block_size,
+        config.kv_blocks,
+        Arc::new(ContextCeiling::new(config.max_context, test_shape())),
+    );
+    let queue = QueueGate::new(config.max_queue);
+    let (paged, held) = exhausted_paged(&decoder, 8, std::time::Duration::from_secs(30));
+
+    let params = greedy_params(8, 1);
+    let mut answer = Answer::fresh(&params, 3, None);
+    answer.generated_ids.extend([5, 6]);
+    let (tx, rx) = mpsc::channel();
+    let (fresh_tx, fresh_rx) = mpsc::channel();
+    let mut waiting: VecDeque<Job> = VecDeque::new();
+    waiting.push_back(Job {
+        prompt_tokens: vec![1, 2, 3],
+        params: params.clone(),
+        stop_tokens: StopTokens::from_eos(None),
+        reply: tx,
+        abort: AbortId(0),
+        blocks: 3,
+        skips: 0,
+        waited: 0,
+        answer: Some(Box::new(answer)),
+    });
+    waiting.push_back(Job {
+        prompt_tokens: vec![4],
+        params: greedy_params(2, 2),
+        stop_tokens: StopTokens::from_eos(None),
+        reply: fresh_tx,
+        abort: AbortId(1),
+        blocks: 1,
+        skips: 0,
+        waited: 0,
+        answer: None,
+    });
+    queue.try_reserve().expect("cap");
+    queue.try_reserve().expect("cap");
+    let free_before = budget.free();
+
+    let mut prefills: VecDeque<Prefill> = VecDeque::new();
+    let started = std::time::Instant::now();
+    admit(
+        &decoder,
+        &mut waiting,
+        &mut prefills,
+        &mut Rows::default(),
+        &config,
+        &queue,
+        &budget,
+        Some(&paged),
+        &Counters::default(),
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "a resumed row must not block the worker for queue_wait"
+    );
+    assert!(prefills.is_empty());
+    assert!(
+        rx.try_recv().is_err(),
+        "the resumed row's client must not be sent anything, least of all an error"
+    );
+    assert!(
+        fresh_rx.try_recv().is_err(),
+        "the job behind it was not tried"
+    );
+    assert_eq!(waiting.len(), 2);
+    assert_eq!(
+        waiting[0].abort,
+        AbortId(0),
+        "the resumed row is back at the head"
+    );
+    let back = waiting[0]
+        .answer
+        .as_ref()
+        .expect("its answer came back with it");
+    assert_eq!(back.generated_ids, vec![5, 6]);
+    assert_eq!(
+        waiting[0].prompt_tokens,
+        vec![1, 2, 3],
+        "the prompt, not prompt + answer"
+    );
+    assert_eq!(budget.free(), free_before, "its reservation was returned");
+    assert_eq!(queue.depth(), 2, "both jobs are still waiting");
+
+    for g in held {
+        paged.store.release_group(g);
+    }
+    admit(
+        &decoder,
+        &mut waiting,
+        &mut prefills,
+        &mut Rows::default(),
+        &config,
+        &queue,
+        &budget,
+        Some(&paged),
+        &Counters::default(),
+    );
+    assert_eq!(prefills.len(), 2, "with pages free both are admitted");
+    assert_eq!(
+        prefills[0].answer.generated_ids,
+        vec![5, 6],
+        "the resumed row continues its answer"
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+/// A FRESH row the store refuses has sent nothing, so it still gets the
+/// retryable `KvPoolExhausted` straight away and its reservation back.
+#[test]
+fn a_fresh_row_the_paged_store_refuses_gets_the_retryable_error() {
+    let decoder = tiny_decoder();
+    let config = budget_config(4, 64);
+    let budget = BlockBudget::new(
+        config.kv_block_size,
+        config.kv_blocks,
+        Arc::new(ContextCeiling::new(config.max_context, test_shape())),
+    );
+    let queue = QueueGate::new(config.max_queue);
+    let (paged, _held) = exhausted_paged(&decoder, 8, std::time::Duration::ZERO);
+    let (tx, rx) = mpsc::channel();
+    let mut waiting: VecDeque<Job> = VecDeque::new();
+    waiting.push_back(Job {
+        prompt_tokens: vec![1, 2, 3],
+        params: greedy_params(8, 1),
+        stop_tokens: StopTokens::from_eos(None),
+        reply: tx,
+        abort: AbortId(0),
+        blocks: 3,
+        skips: 0,
+        waited: 0,
+        answer: None,
+    });
+    queue.try_reserve().expect("cap");
+    let free_before = budget.free();
+    let mut prefills: VecDeque<Prefill> = VecDeque::new();
+    admit(
+        &decoder,
+        &mut waiting,
+        &mut prefills,
+        &mut Rows::default(),
+        &config,
+        &queue,
+        &budget,
+        Some(&paged),
+        &Counters::default(),
+    );
+    assert!(waiting.is_empty() && prefills.is_empty());
+    let result = finished_result(rx.try_recv().expect("an answer was sent"));
+    assert!(
+        matches!(result, Err(DecodeError::KvPoolExhausted)),
+        "{result:?}"
+    );
+    assert_eq!(budget.free(), free_before);
+}
