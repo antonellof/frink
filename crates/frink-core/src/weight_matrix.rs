@@ -381,10 +381,24 @@ pub fn cuda_matvec_kind_supported(kind: QuantKind) -> bool {
 pub fn cpu_int_dot_kind_supported(kind: QuantKind, cols: usize) -> bool {
     match kind {
         QuantKind::Q8_0 | QuantKind::Q4_0 => cols.is_multiple_of(32),
-        QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K | QuantKind::IQ4XS => {
-            cols.is_multiple_of(256)
-        }
-        _ => false,
+        QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K => cols.is_multiple_of(256),
+        k => q8k_row_dot(k).is_some() && cols.is_multiple_of(256),
+    }
+}
+
+/// A Q8_K row dot for a kind with no interleaved (`Kx8`) tier: the CPU
+/// matvec and batched matmul quantize the activations to Q8_K once and
+/// run this per (row, activation), llama.cpp's `ggml_vec_dot_*_q8_K`.
+/// The one list both dispatch arms and [`cpu_int_dot_kind_supported`]
+/// read, so a kind added here takes the integer path everywhere.
+pub(crate) type Q8KRowDot = fn(&[u8], &frink_quant::Q8KActivations) -> f32;
+
+pub(crate) fn q8k_row_dot(kind: QuantKind) -> Option<Q8KRowDot> {
+    match kind {
+        QuantKind::IQ4XS => Some(frink_quant::dot_iq4_xs_q8_k),
+        QuantKind::Q2K => Some(frink_quant::dot_q2_k_q8_k),
+        QuantKind::Q3K => Some(frink_quant::dot_q3_k_q8_k),
+        _ => None,
     }
 }
 
@@ -1854,19 +1868,22 @@ impl WeightMatrix {
                             );
                             return out;
                         }
-                        // IQ4_XS over Q8_K activations, llama.cpp's
-                        // `ggml_vec_dot_iq4_xs_q8_K` (`frink_quant::
-                        // iq4_xs_q8`): the same int8 lane the K-quants
-                        // take, so decode and prefill agree on the
-                        // activation quantization.
-                        QuantKind::IQ4XS if x.len().is_multiple_of(256) => {
+                        // IQ4_XS, Q2_K and Q3_K over Q8_K activations,
+                        // llama.cpp's `ggml_vec_dot_*_q8_K`
+                        // ([`q8k_row_dot`]): the same int8 lane the
+                        // K-quants take, so decode and prefill agree on
+                        // the activation quantization.
+                        k if x.len().is_multiple_of(256) && q8k_row_dot(k).is_some() => {
+                            let Some(dot) = q8k_row_dot(k) else {
+                                unreachable!("guarded above")
+                            };
                             let act = frink_quant::quantize_activations_q8_k(x);
                             crate::par::items_mut(
                                 &mut out,
                                 Self::min_rows_per_task(*rows),
                                 |r, o| {
                                     let row = &data.as_slice()[r * row_bytes..(r + 1) * row_bytes];
-                                    *o = frink_quant::dot_iq4_xs_q8_k(row, &act);
+                                    *o = dot(row, &act);
                                 },
                             );
                             return out;
@@ -3127,17 +3144,21 @@ impl WeightMatrix {
                             }
                             return out;
                         }
-                        // IQ4_XS: quantize the activations to Q8_K ONCE
-                        // per matmul and run the int8 dot per (row,
-                        // activation). No Kx8 tier, so the row's nibbles
+                        // IQ4_XS, Q2_K and Q3_K ([`q8k_row_dot`]):
+                        // quantize the activations to Q8_K ONCE per
+                        // matmul and run the int8 dot per (row,
+                        // activation). No Kx8 tier, so the row's codes
                         // are still decoded per activation, as llama.cpp's
-                        // own IQ4_XS prefill decodes them; what the f32
-                        // fallback below paid on top was an f32 FMA per
-                        // element and a per-activation f32 read of the
-                        // row, measured 4.45x behind llama.cpp on a Ryzen
-                        // 9 3900X (2026-09-15) where every K-quant on the
+                        // own prefill decodes them; what the f32 fallback
+                        // below paid on top was an f32 FMA per element and
+                        // a per-activation f32 read of the row, measured
+                        // 4.45x behind llama.cpp for IQ4_XS on a Ryzen 9
+                        // 3900X (2026-09-15) where every K-quant on the
                         // same host was 1.0x to 1.4x.
-                        QuantKind::IQ4XS if cols.is_multiple_of(256) => {
+                        k if cols.is_multiple_of(256) && q8k_row_dot(k).is_some() => {
+                            let Some(dot) = q8k_row_dot(k) else {
+                                unreachable!("guarded above")
+                            };
                             let mut acts_owned = Vec::new();
                             let (acts, _) =
                                 Self::q8k_acts(shared, x_batch, batch_size, cols, &mut acts_owned);
@@ -3146,10 +3167,7 @@ impl WeightMatrix {
                                 let row = &data_slice[r * row_bytes..(r + 1) * row_bytes];
                                 for (b, act) in acts.iter().enumerate() {
                                     unsafe {
-                                        out_w.set(
-                                            b * rows + r,
-                                            frink_quant::dot_iq4_xs_q8_k(row, act),
-                                        );
+                                        out_w.set(b * rows + r, dot(row, act));
                                     }
                                 }
                             });

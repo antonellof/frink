@@ -66,8 +66,10 @@ unsafe fn sdot_lane(mut acc: int32x4_t, a: int8x16_t, b: int8x16_t, lane: u32) -
 }
 
 /// `sdot Vd.4S, Vn.16B, Vm.16B` -- the plain (non-lane) signed dot.
+/// Stable SDOT through inline asm (`vdotq_s32` is nightly-only); the one
+/// copy every int8 kernel in the crate calls.
 #[target_feature(enable = "neon,dotprod")]
-unsafe fn sdot(mut acc: int32x4_t, a: int8x16_t, b: int8x16_t) -> int32x4_t {
+pub(crate) unsafe fn sdot(mut acc: int32x4_t, a: int8x16_t, b: int8x16_t) -> int32x4_t {
     std::arch::asm!(
         "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
         acc = inout(vreg) acc,

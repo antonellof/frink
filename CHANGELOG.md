@@ -17,6 +17,19 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **Q2_K and Q3_K on the CPU dot against Q8_K activations.**
+  `frink_quant::q2_q3_k_q8` is llama.cpp's `ggml_vec_dot_q2_K_q8_K` and
+  `ggml_vec_dot_q3_K_q8_K`, each with a scalar twin, an SDOT arm and an
+  AVX2 arm. The single-vector and batched CPU matmuls take them for a
+  256-multiple width through one list (`q8k_row_dot`) shared with
+  IQ4_XS and the kernel table, so the CPU `f32` cells in
+  `docs/KERNELS.md` go from 17 to 15. Before this both kinds ran the
+  fused f32 dequant-dot, once per (row, activation) in a batch. This is
+  the arithmetic ggml declares for them (`vec_dot_type = Q8_K`), and
+  `frink parity` with `FRINK_CPU_INT_DOT=1` moves toward libllama on
+  Llama-3.2-1B requantized `--pure`: Q3_K first-token KL 1.9e-3 to
+  5.1e-4, Q2_K 2.1e-2 to 1.7e-2. Speed is not measured (ADR 0006).
+
 - **A sliding-window layer's KV stops growing at its window, by
   default.** The contiguous host store has been able to drop rows behind
   a layer's window since 0.17.0, behind `FRINK_KV_WINDOW=1`. It is now on

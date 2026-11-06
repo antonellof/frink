@@ -100,20 +100,7 @@ mod aarch64 {
     use std::arch::aarch64::*;
 
     use super::*;
-
-    /// Stable SDOT via inline asm (`vdotq_s32` is nightly-only); the
-    /// same helper `simd_aarch64` keeps for the other q8 kernels.
-    #[target_feature(enable = "neon,dotprod")]
-    unsafe fn sdot(mut acc: int32x4_t, a: int8x16_t, b: int8x16_t) -> int32x4_t {
-        std::arch::asm!(
-            "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
-            acc = inout(vreg) acc,
-            a = in(vreg) a,
-            b = in(vreg) b,
-            options(pure, nomem, nostack),
-        );
-        acc
-    }
+    use crate::repack::sdot;
 
     /// `ggml_vec_dot_iq4_xs_q8_K`'s NEON body: codebook lookup with
     /// `tbl`, SDOT per 16 lanes, the sub-block scale applied to the

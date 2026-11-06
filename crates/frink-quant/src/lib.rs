@@ -22,6 +22,8 @@ pub mod iq4_xs_q8;
 /// The base-3 trit formats, ggml's `TQ1_0` and PrismML's `PTQ1_0`.
 pub mod ternary;
 pub use iq4_xs_q8::{dot_iq4_xs_q8_k, dot_iq4_xs_q8_k_scalar};
+pub mod q2_q3_k_q8;
+pub use q2_q3_k_q8::{dot_q2_k_q8_k, dot_q2_k_q8_k_scalar, dot_q3_k_q8_k, dot_q3_k_q8_k_scalar};
 pub mod iq_tables;
 /// ggml-produced golden vectors for the IQ2_XS/IQ2_S/IQ3_S/IQ1_M
 /// kernels. Test-only: a ~60 KB data blob has no business in a release
