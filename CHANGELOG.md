@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-06
+
 ### Changed
 
 - **IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S on the CPU dot against
