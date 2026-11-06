@@ -108,7 +108,7 @@ fn probe_gemma4(state: &frink_models::gemma4_engine::Gemma4DecodeState) -> Vec<C
 /// `pp<N>`: one batched forward over N tokens into fresh KV caches.
 /// Reported as prompt tokens per second, as `llama-bench` does.
 fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Result<Row> {
-    let test = format!("pp{n_prompt}");
+    let test = plan.label(format!("pp{n_prompt}"));
     let tokens = synthetic_tokens(decoder.config.vocab_size, n_prompt, 0);
     // Asserted BEFORE the run: the stream about to be fed is exactly as
     // long as the row's label promises, and every id is in vocabulary.
@@ -117,7 +117,6 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Res
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
     for rep in 0..plan.reps + plan.warmup {
-        plan.announce(rep);
         let mut caches = fresh_caches(decoder);
         // Every rep starts from an empty KV: a prefill that reused a
         // warm cache would report the engine's speed at work it did
@@ -126,19 +125,24 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Res
         // benchmark.
         bench_guard::check_caches_cold(&test, rep, &probe(&caches))?;
         let mut digest = WorkloadDigest::new();
+        let context = plan.fill_depth(rep, decoder.config.vocab_size, |ctx| {
+            let _ = decoder.forward_batch_last(ctx, 0, &mut caches);
+        });
+        digest.feed_all(&context);
         digest.feed_all(&tokens);
+        plan.announce(rep);
         let t = Instant::now();
         // `forward_batch_last`, not `forward_batch`: llama-bench's
         // `pp512` asks for logits at the final position only, so
         // projecting all 512 rows through the vocabulary would be work
         // the reference engine never does.
-        let logits = decoder.forward_batch_last(&tokens, 0, &mut caches);
+        let logits = decoder.forward_batch_last(&tokens, plan.depth, &mut caches);
         let dt = t.elapsed().as_secs_f64();
         // The prompt length is asserted AFTER the run too, not only
         // before: an engine that silently truncated the batch would
         // otherwise divide the full token count by a partial run's
         // time and report a speedup for doing less work.
-        bench_guard::check_prefill_after(&test, n_prompt, &probe(&caches))?;
+        bench_guard::check_prefill_after(&test, plan.depth + n_prompt, &probe(&caches))?;
         let first = *first_digest.get_or_insert(digest);
         bench_guard::check_same_workload(&test, rep, first, digest)?;
         check_result(&test, rep, &logits, &mut first_result)?;
@@ -154,6 +158,7 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Res
         samples: out,
         n_prompt,
         n_gen: 0,
+        n_depth: plan.depth,
         test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
@@ -167,7 +172,7 @@ fn bench_prefill_gemma4(
     n_prompt: usize,
     plan: &Test,
 ) -> anyhow::Result<Row> {
-    let test = format!("pp{n_prompt}");
+    let test = plan.label(format!("pp{n_prompt}"));
     let vocab = Engine::vocab_size(engine);
     let tokens = synthetic_tokens(vocab, n_prompt, 0);
     bench_guard::check_prompt_before(&test, n_prompt, &tokens, vocab)?;
@@ -175,18 +180,24 @@ fn bench_prefill_gemma4(
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
     for rep in 0..plan.reps + plan.warmup {
-        plan.announce(rep);
         let mut state = Engine::new_state(engine);
         bench_guard::check_caches_cold(&test, rep, &probe_gemma4(&state))?;
         let mut digest = WorkloadDigest::new();
+        let context = plan.fill_depth(rep, vocab, |ctx| {
+            for (i, &tok) in ctx.iter().enumerate() {
+                let _ = Engine::forward_token(engine, tok, i, &mut state);
+            }
+        });
+        digest.feed_all(&context);
+        plan.announce(rep);
         let t = Instant::now();
         let mut logits = Vec::new();
         for (i, &tok) in tokens.iter().enumerate() {
             digest.feed(tok);
-            logits = Engine::forward_token(engine, tok, i, &mut state);
+            logits = Engine::forward_token(engine, tok, plan.depth + i, &mut state);
         }
         let dt = t.elapsed().as_secs_f64();
-        bench_guard::check_prefill_after(&test, n_prompt, &probe_gemma4(&state))?;
+        bench_guard::check_prefill_after(&test, plan.depth + n_prompt, &probe_gemma4(&state))?;
         let first = *first_digest.get_or_insert(digest);
         bench_guard::check_same_workload(&test, rep, first, digest)?;
         check_result(&test, rep, &logits, &mut first_result)?;
@@ -199,6 +210,7 @@ fn bench_prefill_gemma4(
         samples: out,
         n_prompt,
         n_gen: 0,
+        n_depth: plan.depth,
         test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
@@ -219,7 +231,7 @@ pub(crate) fn host_kv_is_the_record() -> bool {
 }
 
 fn bench_decode(decoder: &Decoder, n_gen: usize, plan: &Test) -> anyhow::Result<Row> {
-    let test = format!("tg{n_gen}");
+    let test = plan.label(format!("tg{n_gen}"));
     let vocab = decoder.config.vocab_size;
     let tokens = decode_tokens(vocab, n_gen, 0);
     // The decode stream gets the same BEFORE check the prompt does. It
@@ -231,23 +243,27 @@ fn bench_decode(decoder: &Decoder, n_gen: usize, plan: &Test) -> anyhow::Result<
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
     for rep in 0..plan.reps + plan.warmup {
-        plan.announce(rep);
         let mut caches = fresh_caches(decoder);
         bench_guard::check_caches_cold(&test, rep, &probe(&caches))?;
-        let _ = decoder.forward_token(0, 0, &mut caches);
         let mut digest = WorkloadDigest::new();
+        let context = plan.fill_depth(rep, vocab, |ctx| {
+            let _ = decoder.forward_batch_last(ctx, 0, &mut caches);
+        });
+        digest.feed_all(&context);
+        let _ = decoder.forward_token(0, plan.depth, &mut caches);
+        plan.announce(rep);
         let t = Instant::now();
         let mut logits = Vec::new();
         for (i, &tok) in tokens.iter().enumerate() {
             digest.feed(tok);
-            logits = decoder.forward_token(tok, i + 1, &mut caches);
+            logits = decoder.forward_token(tok, plan.depth + i + 1, &mut caches);
         }
         let dt = t.elapsed().as_secs_f64();
         // One priming token plus n_gen decode steps. A short cache
         // means steps were skipped, which would inflate the rate.
         let kv_checked = bench_guard::check_decode_after(
             &test,
-            1,
+            plan.depth + 1,
             n_gen,
             &probe(&caches),
             host_kv_is_the_record(),
@@ -265,13 +281,14 @@ fn bench_decode(decoder: &Decoder, n_gen: usize, plan: &Test) -> anyhow::Result<
         samples: out,
         n_prompt: 0,
         n_gen,
+        n_depth: plan.depth,
         test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
 }
 
 fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, plan: &Test) -> anyhow::Result<Row> {
-    let test = format!("tg{n_gen}");
+    let test = plan.label(format!("tg{n_gen}"));
     let vocab = Engine::vocab_size(engine);
     let tokens = decode_tokens(vocab, n_gen, 0);
     bench_guard::check_prompt_before(&test, n_gen, &tokens, vocab)?;
@@ -279,21 +296,27 @@ fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, plan: &Test) -> anyh
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
     for rep in 0..plan.reps + plan.warmup {
-        plan.announce(rep);
         let mut state = Engine::new_state(engine);
         bench_guard::check_caches_cold(&test, rep, &probe_gemma4(&state))?;
-        let _ = Engine::forward_token(engine, 0, 0, &mut state);
         let mut digest = WorkloadDigest::new();
+        let context = plan.fill_depth(rep, vocab, |ctx| {
+            for (i, &tok) in ctx.iter().enumerate() {
+                let _ = Engine::forward_token(engine, tok, i, &mut state);
+            }
+        });
+        digest.feed_all(&context);
+        let _ = Engine::forward_token(engine, 0, plan.depth, &mut state);
+        plan.announce(rep);
         let t = Instant::now();
         let mut logits = Vec::new();
         for (i, &tok) in tokens.iter().enumerate() {
             digest.feed(tok);
-            logits = Engine::forward_token(engine, tok, i + 1, &mut state);
+            logits = Engine::forward_token(engine, tok, plan.depth + i + 1, &mut state);
         }
         let dt = t.elapsed().as_secs_f64();
         let kv_checked = bench_guard::check_decode_after(
             &test,
-            1,
+            plan.depth + 1,
             n_gen,
             &probe_gemma4(&state),
             host_kv_is_the_record(),
@@ -311,6 +334,7 @@ fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, plan: &Test) -> anyh
         samples: out,
         n_prompt: 0,
         n_gen,
+        n_depth: plan.depth,
         test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
@@ -353,6 +377,10 @@ pub(crate) fn decode_tokens(vocab: usize, n_gen: usize, seq: usize) -> Vec<usize
 /// prompt stride of 7 so no two sequences' prompts coincide either.
 const SEQ_STRIDE: usize = 1013;
 
+/// The stream a `-d` context is drawn from: its own sequence, so the
+/// context never repeats the prompt that follows it.
+const DEPTH_SEQ: usize = 7;
+
 /// Which half of llama-bench's workload a test is, for its progress
 /// lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -368,6 +396,7 @@ struct Tests {
     reps: usize,
     count: usize,
     next: usize,
+    depth: usize,
 }
 
 impl Tests {
@@ -377,6 +406,7 @@ impl Tests {
             reps: args.reps,
             count: usize::from(args.n_prompt > 0) + usize::from(args.n_gen > 0),
             next: 0,
+            depth: args.depth,
         }
     }
 
@@ -390,6 +420,7 @@ impl Tests {
             phase,
             progress: self.opts.progress.then_some((self.next, self.count)),
             time: super::output::now_iso8601(),
+            depth: self.depth,
         };
         if let Some(line) = t.line("starting") {
             eprintln!("{line}");
@@ -410,6 +441,9 @@ struct Test {
     progress: Option<(usize, usize)>,
     /// When the test started, llama-bench's `test_time`.
     time: String,
+    /// llama-bench's `-d`: context tokens in the KV before each timed
+    /// repetition, put there untimed.
+    depth: usize,
 }
 
 impl Test {
@@ -432,6 +466,37 @@ impl Test {
         }
     }
 
+    /// The row's name, with llama-bench's ` @ d<N>` when it ran at a
+    /// depth (`llama-bench.cpp`, the markdown printer).
+    fn label(&self, base: String) -> String {
+        if self.depth > 0 {
+            format!("{base} @ d{}", self.depth)
+        } else {
+            base
+        }
+    }
+
+    /// Fills the KV with `depth` context tokens before a repetition,
+    /// untimed, as llama-bench's depth run does; returns them so the
+    /// caller can digest them. Nothing happens at depth 0.
+    fn fill_depth(&self, rep: usize, vocab: usize, run: impl FnOnce(&[usize])) -> Vec<usize> {
+        if self.depth == 0 {
+            return Vec::new();
+        }
+        if rep >= self.warmup {
+            if let Some(line) = self.line(&format!(
+                "depth run {}/{}",
+                rep - self.warmup + 1,
+                self.reps
+            )) {
+                eprintln!("{line}");
+            }
+        }
+        let context = synthetic_tokens(vocab, self.depth, DEPTH_SEQ);
+        run(&context);
+        context
+    }
+
     fn announce(&self, rep: usize) {
         if let Some(line) = self.line(&self.rep_label(rep)) {
             eprintln!("{line}");
@@ -450,6 +515,7 @@ mod tests {
             phase,
             progress: progress.then_some((2, 2)),
             time: String::new(),
+            depth: 0,
         }
     }
 
@@ -467,6 +533,23 @@ mod tests {
         let g = test(1, Phase::Generation, true);
         assert_eq!(g.rep_label(0), "warmup generation run");
         assert_eq!(g.rep_label(2), "generation run 2/3");
+    }
+
+    /// A depth row is named as llama-bench names it, and a depth-0 row
+    /// keeps the name every published receipt used.
+    #[test]
+    fn a_depth_row_is_named_with_llama_benchs_at_suffix() {
+        let mut t = test(1, Phase::Prompt, false);
+        assert_eq!(t.label("pp512".into()), "pp512");
+        t.depth = 4096;
+        assert_eq!(t.label("pp512".into()), "pp512 @ d4096");
+        let mut ran = 0;
+        let ctx = t.fill_depth(0, 32000, |c| ran = c.len());
+        assert_eq!((ran, ctx.len()), (4096, 4096));
+        t.depth = 0;
+        assert!(t
+            .fill_depth(0, 32000, |_| panic!("depth 0 runs nothing"))
+            .is_empty());
     }
 
     /// `--no-warmup` makes repetition 0 a timed one, and with no

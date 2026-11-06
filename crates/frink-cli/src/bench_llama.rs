@@ -244,6 +244,7 @@ pub(crate) fn run_llama_bench(
     model: &str,
     n_prompt: usize,
     n_gen: usize,
+    n_depth: usize,
     reps: usize,
     ngl: usize,
 ) -> anyhow::Result<LlamaRun> {
@@ -254,6 +255,8 @@ pub(crate) fn run_llama_bench(
         &n_prompt.to_string(),
         "-n",
         &n_gen.to_string(),
+        "-d",
+        &n_depth.to_string(),
         "-r",
         &reps.to_string(),
         "-ngl",

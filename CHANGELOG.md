@@ -31,6 +31,13 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`frink bench -d N`**, llama-bench's `--n-depth` (#404): each test runs
+  with N context tokens already in the KV cache, filled untimed before
+  every repetition as llama-bench's depth run does, and the row is named
+  `pp512 @ d4096` as llama-bench names it. `--compare` passes `-d` on,
+  the structured `-o` formats carry `n_depth`, and the depth context is
+  part of the workload digest (a depth-0 row's digest is unchanged).
+  The `llama-bench` not-accepted count falls to 25.
 - **`frink bench` takes llama-bench's `-hf` / `-hff` / `-hft` and `-ctk` /
   `-ctv`** (#404). `-hf` resolves through the same Hub cache as `frink
   run -hf`, before the backend is set up. `-ctk` takes one value the

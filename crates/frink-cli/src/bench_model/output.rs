@@ -112,6 +112,7 @@ impl TestRecord {
         run: &RunInfo,
         n_prompt: usize,
         n_gen: usize,
+        n_depth: usize,
         test_time: String,
         samples_ts: &[f64],
     ) -> Self {
@@ -151,7 +152,7 @@ impl TestRecord {
             i("n_gpu_layers", run.n_gpu_layers as u64),
             i("n_prompt", n_prompt as u64),
             i("n_gen", n_gen as u64),
-            i("n_depth", 0),
+            i("n_depth", n_depth as u64),
             s("test_time", &test_time),
             i("avg_ns", mean(&ns) as u64),
             i("stddev_ns", sample_stddev(&ns) as u64),
@@ -329,6 +330,7 @@ mod tests {
             &run(),
             0,
             128,
+            0,
             "2026-11-06T10:00:00Z".into(),
             &[100.0, 200.0],
         )

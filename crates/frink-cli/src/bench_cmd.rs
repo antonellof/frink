@@ -53,6 +53,12 @@ pub struct BenchCmd {
     /// Decode steps for the `tg<N>` row (`0` skips).
     #[arg(short = 'n', long = "n-gen", default_value_t = 128)]
     pub n_gen: usize,
+    /// llama-bench's `-d`: run each test with this many context tokens
+    /// already in the KV cache, put there untimed before every
+    /// repetition. The row is named `pp512 @ d4096`, as llama-bench
+    /// names it. One value per run.
+    #[arg(short = 'd', long = "n-depth", default_value_t = 0)]
+    pub n_depth: usize,
     /// Timed repetitions per row; one extra warmup is discarded.
     #[arg(short = 'r', long = "repetitions", default_value_t = 3)]
     pub reps: usize,
@@ -237,6 +243,7 @@ impl BenchCmd {
             cache_type_v: _,
             n_prompt,
             n_gen,
+            n_depth,
             reps,
             threads,
             n_gpu_layers,
@@ -301,6 +308,7 @@ impl BenchCmd {
                 model,
                 n_prompt,
                 n_gen,
+                depth: n_depth,
                 reps,
                 ctx_size,
                 compare,
