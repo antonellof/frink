@@ -17,6 +17,16 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S on the CPU dot against
+  Q8_K activations.** `frink_quant::iq_q8k` is llama.cpp's
+  `ggml_vec_dot_iq*_q8_K`: one dot body (scalar twin, SDOT, AVX2) with a
+  decoder per kind to `grid * sign` integers and per-16 odd scales,
+  checked element for element against the dequantizers. They join
+  `q8k_row_dot`, so the CPU matvec and batched matmul take them, and the
+  CPU `f32` cells in `docs/KERNELS.md` go from 10 to 5. Before this the
+  five ran a scalar f32 dequant-dot. `frink parity` against libllama at
+  the pin (BLAS off) on Llama-3.2-1B IQ quants moves both ways and stays
+  inside the drift these low-bit files show on the f32 path (#476).
 - **GGUF MXFP4 on the CPU dots against Q8 activations.** The block form
   gpt-oss ships in had only a scalar f32 dequant-dot. It now takes
   `frink_quant::legacy_q8`'s body with ggml's doubled `kvalues_mxfp4`
