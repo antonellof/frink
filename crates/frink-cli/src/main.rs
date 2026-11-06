@@ -627,7 +627,7 @@ fn main() -> anyhow::Result<()> {
             .error(clap::error::ErrorKind::UnknownArgument, e)
             .exit()
     });
-    let cli = argv::parse(argv).unwrap_or_else(|e| e.exit());
+    let mut cli = argv::parse(argv).unwrap_or_else(|e| e.exit());
 
     // BEFORE `claim_instance`, and that ordering is the whole point.
     //
@@ -640,13 +640,14 @@ fn main() -> anyhow::Result<()> {
     // and every one of those receipts recorded `backend_active:
     // "Metal"` next to `backend: "cpu"` without anything comparing the
     // two (#126).
-    match &cli.command {
+    match &mut cli.command {
         Commands::Bench(args) => {
             // `--suite` and `--render` do not benchmark in THIS process:
             // the suite spawns a child per entry and render only reads
             // receipts, so applying a backend here would pin the parent
             // to one backend for children that each want their own.
             if !args.suite && !args.render && !args.list_devices {
+                args.apply_llama_flags()?;
                 bench_model::set_process_priority(args.prio)?;
                 bench_model::apply_env(args.threads, args.n_gpu_layers, args.model.as_deref())?;
             }

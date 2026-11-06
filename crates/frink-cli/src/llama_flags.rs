@@ -33,7 +33,7 @@ const TABLE: &str = include_str!("../tests/llama_cpp_flags.txt");
 
 /// Not-accepted flags per llama.cpp tool. Lower these when a gap
 /// closes; the test fails until you do, so they cannot creep back up.
-const PINNED_NOT_ACCEPTED: &[(&str, usize)] = &[("cli", 153), ("server", 227), ("bench", 31)];
+const PINNED_NOT_ACCEPTED: &[(&str, usize)] = &[("cli", 153), ("server", 227), ("bench", 26)];
 
 /// `LLAMA_ARG_*` variables on llama-server flags that frink-server does
 /// not read. Same ratchet.

@@ -54,6 +54,8 @@ to name a real flag of its tool.
 | bench | `-n` | One value per run, as `-p` | Same |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
 | bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and llama-bench's comma-separated sweep refused | Fused attention is a backend property here, and one run measures one configuration |
+| bench | `-ctk` | `f16` (the default) or `f32` on CPU and Metal; a type the KV store would fall back from (`q8_0`, `q4_0`, ...) is refused, as is llama-bench's sweep | A row labelled with a type it did not measure is not a measurement |
+| bench | `-ctv` | Must equal `-ctk` | frink's KV store holds K and V in one type |
 | bench | `-o` | `csv`, `json`, `jsonl` and `sql` carry llama-bench's field names, types and statistics (`avg_ts` the mean, `stddev_ts` the sample stddev), but only the fields frink can state: llama.cpp-only knobs (`cpu_mask`, `poll`, `split_mode`, `tensor_split`, `n_batch`, `n_ubatch`, `build_number`, ...) are absent rather than defaulted. `md` is frink's own table | A field filled with a default frink does not have would read as a measurement |
 | cli | `-co` | Colours the prompt echo and the timing lines on stderr; generated text on stdout is never coloured. A bare `-co` means `on` | frink's stdout is the answer and stays plain so it pipes; `NO_COLOR` still wins under `auto` |
 | server | `--metrics` | Accepted and changes nothing: `/metrics` is always served | frink has no switch to turn the endpoint off |
@@ -1455,6 +1457,8 @@ line up.
 | `--delay` | Seconds to sleep before each test, to let the host cool off |
 | `--prio` | Process priority: `-1` low, `0` normal, `1` medium, `2` high, `3` realtime (`nice` 5, 0, -5, -10, -20, as llama.cpp sets it). A priority the OS refuses is an error |
 | `--progress` | Print each test's progress to stderr, in llama-bench's words |
+| `-hf/--hf-repo`, `-hff/--hf-file`, `-hft/--hf-token` | Benchmark a Hugging Face repo (`user/repo[:QUANT]`), fetched into the frink cache first, as `frink run -hf` does |
+| `-ctk`, `-ctv` | KV cache type; only the types the active backend's store holds, and `-ctv` equal to `-ctk` |
 | `-o/--output` | `md` (the table, the default), `csv`, `json`, `jsonl` or `sql` on stdout, in llama-bench's field names. Under anything but `md`, every other line goes to stderr so stdout stays parseable |
 | `-oe/--output-err` | The same formats (or `none`, the default) on stderr |
 | `--compare` | Also run `llama-bench -o json` on the same GGUF, print the gap, and record the llama.cpp build it reports (see below) |
