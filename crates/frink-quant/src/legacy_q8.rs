@@ -39,8 +39,8 @@
 use half::f16;
 
 use crate::{
-    q5_fifth_bits, Q8Activations, IQ4_NL_BLOCK_BYTES, KVALUES_IQ4NL, Q4_1_BLOCK_BYTES,
-    Q5_0_BLOCK_BYTES, Q5_1_BLOCK_BYTES, Q8_0_BLOCK_ELEMS,
+    q5_fifth_bits, Q8Activations, IQ4_NL_BLOCK_BYTES, KVALUES_IQ4NL, MXFP4_GGUF_BLOCK_BYTES,
+    Q4_1_BLOCK_BYTES, Q5_0_BLOCK_BYTES, Q5_1_BLOCK_BYTES, Q8_0_BLOCK_ELEMS,
 };
 
 /// One 32-element block format: where its scale, offset and codes live,
@@ -55,8 +55,13 @@ trait Block {
     const QH: Option<usize>;
     /// Subtracted from every decoded code (16 for Q5_0).
     const BIAS: i8;
-    /// Codes through the IQ4_NL codebook instead of linear.
-    const CODEBOOK: bool;
+    /// Codes through a 16-entry codebook instead of linear.
+    const CODEBOOK: Option<&'static [i8; 16]>;
+
+    /// The block's multiplier for its decoded integers.
+    fn scale(block: &[u8]) -> f32 {
+        f16_at(block, 0)
+    }
 
     /// The 32 decoded integers of one block, in element order.
     fn decode(block: &[u8]) -> [i8; 32] {
@@ -70,9 +75,9 @@ trait Block {
                 lo |= xh0;
                 hi |= xh1;
             }
-            if Self::CODEBOOK {
-                w[j] = KVALUES_IQ4NL[lo as usize];
-                w[j + 16] = KVALUES_IQ4NL[hi as usize];
+            if let Some(table) = Self::CODEBOOK {
+                w[j] = table[lo as usize];
+                w[j + 16] = table[hi as usize];
             } else {
                 w[j] = lo as i8 - Self::BIAS;
                 w[j + 16] = hi as i8 - Self::BIAS;
@@ -89,7 +94,7 @@ impl Block for Q4_1 {
     const MIN: Option<usize> = Some(2);
     const QH: Option<usize> = None;
     const BIAS: i8 = 0;
-    const CODEBOOK: bool = false;
+    const CODEBOOK: Option<&'static [i8; 16]> = None;
 }
 
 struct Q5_0;
@@ -99,7 +104,7 @@ impl Block for Q5_0 {
     const MIN: Option<usize> = None;
     const QH: Option<usize> = Some(2);
     const BIAS: i8 = 16;
-    const CODEBOOK: bool = false;
+    const CODEBOOK: Option<&'static [i8; 16]> = None;
 }
 
 struct Q5_1;
@@ -109,7 +114,7 @@ impl Block for Q5_1 {
     const MIN: Option<usize> = Some(2);
     const QH: Option<usize> = Some(4);
     const BIAS: i8 = 0;
-    const CODEBOOK: bool = false;
+    const CODEBOOK: Option<&'static [i8; 16]> = None;
 }
 
 struct Iq4Nl;
@@ -119,7 +124,39 @@ impl Block for Iq4Nl {
     const MIN: Option<usize> = None;
     const QH: Option<usize> = None;
     const BIAS: i8 = 0;
-    const CODEBOOK: bool = true;
+    const CODEBOOK: Option<&'static [i8; 16]> = Some(&KVALUES_IQ4NL);
+}
+
+/// GGUF MXFP4 (`block_mxfp4`): one E8M0 scale byte, then sixteen bytes
+/// of E2M1 codes. ggml's `kvalues_mxfp4` holds the E2M1 values doubled so
+/// they fit `int8_t`, paired with `ggml_e8m0_to_fp32_half`; the product
+/// is the real value, exactly.
+struct Mxfp4;
+impl Block for Mxfp4 {
+    const BYTES: usize = MXFP4_GGUF_BLOCK_BYTES;
+    const QS: usize = 1;
+    const MIN: Option<usize> = None;
+    const QH: Option<usize> = None;
+    const BIAS: i8 = 0;
+    const CODEBOOK: Option<&'static [i8; 16]> = Some(&KVALUES_MXFP4_X2);
+
+    fn scale(block: &[u8]) -> f32 {
+        e8m0_to_fp32_half(block[0])
+    }
+}
+
+/// `kvalues_mxfp4` (`ggml-common.h`): E2M1 times two.
+const KVALUES_MXFP4_X2: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+
+/// `ggml_e8m0_to_fp32_half` (`ggml-impl.h`): `2^(e - 128)`, with the
+/// two subnormal patterns for `e < 2`.
+#[inline]
+fn e8m0_to_fp32_half(e: u8) -> f32 {
+    if e < 2 {
+        f32::from_bits(0x0020_0000 << e)
+    } else {
+        f32::from_bits(((e - 1) as u32) << 23)
+    }
 }
 
 #[inline]
@@ -136,7 +173,7 @@ fn dot_scalar<B: Block>(row_bytes: &[u8], act: &Q8Activations) -> f32 {
         let w = B::decode(block);
         let y = &act.q[b * Q8_0_BLOCK_ELEMS..(b + 1) * Q8_0_BLOCK_ELEMS];
         let isum: i32 = w.iter().zip(y).map(|(&w, &y)| w as i32 * y as i32).sum();
-        let mut block_acc = f16_at(block, 0) * isum as f32;
+        let mut block_acc = B::scale(block) * isum as f32;
         if let Some(o) = B::MIN {
             let ysum: i32 = y.iter().map(|&y| y as i32).sum();
             block_acc += f16_at(block, o) * ysum as f32;
@@ -183,6 +220,7 @@ kind_fns!(Q4_1, dot_q4_1_q8, dot_q4_1_q8_scalar, "Q4_1");
 kind_fns!(Q5_0, dot_q5_0_q8, dot_q5_0_q8_scalar, "Q5_0");
 kind_fns!(Q5_1, dot_q5_1_q8, dot_q5_1_q8_scalar, "Q5_1");
 kind_fns!(Iq4Nl, dot_iq4_nl_q8, dot_iq4_nl_q8_scalar, "IQ4_NL");
+kind_fns!(Mxfp4, dot_mxfp4_q8, dot_mxfp4_q8_scalar, "GGUF MXFP4");
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64 {
@@ -210,8 +248,8 @@ mod aarch64 {
             lo = vorrq_u8(lo, vandq_u8(vtstq_u8(b01, bit), fifth));
             hi = vorrq_u8(hi, vandq_u8(vtstq_u8(b23, bit), fifth));
         }
-        if B::CODEBOOK {
-            let codebook = vld1q_s8(KVALUES_IQ4NL.as_ptr());
+        if let Some(table) = B::CODEBOOK {
+            let codebook = vld1q_s8(table.as_ptr());
             return (vqtbl1q_s8(codebook, lo), vqtbl1q_s8(codebook, hi));
         }
         let bias = vdupq_n_s8(B::BIAS);
@@ -236,7 +274,7 @@ mod aarch64 {
             let y = act.q.as_ptr().add(b * Q8_0_BLOCK_ELEMS);
             let (y_lo, y_hi) = (vld1q_s8(y), vld1q_s8(y.add(16)));
             let isum = vaddvq_s32(sdot(sdot(vdupq_n_s32(0), w_lo, y_lo), w_hi, y_hi));
-            let mut block_acc = f16_at(block, 0) * isum as f32;
+            let mut block_acc = B::scale(block) * isum as f32;
             if let Some(o) = B::MIN {
                 let ysum = vaddlvq_s8(y_lo) as i32 + vaddlvq_s8(y_hi) as i32;
                 block_acc += f16_at(block, o) * ysum as f32;
@@ -278,8 +316,8 @@ mod x86 {
         let m4 = _mm_set1_epi8(0xF);
         let mut lo = _mm_and_si128(bytes, m4);
         let mut hi = _mm_and_si128(_mm_srli_epi16(bytes, 4), m4);
-        if B::CODEBOOK {
-            let codebook = _mm_loadu_si128(KVALUES_IQ4NL.as_ptr() as *const __m128i);
+        if let Some(table) = B::CODEBOOK {
+            let codebook = _mm_loadu_si128(table.as_ptr() as *const __m128i);
             lo = _mm_shuffle_epi8(codebook, lo);
             hi = _mm_shuffle_epi8(codebook, hi);
         }
@@ -322,7 +360,7 @@ mod x86 {
             let p16 = _mm256_maddubs_epi16(_mm256_sign_epi8(w, w), _mm256_sign_epi8(y, w));
             let p32 = _mm256_madd_epi16(p16, ones16);
             let da = act.d[b];
-            let dw = _mm256_set1_ps(da * f16_at(block, 0));
+            let dw = _mm256_set1_ps(da * B::scale(block));
             accum = _mm256_fmadd_ps(dw, _mm256_cvtepi32_ps(p32), accum);
             if let Some(o) = B::MIN {
                 let ysum = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8, y), ones16);
@@ -354,8 +392,13 @@ mod tests {
         let mut out = Vec::with_capacity(n_blocks * B::BYTES);
         for _ in 0..n_blocks {
             let mut block: Vec<u8> = (0..B::BYTES).map(|_| next() as u8).collect();
-            let d = f16::from_f32(0.01 + (next() % 1000) as f32 / 5000.0);
-            block[0..2].copy_from_slice(&d.to_le_bytes());
+            if B::BYTES == MXFP4_GGUF_BLOCK_BYTES {
+                // An E8M0 scale near 1, both sides of the bias.
+                block[0] = 120 + (next() % 12) as u8;
+            } else {
+                let d = f16::from_f32(0.01 + (next() % 1000) as f32 / 5000.0);
+                block[0..2].copy_from_slice(&d.to_le_bytes());
+            }
             if let Some(o) = B::MIN {
                 let m = f16::from_f32(-0.05 + (next() % 1000) as f32 / 9000.0);
                 block[o..o + 2].copy_from_slice(&m.to_le_bytes());
@@ -412,6 +455,7 @@ mod tests {
         check_against_f32::<Q5_0>(crate::dot_q5_0_f32_scalar, "q5_0");
         check_against_f32::<Q5_1>(crate::dot_q5_1_f32_scalar, "q5_1");
         check_against_f32::<Iq4Nl>(crate::dot_iq4_nl_f32_scalar, "iq4_nl");
+        check_against_f32::<Mxfp4>(crate::dot_mxfp4_gguf_f32_scalar, "mxfp4");
     }
 
     fn check_simd<B: Block>(what: &str) {
@@ -448,6 +492,7 @@ mod tests {
         check_simd::<Q5_0>("q5_0");
         check_simd::<Q5_1>("q5_1");
         check_simd::<Iq4Nl>("iq4_nl");
+        check_simd::<Mxfp4>("mxfp4");
     }
 
     /// The decoder against the dequantizers, element by element: `d *
@@ -461,7 +506,7 @@ mod tests {
             let want = deq(&bytes).unwrap();
             for (b, block) in bytes.chunks_exact(B::BYTES).enumerate() {
                 let w = B::decode(block);
-                let d = f16_at(block, 0);
+                let d = B::scale(block);
                 let m = B::MIN.map_or(0.0, |o| f16_at(block, o));
                 for j in 0..32 {
                     let got = d * w[j] as f32 + m;
@@ -474,5 +519,6 @@ mod tests {
         check::<Q5_0>(crate::dequant_q5_0, "q5_0");
         check::<Q5_1>(crate::dequant_q5_1, "q5_1");
         check::<Iq4Nl>(crate::dequant_iq4_nl, "iq4_nl");
+        check::<Mxfp4>(crate::dequant_mxfp4_gguf, "mxfp4");
     }
 }
