@@ -29,11 +29,12 @@
 use half::f16;
 
 use crate::iq_tables::{
-    IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS,
+    IQ1S_GRID, IQ2S_GRID, IQ2XS_GRID, IQ2XXS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS,
+    KSIGNS_IQ2XS,
 };
 use crate::{
-    Q8KActivations, IQ2_S_BLOCK_BYTES, IQ2_XS_BLOCK_BYTES, IQ2_XXS_BLOCK_BYTES, IQ3_S_BLOCK_BYTES,
-    IQ3_XXS_BLOCK_BYTES,
+    ternary, Q8KActivations, IQ1_M_BLOCK_BYTES, IQ1_S_BLOCK_BYTES, IQ2_S_BLOCK_BYTES,
+    IQ2_XS_BLOCK_BYTES, IQ2_XXS_BLOCK_BYTES, IQ3_S_BLOCK_BYTES, IQ3_XXS_BLOCK_BYTES,
 };
 
 const QK_K: usize = 256;
@@ -49,6 +50,11 @@ trait IqBlock {
     /// ggml's final multiplier (`*s = FACTOR * sumf`).
     const FACTOR: f32;
     fn decode(block: &[u8]) -> Decoded;
+    /// The block's f16 scale; the first two bytes unless the format
+    /// stores it elsewhere.
+    fn d(block: &[u8]) -> f32 {
+        f16::from_le_bytes([block[0], block[1]]).to_f32()
+    }
 }
 
 #[inline]
@@ -224,6 +230,101 @@ impl IqBlock for Iq3S {
     }
 }
 
+/// The IQ1 kinds add `IQ1S_DELTA = 1/8` times a per-group sign to every
+/// grid value (`grid + delta/8`). Scaling by 8 keeps that in integers:
+/// `w = 8 * grid + delta` with `FACTOR = 1/8` is ggml's
+/// `sumi + IQ1S_DELTA * sumi1` exactly, so one int8 dot carries both.
+struct Iq1S;
+impl IqBlock for Iq1S {
+    const BYTES: usize = IQ1_S_BLOCK_BYTES;
+    const FACTOR: f32 = 0.125;
+    fn decode(block: &[u8]) -> Decoded {
+        let mut out = Decoded {
+            w: [0; QK_K],
+            ls: [0; 16],
+        };
+        for ib in 0..8 {
+            let qh = u16_at(block, 34 + 2 * ib);
+            let ls = 2 * ((qh >> 12) & 7) as i32 + 1;
+            let delta: i8 = if qh & 0x8000 != 0 { -1 } else { 1 };
+            out.ls[2 * ib] = ls;
+            out.ls[2 * ib + 1] = ls;
+            for l in 0..4 {
+                let idx = block[2 + 4 * ib + l] as usize | ((((qh >> (3 * l)) & 7) as usize) << 8);
+                let grid = IQ1S_GRID[idx];
+                for j in 0..8 {
+                    let g = ((grid >> (8 * j)) & 0xFF) as u8 as i8;
+                    out.w[32 * ib + 8 * l + j] = 8 * g + delta;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// IQ1_M: IQ1_S's grid with a delta sign per 8 values, a 3-bit scale per
+/// 16, and the f16 block scale spread over the top nibbles of the four
+/// `scales` words (`iq1m_scale_t`).
+struct Iq1M;
+impl IqBlock for Iq1M {
+    const BYTES: usize = IQ1_M_BLOCK_BYTES;
+    const FACTOR: f32 = 0.125;
+    fn decode(block: &[u8]) -> Decoded {
+        let (qs, qh) = (&block[0..32], &block[32..48]);
+        let sc = |k: usize| u16_at(block, 48 + 2 * k);
+        let mut out = Decoded {
+            w: [0; QK_K],
+            ls: [0; 16],
+        };
+        for ib in 0..8 {
+            let s = sc(ib / 2);
+            out.ls[2 * ib] = 2 * ((s >> (6 * (ib % 2))) & 7) as i32 + 1;
+            out.ls[2 * ib + 1] = 2 * ((s >> (6 * (ib % 2) + 3)) & 7) as i32 + 1;
+            let h = &qh[2 * ib..2 * ib + 2];
+            for l in 0..4 {
+                let hb = h[l / 2];
+                let delta: i8 = if hb & (if l % 2 == 0 { 0x08 } else { 0x80 }) != 0 {
+                    -1
+                } else {
+                    1
+                };
+                let idx = qs[4 * ib + l] as usize | (((hb as usize) << (8 - 4 * (l % 2))) & 0x700);
+                let grid = IQ1S_GRID[idx];
+                for j in 0..8 {
+                    let g = ((grid >> (8 * j)) & 0xFF) as u8 as i8;
+                    out.w[32 * ib + 8 * l + j] = 8 * g + delta;
+                }
+            }
+        }
+        out
+    }
+    fn d(block: &[u8]) -> f32 {
+        let sc = |k: usize| u16_at(block, 48 + 2 * k);
+        let bits =
+            (sc(0) >> 12) | ((sc(1) >> 8) & 0x00f0) | ((sc(2) >> 4) & 0x0f00) | (sc(3) & 0xf000);
+        f16::from_bits(bits).to_f32()
+    }
+}
+
+/// ggml `TQ1_0`: trits in `{-1, 0, 1}` with no sub-block scale
+/// (`ggml_vec_dot_tq1_0_q8_K`), the f16 scale last in the block.
+struct Tq1_0;
+impl IqBlock for Tq1_0 {
+    const BYTES: usize = ternary::TQ1_0_BLOCK_BYTES;
+    const FACTOR: f32 = 1.0;
+    fn decode(block: &[u8]) -> Decoded {
+        let mut out = Decoded {
+            w: [0; QK_K],
+            ls: [1; 16],
+        };
+        ternary::unpack_trits(block, ternary::TQ1_0, &mut out.w);
+        out
+    }
+    fn d(block: &[u8]) -> f32 {
+        ternary::block_scale(block, ternary::TQ1_0)
+    }
+}
+
 /// The scalar twin every SIMD arm is checked against.
 fn dot_scalar<B: IqBlock>(row_bytes: &[u8], act: &Q8KActivations) -> f32 {
     debug_assert_eq!(row_bytes.len() % B::BYTES, 0);
@@ -239,7 +340,7 @@ fn dot_scalar<B: IqBlock>(row_bytes: &[u8], act: &Q8KActivations) -> f32 {
                 .sum();
             bsum += dec.ls[g] * s;
         }
-        acc += f16::from_le_bytes([block[0], block[1]]).to_f32() * act.d[b] * bsum as f32;
+        acc += B::d(block) * act.d[b] * bsum as f32;
     }
     B::FACTOR * acc
 }
@@ -281,6 +382,9 @@ kind_fns!(Iq2Xs, dot_iq2_xs_q8_k, dot_iq2_xs_q8_k_scalar, "IQ2_XS");
 kind_fns!(Iq2S, dot_iq2_s_q8_k, dot_iq2_s_q8_k_scalar, "IQ2_S");
 kind_fns!(Iq3Xxs, dot_iq3_xxs_q8_k, dot_iq3_xxs_q8_k_scalar, "IQ3_XXS");
 kind_fns!(Iq3S, dot_iq3_s_q8_k, dot_iq3_s_q8_k_scalar, "IQ3_S");
+kind_fns!(Iq1S, dot_iq1_s_q8_k, dot_iq1_s_q8_k_scalar, "IQ1_S");
+kind_fns!(Iq1M, dot_iq1_m_q8_k, dot_iq1_m_q8_k_scalar, "IQ1_M");
+kind_fns!(Tq1_0, dot_tq1_0_q8_k, dot_tq1_0_q8_k_scalar, "TQ1_0");
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64 {
@@ -308,7 +412,7 @@ mod aarch64 {
                 let s = vaddvq_s32(sdot(vdupq_n_s32(0), w, vld1q_s8(y.add(16 * g))));
                 bsum += dec.ls[g] * s;
             }
-            acc += f16::from_le_bytes([block[0], block[1]]).to_f32() * act.d[b] * bsum as f32;
+            acc += B::d(block) * act.d[b] * bsum as f32;
         }
         B::FACTOR * acc
     }
@@ -358,7 +462,7 @@ mod x86 {
                 );
                 sumi = _mm256_add_epi32(sumi, _mm256_madd_epi16(p16, sc));
             }
-            let d = f16::from_le_bytes([block[0], block[1]]).to_f32() * act.d[b];
+            let d = B::d(block) * act.d[b];
             accum = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi), accum);
         }
         B::FACTOR * hsum(accum)
@@ -386,7 +490,23 @@ mod tests {
         for _ in 0..n_blocks {
             let mut block: Vec<u8> = (0..B::BYTES).map(|_| next() as u8).collect();
             let d = f16::from_f32(0.01 + (next() % 1000) as f32 / 5000.0);
-            block[0..2].copy_from_slice(&d.to_le_bytes());
+            match B::BYTES {
+                // IQ1_M: the f16 lives in the top nibble of each of the
+                // four `scales` words, low nibble first.
+                IQ1_M_BLOCK_BYTES => {
+                    let bits = d.to_bits();
+                    for k in 0..4 {
+                        let hi = &mut block[48 + 2 * k + 1];
+                        *hi = (*hi & 0x0F) | ((((bits >> (4 * k)) & 0xF) as u8) << 4);
+                    }
+                }
+                // TQ1_0: the f16 is the last two bytes.
+                ternary::TQ1_0_BLOCK_BYTES => {
+                    let at = B::BYTES - 2;
+                    block[at..].copy_from_slice(&d.to_le_bytes());
+                }
+                _ => block[0..2].copy_from_slice(&d.to_le_bytes()),
+            }
             out.extend_from_slice(&block);
         }
         out
@@ -403,7 +523,7 @@ mod tests {
         let want = deq(&bytes).unwrap();
         for (b, block) in bytes.chunks_exact(B::BYTES).enumerate() {
             let dec = B::decode(block);
-            let d = f16::from_le_bytes([block[0], block[1]]).to_f32();
+            let d = B::d(block);
             for e in 0..QK_K {
                 let got = B::FACTOR * d * (dec.ls[e / 16] * dec.w[e] as i32) as f32;
                 let exp = want[b * QK_K + e];
@@ -423,6 +543,9 @@ mod tests {
         check_decode::<Iq2S>(crate::dequant_iq2_s, "iq2_s");
         check_decode::<Iq3Xxs>(crate::dequant_iq3_xxs, "iq3_xxs");
         check_decode::<Iq3S>(crate::dequant_iq3_s, "iq3_s");
+        check_decode::<Iq1S>(crate::dequant_iq1_s, "iq1_s");
+        check_decode::<Iq1M>(crate::dequant_iq1_m, "iq1_m");
+        check_decode::<Tq1_0>(|b| ternary::dequant_trits(b, ternary::TQ1_0), "tq1_0");
     }
 
     fn close(got: f32, want: f32, what: &str) {
@@ -449,6 +572,9 @@ mod tests {
         check_f32::<Iq2S>(crate::dot_iq2_s_f32_scalar, "iq2_s");
         check_f32::<Iq3Xxs>(crate::dot_iq3_xxs_f32_scalar, "iq3_xxs");
         check_f32::<Iq3S>(crate::dot_iq3_s_f32_scalar, "iq3_s");
+        check_f32::<Iq1S>(crate::dot_iq1_s_f32_scalar, "iq1_s");
+        check_f32::<Iq1M>(crate::dot_iq1_m_f32_scalar, "iq1_m");
+        check_f32::<Tq1_0>(|b, x| ternary::dot_trits_f32(b, ternary::TQ1_0, x), "tq1_0");
     }
 
     fn check_simd<B: IqBlock>(what: &str) {
@@ -484,5 +610,8 @@ mod tests {
         check_simd::<Iq2S>("iq2_s");
         check_simd::<Iq3Xxs>("iq3_xxs");
         check_simd::<Iq3S>("iq3_s");
+        check_simd::<Iq1S>("iq1_s");
+        check_simd::<Iq1M>("iq1_m");
+        check_simd::<Tq1_0>("tq1_0");
     }
 }
