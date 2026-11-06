@@ -25,7 +25,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 
 | backend | matvec (decode) | gemm (prefill) | get_rows (embedding) |
 |---|---|---|---|
-| cpu | 11 | 11 | 0 |
+| cpu | 10 | 10 | 0 |
 | cuda | 0 | 0 | 0 |
 | metal | 0 | 0 | 0 |
 | vulkan | 21 | 22 | 22 |
@@ -54,7 +54,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | IQ2_S | f32 | kernel | kernel | HOST |
 | IQ3_S | f32 | kernel | kernel | HOST |
 | IQ1_M | f32 | kernel | kernel | HOST |
-| MXFP4 | f32 | kernel | kernel | HOST |
+| MXFP4 | kernel | kernel | kernel | HOST |
 | TQ1_0 | f32 | kernel | kernel | HOST |
 | PTQ1_0 | f32 | kernel | kernel | HOST |
 
@@ -82,7 +82,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | IQ2_S | f32 | kernel | kernel | HOST |
 | IQ3_S | f32 | kernel | kernel | HOST |
 | IQ1_M | f32 | kernel | kernel | HOST |
-| MXFP4 | f32 | kernel | kernel | HOST |
+| MXFP4 | kernel | kernel | kernel | HOST |
 | TQ1_0 | f32 | kernel | kernel | HOST |
 | PTQ1_0 | f32 | kernel | kernel | HOST |
 

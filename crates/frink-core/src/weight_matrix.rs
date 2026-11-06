@@ -389,7 +389,7 @@ pub fn cpu_int_dot_kind_supported(kind: QuantKind, cols: usize) -> bool {
 
 /// [`q8k_row_dot`] for the 32-element block kinds, over Q8_0-style
 /// activations: llama.cpp's `ggml_vec_dot_{q4_1,q5_1}_q8_1` and
-/// `ggml_vec_dot_{q5_0,iq4_nl}_q8_0` (`frink_quant::legacy_q8`). Q8_0 and
+/// `ggml_vec_dot_{q5_0,iq4_nl,mxfp4}_q8_0` (`frink_quant::legacy_q8`). Q8_0 and
 /// Q4_0 are not here because they have an interleaved tier of their own.
 pub(crate) type Q8RowDot = fn(&[u8], &frink_quant::Q8Activations) -> f32;
 
@@ -399,6 +399,7 @@ pub(crate) fn q8_row_dot(kind: QuantKind) -> Option<Q8RowDot> {
         QuantKind::Q5_0 => Some(frink_quant::dot_q5_0_q8),
         QuantKind::Q5_1 => Some(frink_quant::dot_q5_1_q8),
         QuantKind::IQ4NL => Some(frink_quant::dot_iq4_nl_q8),
+        QuantKind::Mxfp4Gguf => Some(frink_quant::dot_mxfp4_q8),
         _ => None,
     }
 }

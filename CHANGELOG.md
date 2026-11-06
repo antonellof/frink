@@ -17,6 +17,14 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **GGUF MXFP4 on the CPU dots against Q8 activations.** The block form
+  gpt-oss ships in had only a scalar f32 dequant-dot. It now takes
+  `frink_quant::legacy_q8`'s body with ggml's doubled `kvalues_mxfp4`
+  and `ggml_e8m0_to_fp32_half` (`ggml_vec_dot_mxfp4_q8_0`), SDOT and AVX2
+  included, in the CPU matvec and batched matmul. CPU `f32` cells 11 to
+  10. `frink parity` (`FRINK_CPU_INT_DOT=1`) on Llama-3.2-1B requantized
+  `MXFP4_MOE --pure`: prefill MATCH at KL 8.9e-4 (the f32 path 5.9e-4,
+  the two references 4.9e-4 apart), 32-step decode TIE-FLIP.
 - **Q4_1, Q5_0, Q5_1 and IQ4_NL on the CPU dot against Q8 activations.**
   `frink_quant::legacy_q8` is llama.cpp's `ggml_vec_dot_q4_1_q8_1`,
   `ggml_vec_dot_q5_0_q8_0`, `ggml_vec_dot_q5_1_q8_1` and
