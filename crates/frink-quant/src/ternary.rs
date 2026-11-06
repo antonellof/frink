@@ -229,6 +229,145 @@ pub fn quantize_trits(x: &[f32], layout: TritLayout) -> Vec<u8> {
     out
 }
 
+/// PrismML `PTQ1_0` row x Q8_0 activations, `ggml_vec_dot_ptq1_0_q8_0`
+/// (the format's `vec_dot_type` is `Q8_0`): the block's trits against
+/// its four activation blocks, SDOT or AVX2 where the host has them and
+/// [`dot_trits_q8`] (the scalar twin) otherwise.
+pub fn dot_ptq1_0_q8(row_bytes: &[u8], act: &crate::Q8Activations) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: AVX2 and FMA detected; `row_bytes` is whole PTQ1_0
+            // blocks with four Q8_0 blocks each in `act` (asserted inside).
+            return unsafe { simd::dot_ptq1_0_q8_avx2(row_bytes, act) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            // SAFETY: as the x86 arm, for `dotprod`.
+            return unsafe { simd::dot_ptq1_0_q8_neon_sdot(row_bytes, act) };
+        }
+    }
+    dot_trits_q8(row_bytes, PTQ1_0, act)
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+mod simd {
+    use super::*;
+
+    const SUB: usize = PTQ1_0_BLOCK_ELEMS / crate::Q8_0_BLOCK_ELEMS;
+
+    /// # Safety
+    /// The host has `dotprod`; `row_bytes` is whole PTQ1_0 blocks and
+    /// `act` has four Q8_0 blocks per row block (asserted in debug).
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon,dotprod")]
+    pub unsafe fn dot_ptq1_0_q8_neon_sdot(row_bytes: &[u8], act: &crate::Q8Activations) -> f32 {
+        use crate::repack::sdot;
+        use std::arch::aarch64::*;
+        debug_assert_eq!(row_bytes.len() / PTQ1_0_BLOCK_BYTES * SUB, act.n_blocks());
+        let mut trits = [0i8; PTQ1_0_BLOCK_ELEMS];
+        let mut acc = 0f32;
+        for (bi, block) in row_bytes
+            .as_chunks::<PTQ1_0_BLOCK_BYTES>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            unpack_trits(block, PTQ1_0, &mut trits);
+            let mut block_sum = 0f32;
+            for s in 0..SUB {
+                let ab = bi * SUB + s;
+                let y = act.q.as_ptr().add(ab * 32);
+                let t = trits.as_ptr().add(s * 32);
+                let p = sdot(vdupq_n_s32(0), vld1q_s8(t), vld1q_s8(y));
+                let isum = vaddvq_s32(sdot(p, vld1q_s8(t.add(16)), vld1q_s8(y.add(16))));
+                block_sum += isum as f32 * act.d[ab];
+            }
+            acc += block_scale(block, PTQ1_0) * block_sum;
+        }
+        acc
+    }
+
+    /// # Safety
+    /// The host has AVX2 and FMA; as the NEON arm otherwise.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn dot_ptq1_0_q8_avx2(row_bytes: &[u8], act: &crate::Q8Activations) -> f32 {
+        use std::arch::x86_64::*;
+        debug_assert_eq!(row_bytes.len() / PTQ1_0_BLOCK_BYTES * SUB, act.n_blocks());
+        let ones = _mm256_set1_epi16(1);
+        let mut trits = [0i8; PTQ1_0_BLOCK_ELEMS];
+        let mut acc = 0f32;
+        for (bi, block) in row_bytes
+            .as_chunks::<PTQ1_0_BLOCK_BYTES>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            unpack_trits(block, PTQ1_0, &mut trits);
+            let mut block_sum = 0f32;
+            for s in 0..SUB {
+                let ab = bi * SUB + s;
+                let t = _mm256_loadu_si256(trits.as_ptr().add(s * 32) as *const __m256i);
+                let y = _mm256_loadu_si256(act.q.as_ptr().add(ab * 32) as *const __m256i);
+                // `maddubs` wants an unsigned left operand: the trit's
+                // sign moves onto the activation.
+                let p16 = _mm256_maddubs_epi16(_mm256_sign_epi8(t, t), _mm256_sign_epi8(y, t));
+                let p32 = _mm256_madd_epi16(p16, ones);
+                let lo = _mm256_castsi256_si128(p32);
+                let hi = _mm256_extracti128_si256(p32, 1);
+                let v = _mm_add_epi32(lo, hi);
+                let v = _mm_hadd_epi32(v, v);
+                let v = _mm_hadd_epi32(v, v);
+                block_sum += _mm_cvtsi128_si32(v) as f32 * act.d[ab];
+            }
+            acc += block_scale(block, PTQ1_0) * block_sum;
+        }
+        acc
+    }
+}
+
+#[cfg(test)]
+mod simd_tests {
+    use super::*;
+
+    /// The SIMD arm against [`dot_trits_q8`], on random trit bytes and
+    /// activations with a real quantization step. A wrong sub-block
+    /// pairing or a dropped sign shows here.
+    #[test]
+    fn ptq1_0_simd_matches_the_scalar_twin() {
+        let mut s = 0x9e37_79b9u32;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            s
+        };
+        for n_blocks in [1usize, 3, 8] {
+            let mut row = Vec::new();
+            for _ in 0..n_blocks {
+                let mut b: Vec<u8> = (0..PTQ1_0_BLOCK_BYTES).map(|_| next() as u8).collect();
+                let d = f16::from_f32(0.02 + (next() % 100) as f32 / 1000.0);
+                b[PTQ1_0_BLOCK_BYTES - 2..].copy_from_slice(&d.to_le_bytes());
+                row.extend_from_slice(&b);
+            }
+            let x: Vec<f32> = (0..n_blocks * PTQ1_0_BLOCK_ELEMS)
+                .map(|i| ((i as f32) * 0.41).sin() * 2.0)
+                .collect();
+            let act = crate::quantize_activations_q8(&x);
+            let want = dot_trits_q8(&row, PTQ1_0, &act);
+            let got = dot_ptq1_0_q8(&row, &act);
+            let tol = 1e-5 * want.abs().max(1.0) + 1e-5;
+            assert!(
+                (got - want).abs() <= tol,
+                "n_blocks={n_blocks}: {got} vs {want}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

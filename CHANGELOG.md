@@ -15,6 +15,20 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every weight kind has an integer dot on the CPU.** IQ1_S, IQ1_M and
+  TQ1_0 join `frink_quant::iq_q8k` (`ggml_vec_dot_{iq1_s,iq1_m,tq1_0}_q8_K`);
+  the IQ1 delta rides in the same int8 lane as `8 * grid + delta` with a
+  factor of 1/8, which is ggml's `sumi + IQ1S_DELTA * sumi1` exactly.
+  PrismML's PTQ1_0 (Bonsai) gets SDOT and AVX2 arms over Q8_0
+  activations, its fork's `vec_dot_type`, with the existing
+  `dot_trits_q8` as the scalar twin. The CPU `f32` cells in
+  `docs/KERNELS.md` go from 5 to 1, and that one is `Q8_1`, an
+  activation format. `frink parity` at the pin: TQ1_0 first-token KL
+  8.4e-2 to 3.1e-2; IQ1_S and IQ1_M move slightly the other way inside
+  the drift these files show on the f32 path (#476).
+
 ## [0.51.0] - 2026-11-06
 
 ### Changed

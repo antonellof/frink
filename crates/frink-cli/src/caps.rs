@@ -135,32 +135,37 @@ mod tests {
     use super::*;
     use frink_gguf::GgmlType;
 
-    /// Every weight kind has a CUDA kernel for every op (#405), so the
-    /// plan's gaps are the CPU's: an IQ1_S projection has no integer dot
-    /// there, and the plan must say so by kind and op, and say nothing
-    /// about the Q4_K one. The same tensors on CUDA are fully covered.
+    /// Every weight kind has an integer dot on the CPU and a kernel on
+    /// CUDA (#405), so the only gap left to name is `Q8_1`, an
+    /// activation format no quantizer writes as a weight. The plan must
+    /// name it by kind and op on both backends, say why on CUDA, and say
+    /// nothing about the Q4_K tensors beside it.
     #[test]
     fn a_kind_with_no_kernel_is_named_in_the_plan() {
         let tensors = [
             ("token_embd.weight", GgmlType::Q4K),
             ("output.weight", GgmlType::Q6K),
-            ("blk.0.attn_q.weight", GgmlType::IQ1S),
+            ("blk.0.attn_q.weight", GgmlType::Q8_1),
             ("blk.0.ffn_up.weight", GgmlType::Q4K),
             ("blk.0.attn_norm.weight", GgmlType::F32),
         ];
         let text = plan_lines(&tensors, BudgetBackend::Cpu).join("\n");
         assert!(text.contains("4 quantized tensors"), "{text}");
         assert!(
-            text.contains("IQ1_S    matvec   -> f32 dot (1 tensor)"),
+            text.contains("Q8_1     matvec   -> f32 dot (1 tensor)"),
             "{text}"
         );
         assert!(
-            text.contains("IQ1_S    gemm     -> f32 dot (1 tensor)"),
+            text.contains("Q8_1     gemm     -> f32 dot (1 tensor)"),
             "{text}"
         );
         assert!(!text.contains("Q4_K"), "{text}");
-        let cuda = plan_lines(&tensors, BudgetBackend::Cuda);
-        assert!(cuda[1].contains("every quantized tensor"), "{cuda:?}");
+        let cuda = plan_lines(&tensors, BudgetBackend::Cuda).join("\n");
+        assert!(
+            cuda.contains("Q8_1     matvec   -> host (activation format) (1 tensor)"),
+            "{cuda}"
+        );
+        assert!(!cuda.contains("Q4_K"), "{cuda}");
     }
 
     #[test]
