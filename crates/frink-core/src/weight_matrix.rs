@@ -416,6 +416,11 @@ pub(crate) fn q8k_row_dot(kind: QuantKind) -> Option<Q8KRowDot> {
         QuantKind::IQ4XS => Some(frink_quant::dot_iq4_xs_q8_k),
         QuantKind::Q2K => Some(frink_quant::dot_q2_k_q8_k),
         QuantKind::Q3K => Some(frink_quant::dot_q3_k_q8_k),
+        QuantKind::IQ2XXS => Some(frink_quant::dot_iq2_xxs_q8_k),
+        QuantKind::IQ2XS => Some(frink_quant::dot_iq2_xs_q8_k),
+        QuantKind::IQ2S => Some(frink_quant::dot_iq2_s_q8_k),
+        QuantKind::IQ3XXS => Some(frink_quant::dot_iq3_xxs_q8_k),
+        QuantKind::IQ3S => Some(frink_quant::dot_iq3_s_q8_k),
         _ => None,
     }
 }

@@ -8,8 +8,8 @@ use crate::weight_matrix::{cpu_int_dot_for, IntDotShape};
 /// turns this red on purpose: lower the number in the same change and
 /// regenerate `docs/KERNELS.md`, so the diff says which cell closed.
 const PINNED: &[(Backend, Op, usize)] = &[
-    (Backend::Cpu, Op::Matvec, 10),
-    (Backend::Cpu, Op::Gemm, 10),
+    (Backend::Cpu, Op::Matvec, 5),
+    (Backend::Cpu, Op::Gemm, 5),
     (Backend::Cpu, Op::GetRows, 0),
     (Backend::Cuda, Op::Matvec, 0),
     (Backend::Cuda, Op::Gemm, 0),

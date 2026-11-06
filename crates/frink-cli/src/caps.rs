@@ -136,7 +136,7 @@ mod tests {
     use frink_gguf::GgmlType;
 
     /// Every weight kind has a CUDA kernel for every op (#405), so the
-    /// plan's gaps are the CPU's: an IQ2_XXS projection has no integer dot
+    /// plan's gaps are the CPU's: an IQ1_S projection has no integer dot
     /// there, and the plan must say so by kind and op, and say nothing
     /// about the Q4_K one. The same tensors on CUDA are fully covered.
     #[test]
@@ -144,18 +144,18 @@ mod tests {
         let tensors = [
             ("token_embd.weight", GgmlType::Q4K),
             ("output.weight", GgmlType::Q6K),
-            ("blk.0.attn_q.weight", GgmlType::IQ2XXS),
+            ("blk.0.attn_q.weight", GgmlType::IQ1S),
             ("blk.0.ffn_up.weight", GgmlType::Q4K),
             ("blk.0.attn_norm.weight", GgmlType::F32),
         ];
         let text = plan_lines(&tensors, BudgetBackend::Cpu).join("\n");
         assert!(text.contains("4 quantized tensors"), "{text}");
         assert!(
-            text.contains("IQ2_XXS  matvec   -> f32 dot (1 tensor)"),
+            text.contains("IQ1_S    matvec   -> f32 dot (1 tensor)"),
             "{text}"
         );
         assert!(
-            text.contains("IQ2_XXS  gemm     -> f32 dot (1 tensor)"),
+            text.contains("IQ1_S    gemm     -> f32 dot (1 tensor)"),
             "{text}"
         );
         assert!(!text.contains("Q4_K"), "{text}");
