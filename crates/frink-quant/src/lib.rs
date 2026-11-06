@@ -22,6 +22,11 @@ pub mod iq4_xs_q8;
 /// The base-3 trit formats, ggml's `TQ1_0` and PrismML's `PTQ1_0`.
 pub mod ternary;
 pub use iq4_xs_q8::{dot_iq4_xs_q8_k, dot_iq4_xs_q8_k_scalar};
+pub mod legacy_q8;
+pub use legacy_q8::{
+    dot_iq4_nl_q8, dot_iq4_nl_q8_scalar, dot_q4_1_q8, dot_q4_1_q8_scalar, dot_q5_0_q8,
+    dot_q5_0_q8_scalar, dot_q5_1_q8, dot_q5_1_q8_scalar,
+};
 pub mod q2_q3_k_q8;
 pub use q2_q3_k_q8::{dot_q2_k_q8_k, dot_q2_k_q8_k_scalar, dot_q3_k_q8_k, dot_q3_k_q8_k_scalar};
 pub mod iq_tables;

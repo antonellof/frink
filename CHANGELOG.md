@@ -17,6 +17,17 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **Q4_1, Q5_0, Q5_1 and IQ4_NL on the CPU dot against Q8 activations.**
+  `frink_quant::legacy_q8` is llama.cpp's `ggml_vec_dot_q4_1_q8_1`,
+  `ggml_vec_dot_q5_0_q8_0`, `ggml_vec_dot_q5_1_q8_1` and
+  `ggml_vec_dot_iq4_nl_q8_0`: one dot body (scalar twin, SDOT, AVX2)
+  with a decoder per kind, the `_1` kinds' offset applied from the
+  activation block's int8 sum. The CPU matvec and batched matmul take
+  them through `q8_row_dot` for a 32-multiple width, and the CPU `f32`
+  cells in `docs/KERNELS.md` go from 15 to 11. `frink parity`
+  (`FRINK_CPU_INT_DOT=1`) on Llama-3.2-1B requantized `--pure` matches on
+  all four, first-token KL 3.5e-4 to 5.5e-4 against two libllama builds
+  that disagree with each other by 8.6e-4.
 - **Q2_K and Q3_K on the CPU dot against Q8_K activations.**
   `frink_quant::q2_q3_k_q8` is llama.cpp's `ggml_vec_dot_q2_K_q8_K` and
   `ggml_vec_dot_q3_K_q8_K`, each with a scalar twin, an SDOT arm and an

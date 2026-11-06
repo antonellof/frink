@@ -382,7 +382,24 @@ pub fn cpu_int_dot_kind_supported(kind: QuantKind, cols: usize) -> bool {
     match kind {
         QuantKind::Q8_0 | QuantKind::Q4_0 => cols.is_multiple_of(32),
         QuantKind::Q4K | QuantKind::Q5K | QuantKind::Q6K => cols.is_multiple_of(256),
-        k => q8k_row_dot(k).is_some() && cols.is_multiple_of(256),
+        k if q8k_row_dot(k).is_some() => cols.is_multiple_of(256),
+        k => q8_row_dot(k).is_some() && cols.is_multiple_of(32),
+    }
+}
+
+/// [`q8k_row_dot`] for the 32-element block kinds, over Q8_0-style
+/// activations: llama.cpp's `ggml_vec_dot_{q4_1,q5_1}_q8_1` and
+/// `ggml_vec_dot_{q5_0,iq4_nl}_q8_0` (`frink_quant::legacy_q8`). Q8_0 and
+/// Q4_0 are not here because they have an interleaved tier of their own.
+pub(crate) type Q8RowDot = fn(&[u8], &frink_quant::Q8Activations) -> f32;
+
+pub(crate) fn q8_row_dot(kind: QuantKind) -> Option<Q8RowDot> {
+    match kind {
+        QuantKind::Q4_1 => Some(frink_quant::dot_q4_1_q8),
+        QuantKind::Q5_0 => Some(frink_quant::dot_q5_0_q8),
+        QuantKind::Q5_1 => Some(frink_quant::dot_q5_1_q8),
+        QuantKind::IQ4NL => Some(frink_quant::dot_iq4_nl_q8),
+        _ => None,
     }
 }
 
@@ -1606,6 +1623,60 @@ impl WeightMatrix {
         gpu
     }
 
+    /// One integer row dot per output row against one quantized
+    /// activation: the matvec shape of every kind with no interleaved
+    /// tier ([`q8_row_dot`], [`q8k_row_dot`]).
+    fn row_dots<A: Sync>(
+        out: &mut [f32],
+        data: &[u8],
+        row_bytes: usize,
+        act: &A,
+        dot: fn(&[u8], &A) -> f32,
+    ) {
+        let rows = out.len();
+        crate::par::items_mut(out, Self::min_rows_per_task(rows), |r, o| {
+            *o = dot(&data[r * row_bytes..(r + 1) * row_bytes], act);
+        });
+    }
+
+    /// [`Self::row_dots`] for a batch: one dot per (row, activation),
+    /// written `[activation][row]`. Tasks split by row, so a row's bytes
+    /// stay hot across the whole batch.
+    fn row_dots_batch<A: Sync>(
+        data: &[u8],
+        rows: usize,
+        row_bytes: usize,
+        acts: &[A],
+        dot: fn(&[u8], &A) -> f32,
+    ) -> Vec<f32> {
+        #[derive(Clone, Copy)]
+        struct Out(*mut f32);
+        // SAFETY: only carries the pointer into the tasks below, which
+        // write disjoint slots.
+        unsafe impl Send for Out {}
+        // SAFETY: as `Send`.
+        unsafe impl Sync for Out {}
+        impl Out {
+            /// Safety: `idx` in bounds and written by one task only.
+            #[inline]
+            unsafe fn set(self, idx: usize, v: f32) {
+                // SAFETY: the caller's contract.
+                unsafe { *self.0.add(idx) = v };
+            }
+        }
+        let mut out = vec![0f32; acts.len() * rows];
+        let out_w = Out(out.as_mut_ptr());
+        crate::par::indices(rows, Self::min_rows_per_task(rows), |r| {
+            let row = &data[r * row_bytes..(r + 1) * row_bytes];
+            for (b, act) in acts.iter().enumerate() {
+                // SAFETY: `b * rows + r < acts.len() * rows`, and row `r`
+                // belongs to this task alone, so no slot is written twice.
+                unsafe { out_w.set(b * rows + r, dot(row, act)) };
+            }
+        });
+        out
+    }
+
     pub fn apply_cpu(&self, x: &[f32]) -> Vec<f32> {
         assert_eq!(
             x.len(),
@@ -1878,14 +1949,17 @@ impl WeightMatrix {
                                 unreachable!("guarded above")
                             };
                             let act = frink_quant::quantize_activations_q8_k(x);
-                            crate::par::items_mut(
-                                &mut out,
-                                Self::min_rows_per_task(*rows),
-                                |r, o| {
-                                    let row = &data.as_slice()[r * row_bytes..(r + 1) * row_bytes];
-                                    *o = dot(row, &act);
-                                },
-                            );
+                            Self::row_dots(&mut out, data.as_slice(), row_bytes, &act, dot);
+                            return out;
+                        }
+                        // Q4_1, Q5_0, Q5_1 and IQ4_NL over Q8_0-style
+                        // activations ([`q8_row_dot`]).
+                        k if x.len().is_multiple_of(32) && q8_row_dot(k).is_some() => {
+                            let Some(dot) = q8_row_dot(k) else {
+                                unreachable!("guarded above")
+                            };
+                            let act = frink_quant::quantize_activations_q8(x);
+                            Self::row_dots(&mut out, data.as_slice(), row_bytes, &act, dot);
                             return out;
                         }
                         QuantKind::Q6K if x.len().is_multiple_of(256) => {
@@ -3162,16 +3236,30 @@ impl WeightMatrix {
                             let mut acts_owned = Vec::new();
                             let (acts, _) =
                                 Self::q8k_acts(shared, x_batch, batch_size, cols, &mut acts_owned);
-                            let data_slice = data.as_slice();
-                            crate::par::indices(*rows, Self::min_rows_per_task(*rows), |r| {
-                                let row = &data_slice[r * row_bytes..(r + 1) * row_bytes];
-                                for (b, act) in acts.iter().enumerate() {
-                                    unsafe {
-                                        out_w.set(b * rows + r, dot(row, act));
-                                    }
-                                }
-                            });
-                            return out;
+                            return Self::row_dots_batch(
+                                data.as_slice(),
+                                *rows,
+                                row_bytes,
+                                acts,
+                                dot,
+                            );
+                        }
+                        // Q4_1, Q5_0, Q5_1 and IQ4_NL ([`q8_row_dot`]),
+                        // the same shape over Q8_0-style activations.
+                        k if cols.is_multiple_of(32) && q8_row_dot(k).is_some() => {
+                            let Some(dot) = q8_row_dot(k) else {
+                                unreachable!("guarded above")
+                            };
+                            let mut acts_owned = Vec::new();
+                            let (acts, _) =
+                                Self::q8_acts(shared, x_batch, batch_size, cols, &mut acts_owned);
+                            return Self::row_dots_batch(
+                                data.as_slice(),
+                                *rows,
+                                row_bytes,
+                                acts,
+                                dot,
+                            );
                         }
                         QuantKind::Q5K | QuantKind::Q6K => {}
                         _ => {}
