@@ -647,6 +647,7 @@ fn main() -> anyhow::Result<()> {
             // receipts, so applying a backend here would pin the parent
             // to one backend for children that each want their own.
             if !args.suite && !args.render && !args.list_devices {
+                bench_model::set_process_priority(args.prio)?;
                 bench_model::apply_env(args.threads, args.n_gpu_layers, args.model.as_deref())?;
             }
         }

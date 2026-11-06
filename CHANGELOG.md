@@ -29,6 +29,17 @@ are the ones worth reading twice.
   8.4e-2 to 3.1e-2; IQ1_S and IQ1_M move slightly the other way inside
   the drift these files show on the f32 path (#476).
 
+### Added
+
+- **`frink bench` takes llama-bench's `--no-warmup`, `--delay`, `--prio`
+  and `--progress`** with llama-bench's meanings (#404): no warmup
+  repetition (refused with `--receipt`, whose contract requires one), a
+  sleep before each test, the process `nice` llama.cpp's
+  `set_process_priority` sets (an OS refusal is an error), and
+  llama-bench's progress lines on stderr. `bench_model.rs` was split into
+  `measure` and `report` first. The not-accepted count for `llama-bench`
+  falls from 37 to 33.
+
 ## [0.51.0] - 2026-11-06
 
 ### Changed

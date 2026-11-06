@@ -1450,6 +1450,10 @@ line up.
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
 | `-fa/--flash-attn` | `on` or `auto` (the default); `off` and sweeps are refused |
 | `--list-devices` | Print the devices this build can run on and exit |
+| `--no-warmup` | Time every repetition, with no discarded warmup first. Refused with `--receipt` |
+| `--delay` | Seconds to sleep before each test, to let the host cool off |
+| `--prio` | Process priority: `-1` low, `0` normal, `1` medium, `2` high, `3` realtime (`nice` 5, 0, -5, -10, -20, as llama.cpp sets it). A priority the OS refuses is an error |
+| `--progress` | Print each test's progress to stderr, in llama-bench's words |
 | `--compare` | Also run `llama-bench -o json` on the same GGUF, print the gap, and record the llama.cpp build it reports (see below) |
 | `--suite` | Run every [`benchmarks/suite.json`](../benchmarks/suite.json) entry in its own process, write a timing file per run, re-render [`RESULTS.md`](../benchmarks/RESULTS.md) |
 | `--render` | Re-render the RESULTS table from the timing files already on disk, measuring nothing |
