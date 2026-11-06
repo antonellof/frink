@@ -51,6 +51,8 @@ struct Row {
     /// the row's size and the other is 0.
     n_prompt: usize,
     n_gen: usize,
+    /// llama-bench's `n_depth`: context in the KV before the timed part.
+    n_depth: usize,
     /// When the test started (`%FT%TZ`), llama-bench's `test_time`.
     test_time: String,
 }
@@ -207,6 +209,9 @@ pub struct BenchArgs {
     pub model: String,
     pub n_prompt: usize,
     pub n_gen: usize,
+    /// llama-bench's `-d`: context tokens put in the KV, untimed, before
+    /// every repetition.
+    pub depth: usize,
     pub reps: usize,
     pub ctx_size: usize,
     /// Also run `llama-bench` on the same GGUF with matching flags and
@@ -273,7 +278,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         .to_string();
     let kind = select_engine_kind(&arch).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let ctx_needed = args.n_prompt.max(1) + args.n_gen + 2;
+    let ctx_needed = args.depth + args.n_prompt.max(1) + args.n_gen + 2;
     if args.ctx_size > 0 && ctx_needed > args.ctx_size {
         anyhow::bail!(
             "workload needs {ctx_needed} positions but -c is {}",
@@ -379,7 +384,14 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         let tests: Vec<output::TestRecord> = rows
             .iter()
             .map(|r| {
-                output::TestRecord::new(&info, r.n_prompt, r.n_gen, r.test_time.clone(), &r.samples)
+                output::TestRecord::new(
+                    &info,
+                    r.n_prompt,
+                    r.n_gen,
+                    r.n_depth,
+                    r.test_time.clone(),
+                    &r.samples,
+                )
             })
             .collect();
         output::render(format, &tests)
@@ -403,7 +415,14 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
 
     let ngl = if backend == "CPU" { 0 } else { 99 };
     let llama = if args.compare {
-        match bench_llama::run_llama_bench(&model, args.n_prompt, args.n_gen, args.reps, ngl) {
+        match bench_llama::run_llama_bench(
+            &model,
+            args.n_prompt,
+            args.n_gen,
+            args.depth,
+            args.reps,
+            ngl,
+        ) {
             Ok(v) => Some(v),
             Err(e) => {
                 eprintln!("frink bench: llama-bench comparison unavailable: {e}");
@@ -412,8 +431,14 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         }
     } else {
         eprintln!(
-            "compare: llama-bench -m {model} -p {} -n {} -ngl {ngl}   (or pass --compare)",
-            args.n_prompt, args.n_gen,
+            "compare: llama-bench -m {model} -p {} -n {}{} -ngl {ngl}   (or pass --compare)",
+            args.n_prompt,
+            args.n_gen,
+            if args.depth > 0 {
+                format!(" -d {}", args.depth)
+            } else {
+                String::new()
+            },
         );
         None
     };
@@ -528,6 +553,7 @@ mod tests {
             digest: WorkloadDigest::new(),
             n_prompt: 0,
             n_gen: 128,
+            n_depth: 0,
             test_time: String::new(),
         }
     }

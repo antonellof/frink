@@ -52,6 +52,7 @@ to name a real flag of its tool.
 | cli, server | `-fa` | `on` / `auto` accepted, `off` refused. A bare `-fa` means `auto` | Fused attention is a backend property here; `FRINK_METAL_ATTN=0` or `--device cpu` |
 | bench | `-p` | One value per run; llama-bench's lists and ranges are refused by the parser | Run the command once per value |
 | bench | `-n` | One value per run, as `-p` | Same |
+| bench | `-d` | One value per run, as `-p` | Same |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
 | bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and llama-bench's comma-separated sweep refused | Fused attention is a backend property here, and one run measures one configuration |
 | bench | `-ctk` | `f16` (the default) or `f32` on CPU and Metal; a type the KV store would fall back from (`q8_0`, `q4_0`, ...) is refused, as is llama-bench's sweep | A row labelled with a type it did not measure is not a measurement |
@@ -1448,6 +1449,7 @@ line up.
 | `-m/--model` | GGUF to benchmark. Without it, `bench` runs the synthetic matvec microbenchmark instead |
 | `-p/--n-prompt` | Prefill tokens (default 512, `0` skips the `pp` row) |
 | `-n/--n-gen` | Decode steps (default 128, `0` skips the `tg` row) |
+| `-d/--n-depth` | Context tokens put in the KV, untimed, before every repetition; rows are named `pp512 @ d4096` as llama-bench names them. One value per run |
 | `-r/--repetitions` | Timed reps (default 3), plus one discarded warmup |
 | `-t/--threads` | CPU threads (`0` = performance-core default) |
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
