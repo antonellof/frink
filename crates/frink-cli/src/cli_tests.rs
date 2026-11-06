@@ -518,3 +518,62 @@ fn bench_takes_llama_benchs_output_flags() {
     };
     assert_eq!((b.output.as_str(), b.output_err.as_str()), ("json", "md"));
 }
+
+/// llama-bench's `-hf` / `-hff` / `-hft` and `-ctk` / `-ctv` reach
+/// `BenchCmd` through the rewriter, and `-hf` conflicts with `-m` as it
+/// does in `frink run`.
+#[test]
+fn bench_takes_llama_benchs_hub_and_cache_type_flags() {
+    let cli = parse_cli(rewrite(&[
+        "frink",
+        "bench",
+        "-hf",
+        "org/repo:Q4_K_M",
+        "-hff",
+        "x.gguf",
+        "-hft",
+        "tok",
+        "-ctk",
+        "f32",
+        "-ctv",
+        "f32",
+    ]));
+    let super::Commands::Bench(b) = cli.command else {
+        panic!("not bench");
+    };
+    assert_eq!(b.hf_repo.as_deref(), Some("org/repo:Q4_K_M"));
+    assert_eq!(b.hf_file.as_deref(), Some("x.gguf"));
+    assert_eq!(b.hf_token.as_deref(), Some("tok"));
+    assert_eq!(b.cache_type_k.as_deref(), Some("f32"));
+    assert_eq!(b.cache_type_v.as_deref(), Some("f32"));
+    use clap::Parser;
+    assert!(
+        super::Cli::try_parse_from(rewrite(&["frink", "bench", "-m", "a", "-hf", "b/c"])).is_err()
+    );
+}
+
+/// A V type other than K's, and llama-bench's sweep, are refused before
+/// anything is downloaded or loaded.
+#[test]
+fn bench_refuses_a_split_kv_type_and_a_cache_type_sweep() {
+    let mut b = match parse_cli(rewrite(&[
+        "frink", "bench", "-m", "m.gguf", "-ctk", "f32", "-ctv", "f16",
+    ]))
+    .command
+    {
+        super::Commands::Bench(b) => b,
+        _ => panic!("not bench"),
+    };
+    let err = b.apply_llama_flags().unwrap_err().to_string();
+    assert!(err.contains("one type"), "{err}");
+    let mut b = match parse_cli(rewrite(&[
+        "frink", "bench", "-m", "m.gguf", "-ctk", "f16,q8_0",
+    ]))
+    .command
+    {
+        super::Commands::Bench(b) => b,
+        _ => panic!("not bench"),
+    };
+    let err = b.apply_llama_flags().unwrap_err().to_string();
+    assert!(err.contains("sweep"), "{err}");
+}

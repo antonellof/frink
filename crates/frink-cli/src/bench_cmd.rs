@@ -19,6 +19,34 @@ pub struct BenchCmd {
     /// synthetic matvec microbenchmark below is skipped.
     #[arg(short = 'm', long)]
     pub model: Option<String>,
+    /// Hugging Face repo to benchmark, `user/repo[:QUANT]`, llama-bench's
+    /// `-hf`. Fetched into the frink cache on first use, as `frink run
+    /// -hf` does, before anything else reads the model path.
+    #[arg(long = "hf-repo", visible_aliases = ["hf", "hfr"], value_name = "REPO[:QUANT]",
+          conflicts_with = "model")]
+    pub hf_repo: Option<String>,
+    /// Exact filename inside `--hf-repo`, llama-bench's `-hff`.
+    #[arg(
+        long = "hf-file",
+        visible_alias = "hff",
+        value_name = "FILE",
+        requires = "hf_repo"
+    )]
+    pub hf_file: Option<String>,
+    /// Hugging Face access token for `-hf`, llama-bench's `-hft`. Sets
+    /// `HF_TOKEN`, the variable the downloader reads.
+    #[arg(long = "hf-token", visible_alias = "hft", value_name = "TOKEN")]
+    pub hf_token: Option<String>,
+    /// KV cache type for K, llama-bench's `-ctk`. One value per run, and
+    /// only one this backend's KV store actually holds (`f16`, the
+    /// default, or `f32` on CPU and Metal): a type the store would fall
+    /// back from is refused, since the row would measure another one.
+    #[arg(long = "cache-type-k", visible_alias = "ctk", value_name = "TYPE")]
+    pub cache_type_k: Option<String>,
+    /// KV cache type for V, llama-bench's `-ctv`. frink's KV store has one
+    /// type for K and V, so this must equal `-ctk` (or be left out).
+    #[arg(long = "cache-type-v", visible_alias = "ctv", value_name = "TYPE")]
+    pub cache_type_v: Option<String>,
     /// Prompt tokens for the `pp<N>` batched-prefill row (`0` skips).
     #[arg(short = 'p', long = "n-prompt", default_value_t = 512)]
     pub n_prompt: usize,
@@ -149,10 +177,64 @@ fn check_bench_flash_attn(value: &str) -> anyhow::Result<()> {
     frink_core::argv::check_flash_attn(value).map_err(|e| anyhow::anyhow!(e))
 }
 
+/// One `-ctk` / `-ctv` value, through the same parser `frink run` and
+/// `frink-server` use, with llama-bench's sweep refused by name.
+fn check_cache_type(flag: &str, value: &str) -> anyhow::Result<String> {
+    if value.contains(',') {
+        anyhow::bail!(
+            "{flag} {value}: frink bench measures one configuration per run; llama-bench's \
+             comma-separated sweep is not implemented. Run once per value"
+        );
+    }
+    frink_models::ctk::parse_value(value).map_err(|e| anyhow::anyhow!("{flag}: {e}"))
+}
+
 impl BenchCmd {
+    /// The llama-bench flags settled before any worker thread exists
+    /// (`main` calls this ahead of `bench_model::apply_env`): `-ctk` /
+    /// `-ctv` checked and written to `FRINK_CTK`, `-hft` to `HF_TOKEN`,
+    /// and `-hf` resolved to a local path, as `frink run` resolves it
+    /// before its own backend setup.
+    pub fn apply_llama_flags(&mut self) -> anyhow::Result<()> {
+        let k = match &self.cache_type_k {
+            Some(v) => Some(check_cache_type("--cache-type-k", v)?),
+            None => None,
+        };
+        if let Some(v) = &self.cache_type_v {
+            let v = check_cache_type("--cache-type-v", v)?;
+            let k_or_default = k.clone().unwrap_or_else(|| "f16".to_string());
+            if v != k_or_default {
+                anyhow::bail!(
+                    "--cache-type-v {v} with K at {k_or_default}: frink's KV store holds K and \
+                     V in one type, so a V type different from K's cannot be measured"
+                );
+            }
+        }
+        // SAFETY: called from `main` while the process is single-threaded,
+        // before the download below or any worker pool starts.
+        unsafe {
+            if let Some(k) = &k {
+                std::env::set_var("FRINK_CTK", k);
+            }
+            if let Some(token) = &self.hf_token {
+                std::env::set_var("HF_TOKEN", token);
+            }
+        }
+        self.cache_type_k = k;
+        if let Some(spec) = self.hf_repo.take() {
+            self.model = Some(crate::hf::resolve(&spec, self.hf_file.as_deref())?);
+        }
+        Ok(())
+    }
+
     pub fn run(self) -> anyhow::Result<()> {
         let Self {
             model,
+            hf_repo: _,
+            hf_file: _,
+            hf_token: _,
+            cache_type_k,
+            cache_type_v: _,
             n_prompt,
             n_gen,
             reps,
@@ -238,6 +320,7 @@ impl BenchCmd {
                 n_gpu_layers,
                 output,
                 output_err,
+                cache_type_k,
             });
         }
         synthetic(hidden, ffn_dim, iters);

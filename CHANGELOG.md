@@ -31,6 +31,14 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`frink bench` takes llama-bench's `-hf` / `-hff` / `-hft` and `-ctk` /
+  `-ctv`** (#404). `-hf` resolves through the same Hub cache as `frink
+  run -hf`, before the backend is set up. `-ctk` takes one value the
+  active backend's KV store actually holds (`f16` or `f32` on CPU and
+  Metal): a type the store would fall back from is refused, since the
+  row would measure a different one, and `-ctv` must equal `-ctk`
+  because K and V share one type. The `llama-bench` not-accepted count
+  falls from 31 to 26.
 - **`frink bench` takes llama-bench's `--no-warmup`, `--delay`, `--prio`
   and `--progress`** with llama-bench's meanings (#404): no warmup
   repetition (refused with `--receipt`, whose contract requires one), a

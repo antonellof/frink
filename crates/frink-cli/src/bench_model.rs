@@ -229,6 +229,10 @@ pub struct BenchArgs {
     pub output: OutputFormat,
     /// llama-bench's `-oe`: a second copy on stderr, if any.
     pub output_err: Option<OutputFormat>,
+    /// llama-bench's `-ctk` as given (already in `FRINK_CTK`), checked
+    /// against what the active backend's store holds before anything
+    /// is timed.
+    pub cache_type_k: Option<String>,
 }
 
 pub fn run(args: BenchArgs) -> anyhow::Result<()> {
@@ -244,6 +248,17 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         );
     }
     let (load_start, thermal_start) = bench_contract::preflight_host(args.max_load)?;
+    if let Some(want) = &args.cache_type_k {
+        let held = frink_models::kv_budget::host_kv_dtype(active_budget_backend(), want).name();
+        if held != want {
+            anyhow::bail!(
+                "--cache-type-k {want}: the {} KV store would hold {held}, so the row would \
+                 measure {held} and be labelled {want}. frink bench takes the types this \
+                 backend stores",
+                active_backend()
+            );
+        }
+    }
     let model = crate::pull::resolve_model_path(&args.model)?;
     let path = Path::new(&model);
     if !path.exists() {
