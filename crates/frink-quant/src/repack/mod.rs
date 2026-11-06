@@ -22,6 +22,8 @@ mod q8_0x4;
 mod avx2;
 #[cfg(target_arch = "aarch64")]
 mod neon;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use neon::sdot;
 
 #[cfg(test)]
 mod tests;
