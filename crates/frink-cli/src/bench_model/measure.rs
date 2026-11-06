@@ -152,6 +152,9 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Res
     Ok(Row {
         test,
         samples: out,
+        n_prompt,
+        n_gen: 0,
+        test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
 }
@@ -194,6 +197,9 @@ fn bench_prefill_gemma4(
     Ok(Row {
         test,
         samples: out,
+        n_prompt,
+        n_gen: 0,
+        test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
 }
@@ -257,6 +263,9 @@ fn bench_decode(decoder: &Decoder, n_gen: usize, plan: &Test) -> anyhow::Result<
     Ok(Row {
         test,
         samples: out,
+        n_prompt: 0,
+        n_gen,
+        test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
 }
@@ -300,6 +309,9 @@ fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, plan: &Test) -> anyh
     Ok(Row {
         test,
         samples: out,
+        n_prompt: 0,
+        n_gen,
+        test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
 }
@@ -377,6 +389,7 @@ impl Tests {
             warmup: self.opts.warmup,
             phase,
             progress: self.opts.progress.then_some((self.next, self.count)),
+            time: super::output::now_iso8601(),
         };
         if let Some(line) = t.line("starting") {
             eprintln!("{line}");
@@ -395,6 +408,8 @@ struct Test {
     phase: Phase,
     /// `(i, N)` when `--progress` asked for llama-bench's lines.
     progress: Option<(usize, usize)>,
+    /// When the test started, llama-bench's `test_time`.
+    time: String,
 }
 
 impl Test {
@@ -434,6 +449,7 @@ mod tests {
             warmup,
             phase,
             progress: progress.then_some((2, 2)),
+            time: String::new(),
         }
     }
 

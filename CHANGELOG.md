@@ -39,6 +39,14 @@ are the ones worth reading twice.
   llama-bench's progress lines on stderr. `bench_model.rs` was split into
   `measure` and `report` first. The not-accepted count for `llama-bench`
   falls from 37 to 33.
+- **`frink bench -o csv|json|jsonl|sql` and `-oe`**, with llama-bench's
+  field names, types, printers and statistics (`avg_ts` is the mean,
+  `stddev_ts` the sample stddev, as llama-bench computes them; #481 is
+  about the table), so a script that parses `llama-bench -o json` parses
+  frink's. Only the fields frink can state are written; llama.cpp-only
+  knobs are absent rather than defaulted. `model_n_params` counts the
+  GGUF's tensors exactly. Under a structured `-o`, every other line goes
+  to stderr. The `llama-bench` not-accepted count falls to 31.
 
 ## [0.51.0] - 2026-11-06
 
