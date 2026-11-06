@@ -27,7 +27,10 @@ use std::path::Path;
 use std::time::Instant;
 
 mod measure;
+mod output;
 mod report;
+
+pub use output::OutputFormat;
 
 pub(crate) use measure::{check_result, decode_tokens, fresh_caches, probe, synthetic_tokens};
 use measure::{measure_decoder, measure_gemma4};
@@ -44,6 +47,12 @@ struct Row {
     /// into the receipt so two rows for the same workload can be shown
     /// to have measured the same work, across sessions.
     digest: WorkloadDigest,
+    /// llama-bench's `n_prompt` / `n_gen` for this test: one of them is
+    /// the row's size and the other is 0.
+    n_prompt: usize,
+    n_gen: usize,
+    /// When the test started (`%FT%TZ`), llama-bench's `test_time`.
+    test_time: String,
 }
 
 impl Row {
@@ -214,6 +223,12 @@ pub struct BenchArgs {
     pub max_load: f64,
     /// Warmup, delay and progress.
     pub run: RunOpts,
+    /// llama-bench's `-ngl` as given, for the structured output.
+    pub n_gpu_layers: usize,
+    /// llama-bench's `-o`: what stdout carries.
+    pub output: OutputFormat,
+    /// llama-bench's `-oe`: a second copy on stderr, if any.
+    pub output_err: Option<OutputFormat>,
 }
 
 pub fn run(args: BenchArgs) -> anyhow::Result<()> {
@@ -289,27 +304,78 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
 
     let backend = active_backend();
     let threads = frink_core::threads::resolve_cpu_threads();
-    println!(
-        "| {:<30} | {:>10} | {:>10} | {:<10} | {:>7} | {:>15} | {:>20} |",
-        "model", "size", "params", "backend", "threads", "test", "t/s"
-    );
-    println!(
-        "| {:-<30} | {:->10} | {:->10} | {:-<10} | {:->7} | {:->15} | {:->20} |",
-        "", "", "", "", "", "", ""
-    );
-    for row in &rows {
-        println!(
-            "| {:<30} | {:>10} | {:>10} | {:<10} | {:>7} | {:>15} | {:>13.2} ± {:>4.2} |",
-            truncate(&format!("{arch} {}", quant_label(&file)), 30),
-            human_bytes(size_bytes),
-            human_params(params_b),
-            backend,
-            threads,
-            row.test,
-            row.median(),
-            row.stddev(),
+    let mut table = String::new();
+    {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            table,
+            "| {:<30} | {:>10} | {:>10} | {:<10} | {:>7} | {:>15} | {:>20} |",
+            "model", "size", "params", "backend", "threads", "test", "t/s"
         );
+        let _ = writeln!(
+            table,
+            "| {:-<30} | {:->10} | {:->10} | {:-<10} | {:->7} | {:->15} | {:->20} |",
+            "", "", "", "", "", "", ""
+        );
+        for row in &rows {
+            let _ = writeln!(
+                table,
+                "| {:<30} | {:>10} | {:>10} | {:<10} | {:>7} | {:>15} | {:>13.2} ± {:>4.2} |",
+                truncate(&format!("{arch} {}", quant_label(&file)), 30),
+                human_bytes(size_bytes),
+                human_params(params_b),
+                backend,
+                threads,
+                row.test,
+                row.median(),
+                row.stddev(),
+            );
+        }
     }
+    let structured = |format: OutputFormat| -> String {
+        if format == OutputFormat::Md {
+            return table.clone();
+        }
+        let info = output::RunInfo {
+            build_commit: option_env!("FRINK_GIT_SHA")
+                .unwrap_or("unknown")
+                .to_string(),
+            cpu_info: crate::host_state::host_spec().cpu.unwrap_or_default(),
+            gpu_info: bench_contract::accelerator_name(backend).unwrap_or_default(),
+            backends: backend.to_string(),
+            model_filename: model.clone(),
+            model_type: format!("{arch} {}", quant_label(&file)),
+            model_size: size_bytes,
+            // llama.cpp's `llama_model_n_params` counts every tensor's
+            // elements; the table's `params` is an estimate.
+            model_n_params: file
+                .tensors()
+                .map(|(_, t)| t.shape.iter().product::<u64>())
+                .sum(),
+            n_threads: threads,
+            type_k: frink_models::host_kv_dtype_from_env(active_budget_backend())
+                .name()
+                .to_string(),
+            type_v: frink_models::host_kv_dtype_from_env(active_budget_backend())
+                .name()
+                .to_string(),
+            n_gpu_layers: args.n_gpu_layers,
+        };
+        let tests: Vec<output::TestRecord> = rows
+            .iter()
+            .map(|r| {
+                output::TestRecord::new(&info, r.n_prompt, r.n_gen, r.test_time.clone(), &r.samples)
+            })
+            .collect();
+        output::render(format, &tests)
+    };
+    print!("{}", structured(args.output));
+    if let Some(err_format) = args.output_err {
+        eprint!("{}", structured(err_format));
+    }
+    // Anything else frink prints must not land in a stdout a script is
+    // parsing as csv, json, jsonl or sql.
+    let side_table = args.output != OutputFormat::Md;
     eprintln!(
         "\nfrink bench: load {load_s:.2}s, {} reps + {} discarded warmup each",
         args.reps, args.run.warmup
@@ -337,17 +403,29 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         None
     };
 
+    macro_rules! side_println {
+        ($($t:tt)*) => {
+            if side_table {
+                eprintln!($($t)*)
+            } else {
+                println!($($t)*)
+            }
+        };
+    }
     if let Some(llama) = &llama {
-        println!();
-        println!(
+        side_println!();
+        side_println!(
             "| {:<15} | {:>12} | {:>12} | {:>8} |",
-            "test", "frink", "llama.cpp", "gap"
+            "test",
+            "frink",
+            "llama.cpp",
+            "gap"
         );
-        println!("| {:-<15} | {:->12} | {:->12} | {:->8} |", "", "", "", "");
+        side_println!("| {:-<15} | {:->12} | {:->12} | {:->8} |", "", "", "", "");
         for row in &rows {
             let l = llama.tps.get(&row.test).copied();
             let gap = l.map(|l| l / row.median());
-            println!(
+            side_println!(
                 "| {:<15} | {:>12.2} | {:>12} | {:>8} |",
                 row.test,
                 row.median(),
@@ -433,6 +511,9 @@ mod tests {
             test: "tg128".to_string(),
             samples: samples.to_vec(),
             digest: WorkloadDigest::new(),
+            n_prompt: 0,
+            n_gen: 128,
+            test_time: String::new(),
         }
     }
 

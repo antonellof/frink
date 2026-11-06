@@ -504,3 +504,17 @@ fn bench_takes_llama_benchs_run_flags() {
         (-1, true, 5, true)
     );
 }
+
+/// llama-bench's `-o json -oe md`: `-o` is clap's short flag and `-oe`
+/// a two-letter single-dash spelling the argv rewriter must hand to
+/// `--output-err`, not read as `-o e`.
+#[test]
+fn bench_takes_llama_benchs_output_flags() {
+    let cli = parse_cli(rewrite(&[
+        "frink", "bench", "-m", "m.gguf", "-o", "json", "-oe", "md",
+    ]));
+    let super::Commands::Bench(b) = cli.command else {
+        panic!("not bench");
+    };
+    assert_eq!((b.output.as_str(), b.output_err.as_str()), ("json", "md"));
+}

@@ -115,6 +115,26 @@ pub struct BenchCmd {
     /// llama-bench's `--progress`: print each test's progress to stderr.
     #[arg(long, default_value_t = false)]
     pub progress: bool,
+    /// llama-bench's `-o`: `md` (the table, the default), `csv`, `json`,
+    /// `jsonl` or `sql` on stdout, with llama-bench's field names. Under
+    /// anything but `md`, every other line `frink bench` prints goes to
+    /// stderr so stdout stays parseable.
+    #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "md",
+        value_name = "FORMAT"
+    )]
+    pub output: String,
+    /// llama-bench's `-oe`: the same formats (or `none`, the default) on
+    /// stderr.
+    #[arg(
+        long = "output-err",
+        visible_alias = "oe",
+        default_value = "none",
+        value_name = "FORMAT"
+    )]
+    pub output_err: String,
 }
 
 /// `frink bench -fa VALUE`: one value through the shared
@@ -160,7 +180,12 @@ impl BenchCmd {
             delay,
             prio: _, // applied in `main`, before any worker thread
             progress,
+            output,
+            output_err,
         } = self;
+        let output = bench_model::OutputFormat::parse(&output, false)?
+            .unwrap_or(bench_model::OutputFormat::Md);
+        let output_err = bench_model::OutputFormat::parse(&output_err, true)?;
         if list_devices {
             frink_models::devices::print_available_devices();
             return Ok(());
@@ -210,6 +235,9 @@ impl BenchCmd {
                     delay_s: delay,
                     progress,
                 },
+                n_gpu_layers,
+                output,
+                output_err,
             });
         }
         synthetic(hidden, ffn_dim, iters);

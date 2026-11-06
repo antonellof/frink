@@ -154,7 +154,7 @@ pub fn backend_label_agrees(label: &str, active: &str) -> bool {
 /// machine, and `None` when a GPU backend cannot name its device --
 /// which the receipt writer treats as a refusal rather than a blank,
 /// because an unnamed card is what made ten CUDA rows unattributable.
-fn accelerator_name(backend: &str) -> Option<String> {
+pub(crate) fn accelerator_name(backend: &str) -> Option<String> {
     match backend {
         #[cfg(feature = "cuda")]
         "CUDA" => frink_cuda::gpu::probe().and_then(|i| i.first_device_name),
