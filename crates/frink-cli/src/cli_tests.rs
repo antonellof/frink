@@ -478,3 +478,29 @@ fn version_and_usage_work_on_every_front_end_spelling() {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp, "{argv:?}");
     }
 }
+
+/// llama-bench's `--prio -1` is a negative number, not a flag, and the
+/// rewriter and clap must both read it that way; `--no-warmup`,
+/// `--delay` and `--progress` reach `BenchCmd` as themselves.
+#[test]
+fn bench_takes_llama_benchs_run_flags() {
+    let cli = parse_cli(rewrite(&[
+        "frink",
+        "bench",
+        "-m",
+        "m.gguf",
+        "--prio",
+        "-1",
+        "--no-warmup",
+        "--delay",
+        "5",
+        "--progress",
+    ]));
+    let super::Commands::Bench(b) = cli.command else {
+        panic!("not bench");
+    };
+    assert_eq!(
+        (b.prio, b.no_warmup, b.delay, b.progress),
+        (-1, true, 5, true)
+    );
+}

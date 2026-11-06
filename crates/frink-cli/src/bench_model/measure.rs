@@ -2,7 +2,7 @@
 //! engine, every repetition checked by `bench_guard` before and after.
 //! Moved out of `bench_model.rs` unchanged.
 
-use super::{BenchArgs, Row};
+use super::{BenchArgs, Row, RunOpts};
 use crate::bench_guard::{self, CacheProbe, WorkloadDigest};
 use frink_core::cache::KvCache;
 use frink_models::engine::Engine;
@@ -12,11 +12,14 @@ use std::time::Instant;
 /// `pp<N>` / `tg<N>` for the generic [`Decoder`].
 pub(super) fn measure_decoder(decoder: &Decoder, args: &BenchArgs) -> anyhow::Result<Vec<Row>> {
     let mut rows: Vec<Row> = Vec::new();
+    let mut tests = Tests::new(args);
     if args.n_prompt > 0 {
-        rows.push(bench_prefill(decoder, args.n_prompt, args.reps)?);
+        let plan = tests.start(Phase::Prompt);
+        rows.push(bench_prefill(decoder, args.n_prompt, &plan)?);
     }
     if args.n_gen > 0 {
-        rows.push(bench_decode(decoder, args.n_gen, args.reps)?);
+        let plan = tests.start(Phase::Generation);
+        rows.push(bench_decode(decoder, args.n_gen, &plan)?);
     }
     for row in &rows {
         bench_guard::check_timed_samples(&row.test, args.reps, row.samples.len())?;
@@ -28,11 +31,14 @@ pub(super) fn measure_decoder(decoder: &Decoder, args: &BenchArgs) -> anyhow::Re
 /// `pp<N>` / `tg<N>` for [`Gemma4Engine`] (sequential tokens only).
 pub(super) fn measure_gemma4(engine: &Gemma4Engine, args: &BenchArgs) -> anyhow::Result<Vec<Row>> {
     let mut rows: Vec<Row> = Vec::new();
+    let mut tests = Tests::new(args);
     if args.n_prompt > 0 {
-        rows.push(bench_prefill_gemma4(engine, args.n_prompt, args.reps)?);
+        let plan = tests.start(Phase::Prompt);
+        rows.push(bench_prefill_gemma4(engine, args.n_prompt, &plan)?);
     }
     if args.n_gen > 0 {
-        rows.push(bench_decode_gemma4(engine, args.n_gen, args.reps)?);
+        let plan = tests.start(Phase::Generation);
+        rows.push(bench_decode_gemma4(engine, args.n_gen, &plan)?);
     }
     for row in &rows {
         bench_guard::check_timed_samples(&row.test, args.reps, row.samples.len())?;
@@ -101,16 +107,17 @@ fn probe_gemma4(state: &frink_models::gemma4_engine::Gemma4DecodeState) -> Vec<C
 
 /// `pp<N>`: one batched forward over N tokens into fresh KV caches.
 /// Reported as prompt tokens per second, as `llama-bench` does.
-fn bench_prefill(decoder: &Decoder, n_prompt: usize, reps: usize) -> anyhow::Result<Row> {
+fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Result<Row> {
     let test = format!("pp{n_prompt}");
     let tokens = synthetic_tokens(decoder.config.vocab_size, n_prompt, 0);
     // Asserted BEFORE the run: the stream about to be fed is exactly as
     // long as the row's label promises, and every id is in vocabulary.
     bench_guard::check_prompt_before(&test, n_prompt, &tokens, decoder.config.vocab_size)?;
-    let mut out = Vec::with_capacity(reps);
+    let mut out = Vec::with_capacity(plan.reps);
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
-    for rep in 0..reps + bench_guard::WARMUP_REPS {
+    for rep in 0..plan.reps + plan.warmup {
+        plan.announce(rep);
         let mut caches = fresh_caches(decoder);
         // Every rep starts from an empty KV: a prefill that reused a
         // warm cache would report the engine's speed at work it did
@@ -138,7 +145,7 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, reps: usize) -> anyhow::Res
         // Rep 0 is the warmup: first touch of every weight page, and on
         // Metal the first pipeline compile. Timing it would measure the
         // OS and the shader cache, not the engine.
-        if rep >= bench_guard::WARMUP_REPS {
+        if rep >= plan.warmup {
             out.push(n_prompt as f64 / dt);
         }
     }
@@ -155,16 +162,17 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, reps: usize) -> anyhow::Res
 fn bench_prefill_gemma4(
     engine: &Gemma4Engine,
     n_prompt: usize,
-    reps: usize,
+    plan: &Test,
 ) -> anyhow::Result<Row> {
     let test = format!("pp{n_prompt}");
     let vocab = Engine::vocab_size(engine);
     let tokens = synthetic_tokens(vocab, n_prompt, 0);
     bench_guard::check_prompt_before(&test, n_prompt, &tokens, vocab)?;
-    let mut out = Vec::with_capacity(reps);
+    let mut out = Vec::with_capacity(plan.reps);
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
-    for rep in 0..reps + bench_guard::WARMUP_REPS {
+    for rep in 0..plan.reps + plan.warmup {
+        plan.announce(rep);
         let mut state = Engine::new_state(engine);
         bench_guard::check_caches_cold(&test, rep, &probe_gemma4(&state))?;
         let mut digest = WorkloadDigest::new();
@@ -179,7 +187,7 @@ fn bench_prefill_gemma4(
         let first = *first_digest.get_or_insert(digest);
         bench_guard::check_same_workload(&test, rep, first, digest)?;
         check_result(&test, rep, &logits, &mut first_result)?;
-        if rep >= bench_guard::WARMUP_REPS {
+        if rep >= plan.warmup {
             out.push(n_prompt as f64 / dt);
         }
     }
@@ -204,7 +212,7 @@ pub(crate) fn host_kv_is_the_record() -> bool {
     synced || (off("FRINK_METAL") && off("FRINK_CUDA"))
 }
 
-fn bench_decode(decoder: &Decoder, n_gen: usize, reps: usize) -> anyhow::Result<Row> {
+fn bench_decode(decoder: &Decoder, n_gen: usize, plan: &Test) -> anyhow::Result<Row> {
     let test = format!("tg{n_gen}");
     let vocab = decoder.config.vocab_size;
     let tokens = decode_tokens(vocab, n_gen, 0);
@@ -213,10 +221,11 @@ fn bench_decode(decoder: &Decoder, n_gen: usize, reps: usize) -> anyhow::Result<
     // inside the timed loop can only be checked once it is too late to
     // refuse.
     bench_guard::check_prompt_before(&test, n_gen, &tokens, vocab)?;
-    let mut out = Vec::with_capacity(reps);
+    let mut out = Vec::with_capacity(plan.reps);
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
-    for rep in 0..reps + bench_guard::WARMUP_REPS {
+    for rep in 0..plan.reps + plan.warmup {
+        plan.announce(rep);
         let mut caches = fresh_caches(decoder);
         bench_guard::check_caches_cold(&test, rep, &probe(&caches))?;
         let _ = decoder.forward_token(0, 0, &mut caches);
@@ -241,7 +250,7 @@ fn bench_decode(decoder: &Decoder, n_gen: usize, reps: usize) -> anyhow::Result<
         let first = *first_digest.get_or_insert(digest);
         bench_guard::check_same_workload(&test, rep, first, digest)?;
         check_result(&test, rep, &logits, &mut first_result)?;
-        if rep >= bench_guard::WARMUP_REPS {
+        if rep >= plan.warmup {
             out.push(n_gen as f64 / dt);
         }
     }
@@ -252,15 +261,16 @@ fn bench_decode(decoder: &Decoder, n_gen: usize, reps: usize) -> anyhow::Result<
     })
 }
 
-fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, reps: usize) -> anyhow::Result<Row> {
+fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, plan: &Test) -> anyhow::Result<Row> {
     let test = format!("tg{n_gen}");
     let vocab = Engine::vocab_size(engine);
     let tokens = decode_tokens(vocab, n_gen, 0);
     bench_guard::check_prompt_before(&test, n_gen, &tokens, vocab)?;
-    let mut out = Vec::with_capacity(reps);
+    let mut out = Vec::with_capacity(plan.reps);
     let mut first_digest: Option<WorkloadDigest> = None;
     let mut first_result: Option<(usize, f32)> = None;
-    for rep in 0..reps + bench_guard::WARMUP_REPS {
+    for rep in 0..plan.reps + plan.warmup {
+        plan.announce(rep);
         let mut state = Engine::new_state(engine);
         bench_guard::check_caches_cold(&test, rep, &probe_gemma4(&state))?;
         let _ = Engine::forward_token(engine, 0, 0, &mut state);
@@ -283,7 +293,7 @@ fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, reps: usize) -> anyh
         let first = *first_digest.get_or_insert(digest);
         bench_guard::check_same_workload(&test, rep, first, digest)?;
         check_result(&test, rep, &logits, &mut first_result)?;
-        if rep >= bench_guard::WARMUP_REPS {
+        if rep >= plan.warmup {
             out.push(n_gen as f64 / dt);
         }
     }
@@ -331,9 +341,126 @@ pub(crate) fn decode_tokens(vocab: usize, n_gen: usize, seq: usize) -> Vec<usize
 /// prompt stride of 7 so no two sequences' prompts coincide either.
 const SEQ_STRIDE: usize = 1013;
 
+/// Which half of llama-bench's workload a test is, for its progress
+/// lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Prompt,
+    Generation,
+}
+
+/// The tests of one run, numbered as llama-bench numbers its instances
+/// (`benchmark i/N`).
+struct Tests {
+    opts: RunOpts,
+    reps: usize,
+    count: usize,
+    next: usize,
+}
+
+impl Tests {
+    fn new(args: &BenchArgs) -> Self {
+        Self {
+            opts: args.run,
+            reps: args.reps,
+            count: usize::from(args.n_prompt > 0) + usize::from(args.n_gen > 0),
+            next: 0,
+        }
+    }
+
+    /// Starts the next test: llama-bench's `starting` line, then its
+    /// `--delay` cool-off, both before anything is timed.
+    fn start(&mut self, phase: Phase) -> Test {
+        self.next += 1;
+        let t = Test {
+            reps: self.reps,
+            warmup: self.opts.warmup,
+            phase,
+            progress: self.opts.progress.then_some((self.next, self.count)),
+        };
+        if let Some(line) = t.line("starting") {
+            eprintln!("{line}");
+        }
+        if self.opts.delay_s > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(self.opts.delay_s));
+        }
+        t
+    }
+}
+
+/// One test's repetition plan: `warmup` untimed, then `reps` timed.
+struct Test {
+    reps: usize,
+    warmup: usize,
+    phase: Phase,
+    /// `(i, N)` when `--progress` asked for llama-bench's lines.
+    progress: Option<(usize, usize)>,
+}
+
+impl Test {
+    fn line(&self, what: &str) -> Option<String> {
+        self.progress
+            .map(|(i, n)| format!("frink bench: benchmark {i}/{n}: {what}"))
+    }
+
+    /// llama-bench's per-repetition progress text (`llama-bench.cpp`,
+    /// the warmup and timed loops of `main`).
+    fn rep_label(&self, rep: usize) -> String {
+        let kind = match self.phase {
+            Phase::Prompt => "prompt",
+            Phase::Generation => "generation",
+        };
+        if rep < self.warmup {
+            format!("warmup {kind} run")
+        } else {
+            format!("{kind} run {}/{}", rep - self.warmup + 1, self.reps)
+        }
+    }
+
+    fn announce(&self, rep: usize) {
+        if let Some(line) = self.line(&self.rep_label(rep)) {
+            eprintln!("{line}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test(warmup: usize, phase: Phase, progress: bool) -> Test {
+        Test {
+            reps: 3,
+            warmup,
+            phase,
+            progress: progress.then_some((2, 2)),
+        }
+    }
+
+    /// The progress text is llama-bench's, warmup first, timed
+    /// repetitions counted from 1, under `frink bench`'s prefix.
+    #[test]
+    fn progress_lines_are_llama_benchs() {
+        let t = test(1, Phase::Prompt, true);
+        assert_eq!(
+            t.line(&t.rep_label(0)).unwrap(),
+            "frink bench: benchmark 2/2: warmup prompt run"
+        );
+        assert_eq!(t.rep_label(1), "prompt run 1/3");
+        assert_eq!(t.rep_label(3), "prompt run 3/3");
+        let g = test(1, Phase::Generation, true);
+        assert_eq!(g.rep_label(0), "warmup generation run");
+        assert_eq!(g.rep_label(2), "generation run 2/3");
+    }
+
+    /// `--no-warmup` makes repetition 0 a timed one, and with no
+    /// `--progress` nothing is printed at all.
+    #[test]
+    fn no_warmup_times_from_the_first_repetition_and_quiet_prints_nothing() {
+        let t = test(0, Phase::Prompt, false);
+        assert_eq!(t.rep_label(0), "prompt run 1/3");
+        assert!(t.line("starting").is_none());
+    }
 
     #[test]
     fn both_token_streams_satisfy_the_before_check_they_are_handed_to() {

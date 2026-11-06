@@ -146,6 +146,54 @@ pub fn apply_env(threads: usize, n_gpu_layers: usize, model: Option<&str>) -> an
     Ok(())
 }
 
+/// How each test runs: llama-bench's `--no-warmup`, `--delay` and
+/// `--progress`.
+#[derive(Clone, Copy, Debug)]
+pub struct RunOpts {
+    /// Untimed repetitions before the timed ones:
+    /// [`bench_guard::WARMUP_REPS`], or 0 under `--no-warmup`.
+    pub warmup: usize,
+    /// Seconds slept before each test.
+    pub delay_s: u64,
+    /// Print llama-bench's progress lines to stderr.
+    pub progress: bool,
+}
+
+/// llama.cpp's `set_process_priority` (`common/common.cpp`): `--prio`
+/// `-1..=3` as `nice` 5, 0, -5, -10, -20 for this process. `0` changes
+/// nothing. Called before any worker thread is spawned, so the threads
+/// inherit it (on Linux `nice` is per thread). A priority the OS refuses
+/// (a negative `nice` without the privilege) is an error, as
+/// llama-bench exits on it.
+pub fn set_process_priority(prio: i32) -> anyhow::Result<()> {
+    let nice = match prio {
+        0 => return Ok(()),
+        -1 => 5,
+        1 => -5,
+        2 => -10,
+        3 => -20,
+        other => anyhow::bail!("--prio {other}: llama-bench takes -1, 0, 1, 2 or 3"),
+    };
+    #[cfg(unix)]
+    {
+        // SAFETY: `setpriority` reads its three integer arguments and
+        // touches no memory of ours.
+        let rc = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+        if rc != 0 {
+            anyhow::bail!(
+                "--prio {prio}: failed to set process priority (nice {nice}): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = nice;
+        anyhow::bail!("--prio {prio}: process priority is only implemented on Unix hosts")
+    }
+}
+
 pub struct BenchArgs {
     pub model: String,
     pub n_prompt: usize,
@@ -164,12 +212,22 @@ pub struct BenchArgs {
     /// 1-minute load average above which the run refuses to start.
     /// `0.0` disables the check. See `host_state`.
     pub max_load: f64,
+    /// Warmup, delay and progress.
+    pub run: RunOpts,
 }
 
 pub fn run(args: BenchArgs) -> anyhow::Result<()> {
     // Before anything is loaded: a timed run on a busy or hot host
     // produces a number that looks like a measurement and is not one.
     bench_guard::check_repetitions(args.reps)?;
+    if args.run.warmup < bench_guard::WARMUP_REPS && args.receipt.is_some() {
+        anyhow::bail!(
+            "--no-warmup with --receipt: a receipt's measurement contract times only \
+             after {} discarded warmup repetition(s), and a row taken without it would \
+             carry first-touch page faults and pipeline compiles into its rate",
+            bench_guard::WARMUP_REPS
+        );
+    }
     let (load_start, thermal_start) = bench_contract::preflight_host(args.max_load)?;
     let model = crate::pull::resolve_model_path(&args.model)?;
     let path = Path::new(&model);
@@ -254,8 +312,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
     }
     eprintln!(
         "\nfrink bench: load {load_s:.2}s, {} reps + {} discarded warmup each",
-        args.reps,
-        bench_guard::WARMUP_REPS
+        args.reps, args.run.warmup
     );
     let bench_contract::HostAfter {
         load_end,

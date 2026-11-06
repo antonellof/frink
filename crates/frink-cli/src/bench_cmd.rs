@@ -96,6 +96,25 @@ pub struct BenchCmd {
     /// `--list-devices`.
     #[arg(long = "list-devices", default_value_t = false)]
     pub list_devices: bool,
+    /// llama-bench's `--no-warmup`: time every repetition, with no
+    /// discarded warmup first. Refused with `--receipt`, whose
+    /// measurement contract requires the warmup.
+    #[arg(long = "no-warmup", default_value_t = false)]
+    pub no_warmup: bool,
+    /// llama-bench's `--delay`: seconds to sleep before each test, to
+    /// let the host cool off between them.
+    #[arg(long, default_value_t = 0, value_name = "SECONDS")]
+    pub delay: u64,
+    /// llama-bench's `--prio`: process priority, `-1` low, `0` normal,
+    /// `1` medium, `2` high, `3` realtime. Applied before any worker
+    /// thread exists, as `nice` 5, 0, -5, -10, -20 (llama.cpp's
+    /// `set_process_priority`); a priority the OS refuses is an error.
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true,
+          value_parser = clap::value_parser!(i32).range(-1..=3))]
+    pub prio: i32,
+    /// llama-bench's `--progress`: print each test's progress to stderr.
+    #[arg(long, default_value_t = false)]
+    pub progress: bool,
 }
 
 /// `frink bench -fa VALUE`: one value through the shared
@@ -137,6 +156,10 @@ impl BenchCmd {
             max_load,
             flash_attn,
             list_devices,
+            no_warmup,
+            delay,
+            prio: _, // applied in `main`, before any worker thread
+            progress,
         } = self;
         if list_devices {
             frink_models::devices::print_available_devices();
@@ -178,6 +201,15 @@ impl BenchCmd {
                 receipt: receipt.map(Into::into),
                 id: suite_id,
                 max_load,
+                run: bench_model::RunOpts {
+                    warmup: if no_warmup {
+                        0
+                    } else {
+                        crate::bench_guard::WARMUP_REPS
+                    },
+                    delay_s: delay,
+                    progress,
+                },
             });
         }
         synthetic(hidden, ffn_dim, iters);
