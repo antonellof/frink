@@ -9,6 +9,10 @@ Every file in this directory is listed here once.
   shapes, same or better performance, on the hardware people actually
   own. Open items are GitHub issues, ranked by its tiers.
 
+- **[`handover.md`](handover.md)** is the latest handover: what
+  changed recently, what is half-done or blocked on hardware, and the
+  working recipes (release, parity, Vulkan end to end).
+
 Decisions live in [`../adr/`](../adr/README.md). A plan here is a
 design doc for work in flight; when it lands, its lasting decisions
 become ADRs and the plan moves to `archive/`
