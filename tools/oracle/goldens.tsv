@@ -50,6 +50,7 @@ gated_attention_graphs.rs:AFMOE_GOLDEN logits $F/afmoe_tiny.gguf @GRAPH
 gated_attention_graphs.rs:LAGUNA_GOLDEN logits $F/laguna_tiny.gguf @GRAPH
 gated_attention_graphs.rs:LAGUNA_SWA_GOLDEN logits $F/laguna_swa_tiny.gguf @GRAPH
 gated_attention_graphs.rs:SPARK25_GOLDEN logits $F/spark25_tiny.gguf @GRAPH
+gated_attention_graphs.rs:SPARK25_MODEL_ROPE_GOLDEN logits $F/spark25_model_rope_tiny.gguf @GRAPH
 gated_attention_graphs.rs:LAGUNA_SWA_ROT_GOLDEN logits $F/laguna_swa_rot_tiny.gguf @GRAPH
 gguf_roundtrip.rs:GOLDEN_LOGITS numpy an independent NumPy reference (ADR 0011 leaves these alone)
 gguf_roundtrip.rs:GOLDEN_MOE_LOGITS numpy an independent NumPy reference (ADR 0011 leaves these alone)

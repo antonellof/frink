@@ -332,6 +332,105 @@ fn spark25_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match_within(SPARK25, &SPARK25_GOLDEN, SPARK25_GELU_TOL);
 }
 
+/// libllama's answer on `spark25_model_rope_tiny.gguf`: no
+/// `rope.freq_base_swa`, a model base of 40000 and a linear scale of 2.
+const SPARK25_MODEL_ROPE_GOLDEN: [f32; 48] = [
+    1.7014096,
+    -2.3025064,
+    -1.119788,
+    0.13826782,
+    5.0384417,
+    2.1375513,
+    -2.38027,
+    2.6454868,
+    1.5650574,
+    -0.56612873,
+    1.0048635,
+    -0.16368148,
+    -0.55849683,
+    1.1988847,
+    -0.17993565,
+    -1.4665912,
+    -1.3639512,
+    -0.16199172,
+    1.1142344,
+    -1.0404745,
+    -0.69668365,
+    0.115502,
+    0.07256284,
+    1.3284886,
+    1.0493637,
+    -2.0973542,
+    0.06756133,
+    2.2063022,
+    1.0448943,
+    0.768926,
+    0.39203602,
+    0.49788558,
+    -0.1584478,
+    -0.16115597,
+    -1.0621569,
+    1.2473729,
+    -1.0895774,
+    -1.420568,
+    2.4043736,
+    1.5485246,
+    0.116933346,
+    -2.408589,
+    -0.93758965,
+    -0.10251263,
+    -0.7291788,
+    -1.3525501,
+    0.39199722,
+    -0.018420205,
+];
+
+/// **Spark-2.5's sliding layers rotate at the MODEL's base and scale
+/// when the file has no `rope.freq_base_swa`** (#470).
+///
+/// `spark2-5.cpp:10-11` seed the sliding layers' base and scale from the
+/// model's before the optional key (`:12`), and `conversion/spark2_5.py`
+/// writes no such key, so this is every converter-produced file whose
+/// base is not 10000. A reader that fell back to `llama_hparams`'
+/// defaults (base 10000, scale 1) rotates the sliding layers
+/// differently, which the second half shows llama.cpp does not do.
+#[test]
+fn spark25_without_a_swa_rope_base_matches_llama_cpp() {
+    assert_all_three_paths_match_within(
+        "spark25_model_rope",
+        &SPARK25_MODEL_ROPE_GOLDEN,
+        SPARK25_GELU_TOL,
+    );
+    let d = load_graph_fixture("spark25_model_rope");
+    assert_eq!(d.config.rope_theta_swa, Some(40_000.0));
+    let mut defaults = load_graph_fixture("spark25_model_rope");
+    defaults.config.rope_theta_swa = Some(10_000.0);
+    let mut kv = graph_caches(&defaults);
+    let worst = worst_vs(
+        &defaults.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
+        &SPARK25_MODEL_ROPE_GOLDEN,
+    );
+    assert!(
+        worst > 1e-2,
+        "rotating the sliding layers at 10000 moved only {worst}"
+    );
+}
+
+/// Spark-2.5 without its REQUIRED window (`spark2-5.cpp:5`): libllama
+/// refuses the file, and so does frink, by name (#470).
+#[test]
+fn spark25_without_its_window_key_is_refused() {
+    let file = frink_gguf::GgufFile::open(graph_fixture_path("spark25_nowindow")).expect("opens");
+    match ModelConfig::from_gguf(&file) {
+        Err(frink_models::LoadError::UnsupportedFeature(_, msg)) => {
+            assert!(msg.contains("attention.sliding_window"), "{msg}");
+            assert!(msg.contains("spark2-5.cpp:5"), "{msg}");
+        }
+        Err(other) => panic!("expected the missing window refused by name, got {other:?}"),
+        Ok(_) => panic!("a windowless spark2_5 file loaded"),
+    }
+}
+
 /// The numbers in the report, so they can be regenerated rather than
 /// trusted. Run with `--nocapture` to see them.
 #[test]

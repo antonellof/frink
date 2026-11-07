@@ -75,7 +75,7 @@ IS_SWA = [True, False, True, True]
 ROPE_PATTERN = [1, 1, 0, 1]
 
 
-def main(out_path: str) -> None:
+def main(out_path: str, no_window: bool = False) -> None:
     n_layer = len(IS_SWA)
     rng = np.random.default_rng(0x67A17)
 
@@ -95,7 +95,10 @@ def main(out_path: str) -> None:
     w.add_layer_norm_rms_eps(RMS_EPS)
     w.add_rope_freq_base(ROPE_BASE)
     w.add_rope_dimension_count(HEAD_DIM)
-    w.add_sliding_window(SWA_WINDOW)
+    # `granite-swa.cpp:18` reads the window REQUIRED; `--no-window` leaves
+    # it out, and libllama refuses the file, as frink must (#470).
+    if not no_window:
+        w.add_sliding_window(SWA_WINDOW)
     w.add_sliding_window_pattern(IS_SWA)
     w.add_logit_scale(LOGIT_SCALE)
     w.add_residual_scale(RESIDUAL_SCALE)
@@ -153,4 +156,7 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "granite-swa-fixture.gguf")
+    main(
+        sys.argv[1] if len(sys.argv) > 1 else "granite-swa-fixture.gguf",
+        no_window="--no-window" in sys.argv[2:],
+    )

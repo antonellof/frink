@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/spark25_nowindow_tiny.gguf
+config: REFUSED: architecture 'spark2_5' requires unimplemented feature: `spark2_5.attention.sliding_window` is absent or zero, and llama.cpp reads it as a REQUIRED key for this architecture (src/models/spark2-5.cpp:5); every real export writes it, and a file without it does not load upstream

@@ -65,6 +65,17 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **Four sliding-window rows read their keys as the pin does** (#470).
+  `maple`, `spark2_5` and `granite_swa` read `attention.sliding_window`
+  REQUIRED (`maple.cpp:7`, `spark2-5.cpp:5`, `granite-swa.cpp:18`): a
+  file without it is now refused by name, as libllama refuses it, where
+  frink loaded it with no window. `spark2_5` seeds its sliding layers'
+  RoPE base and scale from the model's (`:10-11`), which a
+  converter-produced file (no `rope.freq_base_swa`) reaches whenever its
+  base is not 10000; frink rotated those layers at 10000. `gemma2`
+  seeds a 4096 window before the optional key (`:5`), as `exaone4`
+  does. New fixtures and oracle rows for each, and a libllama golden
+  for the Spark-2.5 base.
 - **A preempted request is no longer failed partway through its
   stream.** When it was re-admitted and the paged store could not seat
   it (the block budget said yes, the store said no), it was finished

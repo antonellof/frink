@@ -36,6 +36,10 @@ optional key (`:14`), so libllama rotates every layer at the model's
 base and scale; a reader that fell back to `llama_hparams`' defaults
 (base 10000, scale 1) would rotate the sliding layers differently.
 
+**`--no-window`** leaves out `attention.sliding_window`, which
+`maple.cpp:7` reads REQUIRED: libllama refuses the file, and so must
+frink (#470).
+
 **`--swa-array short|long`** writes the window array at a length other
 than `block_count` (#452): `short` is the first two entries, `long`
 appends three. `maple.cpp:10` reads it with `get_arr`, which checks no
@@ -98,6 +102,7 @@ def main(
     all_swa: bool = False,
     model_rope: bool = False,
     swa_array: str | None = None,
+    no_window: bool = False,
 ) -> None:
     n_layer = len(IS_SWA)
     rng = np.random.default_rng(0x4A9E)
@@ -124,7 +129,8 @@ def main(
         w.add_rope_freq_base(ROPE_BASE)
         w.add_rope_freq_base_swa(ROPE_BASE_SWA)
     w.add_rope_dimension_count(HEAD_DIM)
-    w.add_sliding_window(SWA_WINDOW)
+    if not no_window:
+        w.add_sliding_window(SWA_WINDOW)
     pattern = [True] * len(IS_SWA) if all_swa else IS_SWA
     if swa_array == "short":
         pattern = pattern[:2]
@@ -187,4 +193,5 @@ if __name__ == "__main__":
         "--all-swa" in sys.argv[2:],
         "--model-rope" in sys.argv[2:],
         sys.argv[sys.argv.index("--swa-array") + 1] if "--swa-array" in sys.argv else None,
+        no_window="--no-window" in sys.argv[2:],
     )
