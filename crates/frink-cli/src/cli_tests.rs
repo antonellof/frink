@@ -621,3 +621,20 @@ fn bench_takes_llama_benchs_pg_pair() {
         );
     }
 }
+
+/// llama-bench's `-b` / `-ub` reach `BenchCmd` through the rewriter
+/// (`-b` is a single letter, `-ub` two), and zero is refused.
+#[test]
+fn bench_takes_llama_benchs_batch_sizes() {
+    let cli = parse_cli(rewrite(&[
+        "frink", "bench", "-m", "m.gguf", "-b", "2048", "-ub", "512",
+    ]));
+    let super::Commands::Bench(b) = cli.command else {
+        panic!("not bench");
+    };
+    assert_eq!((b.batch_size, b.ubatch_size), (Some(2048), Some(512)));
+    use clap::Parser;
+    assert!(
+        super::Cli::try_parse_from(rewrite(&["frink", "bench", "-m", "m", "-ub", "0"])).is_err()
+    );
+}

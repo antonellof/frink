@@ -146,7 +146,7 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Res
         // `pp512` asks for logits at the final position only, so
         // projecting all 512 rows through the vocabulary would be work
         // the reference engine never does.
-        let logits = decoder.forward_batch_last(&tokens, plan.depth, &mut caches);
+        let logits = prefill(decoder, &tokens, plan.depth, plan.chunk, &mut caches);
         let dt = t.elapsed().as_secs_f64();
         // The prompt length is asserted AFTER the run too, not only
         // before: an engine that silently truncated the batch would
@@ -377,7 +377,7 @@ fn bench_combined(decoder: &Decoder, pp: usize, tg: usize, plan: &Test) -> anyho
         digest.feed_all(&prompt);
         plan.announce(rep);
         let t = Instant::now();
-        let mut logits = decoder.forward_batch_last(&prompt, plan.depth, &mut caches);
+        let mut logits = prefill(decoder, &prompt, plan.depth, plan.chunk, &mut caches);
         plan.announce_generation(rep);
         for (i, &tok) in gen.iter().enumerate() {
             digest.feed(tok);
@@ -410,6 +410,26 @@ fn bench_combined(decoder: &Decoder, pp: usize, tg: usize, plan: &Test) -> anyho
         test_time: plan.time.clone(),
         digest: first_digest.unwrap_or_default(),
     })
+}
+
+/// A prompt's batched forward, in `chunk`-token pieces when llama-bench's
+/// `-b` / `-ub` asked for them, as `test_prompt` submits it
+/// (`llama-bench.cpp:2179-2192`): each piece continues from where the
+/// last left the KV, and the logits are the final piece's last row.
+/// `None` is the whole prompt in one pass.
+fn prefill(
+    decoder: &Decoder,
+    tokens: &[usize],
+    start: usize,
+    chunk: Option<usize>,
+    caches: &mut [KvCache],
+) -> Vec<f32> {
+    let step = chunk.unwrap_or(tokens.len()).max(1);
+    let mut logits = Vec::new();
+    for (k, piece) in tokens.chunks(step).enumerate() {
+        logits = decoder.forward_batch_last(piece, start + k * step, caches);
+    }
+    logits
 }
 
 pub(crate) fn fresh_caches(decoder: &Decoder) -> Vec<KvCache> {
@@ -472,6 +492,7 @@ struct Tests {
     count: usize,
     next: usize,
     depth: usize,
+    chunk: Option<usize>,
 }
 
 impl Tests {
@@ -484,6 +505,7 @@ impl Tests {
                 + usize::from(args.pg.is_some()),
             next: 0,
             depth: args.depth,
+            chunk: args.chunk,
         }
     }
 
@@ -498,6 +520,7 @@ impl Tests {
             progress: self.opts.progress.then_some((self.next, self.count)),
             time: super::output::now_iso8601(),
             depth: self.depth,
+            chunk: self.chunk,
         };
         if let Some(line) = t.line("starting") {
             eprintln!("{line}");
@@ -521,6 +544,9 @@ struct Test {
     /// llama-bench's `-d`: context tokens in the KV before each timed
     /// repetition, put there untimed.
     depth: usize,
+    /// llama-bench's `-b` / `-ub`, resolved: prompt tokens per forward
+    /// pass, or the whole prompt in one when neither was given.
+    chunk: Option<usize>,
 }
 
 impl Test {
@@ -607,6 +633,7 @@ mod tests {
             progress: progress.then_some((2, 2)),
             time: String::new(),
             depth: 0,
+            chunk: None,
         }
     }
 
@@ -634,6 +661,31 @@ mod tests {
         assert_eq!(t.rep_label(0), "warmup prompt run");
         assert_eq!(t.rep_label(2), "prompt run 2/3");
         assert_eq!(t.rep_label_as(2, Phase::Generation), "generation run 2/3");
+    }
+
+    /// `-b` / `-ub` change how the prompt is submitted, not what it
+    /// computes: the final logits of a prompt fed in pieces are the ones
+    /// a single pass gives, to f32 accumulation order, and the KV ends at
+    /// the same length. Odd sizes on purpose, so the last piece is short.
+    #[test]
+    fn a_chunked_prefill_computes_what_one_pass_does() {
+        let cfg = frink_models::config::test_dense_fixture();
+        let vocab = cfg.vocab_size;
+        let decoder = frink_models::Decoder::new_random_small(cfg, 2, vocab);
+        let tokens = synthetic_tokens(vocab, 23, 0);
+        let mut whole_kv = fresh_caches(&decoder);
+        let whole = prefill(&decoder, &tokens, 0, None, &mut whole_kv);
+        for chunk in [1usize, 5, 8, 22, 23, 64] {
+            let mut kv = fresh_caches(&decoder);
+            let got = prefill(&decoder, &tokens, 0, Some(chunk), &mut kv);
+            let worst = got
+                .iter()
+                .zip(&whole)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(worst < 1e-4, "chunk {chunk}: logits moved {worst}");
+            assert_eq!(probe(&kv), probe(&whole_kv), "chunk {chunk}: KV length");
+        }
     }
 
     #[test]

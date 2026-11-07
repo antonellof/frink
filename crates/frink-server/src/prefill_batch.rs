@@ -47,22 +47,9 @@ pub(crate) const PRIVATE_PATH_KEY: usize = 0;
 /// Index of the continuous-batching scheduler's spelling.
 pub(crate) const BATCH_PATH_KEY: usize = 1;
 
-/// llama.cpp's resolution of `-b` and `-ub` into the one number frink
-/// keeps: the smaller of whichever the operator actually named, and
-/// `None` when neither was named.
-///
-/// Mirrors `src/llama-context.cpp:265`. `-ub` alone is the physical
-/// batch; `-b` alone stands in for it (llama.cpp's `params.n_ubatch ==
-/// 0` branch); both together clamp to the smaller, because a physical
-/// batch larger than the logical one cannot be submitted.
-pub(crate) fn effective_chunk(batch: Option<usize>, ubatch: Option<usize>) -> Option<usize> {
-    match (batch, ubatch) {
-        (Some(b), Some(u)) => Some(b.min(u)),
-        (Some(b), None) => Some(b),
-        (None, Some(u)) => Some(u),
-        (None, None) => None,
-    }
-}
+/// llama.cpp's resolution of `-b` and `-ub`, shared with `frink bench`
+/// (`frink_core::argv::effective_ubatch`).
+pub(crate) use frink_core::argv::effective_ubatch as effective_chunk;
 
 #[cfg(test)]
 mod tests {
@@ -86,32 +73,5 @@ mod tests {
             PREFILL_CHUNK_ENV_KEYS[PRIVATE_PATH_KEY], PREFILL_CHUNK_ENV_KEYS[BATCH_PATH_KEY],
             "two readers indexing the same entry would leave one path unconfigurable"
         );
-    }
-
-    /// `-ub` larger than `-b` is not a physical batch of `-ub`:
-    /// llama.cpp clamps it (`src/llama-context.cpp:265`) and so does
-    /// frink, or a `-b 64 -ub 512` command would run 512-token chunks
-    /// here and 64-token chunks there.
-    #[test]
-    fn a_ubatch_larger_than_the_batch_clamps_to_the_batch() {
-        assert_eq!(effective_chunk(Some(64), Some(512)), Some(64));
-        assert_eq!(effective_chunk(Some(512), Some(64)), Some(64));
-    }
-
-    /// Either flag alone names the chunk; llama.cpp's `-b` stands in
-    /// for an unset `-ub` by the same line.
-    #[test]
-    fn either_flag_alone_names_the_chunk() {
-        assert_eq!(effective_chunk(Some(256), None), Some(256));
-        assert_eq!(effective_chunk(None, Some(256)), Some(256));
-    }
-
-    /// A command that mentions neither must not re-tune either path:
-    /// the private loop's default is "no chunking at all" and the
-    /// scheduler's is 128, and picking one for the other is a
-    /// behaviour change nobody asked for.
-    #[test]
-    fn naming_neither_flag_leaves_both_paths_on_their_own_defaults() {
-        assert_eq!(effective_chunk(None, None), None);
     }
 }

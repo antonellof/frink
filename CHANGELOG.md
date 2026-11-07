@@ -17,6 +17,14 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`frink bench -b N` / `-ub N`**, llama-bench's logical and physical
+  batch (#404). They resolve to one size as llama.cpp resolves them
+  (the smaller; either alone stands for both), now one shared function
+  (`frink_core::argv::effective_ubatch`) for `frink bench` and
+  `frink-server`, and the `pp` and `pp+tg` rows submit their prompt in
+  pieces of that size, as `test_prompt` does. Neither given keeps the
+  whole prompt in one pass. The `llama-bench` not-accepted count falls
+  to 21.
 - **`frink bench -pg PP,TG`**, llama-bench's combined test (#404): a
   batched prompt and then a generation continuing from it, timed as one
   test at `(pp + tg) / time` and named `pp512+tg128`, as llama-bench
