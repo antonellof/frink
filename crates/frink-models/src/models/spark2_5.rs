@@ -2,17 +2,17 @@
 //! commit.
 //!
 //! - **Standard SWA from a per-layer array** (`:7-8`, `get_arr`), the
-//!   window REQUIRED (`:5`).
+//!   window REQUIRED (`:5`): a file without it is refused, as libllama
+//!   refuses it (#470).
+//! - **The sliding layers' RoPE base and scale seeded from the
+//!   model's** (`:10-11`) before the optional `rope.freq_base_swa`
+//!   (`:12`), so a converter-produced file, which writes no such key,
+//!   rotates its sliding layers at the model's base (#470).
 //! - **A per-head sigmoid gate on the attention output**, REQUIRED
 //!   (`:41,97-105`, [`crate::attn_gate::SPARK2_5`]).
 //! - **GeGLU**: `LLM_FFN_GELU` gated (`:124`), where the family rule
 //!   would give SwiGLU.
 //! - **Per-layer head counts** (`:33-37,76-77`).
-//!
-//! `:10-12` seed the sliding layers' base and scale from the model's,
-//! which the legacy table did not say and frink does not do; the window
-//! is REQUIRED and not refused when absent (#470). Carried over
-//! unchanged.
 //!
 //! Evidence: `tests/gated_attention_graphs.rs`, against libllama.
 
@@ -26,6 +26,9 @@ pub const FACTS: ArchFacts = ArchFacts {
         ..ArchFacts::DEFAULT.ffn
     },
     swa: SwaFacts {
+        window_required: Some("spark2-5.cpp:5"),
+        rope_base_follows_model: true,
+        rope_scale_follows_model: true,
         pattern_key_read: PatternKeyRead::PerLayerBool,
         ..ArchFacts::DEFAULT.swa
     },

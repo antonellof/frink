@@ -9,7 +9,7 @@
 //!   the one graph that reads it back (`crate::rope_layers`).
 //! - **OPTIONAL biases** on `attn_output` and the dense FFN's three.
 //!
-//! The window is REQUIRED here and not refused when absent (#470).
+//! A file without the window is refused, as libllama refuses it (#470).
 //!
 //! Evidence: `tests/granite_swa_graphs.rs`, against libllama.
 
@@ -21,6 +21,7 @@ use crate::swa_layers::PatternKeyRead;
 
 pub const FACTS: ArchFacts = ArchFacts {
     swa: SwaFacts {
+        window_required: Some("granite-swa.cpp:18"),
         pattern_key_read: PatternKeyRead::PerLayerBool,
         ..ArchFacts::DEFAULT.swa
     },

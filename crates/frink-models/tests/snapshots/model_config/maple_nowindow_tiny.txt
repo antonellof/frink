@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/maple_nowindow_tiny.gguf
+config: REFUSED: architecture 'maple' requires unimplemented feature: `maple.attention.sliding_window` is absent or zero, and llama.cpp reads it as a REQUIRED key for this architecture (src/models/maple.cpp:7); every real export writes it, and a file without it does not load upstream

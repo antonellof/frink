@@ -91,6 +91,7 @@ gptoss_tiny                              match                        make_gptos
 granite-moe_tiny                         ref-fails                    make_granitemoe_fixture.py OUT --arch granite-moe  # a hyphenated alias llama.cpp has never named
 granite_nologit_tiny                     both-fail                    make_granite_fixture.py OUT --no-logit-scale  # refusal evidence: logit_scale is REQUIRED upstream
 granite_norope_tiny                      match                        make_granite_fixture.py OUT --no-rope
+granite_swa_nowindow_tiny                both-fail                    make_granite_swa_fixture.py OUT --no-window  # refusal evidence: granite-swa.cpp:18 reads the window REQUIRED (#470)
 granite_swa_tiny                         match                        make_granite_swa_fixture.py OUT
 granite_tiny                             match                        make_granite_fixture.py OUT
 granitehybrid_moe_tiny                   match                        make_granite_hybrid_fixture.py OUT --moe
@@ -143,6 +144,7 @@ mamba2_tiny                              match                        make_mamba
 mamba_dtbcrms_tiny                       match                        make_mamba_fixture.py OUT --arch mamba --dt-b-c-rms
 mamba_tiny                               match                        make_mamba_fixture.py OUT --arch mamba
 maple_model_rope_tiny                    match                        make_maple_fixture.py OUT --model-rope
+maple_nowindow_tiny                      both-fail                    make_maple_fixture.py OUT --no-window  # refusal evidence: maple.cpp:7 reads the window REQUIRED (#470)
 maple_swa_long_tiny                      match                        make_maple_fixture.py OUT --swa-array long
 maple_swa_short_tiny                     match                        make_maple_fixture.py OUT --swa-array short
 maple_tiny                               match                        make_maple_fixture.py OUT
@@ -213,6 +215,8 @@ smallthinker_nowindow_tiny               match                        make_small
 smallthinker_swa2_tiny                   match                        make_smallthinker_fixture.py OUT --swa-period 2
 smallthinker_tiny                        match                        make_smallthinker_fixture.py OUT
 smollm3_tiny                             match                        make_smollm3_fixture.py OUT
+spark25_model_rope_tiny                  match                        make_spark25_fixture.py OUT --model-rope
+spark25_nowindow_tiny                    both-fail                    make_spark25_fixture.py OUT --no-window  # refusal evidence: spark2-5.cpp:5 reads the window REQUIRED (#470)
 spark25_tiny                             match                        make_spark25_fixture.py OUT
 spm-special-tokens-test-vocab            both-fail                    -  # a vocab-only tokenizer fixture, held by the tokenizer unit tests
 stablelm_parallel_tiny                   match                        make_stablelm_fixture.py OUT --parallel

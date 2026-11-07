@@ -69,7 +69,21 @@ IS_SWA = [True, True, False, True]
 HEADS = [4, 2, 4, 2]
 
 
-def main(out_path: str, simple: bool = False, mode: str = "") -> None:
+# `--model-rope`: no `rope.freq_base_swa`, a model base other than 10000
+# and a linear scaling factor of 2. `spark2-5.cpp:10-11` seed the sliding
+# layers' base AND scale from the model's before the optional key (`:12`),
+# so libllama rotates every layer at the model's base and scale (#470).
+MODEL_ROPE_BASE = 40000.0
+MODEL_ROPE_LINEAR = 2.0
+
+
+def main(
+    out_path: str,
+    simple: bool = False,
+    mode: str = "",
+    no_window: bool = False,
+    model_rope: bool = False,
+) -> None:
     n_layer = len(HEADS)
     rng = np.random.default_rng(0x59A24)
 
@@ -87,10 +101,18 @@ def main(out_path: str, simple: bool = False, mode: str = "") -> None:
     w.add_key_length(HEAD_DIM)
     w.add_value_length(HEAD_DIM)
     w.add_layer_norm_rms_eps(RMS_EPS)
-    w.add_rope_freq_base(ROPE_BASE)
-    w.add_rope_freq_base_swa(ROPE_BASE_SWA)
+    if model_rope:
+        w.add_rope_freq_base(MODEL_ROPE_BASE)
+        w.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
+        w.add_rope_scaling_factor(MODEL_ROPE_LINEAR)
+    else:
+        w.add_rope_freq_base(ROPE_BASE)
+        w.add_rope_freq_base_swa(ROPE_BASE_SWA)
     w.add_rope_dimension_count(HEAD_DIM)
-    w.add_sliding_window(SWA_WINDOW)
+    # `spark2-5.cpp:5` reads the window REQUIRED: `--no-window` leaves it
+    # out, and libllama refuses the file, as frink must (#470).
+    if not no_window:
+        w.add_sliding_window(SWA_WINDOW)
     w.add_sliding_window_pattern([True] * len(HEADS) if (simple or mode == "headsonly") else IS_SWA)
     w.add_file_type(gguf.LlamaFileType.ALL_F32)
 
@@ -153,4 +175,6 @@ if __name__ == "__main__":
         sys.argv[1] if len(sys.argv) > 1 else "spark25-fixture.gguf",
         "--simple" in sys.argv[2:],
         "swaonly" if "--swaonly" in sys.argv[2:] else ("headsonly" if "--headsonly" in sys.argv[2:] else ""),
+        no_window="--no-window" in sys.argv[2:],
+        model_rope="--model-rope" in sys.argv[2:],
     )

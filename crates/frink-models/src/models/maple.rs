@@ -8,7 +8,7 @@
 //!   experts (`:17`, `llama-graph.cpp:2228`).
 //! - **Per-layer expert widths** read as an array (`:6`).
 //!
-//! The window is REQUIRED here and not refused when absent (#470).
+//! A file without the window is refused, as libllama refuses it (#470).
 //!
 //! Evidence: `tests/no_rope_layer_graphs.rs`, against libllama.
 
@@ -29,6 +29,7 @@ pub const FACTS: ArchFacts = ArchFacts {
         ..ArchFacts::DEFAULT.ffn
     },
     swa: SwaFacts {
+        window_required: Some("maple.cpp:7"),
         rope_base_follows_model: true,
         rope_scale_follows_model: true,
         pattern_key_read: PatternKeyRead::PerLayerBool,

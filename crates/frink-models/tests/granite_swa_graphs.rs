@@ -190,3 +190,25 @@ fn every_layer_carries_its_attention_sinks() {
         assert_eq!(sinks.len(), d.config.n_heads, "blk.{il}");
     }
 }
+
+/// Refused by name, as libllama refuses it: the file leaves out the
+/// window key the graph reads REQUIRED (#470).
+fn assert_window_refused(fixture: &str, line: &str) {
+    let file = frink_gguf::GgufFile::open(common::graph_fixture_path(fixture)).expect("opens");
+    match frink_models::ModelConfig::from_gguf(&file) {
+        Err(frink_models::LoadError::UnsupportedFeature(_, msg)) => {
+            assert!(msg.contains("attention.sliding_window"), "{msg}");
+            assert!(msg.contains(line), "{msg}");
+        }
+        Err(other) => {
+            panic!("{fixture}: expected the missing window refused by name, got {other:?}")
+        }
+        Ok(_) => panic!("{fixture}: a file without its REQUIRED window loaded"),
+    }
+}
+
+/// Granite-SWA without its REQUIRED window (`granite-swa.cpp:18`).
+#[test]
+fn granite_swa_without_its_window_key_is_refused() {
+    assert_window_refused("granite_swa_nowindow", "granite-swa.cpp:18");
+}
