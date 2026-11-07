@@ -1,0 +1,19 @@
+<｜hy_begin_of_sentence:opensource｜># Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{"function": {"description": "The weather in a city", "name": "get_weather", "parameters": {"properties": {"city": {"description": "La città", "type": "string"}}, "required": ["city"], "type": "object"}}, "type": "function"}
+</tools>
+
+For function call returns, you should first print <tool_calls:opensource>
+For each function call, you should return object like:
+<tool_call:opensource>{function-name}<tool_sep:opensource>
+<arg_key:opensource>{arg-key-1}</arg_key:opensource>
+<arg_value:opensource>{arg-value-1}</arg_value:opensource>
+<arg_key:opensource>{arg-key-2}</arg_key:opensource>
+<arg_value:opensource>{arg-value-2}</arg_value:opensource>
+...
+</tool_call:opensource>
+At the end of function call returns, you should print </tool_calls:opensource><｜reasoning_mode:opensource｜>reasoning_effort:no_think<｜hy_User:opensource｜>What is the capital of France?<｜hy_Assistant:opensource｜><think:opensource></think:opensource>Paris.<｜hy_eos:opensource｜><｜hy_User:opensource｜>And of Italy?<｜hy_Assistant:opensource｜><think:opensource></think:opensource>
