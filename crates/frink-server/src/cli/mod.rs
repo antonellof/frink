@@ -69,6 +69,13 @@ pub struct ServerArgs {
     )]
     hf_file: Option<String>,
 
+    /// llama.cpp's `--offline`: forces use of the cache and prevents
+    /// network access. A `-hf` reference resolves against the files the
+    /// frink cache already holds, and one it does not hold is refused
+    /// naming the cache directory.
+    #[arg(long, default_value_t = false)]
+    offline: bool,
+
     /// Context size, llama.cpp's `-c`. Sets `FRINK_CB_MAX_CONTEXT`.
     ///
     /// Unset means the ceiling is derived at load from the weights and
@@ -444,14 +451,19 @@ fn cli_bind_addr(args: &ServerArgs, env_addr: Option<&str>) -> Option<String> {
 /// Progress goes to STDERR, not stdout: stdout carries the
 /// `frink.server.ready` line a supervising process parses, and a
 /// progress bar in the middle of it would break that contract.
-fn resolve_hf_repo(spec: &str, file: Option<&str>) -> anyhow::Result<String> {
+fn resolve_hf_repo(spec: &str, file: Option<&str>, offline: bool) -> anyhow::Result<String> {
     let mut hf = frink_models::hub::HfRef::parse(spec);
     if let Some(f) = file {
         hf.file = Some(f.to_string());
     }
     eprintln!(
-        "frink: resolving {} on the Hub{}",
+        "frink: resolving {} {}{}",
         hf.repo,
+        if offline {
+            "in the cache"
+        } else {
+            "on the Hub"
+        },
         hf.quant
             .as_deref()
             .map(|q| format!(" ({q})"))
@@ -477,7 +489,7 @@ fn resolve_hf_repo(spec: &str, file: Option<&str>) -> anyhow::Result<String> {
     };
 
     let (path, downloaded) = hf
-        .ensure_local(&mut draw)
+        .ensure_local_with(offline, &mut draw)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if downloaded {
         eprintln!();
@@ -521,7 +533,7 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         unsafe { std::env::set_var("FRINK_MODEL_PATH", model) };
     }
     if let Some(spec) = &args.hf_repo {
-        let path = resolve_hf_repo(spec, args.hf_file.as_deref())?;
+        let path = resolve_hf_repo(spec, args.hf_file.as_deref(), args.offline)?;
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_MODEL_PATH", &path) };
     }

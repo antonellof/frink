@@ -10,14 +10,19 @@
 ///
 /// Progress goes to stderr so a caller redirecting stdout gets the
 /// model's output and not a progress bar.
-pub fn resolve(spec: &str, file: Option<&str>) -> anyhow::Result<String> {
+pub fn resolve(spec: &str, file: Option<&str>, offline: bool) -> anyhow::Result<String> {
     let mut hf = frink_models::hub::HfRef::parse(spec);
     if let Some(f) = file {
         hf.file = Some(f.to_string());
     }
     eprintln!(
-        "frink: resolving {} on the Hub{}",
+        "frink: resolving {} {}{}",
         hf.repo,
+        if offline {
+            "in the cache"
+        } else {
+            "on the Hub"
+        },
         hf.quant
             .as_deref()
             .map(|q| format!(" ({q})"))
@@ -41,7 +46,7 @@ pub fn resolve(spec: &str, file: Option<&str>) -> anyhow::Result<String> {
     };
 
     let (path, downloaded) = hf
-        .ensure_local(&mut draw)
+        .ensure_local_with(offline, &mut draw)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if downloaded {
         eprintln!();

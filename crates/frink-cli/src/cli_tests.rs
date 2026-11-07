@@ -577,3 +577,26 @@ fn bench_refuses_a_split_kv_type_and_a_cache_type_sweep() {
     let err = b.apply_llama_flags().unwrap_err().to_string();
     assert!(err.contains("sweep"), "{err}");
 }
+
+/// llama.cpp's `--offline` reaches `run` and `bench` as itself.
+#[test]
+fn run_and_bench_take_llama_cpps_offline_switch() {
+    let cli = parse_cli(rewrite(&[
+        "frink",
+        "run",
+        "-hf",
+        "org/repo:Q4_K_M",
+        "--offline",
+        "-p",
+        "x",
+    ]));
+    let super::Commands::Run(r) = cli.command else {
+        panic!("not run");
+    };
+    assert!(r.offline);
+    let cli = parse_cli(rewrite(&["frink", "bench", "-hf", "org/repo", "--offline"]));
+    let super::Commands::Bench(b) = cli.command else {
+        panic!("not bench");
+    };
+    assert!(b.offline);
+}

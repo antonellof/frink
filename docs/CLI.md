@@ -121,6 +121,7 @@ These have llama.cpp's meaning (differences above): `-m` / `--model`,
 `-sys` / `--system` / `--system-prompt`, `-sysf` /
 `--system-prompt-file` (one trailing newline dropped, as upstream),
 `-jf` / `--json-schema-file`, `-hft` / `--hf-token` (sets `HF_TOKEN`),
+`--offline` (`-hf` resolves from the cache only, no network),
 `--warmup` / `--no-warmup`, `--show-timings` / `--no-show-timings`,
 `-co` / `--color`, `--jinja`, `-fa` / `--flash-attn`, `-st` /
 `--single-turn`, `-e` / `--escape`, `--no-escape`, `--ignore-eos`,
@@ -1325,6 +1326,7 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `--prefill-assistant` / `--no-prefill-assistant`, `--jinja`,
 `--no-warmup` (there is no warm-up pass), `-fa` / `--flash-attn`,
 `-hft` / `--hf-token` (sets `HF_TOKEN` before `-hf` downloads),
+`--offline` / `LLAMA_ARG_OFFLINE` (`-hf` resolves from the cache only),
 `--ssl-key-file` / `--ssl-cert-file` (set `FRINK_TLS_KEY` /
 `FRINK_TLS_CERT`; one without the other is refused rather than serving
 plain HTTP), `--cors-origins` (sets `FRINK_CORS_ORIGINS`),
@@ -1460,6 +1462,7 @@ line up.
 | `--prio` | Process priority: `-1` low, `0` normal, `1` medium, `2` high, `3` realtime (`nice` 5, 0, -5, -10, -20, as llama.cpp sets it). A priority the OS refuses is an error |
 | `--progress` | Print each test's progress to stderr, in llama-bench's words |
 | `-hf/--hf-repo`, `-hff/--hf-file`, `-hft/--hf-token` | Benchmark a Hugging Face repo (`user/repo[:QUANT]`), fetched into the frink cache first, as `frink run -hf` does |
+| `--offline` | Resolve `-hf` from the frink cache alone, with no network access, as llama.cpp's `--offline` does |
 | `-ctk`, `-ctv` | KV cache type; only the types the active backend's store holds, and `-ctv` equal to `-ctk` |
 | `-o/--output` | `md` (the table, the default), `csv`, `json`, `jsonl` or `sql` on stdout, in llama-bench's field names. Under anything but `md`, every other line goes to stderr so stdout stays parseable |
 | `-oe/--output-err` | The same formats (or `none`, the default) on stderr |

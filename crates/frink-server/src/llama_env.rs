@@ -27,6 +27,7 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_MODEL", "model"),
     ("LLAMA_ARG_HF_REPO", "hf-repo"),
     ("LLAMA_ARG_HF_FILE", "hf-file"),
+    ("LLAMA_ARG_OFFLINE", "offline"),
     ("LLAMA_ARG_CTX_SIZE", "ctx-size"),
     ("LLAMA_API_KEY", "api-key"),
     ("LLAMA_ARG_API_KEY_FILE", "api-key-file"),
@@ -203,5 +204,26 @@ mod tests {
         );
         let err = with_env(&[], &[("LLAMA_ARG_JINJA", "maybe")]).unwrap_err();
         assert!(err.contains("LLAMA_ARG_JINJA=maybe"), "{err}");
+    }
+
+    /// `LLAMA_ARG_OFFLINE` is llama.cpp's `--offline`: truthy turns it
+    /// on, and falsy does nothing, since upstream has no `--no-offline`.
+    #[test]
+    fn llama_arg_offline_is_the_offline_switch() {
+        assert_eq!(
+            with_env(&[], &[("LLAMA_ARG_OFFLINE", "1")]).unwrap(),
+            ["--offline"]
+        );
+        assert!(with_env(&[], &[("LLAMA_ARG_OFFLINE", "0")])
+            .unwrap()
+            .is_empty());
+        let tail = with_env(
+            &["--hf-repo", "org/repo:Q4_K_M"],
+            &[("LLAMA_ARG_OFFLINE", "true")],
+        )
+        .unwrap();
+        let args =
+            crate::ServerArgs::try_parse_from(std::iter::once("frink-server".into()).chain(tail));
+        assert!(args.is_ok(), "{args:?}");
     }
 }
