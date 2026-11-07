@@ -28,17 +28,17 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | cpu | 1 | 1 | 0 |
 | cuda | 0 | 0 | 0 |
 | metal | 0 | 0 | 0 |
-| vulkan | 21 | 22 | 22 |
+| vulkan | 17 | 22 | 22 |
 
 ## matvec (decode)
 
 | kind | cpu | cuda | metal | vulkan |
 |---|---|---|---|---|
 | Q8_0 | kernel | kernel | kernel | kernel |
-| Q4_0 | kernel | kernel | kernel | HOST |
-| Q4_K | kernel | kernel | kernel | HOST |
-| Q5_K | kernel | kernel | kernel | HOST |
-| Q6_K | kernel | kernel | kernel | HOST |
+| Q4_0 | kernel | kernel | kernel | kernel |
+| Q4_K | kernel | kernel | kernel | kernel |
+| Q5_K | kernel | kernel | kernel | kernel |
+| Q6_K | kernel | kernel | kernel | kernel |
 | Q2_K | kernel | kernel | kernel | HOST |
 | Q3_K | kernel | kernel | kernel | HOST |
 | Q4_1 | kernel | kernel | kernel | HOST |

@@ -28,7 +28,11 @@ frink-cuda = { workspace = true }
 # table (`frink_metal::embd_kinds`) on every build. Only the kernels
 # behind it are gated on `metal`.
 frink-metal = { workspace = true }
-frink-vulkan = { workspace = true, optional = true }
+# Unconditional for the same reason again: `Vulkan::matvec_kernel`
+# reads `frink_vulkan::shaders::MATVEC`, the shader table, on every
+# build. Without its own `vulkan` feature the crate pulls in no `ash`
+# and opens no library: it is shader bytes and tables.
+frink-vulkan = { workspace = true }
 # The host KV store keeps K/V at f16 by default, as llama.cpp's
 # `llama_context_default_params` does (`crate::kv_store`).
 half = { workspace = true }
@@ -86,8 +90,8 @@ metal = ["frink-metal/metal"]
 # RUNTIME, so this builds on a machine with no driver, no Vulkan SDK
 # and no C++ toolchain -- the same shape the `cuda` feature has.
 #
-# The backend this enables is ONE kernel wide: Q8_0 matvec, and nothing
-# else. `Vulkan::matvec_kernel` says so, `Vulkan::gemm_supported` is
-# false for every kind, and the guard tests in `gpu_backend` fail if
-# either stops being true. See `docs/plans/vulkan-beachhead-verdict.md`.
-vulkan = ["dep:frink-vulkan", "frink-vulkan/vulkan"]
+# The backend this enables is decode matvecs only: Q8_0, Q4_0, Q4_K,
+# Q5_K and Q6_K (`Vulkan::matvec_kernel` says which), and no GEMM for
+# any kind. The guard tests in `gpu_backend` fail if a claimed kind has
+# no launch. See `docs/plans/vulkan-beachhead-verdict.md` and #409.
+vulkan = ["frink-vulkan/vulkan"]

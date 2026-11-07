@@ -50,6 +50,7 @@
 
 pub mod q8_0_reference;
 pub mod q8_0_shader;
+pub mod shaders;
 pub mod spirv;
 
 #[cfg(feature = "vulkan")]

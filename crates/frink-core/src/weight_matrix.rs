@@ -1511,6 +1511,19 @@ impl WeightMatrix {
                 }
             }
         }
+        // The third backend's gate. Without it the Vulkan seam was
+        // reachable only from its own tests: a model's matvecs never
+        // asked it, so `FRINK_VULKAN=1` decoded on the CPU and printed the
+        // CPU's text (#409).
+        #[cfg(feature = "vulkan")]
+        {
+            use gpu_backend::BackendDispatch as _;
+            if gpu_backend::Vulkan::dense_enabled() {
+                if let Some(out) = self.apply_gpu(x) {
+                    return out;
+                }
+            }
+        }
         self.apply_cpu(x)
     }
 

@@ -48,8 +48,67 @@ pub fn q8_0_matvec(
     row_bytes: usize,
     n_blocks_per_row: usize,
 ) -> Result<Vec<f32>, VulkanError> {
-    assert_eq!(weights.len(), rows * row_bytes, "weight buffer size");
     assert_eq!(x.len(), n_blocks_per_row * BLOCK_ELEMS, "activation length");
+    matvec(
+        ctx,
+        &spirv(),
+        LOCAL_SIZE_X,
+        weights,
+        x,
+        rows,
+        row_bytes,
+        n_blocks_per_row,
+    )
+}
+
+/// The matvec for `kind` through its GLSL shader ([`crate::shaders`]),
+/// with `q8_0_matvec`'s argument list so `frink-core` can hold each as a
+/// plain function pointer.
+macro_rules! shader_matvec {
+    ($($fn_name:ident => $kind:literal),* $(,)?) => {$(
+        #[doc = concat!("`", $kind, "` matvec through its GLSL shader.")]
+        pub fn $fn_name(
+            ctx: &Context,
+            weights: &[u8],
+            x: &[f32],
+            rows: usize,
+            row_bytes: usize,
+            n_blocks_per_row: usize,
+        ) -> Result<Vec<f32>, VulkanError> {
+            let s = crate::shaders::matvec_shader($kind).expect("the table has the row");
+            assert_eq!(x.len(), n_blocks_per_row * s.block_elems, "activation length");
+            assert_eq!(row_bytes, n_blocks_per_row * s.block_bytes, "row stride");
+            let code = crate::shaders::words(s.spv);
+            matvec(ctx, &code, crate::shaders::LOCAL_SIZE_X, weights, x, rows, row_bytes, n_blocks_per_row)
+        }
+    )*};
+}
+
+shader_matvec! {
+    q4_0_matvec => "Q4_0",
+    q4_k_matvec => "Q4_K",
+    q5_k_matvec => "Q5_K",
+    q6_k_matvec => "Q6_K",
+}
+
+/// One matvec through any shader with the matvec interface: binding 0
+/// the weight bytes as `uint` words, binding 1 the activations, binding
+/// 2 the outputs, push constants `rows`, `n_blocks_per_row`, `row_bytes`,
+/// one invocation per row in workgroups of `local_size_x`. Every kind's
+/// shader (`crate::shaders`) keeps that interface, so the host side of a
+/// new kind is a table row, not a copy of this function.
+#[allow(clippy::too_many_arguments)] // the six matvec arguments plus the module and its width
+pub fn matvec(
+    ctx: &Context,
+    code: &[u32],
+    local_size_x: u32,
+    weights: &[u8],
+    x: &[f32],
+    rows: usize,
+    row_bytes: usize,
+    n_blocks_per_row: usize,
+) -> Result<Vec<f32>, VulkanError> {
+    assert_eq!(weights.len(), rows * row_bytes, "weight buffer size");
     assert!(rows > 0 && n_blocks_per_row > 0, "empty matvec");
 
     let words = pack_words(weights);
@@ -94,8 +153,7 @@ pub fn q8_0_matvec(
         .map_err(VulkanError::vk("vkCreatePipelineLayout"))?;
     owned.pipeline_layout = Some(pipeline_layout);
 
-    let code = spirv();
-    let module_info = vk::ShaderModuleCreateInfo::default().code(&code);
+    let module_info = vk::ShaderModuleCreateInfo::default().code(code);
     // SAFETY: `module_info` borrows `code`, alive across the call. The
     // words are a complete SPIR-V module (`spirv-val` asserts that in
     // `q8_0_shader`'s tests); an invalid one is rejected here rather
@@ -180,7 +238,7 @@ pub fn q8_0_matvec(
         .map_err(VulkanError::vk("vkAllocateCommandBuffers"))?[0];
 
     let push = push_constants(rows, n_blocks_per_row, row_bytes);
-    let groups = rows.div_ceil(LOCAL_SIZE_X as usize) as u32;
+    let groups = rows.div_ceil(local_size_x as usize) as u32;
     let begin =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     let barrier = [vk::MemoryBarrier::default()
@@ -506,6 +564,95 @@ mod tests {
                     (g - w).abs() <= tol,
                     "rows={rows} blocks={blocks} row={i}: gpu {g} vs twin {w}"
                 );
+            }
+        }
+    }
+
+    /// A row of `blocks` blocks of `kind`: deterministic bytes, with each
+    /// block's f16 scale fields set to small finite values so no block
+    /// decodes to inf or NaN.
+    fn kind_row(kind: &str, blocks: usize, seed: u64) -> Vec<u8> {
+        let shader = crate::shaders::matvec_shader(kind).unwrap();
+        let mut s = seed | 1;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 33) as u8
+        };
+        let mut out = Vec::new();
+        for b in 0..blocks {
+            let mut blk: Vec<u8> = (0..shader.block_bytes).map(|_| next()).collect();
+            let d = half::f16::from_f32(0.01 + 0.002 * (b % 7) as f32).to_le_bytes();
+            let dmin = half::f16::from_f32(0.005 + 0.001 * (b % 5) as f32).to_le_bytes();
+            match kind {
+                "Q4_0" => blk[0..2].copy_from_slice(&d),
+                "Q4_K" | "Q5_K" => {
+                    blk[0..2].copy_from_slice(&d);
+                    blk[2..4].copy_from_slice(&dmin);
+                }
+                "Q6_K" => blk[208..210].copy_from_slice(&d),
+                other => panic!("no layout for {other}"),
+            }
+            out.extend(blk);
+        }
+        out
+    }
+
+    fn twin(kind: &str) -> fn(&[u8], &[f32]) -> f32 {
+        match kind {
+            "Q4_0" => frink_quant::dot_q4_0_f32_scalar,
+            "Q4_K" => frink_quant::dot_q4_k_f32_scalar,
+            "Q5_K" => frink_quant::dot_q5_k_f32_scalar,
+            "Q6_K" => frink_quant::dot_q6_k_f32_scalar,
+            other => panic!("no twin for {other}"),
+        }
+    }
+
+    /// **Every GLSL shader against its `frink_quant` scalar twin**, on
+    /// whatever Vulkan device is present (MoltenVK on a Mac, RADV or
+    /// AMDVLK on a Radeon), at shapes covering a row stride that is not
+    /// word-aligned, a row count that is not a multiple of the 64-wide
+    /// workgroup, and several workgroups. Skips loudly with no device.
+    #[test]
+    fn gpu_every_shader_matvec_matches_its_scalar_twin() {
+        let ctx = match Context::new() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("SKIPPED, no Vulkan device: {e}");
+                return;
+            }
+        };
+        type Launch =
+            fn(&Context, &[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, VulkanError>;
+        let launches: [(&str, Launch); 4] = [
+            ("Q4_0", q4_0_matvec),
+            ("Q4_K", q4_k_matvec),
+            ("Q5_K", q5_k_matvec),
+            ("Q6_K", q6_k_matvec),
+        ];
+        for (kind, launch) in launches {
+            let shader = crate::shaders::matvec_shader(kind).unwrap();
+            for (rows, blocks) in [(1usize, 1usize), (9, 3), (65, 2), (130, 5)] {
+                let row_bytes = blocks * shader.block_bytes;
+                let mut w = Vec::with_capacity(rows * row_bytes);
+                for r in 0..rows {
+                    w.extend(kind_row(kind, blocks, 31 * r as u64 + 7));
+                }
+                let x = pseudo_random(
+                    rows as u64 * 17 + blocks as u64,
+                    blocks * shader.block_elems,
+                );
+                let got = launch(&ctx, &w, &x, rows, row_bytes, blocks).expect("dispatch");
+                for r in 0..rows {
+                    let want = twin(kind)(&w[r * row_bytes..(r + 1) * row_bytes], &x);
+                    let tol = 1e-4 * want.abs().max(1.0);
+                    assert!(
+                        (got[r] - want).abs() <= tol,
+                        "{kind} ({rows},{blocks}) row {r}: gpu {} vs twin {want}",
+                        got[r]
+                    );
+                }
             }
         }
     }

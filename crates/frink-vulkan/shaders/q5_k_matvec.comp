@@ -1,0 +1,38 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q5_K, 176 bytes per 256 values: Q4_K's d, dmin and scales, then 32
+// high-bit bytes and 128 nibble bytes; the high bit of chunk c's low
+// and high halves is bit 2c and 2c+1 of qh[l] (frink_quant::dequant_q5_k).
+#include "matvec_common.glsl"
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint b = 0u; b < p.n_blocks_per_row; ++b) {
+        uint blk = base + b * 176u;
+        float d = f16_at(blk);
+        float dmin = f16_at(blk + 2u);
+        uint qh = blk + 16u;
+        uint qs = blk + 48u;
+        uint xb = b * 256u;
+        for (uint c = 0u; c < 4u; ++c) {
+            float sc1, m1, sc2, m2;
+            scale_min_k4(2u * c, blk + 4u, sc1, m1);
+            scale_min_k4(2u * c + 1u, blk + 4u, sc2, m2);
+            float d1 = d * sc1, min1 = dmin * m1;
+            float d2 = d * sc2, min2 = dmin * m2;
+            uint u1 = 1u << (2u * c), u2 = 2u << (2u * c);
+            for (uint l = 0u; l < 32u; ++l) {
+                uint q = byte_at(qs + c * 32u + l);
+                uint h = byte_at(qh + l);
+                uint lo = (q & 0x0fu) + ((h & u1) != 0u ? 16u : 0u);
+                uint hi = (q >> 4) + ((h & u2) != 0u ? 16u : 0u);
+                acc += (d1 * float(lo) - min1) * x[xb + c * 64u + l];
+                acc += (d2 * float(hi) - min2) * x[xb + c * 64u + 32u + l];
+            }
+        }
+    }
+    y[row] = acc;
+}
