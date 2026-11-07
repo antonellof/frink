@@ -17,6 +17,9 @@ categories = ["hardware-support", "science"]
 
 [dependencies]
 thiserror = { workspace = true }
+# The weight-identity fingerprint the residency cache shares with
+# frink-cuda's (`runtime`).
+frink-quant = { workspace = true }
 
 # Vulkan via ash's `loaded` feature: `libvulkan` is opened with dlopen at
 # RUNTIME, so no Vulkan SDK, no C++ toolchain and no linker flags are
@@ -36,7 +39,6 @@ ash = { version = "0.38", optional = true, default-features = false, features = 
 ] }
 
 [dev-dependencies]
-frink-quant = { workspace = true }
 half = { workspace = true }
 
 [features]

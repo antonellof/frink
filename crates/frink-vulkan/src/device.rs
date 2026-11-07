@@ -37,6 +37,12 @@ pub enum VulkanError {
     DeviceCreation(vk::Result),
     #[error("no memory type is both HOST_VISIBLE and HOST_COHERENT")]
     NoHostVisibleMemory,
+    /// `wanted` is the raw `VkMemoryPropertyFlags` (ash's flag type has
+    /// no `Debug` without its `debug` feature).
+    #[error("no memory type has property flags {wanted:#x}")]
+    NoMemoryType { wanted: u32 },
+    #[error("a {bytes}-byte weight exceeds the {limit}-byte storage-buffer range")]
+    TooLarge { bytes: u64, limit: u64 },
     #[error("{what} failed: {code:?}")]
     Vk {
         what: &'static str,

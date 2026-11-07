@@ -272,9 +272,9 @@ pub(crate) fn cuda_matvec_launch(kind: QuantKind) -> Option<CudaMatvecLaunchFn> 
     }
 }
 
-/// The per-kind Vulkan launch table. One row, and the guard test is
-/// what keeps it one row: adding a kind to [`Vulkan::matvec_kernel`]
-/// without a shader here fails
+/// The per-kind Vulkan launch table. The guard test keeps it equal to
+/// the claims: adding a kind to [`Vulkan::matvec_kernel`] without a
+/// launch here fails
 /// `every_kind_a_compiled_backend_claims_can_actually_be_launched`.
 #[cfg(feature = "vulkan")]
 fn vulkan_matvec_launch(kind: QuantKind) -> Option<VulkanMatvecLaunchFn> {
@@ -295,28 +295,25 @@ pub struct Metal;
 /// The CUDA backend (`frink-cuda`).
 pub struct Cuda;
 
-/// The Vulkan backend (`frink-vulkan`) — **one kernel wide**.
+/// The Vulkan backend (`frink-vulkan`): decode matvecs only.
 ///
-/// `frink-vulkan` is the `vulkan-beachhead` GO/NO-GO slice, not a
-/// backend: a single hand-emitted SPIR-V Q8_0 matvec, checked against a
-/// scalar twin and run on a real device through MoltenVK. See
-/// `docs/plans/vulkan-beachhead-verdict.md`.
+/// Began as the `vulkan-beachhead` GO/NO-GO slice
+/// (`docs/plans/vulkan-beachhead-verdict.md`); now one GLSL matvec per
+/// kind in `frink_vulkan::shaders`, with resident weights and cached
+/// pipelines (`frink_vulkan::runtime`), each shader checked against its
+/// `frink_quant` scalar twin on a real device. Deliberately no more:
 ///
-/// This impl is what wiring that slice into the seam costs, and it is
-/// deliberately not more than the slice supports:
-///
-/// - **Q8_0 and nothing else.** [`Vulkan::matvec_kernel`] names one
-///   kind; every other kind reports no kernel, which is the honest
-///   answer and is what makes the registry say "NO KERNEL … falls back
-///   to CPU apply_cpu" instead of quietly running slow.
+/// - **Only the kinds with a shader.** [`Vulkan::matvec_kernel`] reads
+///   the shader table; every other kind reports no kernel, which is the
+///   honest answer and is what makes the registry say "NO KERNEL …
+///   falls back to CPU apply_cpu" instead of quietly running slow.
 /// - **No GEMM at all.** [`Vulkan::gemm_supported`] is false for every
 ///   kind. There is no `mul_mm` shader, and `apply_batch_with_acts` has
 ///   no Vulkan arm, so a batched prefill runs on the host —
 ///   [`Vulkan::GEMM_FALLBACK`] says exactly that.
-/// - **No performance claim.** `q8_0_matvec` rebuilds its entire
-///   pipeline per call. Nothing here may be reported as a measured
-///   capability; the verdict says so and this comment repeats it
-///   because the code is now reachable.
+/// - **Opt-in.** Each matvec still waits for its own result, so a token
+///   pays one queue round trip per projection; [`Vulkan::dense_enabled`]
+///   says why that keeps `FRINK_VULKAN` unset meaning off.
 pub struct Vulkan;
 
 impl BackendCaps for Metal {
@@ -494,11 +491,9 @@ impl BackendCaps for Vulkan {
     /// this names the host path rather than inventing a GPU one.
     const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
-    /// The kinds with a shader: Q8_0 (`frink_vulkan::q8_0_shader`, the
-    /// hand-emitted beachhead module) and the GLSL ones in
-    /// `frink_vulkan::shaders` (Q4_0, Q4_K, Q5_K, Q6_K: what Q4_K_M and
-    /// Q5_K_M files are made of), each run against its `frink_quant`
-    /// scalar twin on a real device.
+    /// The kinds with a shader in `frink_vulkan::shaders` (Q8_0, Q4_0,
+    /// Q4_K, Q5_K, Q6_K: what Q4_K_M and Q5_K_M files are made of), each
+    /// run against its `frink_quant` scalar twin on a real device.
     ///
     /// Everything else must report `None` rather than something
     /// plausible. A capability table that over-claims is how a kind ends
@@ -506,21 +501,18 @@ impl BackendCaps for Vulkan {
     /// paid for twice (IQ4_XS prefill, Q5_0 decode). The guard test
     /// checks this against [`vulkan_matvec_launch`] for all 23 kinds.
     fn matvec_kernel(kind: QuantKind) -> Option<&'static str> {
-        match kind {
-            QuantKind::Q8_0 => Some(kind.name()),
-            k => frink_vulkan::shaders::matvec_shader(k.name()).map(|s| s.kind),
-        }
+        frink_vulkan::shaders::matvec_shader(kind.name()).map(|s| s.kind)
     }
 
-    /// No kind, for any kind. The beachhead emitted one matvec shader
-    /// and deliberately no `mul_mm`; the verdict puts a real GEMM in
+    /// No kind, for any kind. `frink-vulkan` has matvec shaders and
+    /// deliberately no `mul_mm` yet; the verdict puts a real GEMM in
     /// `vulkan-prefill-gemm`, which is where the backend decision
     /// actually lives.
     ///
     /// This is the one place the Metal invariant
     /// (`every_metal_matvec_kind_also_has_a_metal_gemm`: matvec set ==
     /// GEMM set) is knowingly not held, and it is held open rather than
-    /// papered over: Q8_0 decodes on Vulkan and prefills on the CPU,
+    /// papered over: a kind decodes on Vulkan and prefills on the CPU,
     /// the registry records the split by name, and `frink bench` would
     /// show it.
     fn gemm_supported(_kind: QuantKind) -> bool {
@@ -565,24 +557,23 @@ type CudaMatvecLaunchFn =
 
 /// A `frink_vulkan::dispatch` matvec's signature. Same five arguments
 /// as [`CudaMatvecLaunchFn`] -- `frink-vulkan` was written to this
-/// list on purpose -- plus the borrowed [`frink_vulkan::device::Context`]
-/// in front, because Vulkan keeps no process-global device inside its
-/// own crate the way `frink_metal::gpu` and `frink_cuda::gpu` do.
-/// [`vulkan_context`] is that global, and it lives here so the beachhead
-/// crate stays a beachhead.
-/// Values per block for a Vulkan-launched kind: the shader table's for
-/// the GLSL kinds, Q8_0's 32 for the beachhead module. Read from the
-/// tables rather than written out, so a K-quant (256 per block) is not
+/// list on purpose -- plus the [`frink_vulkan::runtime::Runtime`] in
+/// front (its cached pipelines and resident weights), because Vulkan
+/// keeps no process-global device inside its own crate the way
+/// `frink_metal::gpu` and `frink_cuda::gpu` do. [`vulkan_runtime`] is
+/// that global, and it lives here.
+/// Values per block for a Vulkan-launched kind, read from the shader
+/// table rather than written out, so a K-quant (256 per block) is not
 /// checked against Q8_0's 32 and refused into a silent CPU fallback.
+/// `None` for a kind with no shader, which has no launch either.
 #[cfg(feature = "vulkan")]
-fn vulkan_block_elems(kind: QuantKind) -> usize {
-    frink_vulkan::shaders::matvec_shader(kind.name())
-        .map_or(frink_vulkan::q8_0_shader::BLOCK_ELEMS, |s| s.block_elems)
+fn vulkan_block_elems(kind: QuantKind) -> Option<usize> {
+    frink_vulkan::shaders::matvec_shader(kind.name()).map(|s| s.block_elems)
 }
 
 #[cfg(feature = "vulkan")]
 type VulkanMatvecLaunchFn = fn(
-    &frink_vulkan::device::Context,
+    &mut frink_vulkan::runtime::Runtime,
     &[u8],
     &[f32],
     usize,
@@ -711,29 +702,27 @@ impl BackendDispatch for Cuda {
     }
 }
 
-/// The process-wide Vulkan device, opened at most once.
+/// The process-wide Vulkan runtime, opened at most once.
 ///
 /// `frink_metal::gpu` and `frink_cuda::gpu` each keep their device
 /// inside their own crate, so their launch functions take no context.
-/// `frink-vulkan` deliberately does not: it is a beachhead whose
-/// `Context` is created and dropped by its own tests, and giving it a
-/// hidden global would have made the GO/NO-GO slice into infrastructure.
-/// So the global lives here, on the seam's side of the boundary.
+/// `frink-vulkan` hands its [`frink_vulkan::runtime::Runtime`] to the
+/// caller instead, so its tests can open and drop their own; the
+/// process's one lives here, on the seam's side of the boundary.
 ///
-/// `Mutex`, not a bare `Context`: a `vk::Queue` must be externally
-/// synchronized, and `apply_gpu` is called from rayon workers.
-/// Serializing them is correct and is not a regression, because
-/// `q8_0_matvec` rebuilds its entire pipeline per call and is not a
-/// performance path in the first place — see the verdict.
+/// `Mutex`: a `vk::Queue` must be externally synchronized, the runtime
+/// reuses one command buffer and descriptor set, and `apply_gpu` is
+/// called from rayon workers. Each matvec waits for its own result, so
+/// serializing them costs nothing the device would have overlapped.
 ///
 /// `None` means the device could not be opened. That is reported once,
 /// here, rather than once per matvec.
 #[cfg(feature = "vulkan")]
-fn vulkan_context() -> Option<&'static std::sync::Mutex<frink_vulkan::device::Context>> {
+fn vulkan_runtime() -> Option<&'static std::sync::Mutex<frink_vulkan::runtime::Runtime>> {
     use std::sync::{Mutex, OnceLock};
-    static CTX: OnceLock<Option<Mutex<frink_vulkan::device::Context>>> = OnceLock::new();
-    CTX.get_or_init(|| match frink_vulkan::device::Context::new() {
-        Ok(ctx) => Some(Mutex::new(ctx)),
+    static RT: OnceLock<Option<Mutex<frink_vulkan::runtime::Runtime>>> = OnceLock::new();
+    RT.get_or_init(|| match frink_vulkan::runtime::Runtime::new() {
+        Ok(rt) => Some(Mutex::new(rt)),
         Err(e) => {
             eprintln!(
                 "frink: Vulkan device unavailable, {}: {e}",
@@ -764,13 +753,14 @@ impl BackendDispatch for Vulkan {
         // not shared through a default method.
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
-            // OPT-IN: unset is off, not "probe". Every matvec still
-            // rebuilds its pipeline and stages its weights per call
-            // (`frink_vulkan::dispatch`), so a decode that reaches Vulkan
-            // runs ~100x slower than the CPU it replaced (Llama-3.2-1B
-            // Q4_K_M on the M2 Pro: 0.9 tok/s against 99). A device that
-            // merely exists must not select that. `FRINK_VULKAN=1` does,
-            // until weights are resident (#409).
+            // OPT-IN: unset is off, not "probe". Weights are resident and
+            // pipelines cached (`frink_vulkan::runtime`), but every matvec
+            // still waits for its own result, so a token pays one queue
+            // round trip per projection and a decode that reaches Vulkan
+            // is slower than the CPU it replaced (Llama-3.2-1B Q4_K_M on
+            // the M2 Pro: 25 tok/s against 111, one laptop run). A device
+            // that merely exists must not select that. `FRINK_VULKAN=1`
+            // does, until a token's matvecs share a submission (#409).
             match std::env::var("FRINK_VULKAN").ok() {
                 None => false,
                 Some(v) => env_or_probe(Some(v.as_str()), "vulkan", || {
@@ -801,7 +791,7 @@ impl BackendDispatch for Vulkan {
         if !Self::dense_enabled() {
             return None;
         }
-        let ctx = vulkan_context()?;
+        let rt = vulkan_runtime()?;
 
         // `frink_vulkan::dispatch::q8_0_matvec` asserts its shape
         // invariants, which is right for a test-driven beachhead and
@@ -812,7 +802,7 @@ impl BackendDispatch for Vulkan {
         let n_blocks_per_row = row_bytes / block_bytes;
         if weights.len() != rows * row_bytes
             || row_bytes != n_blocks_per_row * block_bytes
-            || x.len() != n_blocks_per_row * vulkan_block_elems(kind)
+            || Some(x.len()) != vulkan_block_elems(kind).map(|e| n_blocks_per_row * e)
             || rows == 0
             || n_blocks_per_row == 0
         {
@@ -825,19 +815,19 @@ impl BackendDispatch for Vulkan {
             ))));
         }
 
-        let guard = match ctx.lock() {
+        let mut guard = match rt.lock() {
             Ok(g) => g,
             // A poisoned mutex means another thread panicked mid-
             // dispatch; the device may be mid-submission, so refuse
             // rather than reuse it.
             Err(_) => {
                 return Some(Err(BackendError::new(
-                    "Vulkan context poisoned by an earlier panic",
+                    "Vulkan runtime poisoned by an earlier panic",
                 )))
             }
         };
         Some(
-            launch(&guard, weights, x, rows, row_bytes, n_blocks_per_row)
+            launch(&mut guard, weights, x, rows, row_bytes, n_blocks_per_row)
                 .map_err(BackendError::new),
         )
     }
@@ -1023,10 +1013,10 @@ mod tests {
         );
     }
 
-    /// Vulkan is **one kernel wide** and the seam must keep saying so.
+    /// Vulkan claims exactly its shaders, and the seam must keep saying so.
     ///
-    /// `frink-vulkan` has exactly one shader, `q8_0_shader`. If this
-    /// table ever grows a kind, either a shader landed with it (and this
+    /// `frink-vulkan` has one matvec shader per row of
+    /// `frink_vulkan::shaders::MATVEC`. If this table ever grows a kind, either a shader landed with it (and this
     /// test is the place to say so) or the table now over-claims — which
     /// is how IQ4_XS prefill and Q5_0 decode each silently moved to the
     /// CPU while the capability report said "GPU".
@@ -1050,7 +1040,7 @@ mod tests {
                 QuantKind::Q5K,
                 QuantKind::Q6K
             ],
-            "frink-vulkan has these shaders (q8_0_shader plus shaders::MATVEC); the capability \
+            "frink-vulkan has these shaders (shaders::MATVEC); the capability \
              table claims {claimed:?}"
         );
         for &k in QuantKind::ALL {
