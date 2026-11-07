@@ -15,6 +15,22 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`--chat-template`, `--chat-template-file`, `--chat-template-kwargs`,
+  `-rea` / `--reasoning` and `--reasoning-effort`** on `frink run` and
+  `frink-server`, with their `LLAMA_ARG_*` variables (#404). A template
+  is checked at startup, as llama.cpp checks it. A bare name other than
+  `chatml` is refused: under `--jinja`, llama.cpp's default, `llama3`
+  compiles as plain text and every prompt becomes that word. Server
+  defaults sit under anything a request says.
+
+### Fixed
+
+- **A `LLAMA_ARG_*` variable could beat an explicit flag.** Variables
+  were added after the command line, so between two flags where the
+  last wins, the variable won. llama.cpp applies them first.
+
 ## [0.55.0] - 2026-11-07
 
 ### Changed

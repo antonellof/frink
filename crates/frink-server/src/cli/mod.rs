@@ -137,6 +137,48 @@ pub struct ServerArgs {
     #[arg(long = "no-jinja", default_value_t = false)]
     no_jinja: bool,
 
+    /// A chat template in place of the GGUF's own, llama.cpp's
+    /// `--chat-template`: its Jinja source, or `chatml`. Any other bare
+    /// name is refused. Sets `FRINK_CHAT_TEMPLATE`.
+    #[arg(
+        long = "chat-template",
+        value_name = "JINJA_TEMPLATE",
+        overrides_with = "chat_template_file"
+    )]
+    chat_template: Option<String>,
+
+    /// `--chat-template`, read from a file. The later of the two wins,
+    /// as in llama.cpp.
+    #[arg(
+        long = "chat-template-file",
+        value_name = "JINJA_TEMPLATE_FILE",
+        overrides_with = "chat_template"
+    )]
+    chat_template_file: Option<std::path::PathBuf>,
+
+    /// Template variables for every request, as a JSON object,
+    /// llama.cpp's `--chat-template-kwargs`. Repeatable. A request's own
+    /// `chat_template_kwargs` win. Sets `FRINK_CHAT_TEMPLATE_KWARGS`.
+    #[arg(long = "chat-template-kwargs", value_name = "STRING")]
+    chat_template_kwargs: Vec<String>,
+
+    /// Thinking in the chat, llama.cpp's `-rea`: `on`, `off` or `auto`
+    /// (the default), which leaves it to the template. `on` and `off` set
+    /// the `enable_thinking` template variable for every request.
+    #[arg(
+        long = "reasoning",
+        visible_alias = "rea",
+        value_name = "on|off|auto",
+        allow_hyphen_values = true
+    )]
+    reasoning: Option<String>,
+
+    /// The `reasoning_effort` template variable for every request,
+    /// llama.cpp's `--reasoning-effort`. `default` leaves the template's
+    /// own. Wins over the same key in `--chat-template-kwargs`.
+    #[arg(long = "reasoning-effort", value_name = "LEVEL")]
+    reasoning_effort: Option<String>,
+
     /// Accepted; frink does no warm-up pass, so there is none to skip.
     #[arg(long = "no-warmup", default_value_t = false)]
     no_warmup: bool,
@@ -416,7 +458,7 @@ fn llama_style_argv(
     let mut argv = argv.into_iter();
     let program = argv.next().unwrap_or_else(|| "frink-server".to_string());
     let tail = frink_core::argv::expand_single_dash_names(cmd, argv.collect())?;
-    let tail = crate::llama_env::append_llama_arg_env(cmd, tail, env)?;
+    let tail = crate::llama_env::prepend_llama_arg_env(cmd, tail, env)?;
     Ok(std::iter::once(program).chain(tail).collect())
 }
 
@@ -757,6 +799,33 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         }
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_SLOT_SAVE_PATH", dir) };
+    }
+
+    let reasoning = args
+        .reasoning
+        .as_deref()
+        .map(frink_core::argv::reasoning_switch)
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten();
+    let template_flags = frink_models::template_flags::TemplateFlags::resolve(
+        frink_models::template_flags::TemplateFlagValues {
+            template: args.chat_template.as_deref(),
+            template_file: args.chat_template_file.as_deref(),
+            kwargs: &args.chat_template_kwargs,
+            reasoning,
+            reasoning_effort: args.reasoning_effort.as_deref(),
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    if let Some(source) = &template_flags.source {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::chat_template::TEMPLATE_ENV, source) };
+    }
+    if !template_flags.kwargs.is_empty() {
+        let kwargs = serde_json::Value::Object(template_flags.kwargs).to_string();
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::chat_template::TEMPLATE_KWARGS_ENV, kwargs) };
     }
 
     for (flag, value) in [

@@ -299,6 +299,12 @@ impl ChatTemplate {
                 for (k, v) in &opts.extra {
                     ctx.insert(k.clone(), v.clone());
                 }
+                // llama.cpp's `caps_apply_reasoning_effort`: a graded
+                // template reads the same value as `reasoning_strength`.
+                let effort = ctx.get("reasoning_effort").cloned();
+                if let Some(effort) = effort.filter(|e| e.as_str().is_some_and(|s| !s.is_empty())) {
+                    ctx.entry("reasoning_strength").or_insert(effort);
+                }
                 ctx.insert("messages".into(), Value::Array(messages.to_vec()));
                 ctx.insert(
                     "add_generation_prompt".into(),
@@ -1184,6 +1190,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "real|false");
+    }
+
+    /// llama.cpp sets both spellings at render, so `frink run` needs this
+    /// as much as the server does. A caller's own spelling stays.
+    #[test]
+    fn reasoning_effort_also_reads_as_reasoning_strength() {
+        let render = |extra: serde_json::Value| {
+            let serde_json::Value::Object(extra) = extra else {
+                panic!("not an object");
+            };
+            ChatTemplate::from_jinja("[{{ reasoning_strength }}]")
+                .unwrap()
+                .render(
+                    &[msg("user", "x")],
+                    &RenderOptions {
+                        extra,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            render(serde_json::json!({"reasoning_effort": "high"})),
+            "[high]"
+        );
+        assert_eq!(render(serde_json::json!({"reasoning_effort": ""})), "[]");
+        assert_eq!(
+            render(serde_json::json!({"reasoning_effort": "high", "reasoning_strength": "low"})),
+            "[low]"
+        );
     }
 
     // ---- gemma-4: the variant the plan says was never implemented ---
