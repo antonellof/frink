@@ -17,6 +17,12 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`frink bench -pg PP,TG`**, llama-bench's combined test (#404): a
+  batched prompt and then a generation continuing from it, timed as one
+  test at `(pp + tg) / time` and named `pp512+tg128`, as llama-bench
+  does. `--compare` passes it on, `-d` applies, and `-o` reports it with
+  both `n_prompt` and `n_gen`. Refused on the Gemma-4 engine, which has
+  no batched prefill. The `llama-bench` not-accepted count falls to 23.
 - **`--offline` on `frink run`, `frink bench` and `frink-server`**
   (and `LLAMA_ARG_OFFLINE` on the server), llama.cpp's "forces use of
   cache, prevents network access" (#404). A `-hf` reference resolves

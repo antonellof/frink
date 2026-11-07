@@ -53,6 +53,7 @@ to name a real flag of its tool.
 | bench | `-p` | One value per run; llama-bench's lists and ranges are refused by the parser | Run the command once per value |
 | bench | `-n` | One value per run, as `-p` | Same |
 | bench | `-d` | One value per run, as `-p` | Same |
+| bench | `-pg` | One pair per run; refused on the Gemma-4 engine, which has no batched prefill to time | Same, and a combined row on a different prompt path would not be llama-bench's |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
 | bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and llama-bench's comma-separated sweep refused | Fused attention is a backend property here, and one run measures one configuration |
 | bench | `-ctk` | `f16` (the default) or `f32` on CPU and Metal; a type the KV store would fall back from (`q8_0`, `q4_0`, ...) is refused, as is llama-bench's sweep | A row labelled with a type it did not measure is not a measurement |
@@ -1451,6 +1452,7 @@ line up.
 | `-m/--model` | GGUF to benchmark. Without it, `bench` runs the synthetic matvec microbenchmark instead |
 | `-p/--n-prompt` | Prefill tokens (default 512, `0` skips the `pp` row) |
 | `-n/--n-gen` | Decode steps (default 128, `0` skips the `tg` row) |
+| `-pg PP,TG` | Also run one combined test, a prompt then a generation timed as a unit, named `pp512+tg128` as llama-bench names it. One pair per run |
 | `-d/--n-depth` | Context tokens put in the KV, untimed, before every repetition; rows are named `pp512 @ d4096` as llama-bench names them. One value per run |
 | `-r/--repetitions` | Timed reps (default 3), plus one discarded warmup |
 | `-t/--threads` | CPU threads (`0` = performance-core default) |

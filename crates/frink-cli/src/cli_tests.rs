@@ -599,4 +599,23 @@ fn run_and_bench_take_llama_cpps_offline_switch() {
         panic!("not bench");
     };
     assert!(b.offline);
+/// llama-bench's `-pg pp,tg` reaches `BenchCmd` through the rewriter as
+/// one pair; a malformed or all-zero pair is refused at parse time.
+#[test]
+fn bench_takes_llama_benchs_pg_pair() {
+    let cli = parse_cli(rewrite(&[
+        "frink", "bench", "-m", "m.gguf", "-pg", "512,128",
+    ]));
+    let super::Commands::Bench(b) = cli.command else {
+        panic!("not bench");
+    };
+    assert_eq!(b.pg, Some((512, 128)));
+    use clap::Parser;
+    for bad in ["512", "0,0", "a,1", "1,2,3"] {
+        assert!(
+            super::Cli::try_parse_from(rewrite(&["frink", "bench", "-m", "m", "-pg", bad]))
+                .is_err(),
+            "-pg {bad} parsed"
+        );
+    }
 }
