@@ -36,33 +36,7 @@ pub(crate) struct ResidentCuda<T> {
 /// The quantized-weight instance, under the name every caller uses.
 pub(crate) type ResidentCudaWeights = ResidentCuda<u8>;
 
-/// A cheap sample of a weight buffer: its first and last 64 bytes and
-/// 64 from the middle. Not a hash of the whole tensor (that is
-/// gigabytes per token); enough that a different buffer at the same
-/// address is caught unless it agrees on 192 sampled bytes.
-#[derive(PartialEq, Eq, Clone, Debug)]
-struct WeightFingerprint {
-    head: [u8; 64],
-    mid: [u8; 64],
-    tail: [u8; 64],
-}
-
-impl WeightFingerprint {
-    fn of(bytes: &[u8]) -> Self {
-        fn take(bytes: &[u8], at: usize) -> [u8; 64] {
-            let mut out = [0u8; 64];
-            let at = at.min(bytes.len());
-            let n = (bytes.len() - at).min(64);
-            out[..n].copy_from_slice(&bytes[at..at + n]);
-            out
-        }
-        Self {
-            head: take(bytes, 0),
-            mid: take(bytes, bytes.len() / 2),
-            tail: take(bytes, bytes.len().saturating_sub(64)),
-        }
-    }
-}
+use frink_quant::fingerprint::WeightFingerprint;
 
 // SAFETY: slices live on the process-wide shared CudaDevice and are
 // only read by kernels; same sharing model as Metal's ResidentWeightBuffer.

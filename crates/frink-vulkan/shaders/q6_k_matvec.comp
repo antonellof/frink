@@ -2,34 +2,29 @@
 #extension GL_GOOGLE_include_directive : require
 // Q6_K, 210 bytes per 256 values: 128 low-nibble bytes, 64 high-bit
 // bytes, 16 signed scales, f16 d LAST (frink_quant::dequant_q6_k).
+// Sixteen units per block, one per scale: unit u is half h = u/8,
+// quarter q = (u%8)/2 (values h*128 + q*32 + l) and l in the 16 of
+// (u%2), with scale sc[h*8 + (u%2) + 2q].
 #include "matvec_common.glsl"
 
 void main() {
-    uint row = gl_GlobalInvocationID.x;
+    uint row = matvec_row();
     if (row >= p.rows) return;
     uint base = row * p.row_bytes;
     float acc = 0.0;
-    for (uint b = 0u; b < p.n_blocks_per_row; ++b) {
+    for (uint u = gl_LocalInvocationID.x; u < p.n_blocks_per_row * 16u; u += WG) {
+        uint b = u >> 4, h = (u >> 3) & 1u, q = (u >> 1) & 3u, lg = u & 1u;
         uint blk = base + b * 210u;
-        float d = f16_at(blk + 208u);
-        for (uint half_ = 0u; half_ < 2u; ++half_) {
-            uint ql = blk + half_ * 64u;
-            uint qh = blk + 128u + half_ * 32u;
-            uint sc = blk + 192u + half_ * 8u;
-            uint xb = b * 256u + half_ * 128u;
-            for (uint l = 0u; l < 32u; ++l) {
-                uint is = l / 16u;
-                uint a = byte_at(ql + l), a2 = byte_at(ql + l + 32u), h = byte_at(qh + l);
-                int q1 = int((a & 0x0fu) | ((h & 3u) << 4)) - 32;
-                int q2 = int((a2 & 0x0fu) | (((h >> 2) & 3u) << 4)) - 32;
-                int q3 = int((a >> 4) | (((h >> 4) & 3u) << 4)) - 32;
-                int q4 = int((a2 >> 4) | (((h >> 6) & 3u) << 4)) - 32;
-                acc += d * float(i8_at(sc + is)) * float(q1) * x[xb + l];
-                acc += d * float(i8_at(sc + is + 2u)) * float(q2) * x[xb + l + 32u];
-                acc += d * float(i8_at(sc + is + 4u)) * float(q3) * x[xb + l + 64u];
-                acc += d * float(i8_at(sc + is + 6u)) * float(q4) * x[xb + l + 96u];
-            }
+        uint ql = blk + h * 64u + (q & 1u) * 32u;
+        uint qh = blk + 128u + h * 32u;
+        uint nib = (q >> 1) * 4u, hs = q * 2u;
+        uint xb = b * 256u + h * 128u + q * 32u;
+        float s = 0.0;
+        for (uint l = lg * 16u; l < lg * 16u + 16u; ++l) {
+            int v = int(((byte_at(ql + l) >> nib) & 0x0fu) | (((byte_at(qh + l) >> hs) & 3u) << 4)) - 32;
+            s += float(v) * x[xb + l];
         }
+        acc += f16_at(blk + 208u) * float(i8_at(blk + 192u + h * 8u + lg + 2u * q)) * s;
     }
-    y[row] = acc;
+    finish(row, acc);
 }

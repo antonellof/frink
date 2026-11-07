@@ -5,6 +5,14 @@ GO/NO-GO on the smallest honest slice (`ash` plus one SPIR-V kernel),
 not a full backend", and says a written verdict is the deliverable.
 This is that verdict. Dated 2026-09-01.
 
+> **Since then (#409):** the shader-authoring question in §3 was
+> answered with GLSL compiled to committed SPIR-V
+> (`crates/frink-vulkan/shaders`, drift-checked against the pinned
+> `glslang`), and the hand-emitted emitter this verdict describes
+> (`spirv.rs`, `q8_0_shader.rs`, `q8_0_reference.rs`) was deleted once
+> its Q8_0 had a GLSL twin. Weights are resident and pipelines cached
+> (`frink_vulkan::runtime`). The text below is the verdict as written.
+
 **The answer is GO**, on the narrow question actually asked, with the
 costs below written down so nobody has to rediscover them. The question
 was *can frink reach a Vulkan device from Rust, upload a quantized

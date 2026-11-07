@@ -1,32 +1,30 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // Q4_K, 144 bytes per 256 values: f16 d, f16 dmin, 12 packed scale
-// bytes, 128 nibble bytes (frink_quant::dequant_q4_k).
+// bytes, 128 nibble bytes (frink_quant::dequant_q4_k). Eight units per
+// block, one per 32-value sub-block: unit j is chunk j/2's low (even j)
+// or high (odd j) nibbles, with scale and min j.
 #include "matvec_common.glsl"
 
 void main() {
-    uint row = gl_GlobalInvocationID.x;
+    uint row = matvec_row();
     if (row >= p.rows) return;
     uint base = row * p.row_bytes;
     float acc = 0.0;
-    for (uint b = 0u; b < p.n_blocks_per_row; ++b) {
+    for (uint u = gl_LocalInvocationID.x; u < p.n_blocks_per_row * 8u; u += WG) {
+        uint b = u >> 3, j = u & 7u, c = j >> 1, shift = (j & 1u) * 4u;
         uint blk = base + b * 144u;
-        float d = f16_at(blk);
-        float dmin = f16_at(blk + 2u);
-        uint qs = blk + 16u;
-        uint xb = b * 256u;
-        for (uint c = 0u; c < 4u; ++c) {
-            float sc1, m1, sc2, m2;
-            scale_min_k4(2u * c, blk + 4u, sc1, m1);
-            scale_min_k4(2u * c + 1u, blk + 4u, sc2, m2);
-            float d1 = d * sc1, min1 = dmin * m1;
-            float d2 = d * sc2, min2 = dmin * m2;
-            for (uint l = 0u; l < 32u; ++l) {
-                uint q = byte_at(qs + c * 32u + l);
-                acc += (d1 * float(q & 0x0fu) - min1) * x[xb + c * 64u + l];
-                acc += (d2 * float(q >> 4) - min2) * x[xb + c * 64u + 32u + l];
-            }
+        float sc, m;
+        scale_min_k4(j, blk + 4u, sc, m);
+        uint qs = blk + 16u + c * 32u;
+        uint xb = b * 256u + j * 32u;
+        float s = 0.0, xs = 0.0;
+        for (uint l = 0u; l < 32u; ++l) {
+            float xv = x[xb + l];
+            s += float((byte_at(qs + l) >> shift) & 0x0fu) * xv;
+            xs += xv;
         }
+        acc += f16_at(blk) * sc * s - f16_at(blk + 2u) * m * xs;
     }
-    y[row] = acc;
+    finish(row, acc);
 }

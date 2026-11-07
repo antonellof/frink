@@ -2,17 +2,16 @@
 #extension GL_GOOGLE_include_directive : require
 // Q4_0, 18 bytes per 32 values: f16 d, then 16 bytes whose low nibbles
 // are values 0..16 and high nibbles 16..32, each (nibble - 8) * d
-// (frink_quant::dequant_q4_0).
+// (frink_quant::dequant_q4_0). One unit per block.
 #include "matvec_common.glsl"
 
 void main() {
-    uint row = gl_GlobalInvocationID.x;
+    uint row = matvec_row();
     if (row >= p.rows) return;
     uint base = row * p.row_bytes;
     float acc = 0.0;
-    for (uint b = 0u; b < p.n_blocks_per_row; ++b) {
+    for (uint b = gl_LocalInvocationID.x; b < p.n_blocks_per_row; b += WG) {
         uint blk = base + b * 18u;
-        float d = f16_at(blk);
         uint xb = b * 32u;
         float s = 0.0;
         for (uint i = 0u; i < 16u; ++i) {
@@ -20,7 +19,7 @@ void main() {
             s += float(int(q & 0x0fu) - 8) * x[xb + i];
             s += float(int(q >> 4) - 8) * x[xb + 16u + i];
         }
-        acc += d * s;
+        acc += f16_at(blk) * s;
     }
-    y[row] = acc;
+    finish(row, acc);
 }

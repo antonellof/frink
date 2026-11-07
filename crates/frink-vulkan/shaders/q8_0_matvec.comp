@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q8_0, 34 bytes per 32 values: f16 d, then 32 int8 quants, each
+// q * d (frink_quant::dequant_q8_0). One unit per block.
+#include "matvec_common.glsl"
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint b = gl_LocalInvocationID.x; b < p.n_blocks_per_row; b += WG) {
+        uint blk = base + b * 34u;
+        uint xb = b * 32u;
+        float s = 0.0;
+        for (uint i = 0u; i < 32u; ++i) {
+            s += float(i8_at(blk + 2u + i)) * x[xb + i];
+        }
+        acc += f16_at(blk) * s;
+    }
+    finish(row, acc);
+}

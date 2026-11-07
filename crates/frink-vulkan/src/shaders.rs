@@ -1,9 +1,10 @@
 //! The GLSL matvec shaders (`crates/frink-vulkan/shaders/*.comp`) and
 //! their committed SPIR-V.
 //!
-//! The beachhead emitted SPIR-V words from Rust (`q8_0_shader`), which
-//! needs no tool at all and does not scale: ~560 lines for the simplest
-//! kernel (`docs/plans/vulkan-beachhead-verdict.md`, §2). These are GLSL,
+//! The beachhead emitted SPIR-V words from Rust, which needed no tool
+//! at all and did not scale: ~560 lines for the simplest kernel
+//! (`docs/plans/vulkan-beachhead-verdict.md`, §2), and it was deleted
+//! once its Q8_0 had a GLSL twin here. These are GLSL,
 //! compiled by `glslangValidator` (`shaders/build.sh`) into `shaders/spv/`,
 //! and the `.spv` files are committed, so a frink build needs no shader
 //! compiler and no C++ toolchain, which this repo has refused twice. Two
@@ -13,9 +14,10 @@
 //! wrote them (`spv/GENERATOR`), as a golden is checked against the
 //! oracle that produced it.
 //!
-//! Every shader keeps `dispatch::matvec`'s interface and mirrors one
-//! `frink_quant` dequantizer line for line; its scalar twin is that
-//! crate's `dot_*_f32_scalar`.
+//! Every shader keeps `Runtime::matvec`'s interface (one workgroup of
+//! [`LOCAL_SIZE_X`] per row; `matvec_common.glsl`) and decodes one
+//! `frink_quant` block layout; its scalar twin is that crate's
+//! `dot_*_f32_scalar`.
 
 /// One quant kind's matvec shader.
 #[derive(Debug, Clone, Copy)]
@@ -31,9 +33,14 @@ pub struct MatvecShader {
 /// `local_size_x` in every shader (`matvec_common.glsl`).
 pub const LOCAL_SIZE_X: u32 = 64;
 
-/// The shader-backed kinds. Q8_0 stays on the hand-emitted beachhead
-/// module (`q8_0_shader`).
+/// Every kind the Vulkan matvec runs.
 pub const MATVEC: &[MatvecShader] = &[
+    MatvecShader {
+        kind: "Q8_0",
+        spv: include_bytes!("../shaders/spv/q8_0_matvec.spv"),
+        block_bytes: 34,
+        block_elems: 32,
+    },
     MatvecShader {
         kind: "Q4_0",
         spv: include_bytes!("../shaders/spv/q4_0_matvec.spv"),
@@ -158,6 +165,7 @@ mod tests {
     #[test]
     fn every_shader_is_one_row_with_ggml_block_sizes() {
         for (kind, bytes, elems) in [
+            ("Q8_0", 34, 32),
             ("Q4_0", 18, 32),
             ("Q4_K", 144, 256),
             ("Q5_K", 176, 256),
@@ -166,9 +174,22 @@ mod tests {
             let s = matvec_shader(kind).unwrap();
             assert_eq!((s.block_bytes, s.block_elems), (bytes, elems), "{kind}");
         }
-        assert!(
-            matvec_shader("Q8_0").is_none(),
-            "Q8_0 is the hand-emitted module"
+        // No orphan: every compiled module has its row, so a shader
+        // cannot be built and then silently never dispatched.
+        let compiled = std::fs::read_dir(shader_dir().join("spv"))
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "spv")
+            })
+            .count();
+        assert_eq!(
+            compiled,
+            MATVEC.len(),
+            "a .spv in shaders/spv has no MATVEC row"
         );
     }
 }

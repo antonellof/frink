@@ -15,6 +15,24 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **Vulkan matvecs keep their weights on the device and their pipelines
+  built** (#409). A new `frink_vulkan::runtime::Runtime` uploads each
+  weight once and keeps it resident, keyed by host address and checked
+  against the same 192-byte fingerprint `frink-cuda`'s cache uses (now
+  shared, `frink_quant::fingerprint`). It also builds each pipeline once
+  and reuses one command buffer. Weights go to `DEVICE_LOCAL` memory:
+  through a mapping when it is host-visible (unified memory, resizable
+  BAR), otherwise through a staging copy, the path a discrete Radeon
+  takes, and both paths are tested against the scalar twins. The
+  shaders now give each row a whole workgroup and reduce in shared
+  memory, as llama.cpp's matvec does, and Q8_0 joins them in GLSL. That
+  deletes the hand-emitted SPIR-V emitter, about 1,280 lines.
+  Llama-3.2-1B Q4_K_M on Vulkan (MoltenVK, M2 Pro) still gives the CPU's
+  greedy tokens and went from 0.9 to 25 tok/s against the CPU's 111.
+  Vulkan is still opt-in.
+
 ## [0.54.0] - 2026-11-07
 
 ### Added

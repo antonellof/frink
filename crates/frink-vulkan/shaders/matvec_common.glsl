@@ -1,12 +1,22 @@
 // The matvec interface every frink-vulkan shader keeps
-// (crates/frink-vulkan/src/dispatch.rs, `matvec`): weights as uint words
-// at binding 0, activations at 1, outputs at 2; push constants rows,
-// n_blocks_per_row, row_bytes; one invocation per row.
+// (crates/frink-vulkan/src/runtime.rs, `Runtime::matvec`): weights as
+// uint words at binding 0, activations at 1, outputs at 2; push
+// constants rows, n_blocks_per_row, row_bytes.
+//
+// ONE WORKGROUP PER ROW, the shape of llama.cpp's mul_mat_vec: the row
+// is cut into units (a block, or a sub-block with its own scale), the 64
+// invocations take units tid, tid+64, ..., and `finish` sums their
+// partials in shared memory. A row walked by one invocation, as the
+// first shaders did, reads its weights at about a tenth of the memory
+// bandwidth. Rows beyond 65535 (an lm_head) arrive as a 2-D grid, so
+// the row index folds y in.
 //
 // Weights are read as BYTES out of uint words, because ggml block
-// strides (18, 144, 176, 210) are not word multiples and 8-bit storage
-// is an optional capability (docs/plans/vulkan-beachhead-verdict.md, §3).
+// strides (18, 34, 144, 176, 210) are not word multiples and 8-bit
+// storage is an optional capability
+// (docs/plans/vulkan-beachhead-verdict.md, §3).
 
+#define WG 64u
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) readonly buffer Weights { uint w[]; };
@@ -18,6 +28,26 @@ layout(push_constant) uniform Push {
     uint n_blocks_per_row;
     uint row_bytes;
 } p;
+
+shared float partial[WG];
+
+uint matvec_row() {
+    return gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+}
+
+// Reduce every invocation's `acc` and write the row. Called by all 64
+// invocations, in uniform control flow (a whole workgroup shares its
+// row, so the `row >= rows` early return is uniform too).
+void finish(uint row, float acc) {
+    uint tid = gl_LocalInvocationID.x;
+    partial[tid] = acc;
+    barrier();
+    for (uint s = WG / 2u; s > 0u; s >>= 1) {
+        if (tid < s) partial[tid] += partial[tid + s];
+        barrier();
+    }
+    if (tid == 0u) y[row] = partial[0];
+}
 
 uint byte_at(uint k) {
     return (w[k >> 2] >> ((k & 3u) * 8u)) & 0xffu;
