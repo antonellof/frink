@@ -25,11 +25,11 @@ went into four areas:
 
 | PR | What | Issue |
 |---|---|---|
-| #503 | journal panic-hook test counted other threads' panics (flake) | — |
-| #502 | release 0.55.0 | — |
+| #503 | journal panic-hook test counted other threads' panics (flake) | none |
+| #502 | release 0.55.0 | none |
 | #500 | Vulkan: Q/K/V and gate/up as one submission each (`Runtime::matvec_many`); seam tests compared Vulkan with itself, now `apply_cpu` | #409 |
 | #499 | Vulkan: `frink_vulkan::runtime::Runtime` (resident weights, cached pipelines), a workgroup per row, Q8_0 in GLSL, hand-emitted SPIR-V emitter deleted; `frink_quant::fingerprint` shared with `frink-cuda` | #409 |
-| #498 | release 0.54.0 | — |
+| #498 | release 0.54.0 | none |
 | #497 | Vulkan Q4_0/Q4_K/Q5_K/Q6_K matvecs (GLSL → committed SPIR-V); `WeightMatrix::apply` had no Vulkan gate at all | #409 |
 | #496 | `--list-devices` names a Ryzen AI NPU (sysfs, Linux) | #494 |
 | #495 | `crates/frink-rocm`: hiprtc via dlopen, every `frink-cuda` kernel compiles for 8 RDNA targets in CI; CDNA refused as wave64 | #494 |
@@ -115,11 +115,12 @@ Plan: [`amd.md`](amd.md).
   2026-11-07, and the account balance was $0. AMD GPUs are on AMD
   Developer Cloud, RunPod, TensorWave and Hot Aisle, which need an
   account the owner creates. Per `CLAUDE.md`, agents do not rent
-  hardware unless the user explicitly asks. The user did authorise
-  vast.ai for Vulkan/AMD testing in this session; create the instance
-  and destroy it afterwards (see `.local-scripts/vast_gpu_receipts.sh`
-  for the safety pattern: a cost cap, `trap` teardown, no credentials
-  on the box).
+  hardware. The user authorised vast.ai for Vulkan/AMD testing in the
+  session that wrote this file, and that approval ended with it: ask
+  again before any rental. When one is approved, see
+  `.local-scripts/vast_gpu_receipts.sh` for the safety pattern (a cost
+  cap, `trap` teardown, no credentials on the box), and destroy the
+  instance afterwards.
 - Local Docker images for the ROCm census: `frink-hiprtc`,
   `frink-hiprtc-rust` (x86_64, ROCm 6.4). Run with:
   ```
@@ -145,10 +146,12 @@ Plan: [`amd.md`](amd.md).
 | #403 one file per architecture | open | stale worktree `registry-step9b` (see below) |
 | #406, #407, #61, #27 | open | per `north-star.md` order |
 
-Suggested next items that need no hardware: Vulkan step 1 or 2,
-#501, more #404 flags, MTP draft heads (`--mtp` currently errors by
-name). For MTP, see [`speculative-decoding.md`](speculative-decoding.md);
-vLLM's EAGLE and n-gram drafters are the comparison points.
+Items that need no hardware, in `north-star.md` order: more #404
+flags (priority 4), then Vulkan step 1 or 2 (priority 9, ahead of its
+rank only if the user argues it there). #501 is a small test fix that
+any of these can pick up first. MTP draft heads (`--mtp` errors by name
+today) sit under "Not now" in `north-star.md`; see
+[`speculative-decoding.md`](speculative-decoding.md) if that changes.
 
 ## Things not to touch
 
