@@ -362,7 +362,8 @@ fn the_facts_agree_with_every_public_lookup() {
 
 /// Plan risk 1: the config loader keys on the RAW name. `llama-embed`
 /// is the one alias `canonical_architecture` folds, and on the config
-/// side it keeps its own catalog row.
+/// side it keeps its own catalog row -- a deferred embedding row since
+/// #421, because llama.cpp builds no output head for it.
 #[test]
 fn config_facts_are_keyed_on_the_raw_name() {
     let raw = ArchFacts::of("llama-embed");
@@ -371,7 +372,10 @@ fn config_facts_are_keyed_on_the_raw_name() {
         crate::capability::canonical_architecture("llama-embed"),
         "llama"
     );
-    assert!(raw.audited);
+    assert!(
+        !raw.audited,
+        "llama.cpp computes no logits for llama-embed (#421)"
+    );
 }
 
 /// A row on a name the catalog does not know can never be read: the

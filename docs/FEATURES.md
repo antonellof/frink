@@ -6,7 +6,7 @@ happens inside the matvec. Backends: CPU, Apple Metal, and CUDA.
 
 ## Models
 
-102 architectures run with a benchmark row, a pinned logit
+101 architectures run with a benchmark row, a pinned logit
 comparison against real `libllama`, or a fixture behind each. Nine
 more on the same path have been read and stop with an error that names
 what is missing. `frink archs` prints the
@@ -249,8 +249,9 @@ OpenAI-compatible HTTP API:
   `pooling_type` (NONE / MEAN / CLS / LAST; RANK refuses, it is a
   classification head rather than a pooling rule, and a rank-head
   checkpoint belongs on `/v1/rerank` instead). A decoder GGUF still
-  pools its hidden states (mean/last) as before, `llama-embed` (Llama's
-  graph with the output head skipped) is served the same way, and
+  pools its hidden states (mean/last) as before (`llama-embed`, which
+  llama.cpp runs with no output head, refuses by name until its pooled
+  embedding is checked against llama.cpp's, #421), and
   `FRINK_EMBEDDING_MODEL_PATH` runs an encoder side-by-side with a
   generative model in one process
 - Reranking. A `bert` checkpoint carrying a rank head (`cls`,

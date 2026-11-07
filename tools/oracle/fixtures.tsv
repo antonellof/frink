@@ -131,7 +131,7 @@ llama4_dense_tiny                        both-fail                    make_llama
 llama4_noswa_tiny                        both-fail                    make_llama4_fixture.py OUT --noswa  # refusal evidence: llama.cpp asserts on a zero window
 llama4_tiny                              match                        make_llama4_fixture.py OUT
 llama_biases_tiny                        match                        make_proj_bias_fixture.py llama OUT
-llama_embed_tiny                         skip                         make_proj_bias_fixture.py llama OUT --spelled llama-embed  # #421: libllama computes no logits for llama-embed (llama.cpp:238 skips the head)
+llama_embed_tiny                         refused                      make_proj_bias_fixture.py llama OUT --spelled llama-embed  # #421: libllama builds no output head for llama-embed (llama.cpp:238 skips it), so frink refuses it by name
 llama_nextn_tiny                         both-fail                    make_proj_bias_fixture.py llama OUT --nextn  # refusal evidence: llama's tensor loader creates only the trunk, libllama fails on the MTP block (#441)
 lora_a_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
 lora_b_tiny                              both-fail                    -  # an adapter; make_lora_fixture.py runs llama.cpp's convert_lora_to_gguf.py over a torch/PEFT export, which CI does not install
