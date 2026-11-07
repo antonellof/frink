@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-07
+
 ### Changed
 
 - **Every weight kind has an integer dot on the CPU.** IQ1_S, IQ1_M and
