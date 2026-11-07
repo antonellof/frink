@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-11-07
+
 ### Added
 
 - **`frink bench -b N` / `-ub N`**, llama-bench's logical and physical
