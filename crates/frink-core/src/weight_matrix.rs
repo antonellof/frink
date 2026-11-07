@@ -1608,7 +1608,7 @@ impl WeightMatrix {
     /// is what this saves.
     pub fn apply_three(a: &Self, b: &Self, c: &Self, x: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         if Self::gpu_dense_active() {
-            #[cfg(any(feature = "cuda", feature = "metal"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
             if let Some(mut outs) = Self::apply_gpu_multi(&[a, b, c], x) {
                 let c = outs.pop().unwrap();
                 let b = outs.pop().unwrap();
@@ -1624,7 +1624,7 @@ impl WeightMatrix {
     /// pair (a gated delta-net's `qkv` and `z`, a GLU's gate and up).
     pub fn apply_pair(a: &Self, b: &Self, x: &[f32]) -> (Vec<f32>, Vec<f32>) {
         if Self::gpu_dense_active() {
-            #[cfg(any(feature = "cuda", feature = "metal"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
             if let Some(mut outs) = Self::apply_gpu_multi(&[a, b], x) {
                 let b = outs.pop().unwrap();
                 let a = outs.pop().unwrap();
@@ -1643,6 +1643,11 @@ impl WeightMatrix {
         let gpu = false;
         #[cfg(feature = "cuda")]
         let gpu = gpu || cuda_dense_enabled();
+        #[cfg(feature = "vulkan")]
+        let gpu = gpu || {
+            use gpu_backend::BackendDispatch as _;
+            gpu_backend::Vulkan::dense_enabled()
+        };
         gpu
     }
 
@@ -3460,11 +3465,11 @@ impl WeightMatrix {
     /// Runs several independent matvecs that share the same activation
     /// `x` in one GPU dispatch (one upload of `x`, one wait). Tries
     /// CUDA first (when `cuda_dense_enabled()`), then Metal (when
-    /// `metal_dense_enabled()`). Intended for Q/K/V (and similar)
+    /// `metal_dense_enabled()`), then Vulkan (`FRINK_VULKAN=1`). Intended for Q/K/V (and similar)
     /// projections. Returns `None` if no GPU backend is enabled, any
     /// matrix lacks a GPU kernel, or all fused launches fail — caller
     /// should fall back to sequential [`Self::apply`].
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     pub fn apply_gpu_multi(mats: &[&WeightMatrix], x: &[f32]) -> Option<Vec<Vec<f32>>> {
         Self::apply_gpu_multi_folded(mats, x, None)
     }
@@ -3488,7 +3493,7 @@ impl WeightMatrix {
     /// `fold` is Metal-only: the rotation kernel is
     /// `frink_metal::hadamard`, and a CUDA or Vulkan caller takes the
     /// host butterfly rather than a rotation nothing there implements.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     pub(crate) fn apply_gpu_multi_folded(
         mats: &[&WeightMatrix],
         x: &[f32],
@@ -3618,6 +3623,13 @@ impl WeightMatrix {
                     eprintln!("frink: Metal fused matvec failed, falling back to CPU: {e}");
                 }
             }
+        }
+
+        // Vulkan last, as in `gpu_backend_table`: one submission for the
+        // set, the `Vulkan::matvec_kernel` table deciding the kinds.
+        #[cfg(feature = "vulkan")]
+        if let Some(outs) = gpu_backend::vulkan_matvec_many(mats, x) {
+            return Some(outs);
         }
 
         None

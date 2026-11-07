@@ -311,9 +311,10 @@ pub struct Cuda;
 ///   kind. There is no `mul_mm` shader, and `apply_batch_with_acts` has
 ///   no Vulkan arm, so a batched prefill runs on the host —
 ///   [`Vulkan::GEMM_FALLBACK`] says exactly that.
-/// - **Opt-in.** Each matvec still waits for its own result, so a token
-///   pays one queue round trip per projection; [`Vulkan::dense_enabled`]
-///   says why that keeps `FRINK_VULKAN` unset meaning off.
+/// - **Opt-in.** The host runs everything between matvecs, so a token
+///   pays a queue round trip per submission (Q/K/V and gate/up share
+///   one, [`vulkan_matvec_many`]); [`Vulkan::dense_enabled`] says why
+///   that keeps `FRINK_VULKAN` unset meaning off.
 pub struct Vulkan;
 
 impl BackendCaps for Metal {
@@ -753,14 +754,16 @@ impl BackendDispatch for Vulkan {
         // not shared through a default method.
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
-            // OPT-IN: unset is off, not "probe". Weights are resident and
-            // pipelines cached (`frink_vulkan::runtime`), but every matvec
-            // still waits for its own result, so a token pays one queue
-            // round trip per projection and a decode that reaches Vulkan
-            // is slower than the CPU it replaced (Llama-3.2-1B Q4_K_M on
-            // the M2 Pro: 25 tok/s against 111, one laptop run). A device
-            // that merely exists must not select that. `FRINK_VULKAN=1`
-            // does, until a token's matvecs share a submission (#409).
+            // OPT-IN: unset is off, not "probe". Weights are resident,
+            // pipelines cached, and Q/K/V and gate/up share a submission
+            // (`frink_vulkan::runtime`), but the host still runs norms,
+            // RoPE and attention between submissions, so a token pays
+            // about four queue round trips per layer and a decode that
+            // reaches Vulkan is slower than the CPU it replaced
+            // (Llama-3.2-1B Q4_K_M on the M2 Pro: 30 tok/s against 113,
+            // one laptop run). A device that merely exists must not
+            // select that. `FRINK_VULKAN=1` does, until a layer runs on
+            // the device (#409).
             match std::env::var("FRINK_VULKAN").ok() {
                 None => false,
                 Some(v) => env_or_probe(Some(v.as_str()), "vulkan", || {
@@ -830,6 +833,52 @@ impl BackendDispatch for Vulkan {
             launch(&mut guard, weights, x, rows, row_bytes, n_blocks_per_row)
                 .map_err(BackendError::new),
         )
+    }
+}
+
+/// Several quantized matrices of one activation through ONE Vulkan
+/// submission (`frink_vulkan::runtime::Runtime::matvec_many`): the
+/// Vulkan arm of `WeightMatrix::apply_gpu_multi`. `None` when Vulkan is
+/// off or absent, a matrix is not plain quantized (a fold or adapter is
+/// unwrapped by the caller first), a kind has no shader, or the launch
+/// fails, which is logged; the caller then runs them one by one.
+#[cfg(feature = "vulkan")]
+pub(crate) fn vulkan_matvec_many(
+    mats: &[&crate::weight_matrix::WeightMatrix],
+    x: &[f32],
+) -> Option<Vec<Vec<f32>>> {
+    use crate::weight_matrix::WeightMatrix;
+    if !Vulkan::dense_enabled() || mats.len() > frink_vulkan::runtime::MAX_FUSED {
+        return None;
+    }
+    let mut jobs = Vec::with_capacity(mats.len());
+    for m in mats {
+        let WeightMatrix::Quantized {
+            data, rows, kind, ..
+        } = m
+        else {
+            return None;
+        };
+        // The claim table, so this arm cannot launch a kind the seam
+        // reports as having no kernel.
+        Vulkan::matvec_kernel(*kind)?;
+        jobs.push(frink_vulkan::runtime::MatvecJob {
+            shader: frink_vulkan::shaders::matvec_shader(kind.name())?,
+            weights: data.as_slice(),
+            rows: *rows,
+        });
+    }
+    let rt = vulkan_runtime()?;
+    let mut guard = rt.lock().ok()?;
+    match guard.matvec_many(&jobs, x) {
+        Ok(outs) => Some(outs),
+        Err(e) => {
+            eprintln!(
+                "frink: Vulkan fused matvec failed, {}: {e}",
+                Vulkan::MATVEC_FALLBACK
+            );
+            None
+        }
     }
 }
 
@@ -1217,7 +1266,9 @@ mod tests {
             let got = Vulkan::launch_matvec(kind, data.as_slice(), &x, rows, row_bytes)
                 .unwrap_or_else(|| panic!("{kind:?} has a Vulkan kernel"))
                 .unwrap_or_else(|e| panic!("{kind:?} launch: {e}"));
-            let want = m.apply(&x);
+            // `apply_cpu`, not `apply`: with FRINK_VULKAN=1 `apply`
+            // is the Vulkan path too, and would agree with itself.
+            let want = m.apply_cpu(&x);
             for (r, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert!(
                     (g - w).abs() <= 1e-3 * w.abs().max(1.0),
@@ -1225,6 +1276,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `apply_three` / `apply_pair` under `FRINK_VULKAN=1`: Q/K/V-shaped
+    /// matrices of three kinds (row counts 11, 3, 7) through ONE
+    /// submission, each output against its own matrix's CPU matvec, so
+    /// outputs swapped or packed over each other cannot pass.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn the_vulkan_fused_matvecs_match_the_cpu_matvecs() {
+        use crate::weight_matrix::{WeightBytes, WeightMatrix};
+        if !Vulkan::dense_enabled() {
+            eprintln!(
+                "Vulkan not selected (FRINK_VULKAN=1) or no device; the fused seam was NOT checked"
+            );
+            return;
+        }
+        let cols = 512usize;
+        let x: Vec<f32> = (0..cols).map(|i| ((i % 19) as f32 - 9.0) / 6.0).collect();
+        let make = |kind: QuantKind, rows: usize, salt: usize| {
+            let mut data = Vec::new();
+            for r in 0..rows {
+                let row: Vec<f32> = (0..cols)
+                    .map(|i| ((((r + salt) * cols + i) * 37 % 101) as f32 - 50.0) / 29.0)
+                    .collect();
+                match kind {
+                    QuantKind::Q4K => frink_quant::encode_row_q4_k(&row, None, &mut data),
+                    QuantKind::Q6K => frink_quant::encode_row_q6_k(&row, None, &mut data),
+                    _ => frink_quant::encode_row_q5_k(&row, None, &mut data),
+                }
+                .expect("encodes");
+            }
+            WeightMatrix::Quantized {
+                data: WeightBytes::Owned(data),
+                rows,
+                cols,
+                kind,
+            }
+        };
+        let q = make(QuantKind::Q4K, 11, 0);
+        let k = make(QuantKind::Q6K, 3, 5);
+        let v = make(QuantKind::Q5K, 7, 9);
+        let outs = vulkan_matvec_many(&[&q, &k, &v], &x).expect("one Vulkan submission");
+        let (a, b, c) = WeightMatrix::apply_three(&q, &k, &v, &x);
+        for (name, m, got) in [
+            ("q", &q, &outs[0]),
+            ("k", &k, &outs[1]),
+            ("v", &v, &outs[2]),
+        ] {
+            let want = m.apply_cpu(&x);
+            assert_eq!(got.len(), want.len(), "{name}");
+            for (r, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+                    "{name} row {r}: vulkan {g} vs cpu {w}"
+                );
+            }
+        }
+        assert_eq!(
+            (&a, &b, &c),
+            (&outs[0], &outs[1], &outs[2]),
+            "apply_three takes the fused path"
+        );
     }
 
     #[cfg(feature = "vulkan")]
@@ -1265,7 +1378,7 @@ mod tests {
         let got = Vulkan::launch_matvec(QuantKind::Q8_0, data.as_slice(), &x, rows, blocks * 34)
             .expect("Q8_0 has a Vulkan kernel")
             .expect("the launch must succeed once a device is open");
-        let want = m.apply(&x);
+        let want = m.apply_cpu(&x); // not `apply`, which is Vulkan here
 
         assert_eq!(got.len(), want.len());
         for (r, (g, w)) in got.iter().zip(&want).enumerate() {

@@ -74,11 +74,13 @@ and the staging-buffer upload. That covers a Q4_K_M or Q5_K_M model's
 matvecs: Llama-3.2-1B Q4_K_M decodes with them on Vulkan to the CPU's
 own greedy tokens. Weights are uploaded once and stay resident, and
 pipelines are built once. It reports no GEMM for any kind, so a
-prefill lands on the host. It is **opt-in** (`FRINK_VULKAN=1`, unset is
-off) because every matvec still waits for its own result: that decode
-ran at 25 tok/s against the CPU's 111 on the same machine (one laptop
-run, not a benchmark). Recording a token's matvecs into one submission
-is the next step (#409). It exists to give every AMD and Intel GPU a
+prefill lands on the host. Q/K/V and gate/up each go to the device as one
+submission. It is **opt-in** (`FRINK_VULKAN=1`, unset is off) because
+the host still runs the norms, RoPE and attention between submissions,
+so a token pays about four queue round trips per layer: that decode ran
+at 30 tok/s against the CPU's 113 on the same machine (one laptop run,
+not a benchmark). Running a whole layer on the device is the next step
+(#409). It exists to give every AMD and Intel GPU a
 path, including the ones ROCm does not support. `docs/plans/vulkan-beachhead-verdict.md` has the
 sizing: a full Vulkan backend is 15 to 25k lines.
 
