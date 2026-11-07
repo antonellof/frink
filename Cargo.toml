@@ -12,6 +12,7 @@ members = [
     "crates/frink-cuda",
     "crates/frink-metal",
     "crates/frink-vulkan",
+    "crates/frink-rocm",
     "crates/frink-inference",
 ]
 resolver = "2"

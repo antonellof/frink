@@ -597,6 +597,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "frink-rocm"
+version = "0.53.0"
+dependencies = [
+ "frink-cuda",
+ "frink-quant",
+ "half",
+ "libloading",
+ "thiserror",
+]
+
+[[package]]
 name = "frink-safetensors"
 version = "0.53.0"
 dependencies = [

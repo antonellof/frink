@@ -1,0 +1,36 @@
+[package]
+name = "frink-rocm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "ROCm/HIP beachhead for the Frink inference engine: frink-cuda's kernels through hiprtc on AMD GPUs"
+readme = "README.md"
+keywords = ["rocm", "hip", "amd", "gpu", "frink"]
+categories = ["hardware-support", "science"]
+# A beachhead, as frink-vulkan was: nothing depends on it yet, so it is
+# not published (docs/plans/amd.md, phase R1).
+publish = false
+
+[dependencies]
+thiserror = { workspace = true }
+# The kernel text this crate compiles for AMD is frink-cuda's own, so
+# a kernel fixed there is fixed here (llama.cpp's ggml-hip does the same
+# with ggml-cuda's sources).
+frink-cuda = { workspace = true }
+# HIP and hiprtc are opened with dlopen at RUNTIME, as frink-cuda opens
+# the CUDA driver: `cargo build --features rocm` needs no ROCm install.
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+frink-quant = { workspace = true }
+half = { workspace = true }
+# The census test reaches the kernels frink-cuda keeps behind its own
+# `cuda` feature (attention, prefill, elementwise). That feature only
+# dlopens at run time, so enabling it for tests links nothing.
+frink-cuda = { workspace = true, features = ["cuda"] }
+
+[features]
+default = []
+rocm = ["dep:libloading"]
