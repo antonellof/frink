@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-11-07
+
 ### Added
 
 - **Vulkan decode matvecs for Q4_0, Q4_K, Q5_K and Q6_K** (#409), so a
