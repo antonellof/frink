@@ -39,6 +39,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p frink-cuda --features cuda --verbose
 
+  # docs/plans/amd.md, phase R1: every frink-cuda kernel frink would run
+  # on an AMD GPU must compile under ROCm's hiprtc for every served RDNA
+  # target. hiprtc needs no GPU, so this is a real compile on a stock
+  # runner; a kernel HIP cannot take fails here, not on the first AMD
+  # user. The launch test stays ignored (it needs an AMD GPU).
+  rocm-hiprtc-census:
+    name: frink-rocm hiprtc census (every kernel x every RDNA target, no GPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install ROCm hiprtc (6.4)
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/6.4 noble main" | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends hip-runtime-amd hip-dev
+      - run: cargo clippy -p frink-rocm --features rocm --all-targets -- -D warnings
+      - run: cargo test -p frink-rocm --features rocm -- --ignored census --nocapture
+        env:
+          LD_LIBRARY_PATH: /opt/rocm/lib
+
   # CONTRIBUTING.md: the cuda feature must keep compiling without a GPU
   # or CUDA toolkit present through the full CLI/server dependency chain.
   cuda-feature-chain:

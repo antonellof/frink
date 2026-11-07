@@ -121,6 +121,19 @@ The CUDA C kernel sources in `frink-cuda/src/gpu.rs` are original code
 written to mirror `frink-quant`'s CPU fused-dequant math; see that
 module's doc comments for their verification status.
 
+## ROCm/HIP execution path
+
+`frink-rocm` compiles `frink-cuda`'s own kernel text for AMD GPUs
+through ROCm's `hiprtc`, following the approach of llama.cpp's
+`ggml-hip`, which builds `ggml-cuda`'s sources against HIP. Its prelude
+maps the CUDA `__shfl_*_sync` shuffles to HIP's `__shfl_*` the way
+llama.cpp's `ggml/src/ggml-cuda/vendors/hip.h` (lines 32-34) maps them,
+which is four preprocessor lines; ggml and llama.cpp are MIT licensed
+(copyright notice above). The ROCm architecture families follow the
+`GGML_CUDA_CC_*` table in llama.cpp's `ggml/src/ggml-cuda/common.cuh`.
+`frink-rocm` opens ROCm's `libamdhip64` and `libhiprtc` at run time
+with `libloading` (MIT/ISC); no ROCm code is bundled.
+
 ## GBNF grammar engine
 
 `frink-models::grammar` is a direct Rust port of llama.cpp's

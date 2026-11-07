@@ -15,6 +15,22 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`frink-rocm`, the ROCm beachhead** (`docs/plans/amd.md`, #494).
+  frink's CUDA kernels are runtime-compiled text, so this crate compiles
+  that same text for AMD GPUs through ROCm's `hiprtc` behind a small HIP
+  prelude, as llama.cpp's `ggml-hip` builds `ggml-cuda`. **Every**
+  kernel frink would run on AMD (83 of them: decode matvecs, GEMMs,
+  gathers, attention, prefill, elementwise) compiles for all eight
+  served RDNA targets (gfx1030 through gfx1201, Strix Halo's gfx1151
+  included), 664 compiles, gated in CI in a stock runner with ROCm 6.4
+  and no GPU. CDNA (MI-series) is refused by name: it runs wave64 and
+  the kernels still assume 32 lanes. A Q8_0 matvec launch through the
+  `dlopen`ed HIP runtime is written against its scalar twin and has
+  **never run on an AMD GPU**; no frink model runs on ROCm yet (phase
+  R2). Not published.
+
 ## [0.53.0] - 2026-11-07
 
 ### Added

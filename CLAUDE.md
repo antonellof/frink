@@ -140,6 +140,7 @@ frink-gguf + frink-quant → frink-core → frink-moe → frink-models
                                                   → frink-cli / frink-server
 frink-api        wire DTOs, serde only
 frink-cuda / frink-metal / frink-vulkan   kernels, below frink-core
+frink-rocm          frink-cuda's kernels through hiprtc (beachhead, not yet a backend)
 frink-safetensors   beside frink-gguf
 frink-inference     published facade
 ```
