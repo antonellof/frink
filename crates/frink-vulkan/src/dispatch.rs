@@ -34,15 +34,7 @@ macro_rules! shader_matvec {
             let s = crate::shaders::matvec_shader($kind).expect("the table has the row");
             assert_eq!(x.len(), n_blocks_per_row * s.block_elems, "activation length");
             assert_eq!(row_bytes, n_blocks_per_row * s.block_bytes, "row stride");
-            rt.matvec(
-                $kind,
-                || crate::shaders::words(s.spv),
-                weights,
-                x,
-                rows,
-                row_bytes,
-                n_blocks_per_row,
-            )
+            rt.matvec(s, weights, x, rows)
         }
     )*};
 }
@@ -230,5 +222,59 @@ mod tests {
             1,
             "the stale copy is replaced, not kept"
         );
+    }
+
+    /// **One submission, several kinds.** Q/K/V and gate/up go through
+    /// [`Runtime::matvec_many`]: every output must be its own matvec's,
+    /// at row counts (9, 65, 3, 130) whose byte sizes are not multiples
+    /// of any storage-offset alignment, so a packing that ignores the
+    /// alignment, or binds every output at offset 0, shows up as a wrong
+    /// row. Run twice: the second submission is all resident.
+    #[test]
+    fn gpu_matvec_many_gives_every_job_its_own_answer() {
+        let Some(mut rt) = runtime() else { return };
+        let cols = 512;
+        let x = pseudo_random(0xf05e, cols);
+        let plan = [("Q4_K", 9usize), ("Q6_K", 65), ("Q8_0", 3), ("Q5_K", 130)];
+        let weights: Vec<(&str, Vec<u8>, usize, usize)> = plan
+            .iter()
+            .map(|&(kind, rows)| {
+                let s = crate::shaders::matvec_shader(kind).unwrap();
+                let blocks = cols / s.block_elems;
+                let w: Vec<u8> = (0..rows)
+                    .flat_map(|r| kind_row(kind, blocks, 97 * r as u64 + rows as u64))
+                    .collect();
+                (kind, w, rows, blocks * s.block_bytes)
+            })
+            .collect();
+        let jobs: Vec<crate::runtime::MatvecJob<'_>> = weights
+            .iter()
+            .map(|(kind, w, rows, _)| crate::runtime::MatvecJob {
+                shader: crate::shaders::matvec_shader(kind).unwrap(),
+                weights: w,
+                rows: *rows,
+            })
+            .collect();
+        for pass in ["upload", "resident"] {
+            let outs = rt.matvec_many(&jobs, &x).expect("fused dispatch");
+            assert_eq!(outs.len(), jobs.len());
+            for ((kind, w, rows, row_bytes), got) in weights.iter().zip(&outs) {
+                assert_eq!(got.len(), *rows);
+                assert_twin(kind, w, &x, got, *row_bytes, &format!("fused {pass}"));
+            }
+        }
+
+        // A shape that does not fit is an error the caller can fall back
+        // from, not a panic in a rayon worker.
+        let bad = crate::runtime::MatvecJob {
+            shader: crate::shaders::matvec_shader("Q4_K").unwrap(),
+            weights: &weights[0].1[..100],
+            rows: 9,
+        };
+        assert!(rt.matvec_many(&[bad], &x).is_err());
+        assert!(rt.matvec_many(&[], &x).is_err());
+        assert!(rt
+            .matvec_many(&[jobs[0]; crate::runtime::MAX_FUSED + 1], &x)
+            .is_err());
     }
 }

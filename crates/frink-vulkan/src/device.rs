@@ -43,6 +43,10 @@ pub enum VulkanError {
     NoMemoryType { wanted: u32 },
     #[error("a {bytes}-byte weight exceeds the {limit}-byte storage-buffer range")]
     TooLarge { bytes: u64, limit: u64 },
+    /// A matvec whose weights, rows and activation do not describe whole
+    /// blocks of its kind.
+    #[error("shape rejected: {0}")]
+    Shape(String),
     #[error("{what} failed: {code:?}")]
     Vk {
         what: &'static str,

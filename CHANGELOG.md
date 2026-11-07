@@ -17,6 +17,24 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **Vulkan runs Q/K/V and gate/up as one submission each** (#409).
+  `Runtime::matvec_many` records several matvecs of one activation into
+  one command buffer, with one upload and one wait, and the outputs
+  packed at aligned offsets. It is the Vulkan arm of
+  `WeightMatrix::apply_gpu_multi`, so `apply_three` and `apply_pair`
+  reach it as they reach Metal's and CUDA's. A layer goes from seven
+  queue round trips to four. Llama-3.2-1B Q4_K_M on MoltenVK still gives
+  the CPU's greedy tokens, at about 30 tok/s, up from 25. Still opt-in.
+
+### Fixed
+
+- **The Vulkan seam tests compared Vulkan with itself.** Since
+  `WeightMatrix::apply` gained its Vulkan gate (#497), the "CPU" side of
+  both seam tests was `apply`, which under `FRINK_VULKAN=1` is the
+  Vulkan path. They now compare against `apply_cpu`.
+
+### Changed
+
 - **Vulkan matvecs keep their weights on the device and their pipelines
   built** (#409). A new `frink_vulkan::runtime::Runtime` uploads each
   weight once and keeps it resident, keyed by host address and checked

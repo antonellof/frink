@@ -10,9 +10,10 @@
 //! - **one** descriptor-set layout and pipeline layout, because every
 //!   matvec shader has the same interface (`shaders/matvec_common.glsl`);
 //! - **one pipeline per shader**, built on its first call;
-//! - **one** command buffer, fence and descriptor set, re-recorded and
-//!   re-written per call (the previous call waited on the fence, so
-//!   none of them is in use);
+//! - **one** command buffer and fence, and [`MAX_FUSED`] descriptor
+//!   sets, re-recorded and re-written per call (the previous call waited
+//!   on the fence, so none of them is in use), so several matvecs of one
+//!   activation share a submission ([`Runtime::matvec_many`]);
 //! - grow-only host-visible buffers for the activations and the output;
 //! - **resident weights**, keyed by host `(address, length)` and checked
 //!   against [`WeightFingerprint`] on every hit, the same identity rule
@@ -34,12 +35,26 @@
 //! every weight the model's matvecs have touched.
 
 use crate::device::{Context, VulkanError};
+use crate::shaders::MatvecShader;
 use ash::vk;
 use frink_quant::fingerprint::WeightFingerprint;
 use std::collections::HashMap;
 
 /// Bytes of push constants: `rows`, `n_blocks_per_row`, `row_bytes`.
 const PUSH_CONSTANT_BYTES: u32 = 12;
+
+/// The most matvecs one submission holds: Q/K/V is three, gate/up two;
+/// eight leaves room without a descriptor pool worth managing.
+pub const MAX_FUSED: usize = 8;
+
+/// One matvec of a [`Runtime::matvec_many`] submission.
+#[derive(Clone, Copy)]
+pub struct MatvecJob<'a> {
+    pub shader: &'static MatvecShader,
+    /// `rows` rows of verbatim GGUF blocks of `shader.kind`.
+    pub weights: &'a [u8],
+    pub rows: usize,
+}
 
 /// One buffer and the memory bound to it, mapped when host-visible.
 struct Buf {
@@ -70,7 +85,9 @@ pub struct Runtime {
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
-    set: vk::DescriptorSet,
+    /// One per matvec a submission can hold ([`MAX_FUSED`]).
+    sets: Vec<vk::DescriptorSet>,
+    min_offset_align: u64,
     cmd_pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
@@ -127,7 +144,8 @@ impl Runtime {
             set_layout,
             pipeline_layout: vk::PipelineLayout::null(),
             desc_pool: vk::DescriptorPool::null(),
-            set: vk::DescriptorSet::null(),
+            sets: Vec::new(),
+            min_offset_align: limits.min_storage_buffer_offset_alignment.max(4),
             cmd_pool: vk::CommandPool::null(),
             cmd: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
@@ -155,19 +173,20 @@ impl Runtime {
 
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3)];
+            .descriptor_count(3 * MAX_FUSED as u32)];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(1)
+            .max_sets(MAX_FUSED as u32)
             .pool_sizes(&pool_sizes);
         // SAFETY: `pool_info` borrows `pool_sizes`, alive across the call.
         rt.desc_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .map_err(VulkanError::vk("vkCreateDescriptorPool"))?;
+        let many_layouts = [set_layout; MAX_FUSED];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(rt.desc_pool)
-            .set_layouts(&set_layouts);
-        // SAFETY: the pool was sized for exactly this one set.
-        rt.set = unsafe { device.allocate_descriptor_sets(&alloc_info) }
-            .map_err(VulkanError::vk("vkAllocateDescriptorSets"))?[0];
+            .set_layouts(&many_layouts);
+        // SAFETY: the pool was sized for exactly these MAX_FUSED sets.
+        rt.sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
+            .map_err(VulkanError::vk("vkAllocateDescriptorSets"))?;
 
         let cmd_pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(rt.ctx.queue_family)
@@ -207,39 +226,66 @@ impl Runtime {
         (self.weights.len(), bytes)
     }
 
-    /// One matvec: `y[row] = dot(dequant(W[row]), x)` through the
-    /// shader `key`, built from `code()` on its first call. `weights`
-    /// is `rows * row_bytes` of verbatim GGUF blocks and stays resident
-    /// under its host address. Every shader passed here must have the
-    /// matvec interface of `shaders/matvec_common.glsl`: one workgroup
-    /// per row, rows folded over a 2-D grid.
-    #[allow(clippy::too_many_arguments)] // the six matvec arguments plus the shader's identity
+    /// One matvec: `y[row] = dot(dequant(W[row]), x)` through
+    /// `shader`. [`Self::matvec_many`] with one job.
     pub fn matvec(
         &mut self,
-        key: &'static str,
-        code: impl FnOnce() -> Vec<u32>,
+        shader: &'static MatvecShader,
         weights: &[u8],
         x: &[f32],
         rows: usize,
-        row_bytes: usize,
-        n_blocks_per_row: usize,
     ) -> Result<Vec<f32>, VulkanError> {
-        assert_eq!(weights.len(), rows * row_bytes, "weight buffer size");
-        assert!(rows > 0 && n_blocks_per_row > 0, "empty matvec");
-        let padded = weights.len().next_multiple_of(4) as u64;
-        // The shader indexes bytes in a 32-bit `uint`, and a binding
-        // cannot exceed the device's range: refuse rather than wrap.
-        if padded > self.max_storage_range || padded > u64::from(u32::MAX) {
-            return Err(VulkanError::TooLarge {
-                bytes: padded,
-                limit: self.max_storage_range.min(u64::from(u32::MAX)),
-            });
+        let job = MatvecJob {
+            shader,
+            weights,
+            rows,
+        };
+        Ok(self
+            .matvec_many(&[job], x)?
+            .pop()
+            .expect("one job, one output"))
+    }
+
+    /// Several matvecs of ONE activation in one submission: one upload
+    /// of `x`, `jobs.len()` dispatches, one wait. Q/K/V and gate/up are
+    /// what this is for; each separate submission costs a queue round
+    /// trip (~0.2 ms on MoltenVK) that a decode token pays per matvec.
+    ///
+    /// Each job's weights are verbatim GGUF blocks of its shader's
+    /// kind, `rows` rows of whole blocks covering `x`, and stay resident
+    /// under their host address. A shape that does not fit is an error,
+    /// not a panic: this sits on a dispatch path whose answer to an
+    /// error is the CPU.
+    pub fn matvec_many(
+        &mut self,
+        jobs: &[MatvecJob<'_>],
+        x: &[f32],
+    ) -> Result<Vec<Vec<f32>>, VulkanError> {
+        if jobs.is_empty() || jobs.len() > MAX_FUSED {
+            return Err(VulkanError::Shape(format!(
+                "{} matvecs in one submission (1..={MAX_FUSED})",
+                jobs.len()
+            )));
+        }
+        let mut shapes = Vec::with_capacity(jobs.len());
+        for j in jobs {
+            shapes.push(self.check(j, x.len())?);
         }
 
-        let pipeline = self.kernel(key, code)?;
-        let w_buf = self.resident(weights)?;
+        // Outputs share one buffer at aligned offsets.
+        let mut offsets = Vec::with_capacity(jobs.len());
+        let mut end = 0u64;
+        for j in jobs {
+            offsets.push(end);
+            end = (end + j.rows as u64 * 4).next_multiple_of(self.min_offset_align);
+        }
+
+        let mut bound = Vec::with_capacity(jobs.len());
+        for j in jobs {
+            bound.push((self.kernel(j.shader)?, self.resident(j.weights)?));
+        }
         let x_buf = Self::grow(&self.ctx.device, &self.mem_props, &mut self.x, x.len() * 4)?;
-        let y_buf = Self::grow(&self.ctx.device, &self.mem_props, &mut self.y, rows * 4)?;
+        let y_buf = Self::grow(&self.ctx.device, &self.mem_props, &mut self.y, end as usize)?;
         let x_ptr = self
             .x
             .as_ref()
@@ -253,52 +299,68 @@ impl Runtime {
         }
 
         let device = &self.ctx.device;
-        let buffer_infos = [w_buf, x_buf, y_buf].map(|b| {
-            [vk::DescriptorBufferInfo::default()
-                .buffer(b)
-                .offset(0)
-                .range(vk::WHOLE_SIZE)]
-        });
-        let writes: Vec<_> = buffer_infos
-            .iter()
-            .enumerate()
-            .map(|(i, info)| {
-                vk::WriteDescriptorSet::default()
-                    .dst_set(self.set)
-                    .dst_binding(i as u32)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(info)
-            })
-            .collect();
-        // SAFETY: `writes` borrows `buffer_infos`, alive across the
-        // call; every buffer is live and bound; the set is not in use
-        // because every submission is waited on before returning.
-        unsafe { device.update_descriptor_sets(&writes, &[]) };
+        for (i, (j, &(_, w_buf))) in jobs.iter().zip(&bound).enumerate() {
+            let ranges = [
+                (w_buf, 0, vk::WHOLE_SIZE),
+                (x_buf, 0, vk::WHOLE_SIZE),
+                (y_buf, offsets[i], j.rows as u64 * 4),
+            ];
+            let infos = ranges.map(|(buffer, offset, range)| {
+                [vk::DescriptorBufferInfo::default()
+                    .buffer(buffer)
+                    .offset(offset)
+                    .range(range)]
+            });
+            let writes: Vec<_> = infos
+                .iter()
+                .enumerate()
+                .map(|(b, info)| {
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(self.sets[i])
+                        .dst_binding(b as u32)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(info)
+                })
+                .collect();
+            // SAFETY: `writes` borrows `infos`, alive across the call;
+            // every buffer is live and bound; each output offset is a
+            // multiple of `minStorageBufferOffsetAlignment` and its range
+            // lies inside `y` (sized to `end`); no set is in use, as
+            // every submission is waited on before returning.
+            unsafe { device.update_descriptor_sets(&writes, &[]) };
+        }
 
-        let push = push_constants(rows, n_blocks_per_row, row_bytes);
-        let (gx, gy) = grid(rows);
         let barrier = [vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE)
             .dst_access_mask(vk::AccessFlags::HOST_READ)];
-        let (layout, set) = (self.pipeline_layout, self.set);
+        let layout = self.pipeline_layout;
+        let sets = self.sets.clone();
         self.submit(|device, cmd| {
             // SAFETY: `cmd` is recording (see `submit`); every handle
             // was created on this device and outlives the submission,
-            // which `submit` waits on. The grid has at least `rows`
+            // which `submit` waits on. Each grid has at least `rows`
             // workgroups and the shader guards `row < rows`, so no
-            // invocation writes past `y`.
+            // invocation writes past its own output range. The
+            // dispatches only read shared inputs and write disjoint
+            // ranges, so they need no barrier between them.
             unsafe {
-                device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
-                device.cmd_bind_descriptor_sets(
-                    cmd,
-                    vk::PipelineBindPoint::COMPUTE,
-                    layout,
-                    0,
-                    &[set],
-                    &[],
-                );
-                device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, &push);
-                device.cmd_dispatch(cmd, gx, gy, 1);
+                for (i, ((pipeline, _), &(rows, n_blocks, row_bytes))) in
+                    bound.iter().zip(&shapes).enumerate()
+                {
+                    let push = push_constants(rows, n_blocks, row_bytes);
+                    let (gx, gy) = grid(rows);
+                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, *pipeline);
+                    device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::COMPUTE,
+                        layout,
+                        0,
+                        &[sets[i]],
+                        &[],
+                    );
+                    device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, &push);
+                    device.cmd_dispatch(cmd, gx, gy, 1);
+                }
                 device.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -316,31 +378,71 @@ impl Runtime {
             .as_ref()
             .and_then(|b| b.mapped)
             .expect("host-visible");
-        let mut bytes = vec![0u8; rows * 4];
-        // SAFETY: `y` maps at least `rows * 4` bytes, and the fence
-        // `submit` waited on, with the HOST_READ barrier recorded above,
-        // ordered the device's writes before this read. Byte-wise, as
-        // `vkMapMemory` promises only `minMemoryMapAlignment`.
-        unsafe { std::ptr::copy_nonoverlapping(y_ptr, bytes.as_mut_ptr(), rows * 4) };
-        Ok(bytes
-            .as_chunks::<4>()
-            .0
+        Ok(jobs
             .iter()
-            .map(|c| f32::from_le_bytes(*c))
+            .zip(&offsets)
+            .map(|(j, &off)| {
+                let mut bytes = vec![0u8; j.rows * 4];
+                // SAFETY: `[off, off + rows * 4)` lies inside the mapped
+                // `y`, and the fence `submit` waited on, with the
+                // HOST_READ barrier recorded above, ordered the device's
+                // writes before this read. Byte-wise, as `vkMapMemory`
+                // promises only `minMemoryMapAlignment`.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        y_ptr.add(off as usize),
+                        bytes.as_mut_ptr(),
+                        j.rows * 4,
+                    )
+                };
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from_le_bytes(*c))
+                    .collect()
+            })
             .collect())
     }
 
-    /// The pipeline for `key`, built on first use.
-    fn kernel(
-        &mut self,
-        key: &'static str,
-        code: impl FnOnce() -> Vec<u32>,
-    ) -> Result<vk::Pipeline, VulkanError> {
-        if let Some(k) = self.kernels.get(key) {
+    /// `(rows, n_blocks_per_row, row_bytes)` for a job over an
+    /// activation of `x_len`, or why it does not fit.
+    fn check(&self, j: &MatvecJob<'_>, x_len: usize) -> Result<(usize, usize, usize), VulkanError> {
+        let s = j.shader;
+        let n_blocks = x_len / s.block_elems;
+        let row_bytes = n_blocks * s.block_bytes;
+        if j.rows == 0
+            || n_blocks == 0
+            || x_len != n_blocks * s.block_elems
+            || j.weights.len() != j.rows * row_bytes
+        {
+            return Err(VulkanError::Shape(format!(
+                "{} matvec: {} weight bytes, {} rows, {x_len} activations",
+                s.kind,
+                j.weights.len(),
+                j.rows
+            )));
+        }
+        let padded = j.weights.len().next_multiple_of(4) as u64;
+        // The shader indexes bytes in a 32-bit `uint`, and a binding
+        // cannot exceed the device's range: refuse rather than wrap.
+        let limit = self.max_storage_range.min(u64::from(u32::MAX));
+        if padded > limit {
+            return Err(VulkanError::TooLarge {
+                bytes: padded,
+                limit,
+            });
+        }
+        Ok((j.rows, n_blocks, row_bytes))
+    }
+
+    /// The pipeline for `shader`, built on first use.
+    fn kernel(&mut self, shader: &'static MatvecShader) -> Result<vk::Pipeline, VulkanError> {
+        if let Some(k) = self.kernels.get(shader.kind) {
             return Ok(k.pipeline);
         }
         let device = &self.ctx.device;
-        let words = code();
+        let words = crate::shaders::words(shader.spv);
         let module_info = vk::ShaderModuleCreateInfo::default().code(&words);
         // SAFETY: `module_info` borrows `words`, alive across the call.
         // Every module is validated by `spirv-val` in its own crate's
@@ -369,7 +471,8 @@ impl Runtime {
                 });
             }
         };
-        self.kernels.insert(key, Kernel { module, pipeline });
+        self.kernels
+            .insert(shader.kind, Kernel { module, pipeline });
         Ok(pipeline)
     }
 
