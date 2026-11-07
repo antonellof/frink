@@ -436,60 +436,38 @@ fn each_projection_bias_is_visible_in_the_logits() {
     }
 }
 
-/// **`llama-embed` is `llama`, and the fixture is the evidence.**
+/// **`llama-embed` is refused by name: llama.cpp computes no logits
+/// for it** (#421).
 ///
-/// llama.cpp's `llama_model_llama_embed` INHERITS `llama_model_llama`
-/// (`models.h:175-182`): the same `load_arch_hparams`, the same
-/// `load_arch_tensors`, and a `build_arch_graph` that is `llama`'s
-/// graph with the `embed` template argument set. That flag skips the
-/// output head and changes nothing in the decoder body, so llama.cpp
-/// cannot compute a different graph for the two names.
+/// Its decoder BODY is `llama`'s (`models.h:175-182`), and this test
+/// used to hold its fixture to `llama`'s golden on that ground. But its
+/// graph is `graph<true>` (`llama-embed.cpp:3-5`), which skips the
+/// output head (`llama.cpp:238-244`, no `t_logits`) and attends through
+/// `build_attn_inp_no_cache`, whose mask follows `attention.causal`.
+/// libllama returns an unset buffer as its "logits": the oracle measured
+/// it 8.09 away from the same weights spelled `llama`. Generating from
+/// it computed something llama.cpp never does, so it is a deferred
+/// embedding row until its pooled `t_embd` is checked against
+/// llama.cpp.
 ///
-/// frink had it DEFERRED as an "embedding variant", which was read off
-/// the name rather than the graph -- the mistake `pangu-embedded`
-/// already cost this project once.
-///
-/// The fixture is `llama_biases_tiny.gguf`'s weights written under the
-/// other architecture string (`--spelled`), so the two differ in the
-/// name and in nothing else. It is held to `llama`'s own libllama
-/// golden rather than to frink's output, which is what makes this
-/// evidence rather than a tautology.
+/// The fixture is `llama_biases_tiny.gguf`'s weights under the other
+/// name, so the only thing that can refuse it is the name.
 #[test]
-fn llama_embed_is_llama_and_meets_llamas_golden() {
-    // It is on the decoder path, not the encoder loader: it has a KV
-    // cache and it generates.
+fn llama_embed_is_refused_by_name_because_llama_cpp_builds_no_head() {
     let path = resolve_architecture("llama-embed").expect("a catalog row");
     assert!(
-        matches!(
-            path,
-            ArchPath::GenericGqa {
-                rope: RopeLayout::Norm,
-                ..
-            }
-        ),
-        "llama-embed must resolve on the shared decoder with llama's rotation, not as a \
-         deferred scope: {path:?}"
+        matches!(path, ArchPath::Deferred { .. }),
+        "llama-embed must not resolve onto a decoder path: {path:?}"
     );
-
-    // The same golden the `llama` spelling is held to.
-    assert_all_three_paths_match("llama_embed", &LLAMA_BIASES_GOLDEN);
-
-    // And the two really are the same weights: identical logits, not
-    // merely both close to the golden.
-    let same = decode(&load_graph_fixture("llama_embed"));
-    let base = decode(&load_graph_fixture(LLAMA_BIASES));
-    assert_eq!(
-        same.len(),
-        base.len(),
-        "the two spellings must produce the same vocabulary"
+    let err = match common::try_load_graph_fixture("llama_embed") {
+        Ok(_) => panic!("llama-embed loaded as a decoder"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("requires unimplemented feature") && err.contains("no output head"),
+        "the refusal must name why: {err}"
     );
-    let worst = same
-        .iter()
-        .zip(&base)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f32, f32::max);
-    assert_eq!(
-        worst, 0.0,
-        "the alias must compute bit-identical logits to the row it aliases"
-    );
+    // The same weights spelled `llama` still run: it is the name, not
+    // the file, that is refused.
+    assert_all_three_paths_match(LLAMA_BIASES, &LLAMA_BIASES_GOLDEN);
 }

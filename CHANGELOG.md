@@ -72,6 +72,13 @@ are the ones worth reading twice.
   the answer. It now waits at the head of the queue, with everything it
   produced intact and without blocking the worker for `queue_wait`; a
   fresh request still gets the retryable error (#408).
+- **`llama-embed` refuses by name instead of generating** (#421).
+  llama.cpp builds no output head for it (`llama-embed.cpp:3-5`,
+  `llama.cpp:238-244`) and attends with the mask its `attention.causal`
+  key sets, so libllama has no logits for it; frink generated from it,
+  computing something llama.cpp never does. It is a deferred embedding
+  row now (`embedding_model::NOT_YET`), its oracle row is `refused`
+  rather than `skip`, and the audited count falls from 102 to 101.
 
 ## [0.51.0] - 2026-11-06
 

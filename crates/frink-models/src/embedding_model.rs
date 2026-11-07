@@ -52,6 +52,15 @@ const NOT_YET: &[(&str, &str)] = &[
         "nomic-bert-moe",
         "a second FFN shape on its MoE layers (moe_every_n_layers)",
     ),
+    // A decoder body with no head (`llama-embed.cpp:3-5`,
+    // `llama.cpp:238-244`), attending through `build_attn_inp_no_cache`
+    // under whatever `attention.causal` says (#421). Served once the
+    // pooled `t_embd` is held to `tools/llama_logits.c --embed`.
+    (
+        "llama-embed",
+        "llama's decoder body without its output head, pooled as `{arch}.pooling_type` says \
+         and checked against llama.cpp's t_embd",
+    ),
     (
         "modern-bert",
         "its own graph (local/global alternating attention)",

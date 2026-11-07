@@ -13,7 +13,6 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Family | Notes |
 |---|---|
 | Llama 3.x, TinyLlama, Mistral, Mixtral, Yi, SmolLM2, MiroThinker (`llama`); Ministral 3 (`mistral3`) | |
-| `llama-embed` | Llama's graph with the output head skipped. `/v1/embeddings` pools its hidden states |
 | Llama 4 Scout, Llama 4 Maverick (`llama4`) | CPU only: its window is chunked, and the fused Metal launches take one window per layer |
 | Qwen-1 (`qwen`), Qwen2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen1.5-MoE / Qwen2-MoE (`qwen2moe`), Qwen3-MoE (`qwen3moe`) | |
 | Qwen3.5 dense and MoE (`qwen35`, `qwen35moe`), Qwen3-Next (`qwen3next`) | Recurrent: no prefix-cache reuse, no `--model-draft` |
@@ -42,10 +41,10 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint. `PTQ1_0` runs on CPU and Metal; `PQ2_0` is recognised, not executed |
 | BERT (`bert`), nomic-bert (`nomic-bert`), jina-bert-v2 (`jina-bert-v2`), jina-bert-v3 (`jina-bert-v3`), NeoBERT (`neo-bert`), EuroBERT (`eurobert`) | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
 
-102 architectures run on the shared decoder, each backed by a benchmark
+101 architectures run on the shared decoder, each backed by a benchmark
 row, a pinned logit comparison against real `libllama`, or a fixture.
 The GGUF architecture string of each is in brackets above; every one of
-the 102 in `capability::AUDITED_GENERIC_GQA` appears there. Gemma-4,
+the 101 in `capability::AUDITED_GENERIC_GQA` appears there. Gemma-4,
 the MLA rows and the encoders run on engines of their own and are
 counted separately. `frink archs` is the authoritative list.
 

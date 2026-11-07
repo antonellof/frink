@@ -275,16 +275,7 @@ pub fn unaudited_refusal_detail(arch: &str) -> String {
 pub const AUDITED_GENERIC_GQA: &[&str] = &[
     // Bench rows in benchmarks/suite.json, measured against llama.cpp
     // on the same host and file.
-    "llama", // TinyLlama, Mistral, Mixtral, SmolLM2, Llama-3.x all tag llama
-    // `llama-embed` computes `llama`'s graph BY INHERITANCE
-    // (`models.h:175-182`: same hparams loader, same tensor loader,
-    // `graph<embed>` of the same template), so llama.cpp cannot
-    // compute a different body for it. The evidence is a fixture
-    // byte-identical to a `llama` one but for the architecture string,
-    // asserted to produce the same logits -- the `granite-moe` pattern,
-    // with a stronger citation, because this alias is llama.cpp's own
-    // rather than frink's.
-    "llama-embed",
+    "llama",    // TinyLlama, Mistral, Mixtral, SmolLM2, Llama-3.x all tag llama
     "qwen2",    // Qwen2.5-0.5B
     "qwen2moe", // Qwen1.5-MoE-A2.7B
     "qwen3",    // Qwen3-0.6B
@@ -2049,24 +2040,20 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
         // Norm-RoPE row moved into `NORM_ROPE_TRIAGED` below when it was
         // read against llama.cpp's graph.
         v.push(gqa_norm("llama"));
-        // `llama-embed` is `llama`, and not by resemblance: llama.cpp's
-        // `llama_model_llama_embed` INHERITS `llama_model_llama`
-        // (`models.h:175-182`), reuses its `load_arch_hparams` and
-        // `load_arch_tensors` verbatim, and its whole
-        // `build_arch_graph` is `llama`'s graph with the `embed`
-        // template argument set -- which skips the output head and
-        // changes nothing in the decoder body.
-        //
-        // It was DEFERRED as an "embedding variant", read off the NAME.
-        // That is the mistake `pangu-embedded` already cost this
-        // project once: a row classified by what it is called rather
-        // than by what its converter and graph say. Reading
-        // `models.h` takes a minute.
-        //
-        // So it is the decoder path, not the encoder loader: it has a
-        // KV cache and generates. `/v1/embeddings` pools its hidden
-        // states the way it already does for any GGUF decoder.
-        v.push(gqa_norm("llama-embed"));
+        // `llama-embed` is NOT here, though its decoder BODY is
+        // `llama`'s (`models.h:175-182`: same hparams loader, same
+        // tensor loader). Its graph is `graph<true>`
+        // (`llama-embed.cpp:3-5`), which skips the output head
+        // (`llama.cpp:238-244`, no `t_logits`) and attends through
+        // `build_attn_inp_no_cache`, whose mask follows
+        // `attention.causal` -- false for the bidirectional checkpoint
+        // the converter registers it for (`LlamaBidirectionalModel`,
+        // `nvidia/llama-embed-nemotron-8b`; `conversion/base.py:1629`).
+        // llama.cpp therefore computes no logits for it at all, and
+        // generating from it computed something llama.cpp never does
+        // (#421). It is an embedding model, deferred with the others
+        // below until the embedding path serves it checked against
+        // llama.cpp's `t_embd`.
         // Audited too, each by a libllama-golden fixture -- see
         // `AUDITED_GENERIC_GQA` for the arm each one needed and
         // `tests/one_match_arm_graphs.rs` for the evidence.
@@ -3095,6 +3082,13 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
                 DeferredEncoderEmbedding,
                 "encoder; no output head, so never a decoder -- served by \
                  frink_models::EmbeddingModel on /v1/embeddings",
+            ),
+            (
+                "llama-embed",
+                DeferredEncoderEmbedding,
+                "embedding model: llama.cpp builds no output head for it \
+                 (llama-embed.cpp:3-5 -> llama.cpp:238-244), so there are no logits to \
+                 generate from; its pooled embedding is not yet checked against llama.cpp",
             ),
             (
                 "modern-bert",

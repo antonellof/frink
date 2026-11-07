@@ -607,8 +607,10 @@ embedding rows upstream builds (`nomic-bert-moe`, `modern-bert`,
 `t5encoder`, `gemma-embedding`, `gemma-embedding2` and two decision-head
 scorers) refuse by name, each saying what it needs;
 `frink_models::embedding_model::NOT_YET` is that list. `llama-embed`
-is a Llama decoder with the output head skipped, so it loads on the
-decoder path and `/v1/embeddings` pools its hidden states.
+is among them: llama.cpp runs Llama's decoder body for it with no
+output head and with the mask its `attention.causal` key sets, so it
+has no logits to generate from, and its pooled embedding is not yet
+checked against llama.cpp's (#421).
 
 ## Reranking
 

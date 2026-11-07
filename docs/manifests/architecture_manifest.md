@@ -12,7 +12,6 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | GGUF arch | Scope | Family | Memory | Path |
 |---|---|---|---|---|
 | `llama` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
-| `llama-embed` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `bailingmoe` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `deepseek` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
 | `maincoder` | TextGeneration | StandardGqa | KvGqa | generic-gqa |
@@ -149,6 +148,7 @@ Measured against a serving engine that loads HuggingFace checkpoints directly in
 | `t5` | TextGeneration | EncoderDecoder | None | dedicated |
 | `t5encoder` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `bert` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
+| `llama-embed` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `modern-bert` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `nomic-bert` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
 | `nomic-bert-moe` | DeferredEncoderEmbedding | StandardGqa | None | deferred |
