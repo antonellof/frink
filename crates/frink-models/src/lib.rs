@@ -10,6 +10,7 @@
 
 pub mod act_layers;
 pub mod alibi;
+pub mod amd_npu;
 pub mod attn_gate;
 pub mod attn_temperature;
 pub mod attn_value_scale;

@@ -30,6 +30,12 @@ are the ones worth reading twice.
   `dlopen`ed HIP runtime is written against its scalar twin and has
   **never run on an AMD GPU**; no frink model runs on ROCm yet (phase
   R2). Not published.
+- **`--list-devices` names an AMD Ryzen AI NPU** (#494). On Linux it
+  reads sysfs for the PCI IDs the `amdxdna` driver binds (`0x1502`,
+  XDNA; `0x17f0` and kin, XDNA2: Strix, Strix Halo, Kraken) and prints
+  the generation, the bound driver, and that frink does not use it yet:
+  there are no NPU kernels (`docs/plans/amd.md`, phase N). No XRT is
+  needed to detect it.
 
 ## [0.53.0] - 2026-11-07
 

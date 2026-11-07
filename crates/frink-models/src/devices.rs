@@ -32,4 +32,10 @@ pub fn print_available_devices() {
             println!("        ({} devices detected)", cuda.cuda_device_count);
         }
     }
+
+    // Listed so a Ryzen AI machine is not silent about its NPU, and says
+    // plainly that frink does not use it yet.
+    for npu in crate::amd_npu::detect() {
+        println!("  {}", crate::amd_npu::describe(&npu));
+    }
 }
