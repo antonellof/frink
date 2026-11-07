@@ -5276,8 +5276,10 @@ pub(crate) mod tests {
     fn shared_quads_are_what_each_consumer_would_have_built_itself() {
         // The early return below reads a process-global, so it has to be
         // pinned or a neighbour can turn the tier off between the check
-        // and the assertions it guards.
+        // and the assertions it guards. A device build would hand these
+        // kinds to the GPU, and `quantize_batch_acts` would refuse.
         let _int_dot = ForceIntDot::new(true);
+        let _host = host_pin::ForceHost::new();
         if !cpu_int_dot_for(IntDotShape::BatchGemm) {
             return;
         }

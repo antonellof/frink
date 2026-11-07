@@ -870,6 +870,8 @@ mod tests {
     #[test]
     fn the_batch_path_answers_the_same_with_the_cache_full_and_disabled() {
         let _force = ForceIntDot::new(true);
+        // A device build would take the GEMM off the host, past the cache.
+        let _host = super::super::host_pin::ForceHost::new();
         if !super::super::cpu_int_dot_for(super::super::IntDotShape::BatchGemm) {
             return;
         }
