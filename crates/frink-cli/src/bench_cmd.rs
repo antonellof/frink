@@ -65,6 +65,11 @@ pub struct BenchCmd {
     /// names it. One value per run.
     #[arg(short = 'd', long = "n-depth", default_value_t = 0)]
     pub n_depth: usize,
+    /// llama-bench's `-pg pp,tg`: also run one combined test, a prompt of
+    /// `pp` tokens and then `tg` generated ones timed as a unit and named
+    /// `pp512+tg128`. One pair per run.
+    #[arg(long = "pg", value_name = "PP,TG", value_parser = parse_pg)]
+    pub pg: Option<(usize, usize)>,
     /// Timed repetitions per row; one extra warmup is discarded.
     #[arg(short = 'r', long = "repetitions", default_value_t = 3)]
     pub reps: usize,
@@ -189,6 +194,26 @@ fn check_bench_flash_attn(value: &str) -> anyhow::Result<()> {
     frink_core::argv::check_flash_attn(value).map_err(|e| anyhow::anyhow!(e))
 }
 
+/// llama-bench's `-pg pp,tg`: exactly two counts, not both zero (an
+/// instance llama-bench drops, `llama-bench.cpp:1432`).
+fn parse_pg(value: &str) -> Result<(usize, usize), String> {
+    let (pp, tg) = value
+        .split_once(',')
+        .ok_or_else(|| format!("-pg {value}: expected PP,TG"))?;
+    let n = |s: &str| {
+        s.trim()
+            .parse::<usize>()
+            .map_err(|_| format!("-pg {value}: `{s}` is not a token count"))
+    };
+    let pair = (n(pp)?, n(tg)?);
+    if pair == (0, 0) {
+        return Err(format!(
+            "-pg {value}: a test of zero tokens measures nothing"
+        ));
+    }
+    Ok(pair)
+}
+
 /// One `-ctk` / `-ctv` value, through the same parser `frink run` and
 /// `frink-server` use, with llama-bench's sweep refused by name.
 fn check_cache_type(flag: &str, value: &str) -> anyhow::Result<String> {
@@ -255,6 +280,7 @@ impl BenchCmd {
             n_prompt,
             n_gen,
             n_depth,
+            pg,
             reps,
             threads,
             n_gpu_layers,
@@ -320,6 +346,7 @@ impl BenchCmd {
                 n_prompt,
                 n_gen,
                 depth: n_depth,
+                pg,
                 reps,
                 ctx_size,
                 compare,

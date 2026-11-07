@@ -21,6 +21,10 @@ pub(super) fn measure_decoder(decoder: &Decoder, args: &BenchArgs) -> anyhow::Re
         let plan = tests.start(Phase::Generation);
         rows.push(bench_decode(decoder, args.n_gen, &plan)?);
     }
+    if let Some((pp, tg)) = args.pg {
+        let plan = tests.start(Phase::Combined);
+        rows.push(bench_combined(decoder, pp, tg, &plan)?);
+    }
     for row in &rows {
         bench_guard::check_timed_samples(&row.test, args.reps, row.samples.len())?;
         bench_guard::check_sample_rates(&row.test, &row.samples)?;
@@ -30,6 +34,12 @@ pub(super) fn measure_decoder(decoder: &Decoder, args: &BenchArgs) -> anyhow::Re
 
 /// `pp<N>` / `tg<N>` for [`Gemma4Engine`] (sequential tokens only).
 pub(super) fn measure_gemma4(engine: &Gemma4Engine, args: &BenchArgs) -> anyhow::Result<Vec<Row>> {
+    if args.pg.is_some() {
+        anyhow::bail!(
+            "-pg: the Gemma-4 engine has no batched prefill, so a combined prompt+generation \
+             row would time a different prompt path from llama-bench's; run -p and -n instead"
+        );
+    }
     let mut rows: Vec<Row> = Vec::new();
     let mut tests = Tests::new(args);
     if args.n_prompt > 0 {
@@ -340,6 +350,68 @@ fn bench_decode_gemma4(engine: &Gemma4Engine, n_gen: usize, plan: &Test) -> anyh
     })
 }
 
+/// llama-bench's `-pg pp,tg` (`pp<P>+tg<G>`): a batched prompt of `pp`
+/// tokens and then `tg` single-token steps continuing from it, the
+/// whole timed as one test and reported as `(pp + tg) / time`, as
+/// llama-bench's `get_ts` reports it. The generation continues straight
+/// from the prompt with no priming token of its own, as llama-bench's
+/// `test_gen` continues from the KV's last position.
+fn bench_combined(decoder: &Decoder, pp: usize, tg: usize, plan: &Test) -> anyhow::Result<Row> {
+    let test = plan.label(format!("pp{pp}+tg{tg}"));
+    let vocab = decoder.config.vocab_size;
+    let prompt = synthetic_tokens(vocab, pp, 0);
+    let gen = decode_tokens(vocab, tg, 0);
+    bench_guard::check_prompt_before(&test, pp, &prompt, vocab)?;
+    bench_guard::check_prompt_before(&test, tg, &gen, vocab)?;
+    let mut out = Vec::with_capacity(plan.reps);
+    let mut first_digest: Option<WorkloadDigest> = None;
+    let mut first_result: Option<(usize, f32)> = None;
+    for rep in 0..plan.reps + plan.warmup {
+        let mut caches = fresh_caches(decoder);
+        bench_guard::check_caches_cold(&test, rep, &probe(&caches))?;
+        let mut digest = WorkloadDigest::new();
+        let context = plan.fill_depth(rep, vocab, |ctx| {
+            let _ = decoder.forward_batch_last(ctx, 0, &mut caches);
+        });
+        digest.feed_all(&context);
+        digest.feed_all(&prompt);
+        plan.announce(rep);
+        let t = Instant::now();
+        let mut logits = decoder.forward_batch_last(&prompt, plan.depth, &mut caches);
+        plan.announce_generation(rep);
+        for (i, &tok) in gen.iter().enumerate() {
+            digest.feed(tok);
+            logits = decoder.forward_token(tok, plan.depth + pp + i, &mut caches);
+        }
+        let dt = t.elapsed().as_secs_f64();
+        // The prompt and every generation step must be in the cache: a
+        // short one means work was skipped and the rate would count it.
+        let kv_checked = bench_guard::check_decode_after(
+            &test,
+            plan.depth + pp,
+            tg,
+            &probe(&caches),
+            host_kv_is_the_record(),
+        )?;
+        let _ = kv_checked;
+        let first = *first_digest.get_or_insert(digest);
+        bench_guard::check_same_workload(&test, rep, first, digest)?;
+        check_result(&test, rep, &logits, &mut first_result)?;
+        if rep >= plan.warmup {
+            out.push((pp + tg) as f64 / dt);
+        }
+    }
+    Ok(Row {
+        test,
+        samples: out,
+        n_prompt: pp,
+        n_gen: tg,
+        n_depth: plan.depth,
+        test_time: plan.time.clone(),
+        digest: first_digest.unwrap_or_default(),
+    })
+}
+
 pub(crate) fn fresh_caches(decoder: &Decoder) -> Vec<KvCache> {
     decoder.config.new_kv_caches()
 }
@@ -387,6 +459,9 @@ const DEPTH_SEQ: usize = 7;
 enum Phase {
     Prompt,
     Generation,
+    /// llama-bench's `-pg pp,tg`: a prompt then a generation, timed as
+    /// one test.
+    Combined,
 }
 
 /// The tests of one run, numbered as llama-bench numbers its instances
@@ -404,7 +479,9 @@ impl Tests {
         Self {
             opts: args.run,
             reps: args.reps,
-            count: usize::from(args.n_prompt > 0) + usize::from(args.n_gen > 0),
+            count: usize::from(args.n_prompt > 0)
+                + usize::from(args.n_gen > 0)
+                + usize::from(args.pg.is_some()),
             next: 0,
             depth: args.depth,
         }
@@ -455,8 +532,15 @@ impl Test {
     /// llama-bench's per-repetition progress text (`llama-bench.cpp`,
     /// the warmup and timed loops of `main`).
     fn rep_label(&self, rep: usize) -> String {
-        let kind = match self.phase {
-            Phase::Prompt => "prompt",
+        self.rep_label_as(rep, self.phase)
+    }
+
+    /// [`Self::rep_label`] for one half of a test: a combined test
+    /// announces its prompt and then its generation, as llama-bench
+    /// does for a `-pg` instance.
+    fn rep_label_as(&self, rep: usize, phase: Phase) -> String {
+        let kind = match phase {
+            Phase::Prompt | Phase::Combined => "prompt",
             Phase::Generation => "generation",
         };
         if rep < self.warmup {
@@ -495,6 +579,13 @@ impl Test {
         let context = synthetic_tokens(vocab, self.depth, DEPTH_SEQ);
         run(&context);
         context
+    }
+
+    /// The generation half of a combined test's repetition.
+    fn announce_generation(&self, rep: usize) {
+        if let Some(line) = self.line(&self.rep_label_as(rep, Phase::Generation)) {
+            eprintln!("{line}");
+        }
     }
 
     fn announce(&self, rep: usize) {
@@ -537,6 +628,14 @@ mod tests {
 
     /// A depth row is named as llama-bench names it, and a depth-0 row
     /// keeps the name every published receipt used.
+    #[test]
+    fn a_combined_test_announces_its_prompt_then_its_generation() {
+        let t = test(1, Phase::Combined, true);
+        assert_eq!(t.rep_label(0), "warmup prompt run");
+        assert_eq!(t.rep_label(2), "prompt run 2/3");
+        assert_eq!(t.rep_label_as(2, Phase::Generation), "generation run 2/3");
+    }
+
     #[test]
     fn a_depth_row_is_named_with_llama_benchs_at_suffix() {
         let mut t = test(1, Phase::Prompt, false);

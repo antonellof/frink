@@ -212,6 +212,8 @@ pub struct BenchArgs {
     /// llama-bench's `-d`: context tokens put in the KV, untimed, before
     /// every repetition.
     pub depth: usize,
+    /// llama-bench's `-pg pp,tg`: one combined test, if asked for.
+    pub pg: Option<(usize, usize)>,
     pub reps: usize,
     pub ctx_size: usize,
     /// Also run `llama-bench` on the same GGUF with matching flags and
@@ -278,7 +280,9 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         .to_string();
     let kind = select_engine_kind(&arch).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let ctx_needed = args.depth + args.n_prompt.max(1) + args.n_gen + 2;
+    let ctx_needed = args.depth
+        + (args.n_prompt.max(1) + args.n_gen).max(args.pg.map_or(0, |(pp, tg)| pp + tg))
+        + 2;
     if args.ctx_size > 0 && ctx_needed > args.ctx_size {
         anyhow::bail!(
             "workload needs {ctx_needed} positions but -c is {}",
@@ -420,6 +424,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             args.n_prompt,
             args.n_gen,
             args.depth,
+            args.pg,
             args.reps,
             ngl,
         ) {

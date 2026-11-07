@@ -245,10 +245,11 @@ pub(crate) fn run_llama_bench(
     n_prompt: usize,
     n_gen: usize,
     n_depth: usize,
+    pg: Option<(usize, usize)>,
     reps: usize,
     ngl: usize,
 ) -> anyhow::Result<LlamaRun> {
-    let args: Vec<String> = [
+    let mut args: Vec<String> = [
         "-m",
         model,
         "-p",
@@ -267,6 +268,9 @@ pub(crate) fn run_llama_bench(
     .iter()
     .map(|s| s.to_string())
     .collect();
+    if let Some((pp, tg)) = pg {
+        args.extend(["-pg".to_string(), format!("{pp},{tg}")]);
+    }
     let out = std::process::Command::new("llama-bench")
         .args(&args)
         .output()
