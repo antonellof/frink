@@ -399,6 +399,7 @@ pub(super) fn refuse_what_dedicated_engines_ignore(
         model: _,
         hf_repo: _,
         hf_file: _,
+        offline: _,
         presence_penalty: _,
         frequency_penalty: _,
         prompt: _,

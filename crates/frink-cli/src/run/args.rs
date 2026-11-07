@@ -44,6 +44,13 @@ pub struct InferArgs {
     )]
     pub hf_file: Option<String>,
 
+    /// llama.cpp's `--offline`: forces use of the cache and prevents
+    /// network access. A `-hf` reference resolves against the files the
+    /// frink cache already holds, and one it does not hold is refused
+    /// naming the cache directory.
+    #[arg(long, default_value_t = false)]
+    pub offline: bool,
+
     /// Penalise a token for having appeared at all, llama.cpp's
     /// `--presence-penalty`. `0.0` = off, which is llama.cpp's default.
     ///

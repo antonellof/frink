@@ -202,17 +202,87 @@ impl HfRef {
         &self,
         on_progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<(std::path::PathBuf, bool), String> {
+        self.ensure_local_with(false, on_progress)
+    }
+
+    /// Where this repo's files live in [`cache_dir`].
+    ///
+    /// Under `hub/` rather than directly in the cache root, which
+    /// already holds `instances/` (the running-instance registry). A
+    /// repo named `instances` would otherwise land on top of it.
+    pub fn cache_path(&self) -> std::path::PathBuf {
+        cache_dir().join("hub").join(self.repo.replace('/', "__"))
+    }
+
+    /// [`Self::ensure_local`], or with `offline` llama.cpp's `--offline`
+    /// (`common/arg.cpp`: "forces use of cache, prevents network
+    /// access"): the file or quant tag is resolved against what
+    /// [`Self::cache_path`] already holds, and nothing is listed or
+    /// fetched from the Hub. A reference the cache cannot answer is
+    /// refused naming the directory it looked in.
+    pub fn ensure_local_with(
+        &self,
+        offline: bool,
+        on_progress: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<(std::path::PathBuf, bool), String> {
+        let dir = self.cache_path();
+        if offline {
+            return self.resolve_in_dir(&dir).map(|p| (p, false));
+        }
         let filename = self.resolve()?;
-        // Under `hub/` rather than directly in the cache root, which
-        // already holds `instances/` (the running-instance registry). A
-        // repo named `instances` would otherwise land on top of it.
-        let dir = cache_dir().join("hub").join(self.repo.replace('/', "__"));
         let path = dir.join(&filename);
         if path.is_file() {
             return Ok((path, false));
         }
         let path = fetch_to_dir_with_progress(&self.repo, &filename, &dir, on_progress)?;
         Ok((path, true))
+    }
+}
+
+impl HfRef {
+    /// The cached file this reference names, from `dir` alone: the exact
+    /// `-hff` filename when one was given, else the first GGUF whose name
+    /// matches [`Self::pattern`] without regard to case, in sorted order,
+    /// which is how [`resolve_glob_ci`] picks from the Hub's listing. A
+    /// `.partial` download is not a match: it is not a whole file.
+    pub fn resolve_in_dir(&self, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+        let not_cached = || {
+            format!(
+                "--offline: {}{} is not in the cache ({}); run once without --offline to fetch it",
+                self.repo,
+                self.file
+                    .as_deref()
+                    .map(|f| format!(" / {f}"))
+                    .or_else(|| self.quant.as_deref().map(|q| format!(":{q}")))
+                    .unwrap_or_default(),
+                dir.display()
+            )
+        };
+        if let Some(f) = &self.file {
+            let path = dir.join(f);
+            return if path.is_file() {
+                Ok(path)
+            } else {
+                Err(not_cached())
+            };
+        }
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map_err(|_| not_cached())?
+            .filter_map(|e| {
+                let e = e.ok()?;
+                e.file_type()
+                    .ok()?
+                    .is_file()
+                    .then(|| e.file_name().into_string().ok())?
+            })
+            .collect();
+        names.sort();
+        let lowered = self.pattern().to_ascii_lowercase();
+        names
+            .into_iter()
+            .find(|n| glob_matches(&lowered, &n.to_ascii_lowercase()))
+            .map(|n| dir.join(n))
+            .ok_or_else(not_cached)
     }
 }
 
@@ -590,6 +660,53 @@ mod hf_ref_tests {
     /// An explicit `--hf-file` wins over the quant tag and skips the
     /// Hub listing entirely: the user named the file, so asking the API
     /// which files exist only adds a way to fail.
+    fn cache_with(files: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "frink-hub-offline-{}-{}",
+            std::process::id(),
+            files.join("+").len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in files {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        dir
+    }
+
+    /// `--offline` resolves a quant tag against the cache directory
+    /// alone, case-insensitively, skipping a half-written `.partial`.
+    #[test]
+    fn offline_resolves_a_quant_tag_from_the_cache_alone() {
+        let dir = cache_with(&["m-q4_k_m.gguf.partial", "m-Q4_K_M.gguf", "m-Q8_0.gguf"]);
+        let got = HfRef::parse("org/repo:q4_k_m")
+            .resolve_in_dir(&dir)
+            .unwrap();
+        assert_eq!(got, dir.join("m-Q4_K_M.gguf"));
+        let mut exact = HfRef::parse("org/repo");
+        exact.file = Some("m-Q8_0.gguf".into());
+        assert_eq!(exact.resolve_in_dir(&dir).unwrap(), dir.join("m-Q8_0.gguf"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reference the cache cannot answer is refused naming where it
+    /// looked, never sent to the network.
+    #[test]
+    fn offline_refuses_what_the_cache_does_not_hold() {
+        let dir = cache_with(&["m-Q8_0.gguf"]);
+        let err = HfRef::parse("org/repo:Q4_K_M")
+            .resolve_in_dir(&dir)
+            .unwrap_err();
+        assert!(
+            err.contains("--offline") && err.contains("org/repo:Q4_K_M"),
+            "{err}"
+        );
+        assert!(err.contains(&dir.display().to_string()), "{err}");
+        let missing = dir.join("nope");
+        assert!(HfRef::parse("org/repo").resolve_in_dir(&missing).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_explicit_file_short_circuits_resolution() {
         let mut r = HfRef::parse("owner/repo:Q4_K_M");

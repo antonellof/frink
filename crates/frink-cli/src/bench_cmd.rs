@@ -37,6 +37,12 @@ pub struct BenchCmd {
     /// `HF_TOKEN`, the variable the downloader reads.
     #[arg(long = "hf-token", visible_alias = "hft", value_name = "TOKEN")]
     pub hf_token: Option<String>,
+    /// llama.cpp's `--offline`: forces use of the cache and prevents
+    /// network access. A `-hf` reference resolves against the files the
+    /// frink cache already holds, and one it does not hold is refused
+    /// naming the cache directory.
+    #[arg(long, default_value_t = false)]
+    pub offline: bool,
     /// KV cache type for K, llama-bench's `-ctk`. One value per run, and
     /// only one this backend's KV store actually holds (`f16`, the
     /// default, or `f32` on CPU and Metal): a type the store would fall
@@ -228,7 +234,11 @@ impl BenchCmd {
         }
         self.cache_type_k = k;
         if let Some(spec) = self.hf_repo.take() {
-            self.model = Some(crate::hf::resolve(&spec, self.hf_file.as_deref())?);
+            self.model = Some(crate::hf::resolve(
+                &spec,
+                self.hf_file.as_deref(),
+                self.offline,
+            )?);
         }
         Ok(())
     }
@@ -239,6 +249,7 @@ impl BenchCmd {
             hf_repo: _,
             hf_file: _,
             hf_token: _,
+            offline: _,
             cache_type_k,
             cache_type_v: _,
             n_prompt,

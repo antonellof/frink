@@ -15,6 +15,16 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **`--offline` on `frink run`, `frink bench` and `frink-server`**
+  (and `LLAMA_ARG_OFFLINE` on the server), llama.cpp's "forces use of
+  cache, prevents network access" (#404). A `-hf` reference resolves
+  its file or quant tag against the frink cache directory alone; one the
+  cache does not hold is refused naming the directory. The not-accepted
+  counts fall to 152 (cli), 226 (server) and 24 (bench), and the
+  server's unread `LLAMA_ARG_*` count to 126.
+
 ## [0.52.0] - 2026-11-07
 
 ### Changed

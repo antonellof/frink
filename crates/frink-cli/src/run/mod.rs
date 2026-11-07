@@ -540,7 +540,11 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
     // `-hf` resolves to a local path before anything else looks at
     // `--model`, so the rest of this function sees one kind of input.
     if let Some(spec) = args.hf_repo.clone() {
-        args.model = Some(crate::hf::resolve(&spec, args.hf_file.as_deref())?);
+        args.model = Some(crate::hf::resolve(
+            &spec,
+            args.hf_file.as_deref(),
+            args.offline,
+        )?);
     }
     if args.mtp {
         anyhow::bail!(
