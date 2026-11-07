@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-11-07
+
 ### Changed
 
 - **Vulkan runs Q/K/V and gate/up as one submission each** (#409).
@@ -25,15 +27,6 @@ are the ones worth reading twice.
   reach it as they reach Metal's and CUDA's. A layer goes from seven
   queue round trips to four. Llama-3.2-1B Q4_K_M on MoltenVK still gives
   the CPU's greedy tokens, at about 30 tok/s, up from 25. Still opt-in.
-
-### Fixed
-
-- **The Vulkan seam tests compared Vulkan with itself.** Since
-  `WeightMatrix::apply` gained its Vulkan gate (#497), the "CPU" side of
-  both seam tests was `apply`, which under `FRINK_VULKAN=1` is the
-  Vulkan path. They now compare against `apply_cpu`.
-
-### Changed
 
 - **Vulkan matvecs keep their weights on the device and their pipelines
   built** (#409). A new `frink_vulkan::runtime::Runtime` uploads each
@@ -50,6 +43,13 @@ are the ones worth reading twice.
   Llama-3.2-1B Q4_K_M on Vulkan (MoltenVK, M2 Pro) still gives the CPU's
   greedy tokens and went from 0.9 to 25 tok/s against the CPU's 111.
   Vulkan is still opt-in.
+
+### Fixed
+
+- **The Vulkan seam tests compared Vulkan with itself.** Since
+  `WeightMatrix::apply` gained its Vulkan gate (#497), the "CPU" side of
+  both seam tests was `apply`, which under `FRINK_VULKAN=1` is the
+  Vulkan path. They now compare against `apply_cpu`.
 
 ## [0.54.0] - 2026-11-07
 
