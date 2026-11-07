@@ -33,6 +33,23 @@ pub enum Switch {
     Auto,
 }
 
+/// llama.cpp's resolution of `-b` and `-ub` into the one number frink
+/// keeps: the smaller of whichever the operator actually named, and
+/// `None` when neither was named.
+///
+/// Mirrors `src/llama-context.cpp:265`. `-ub` alone is the physical
+/// batch; `-b` alone stands in for it (llama.cpp's `params.n_ubatch ==
+/// 0` branch); both together clamp to the smaller, because a physical
+/// batch larger than the logical one cannot be submitted.
+pub fn effective_ubatch(batch: Option<usize>, ubatch: Option<usize>) -> Option<usize> {
+    match (batch, ubatch) {
+        (Some(b), Some(u)) => Some(b.min(u)),
+        (Some(b), None) => Some(b),
+        (None, Some(u)) => Some(u),
+        (None, None) => None,
+    }
+}
+
 /// llama.cpp's `common_arg_utils::is_truthy` / `is_falsey` / `is_autoy`
 /// (`common/arg.cpp:1345-1355`), exactly: `on enabled true 1`,
 /// `off disabled false 0`, `auto -1`. Anything else is `None`, which
@@ -306,5 +323,32 @@ mod tests {
             run(&["--prompt", "-weird", "--prompt=x", "-xx"]).unwrap_err(),
             run(&["-xx"]).unwrap_err()
         );
+    }
+
+    /// `-ub` larger than `-b` is not a physical batch of `-ub`:
+    /// llama.cpp clamps it (`src/llama-context.cpp:265`) and so does
+    /// frink, or a `-b 64 -ub 512` command would run 512-token chunks
+    /// here and 64-token chunks there.
+    #[test]
+    fn a_ubatch_larger_than_the_batch_clamps_to_the_batch() {
+        assert_eq!(effective_ubatch(Some(64), Some(512)), Some(64));
+        assert_eq!(effective_ubatch(Some(512), Some(64)), Some(64));
+    }
+
+    /// Either flag alone names the chunk; llama.cpp's `-b` stands in
+    /// for an unset `-ub` by the same line.
+    #[test]
+    fn either_flag_alone_names_the_chunk() {
+        assert_eq!(effective_ubatch(Some(256), None), Some(256));
+        assert_eq!(effective_ubatch(None, Some(256)), Some(256));
+    }
+
+    /// A command that mentions neither must not re-tune either path:
+    /// the private loop's default is "no chunking at all" and the
+    /// scheduler's is 128, and picking one for the other is a
+    /// behaviour change nobody asked for.
+    #[test]
+    fn naming_neither_flag_leaves_both_paths_on_their_own_defaults() {
+        assert_eq!(effective_ubatch(None, None), None);
     }
 }

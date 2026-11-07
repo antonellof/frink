@@ -53,6 +53,8 @@ to name a real flag of its tool.
 | bench | `-p` | One value per run; llama-bench's lists and ranges are refused by the parser | Run the command once per value |
 | bench | `-n` | One value per run, as `-p` | Same |
 | bench | `-d` | One value per run, as `-p` | Same |
+| bench | `-b` | One value per run, and leaving both `-b` and `-ub` out means the whole prompt in one pass rather than llama-bench's defaults of 2048 / 512 | A command that does not mention batching keeps the rows every published receipt measured |
+| bench | `-ub` | One value per run; see `-b` | Same |
 | bench | `-pg` | One pair per run; refused on the Gemma-4 engine, which has no batched prefill to time | Same, and a combined row on a different prompt path would not be llama-bench's |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
 | bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and llama-bench's comma-separated sweep refused | Fused attention is a backend property here, and one run measures one configuration |
@@ -1452,6 +1454,7 @@ line up.
 | `-m/--model` | GGUF to benchmark. Without it, `bench` runs the synthetic matvec microbenchmark instead |
 | `-p/--n-prompt` | Prefill tokens (default 512, `0` skips the `pp` row) |
 | `-n/--n-gen` | Decode steps (default 128, `0` skips the `tg` row) |
+| `-b/--batch-size`, `-ub/--ubatch-size` | Submit the prompt in pieces of the size llama.cpp resolves the two to (the smaller; either alone stands for both), as llama-bench's `test_prompt` does. Neither given is the whole prompt in one pass. One value each per run |
 | `-pg PP,TG` | Also run one combined test, a prompt then a generation timed as a unit, named `pp512+tg128` as llama-bench names it. One pair per run |
 | `-d/--n-depth` | Context tokens put in the KV, untimed, before every repetition; rows are named `pp512 @ d4096` as llama-bench names them. One value per run |
 | `-r/--repetitions` | Timed reps (default 3), plus one discarded warmup |

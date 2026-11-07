@@ -214,6 +214,10 @@ pub struct BenchArgs {
     pub depth: usize,
     /// llama-bench's `-pg pp,tg`: one combined test, if asked for.
     pub pg: Option<(usize, usize)>,
+    /// llama-bench's `-b` / `-ub`, resolved by
+    /// `frink_core::argv::effective_ubatch`: prompt tokens per forward
+    /// pass, `None` for the whole prompt at once.
+    pub chunk: Option<usize>,
     pub reps: usize,
     pub ctx_size: usize,
     /// Also run `llama-bench` on the same GGUF with matching flags and

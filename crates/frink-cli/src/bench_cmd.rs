@@ -70,6 +70,19 @@ pub struct BenchCmd {
     /// `pp512+tg128`. One pair per run.
     #[arg(long = "pg", value_name = "PP,TG", value_parser = parse_pg)]
     pub pg: Option<(usize, usize)>,
+    /// llama-bench's `-b`: the logical batch, prompt tokens submitted per
+    /// call. With `-ub`, the two resolve to one physical size as
+    /// llama.cpp resolves them (the smaller; either alone stands for
+    /// both), and the `pp` and `pp+tg` rows submit their prompt in pieces
+    /// of that size. Neither given is the whole prompt in one pass. One
+    /// value per run.
+    #[arg(long = "batch-size", visible_alias = "b", value_name = "N",
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub batch_size: Option<u64>,
+    /// llama-bench's `-ub`: the physical batch. See `-b`.
+    #[arg(long = "ubatch-size", visible_alias = "ub", value_name = "N",
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub ubatch_size: Option<u64>,
     /// Timed repetitions per row; one extra warmup is discarded.
     #[arg(short = 'r', long = "repetitions", default_value_t = 3)]
     pub reps: usize,
@@ -281,6 +294,8 @@ impl BenchCmd {
             n_gen,
             n_depth,
             pg,
+            batch_size,
+            ubatch_size,
             reps,
             threads,
             n_gpu_layers,
@@ -347,6 +362,10 @@ impl BenchCmd {
                 n_gen,
                 depth: n_depth,
                 pg,
+                chunk: frink_core::argv::effective_ubatch(
+                    batch_size.map(|b| b as usize),
+                    ubatch_size.map(|u| u as usize),
+                ),
                 reps,
                 ctx_size,
                 compare,
