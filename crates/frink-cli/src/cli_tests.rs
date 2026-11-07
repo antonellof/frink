@@ -599,6 +599,8 @@ fn run_and_bench_take_llama_cpps_offline_switch() {
         panic!("not bench");
     };
     assert!(b.offline);
+}
+
 /// llama-bench's `-pg pp,tg` reaches `BenchCmd` through the rewriter as
 /// one pair; a malformed or all-zero pair is refused at parse time.
 #[test]
