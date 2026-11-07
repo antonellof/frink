@@ -17,6 +17,18 @@ are the ones worth reading twice.
 
 ### Added
 
+- **Vulkan decode matvecs for Q4_0, Q4_K, Q5_K and Q6_K** (#409), so a
+  Q4_K_M or Q5_K_M model's matvecs can run on any Vulkan GPU, including
+  every Radeon ROCm does not support. The shaders are GLSL
+  (`crates/frink-vulkan/shaders`), compiled by `glslangValidator` and
+  committed as SPIR-V, so a build needs no shader compiler; a test
+  recompiles them and fails on drift when the pinned compiler version is
+  present. Each runs against its `frink_quant` scalar twin on MoltenVK,
+  and Llama-3.2-1B Q4_K_M decodes on them to the CPU's greedy tokens.
+  `frink-cli --features vulkan` builds it. **Opt-in** (`FRINK_VULKAN=1`)
+  because it is still the beachhead's per-call pipeline: 0.9 tok/s
+  against the CPU's 99 here.
+
 - **`frink-rocm`, the ROCm beachhead** (`docs/plans/amd.md`, #494).
   frink's CUDA kernels are runtime-compiled text, so this crate compiles
   that same text for AMD GPUs through ROCm's `hiprtc` behind a small HIP
@@ -36,6 +48,15 @@ are the ones worth reading twice.
   the generation, the bound driver, and that frink does not use it yet:
   there are no NPU kernels (`docs/plans/amd.md`, phase N). No XRT is
   needed to detect it.
+
+### Fixed
+
+- **`FRINK_VULKAN=1` reached no model matvec.** `WeightMatrix::apply`
+  tried CUDA and Metal only, so the Vulkan seam answered its own tests
+  and nothing else, and a Vulkan run printed the CPU's tokens at the
+  CPU's speed. It now has the third gate. Also fixed on the way: the
+  seam's shape check compared every kind against Q8_0's 32-value block,
+  which would have refused any K-quant into a silent CPU fallback.
 
 ## [0.53.0] - 2026-11-07
 

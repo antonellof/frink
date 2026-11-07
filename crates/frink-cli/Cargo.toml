@@ -47,6 +47,10 @@ default = ["serve"]
 cuda = ["frink-cuda/cuda", "frink-models/cuda", "frink-server?/cuda"]
 # Caps detection + Metal apply_gpu dispatch through frink-models.
 metal = ["frink-metal/metal", "frink-models/metal", "frink-server?/metal"]
+# Vulkan decode matvecs (Q8_0, Q4_0, Q4_K, Q5_K, Q6_K) through
+# frink-core's seam, selected with FRINK_VULKAN=1 (#409). Not forwarded
+# to frink-server yet.
+vulkan = ["frink-models/vulkan"]
 # `frink serve`: the OpenAI-compatible HTTP server, linked in from the
 # frink-server library rather than reimplemented, so both front ends
 # share one `ServerArgs` and one code path.

@@ -56,3 +56,5 @@ cuda = ["frink-moe/cuda", "frink-cuda/cuda"]
 # and a consumer that only loads a local GGUF should not pay for it.
 hub = ["dep:ureq"]
 metal = ["frink-moe/metal", "frink-metal/metal"]
+# Decode matvecs for the kinds `frink-vulkan` has shaders for (#409).
+vulkan = ["frink-moe/vulkan"]

@@ -23,3 +23,4 @@ frink-quant = { workspace = true }
 default = []
 cuda = ["frink-core/cuda"]
 metal = ["frink-core/metal"]
+vulkan = ["frink-core/vulkan"]

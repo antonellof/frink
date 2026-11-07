@@ -56,7 +56,7 @@ recurrent state cannot be rolled back to a middle position.
 | **CPU** | Dense and MoE. int8×int8 matvec on by default (`FRINK_CPU_INT_DOT=0` opts out), interleaved Q4_Kx8 / Q8_0x4 GEMV, Q8_0x4 batch GEMM for prefill, Q5/Q6 int-dot, pool sized to performance cores |
 | **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, MoE Concurrent with fused groups, `MemRanges`, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K) |
 | **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15); `Q4_1`, `Q5_1`, `TQ1_0`, `PTQ1_0` and the seven IQ1/IQ2/IQ3 kinds matvec and GEMM built from one dequant per kind, the IQ grids generated from the CPU's tables (not yet run on hardware), and a resident dense prefill stack (norms, QKV bias, QK norm, RoPE, causal GQA, SwiGLU, residuals on the device; K/V rows back to the host cache). A decode token whose embedding row is its first hidden state is gathered on the device (`get_rows`, built from each kind's GEMM dequant; not yet run on hardware) |
-| **Vulkan** | `Q8_0` matvec only, no GEMM (`--features vulkan`). A beachhead rather than a full backend: see below |
+| **Vulkan** | Decode matvecs for `Q8_0`, `Q4_0`, `Q4_K`, `Q5_K` and `Q6_K`, no GEMM (`--features vulkan`, opt-in with `FRINK_VULKAN=1`). Correct and far from fast: see below |
 
 Which quant kinds each backend runs, per op (matvec for decode, GEMM
 for prefill, `get_rows` for the embedding), and which fall back to the
@@ -65,13 +65,20 @@ tables by `frink caps --kernels` and a test fails when it drifts. A
 fallback also prints a `NO KERNEL` line at load, and `frink inspect-plan`
 lists the tensors of one GGUF that would take one.
 
-Vulkan is a single kernel. `--features vulkan` gives a `Q8_0` matvec
-and nothing else. It reports no GEMM for any kind, so a prefill lands on
-the host, and it claims no other quantization. It ran on real hardware
-(an M2 Pro through MoltenVK) against a scalar twin, which is why it has
-a place in the dispatch table, but there is no measured number for it
-and zero-copy residency from mmap is unproven. It exists to give AMD and
-Intel some path, and because a real backend needs the same seam. `docs/plans/vulkan-beachhead-verdict.md` has the
+Vulkan runs decode matvecs and nothing else. `--features vulkan`
+gives `Q8_0` (the hand-emitted beachhead module) and `Q4_0`, `Q4_K`,
+`Q5_K` and `Q6_K` (GLSL in `crates/frink-vulkan/shaders`, compiled
+SPIR-V committed beside it), each run against its `frink_quant` scalar
+twin on a real device (an M2 Pro through MoltenVK). That covers a
+Q4_K_M or Q5_K_M model's matvecs: Llama-3.2-1B Q4_K_M decodes with them
+on Vulkan to the CPU's own greedy tokens. It reports no GEMM for any
+kind, so a prefill lands on the host. It is **opt-in**
+(`FRINK_VULKAN=1`, unset is off) because it is slow: every matvec
+still rebuilds its pipeline and copies its weights to the device, and
+that decode ran at 0.9 tok/s against the CPU's 99 on the same machine.
+Resident weights and cached pipelines are the next step (#409); it
+exists to give every AMD and Intel GPU a path, including the ones ROCm
+does not support. `docs/plans/vulkan-beachhead-verdict.md` has the
 sizing: a full Vulkan backend is 15 to 25k lines.
 
 The CUDA GEMM has run on hardware and is now the limit. Its hardware test

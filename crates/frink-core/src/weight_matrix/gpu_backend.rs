@@ -278,8 +278,13 @@ pub(crate) fn cuda_matvec_launch(kind: QuantKind) -> Option<CudaMatvecLaunchFn> 
 /// `every_kind_a_compiled_backend_claims_can_actually_be_launched`.
 #[cfg(feature = "vulkan")]
 fn vulkan_matvec_launch(kind: QuantKind) -> Option<VulkanMatvecLaunchFn> {
+    use frink_vulkan::dispatch as d;
     match kind {
-        QuantKind::Q8_0 => Some(frink_vulkan::dispatch::q8_0_matvec),
+        QuantKind::Q8_0 => Some(d::q8_0_matvec),
+        QuantKind::Q4_0 => Some(d::q4_0_matvec),
+        QuantKind::Q4K => Some(d::q4_k_matvec),
+        QuantKind::Q5K => Some(d::q5_k_matvec),
+        QuantKind::Q6K => Some(d::q6_k_matvec),
         _ => None,
     }
 }
@@ -489,8 +494,11 @@ impl BackendCaps for Vulkan {
     /// this names the host path rather than inventing a GPU one.
     const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
-    /// Exactly one kind, because there is exactly one shader:
-    /// `frink_vulkan::q8_0_shader`.
+    /// The kinds with a shader: Q8_0 (`frink_vulkan::q8_0_shader`, the
+    /// hand-emitted beachhead module) and the GLSL ones in
+    /// `frink_vulkan::shaders` (Q4_0, Q4_K, Q5_K, Q6_K: what Q4_K_M and
+    /// Q5_K_M files are made of), each run against its `frink_quant`
+    /// scalar twin on a real device.
     ///
     /// Everything else must report `None` rather than something
     /// plausible. A capability table that over-claims is how a kind ends
@@ -500,7 +508,7 @@ impl BackendCaps for Vulkan {
     fn matvec_kernel(kind: QuantKind) -> Option<&'static str> {
         match kind {
             QuantKind::Q8_0 => Some(kind.name()),
-            _ => None,
+            k => frink_vulkan::shaders::matvec_shader(k.name()).map(|s| s.kind),
         }
     }
 
@@ -562,6 +570,16 @@ type CudaMatvecLaunchFn =
 /// own crate the way `frink_metal::gpu` and `frink_cuda::gpu` do.
 /// [`vulkan_context`] is that global, and it lives here so the beachhead
 /// crate stays a beachhead.
+/// Values per block for a Vulkan-launched kind: the shader table's for
+/// the GLSL kinds, Q8_0's 32 for the beachhead module. Read from the
+/// tables rather than written out, so a K-quant (256 per block) is not
+/// checked against Q8_0's 32 and refused into a silent CPU fallback.
+#[cfg(feature = "vulkan")]
+fn vulkan_block_elems(kind: QuantKind) -> usize {
+    frink_vulkan::shaders::matvec_shader(kind.name())
+        .map_or(frink_vulkan::q8_0_shader::BLOCK_ELEMS, |s| s.block_elems)
+}
+
 #[cfg(feature = "vulkan")]
 type VulkanMatvecLaunchFn = fn(
     &frink_vulkan::device::Context,
@@ -746,10 +764,19 @@ impl BackendDispatch for Vulkan {
         // not shared through a default method.
         static ENABLED: OnceLock<bool> = OnceLock::new();
         *ENABLED.get_or_init(|| {
-            let v = std::env::var("FRINK_VULKAN").ok();
-            env_or_probe(v.as_deref(), "vulkan", || {
-                frink_vulkan::device::probe().is_ok()
-            })
+            // OPT-IN: unset is off, not "probe". Every matvec still
+            // rebuilds its pipeline and stages its weights per call
+            // (`frink_vulkan::dispatch`), so a decode that reaches Vulkan
+            // runs ~100x slower than the CPU it replaced (Llama-3.2-1B
+            // Q4_K_M on the M2 Pro: 0.9 tok/s against 99). A device that
+            // merely exists must not select that. `FRINK_VULKAN=1` does,
+            // until weights are resident (#409).
+            match std::env::var("FRINK_VULKAN").ok() {
+                None => false,
+                Some(v) => env_or_probe(Some(v.as_str()), "vulkan", || {
+                    frink_vulkan::device::probe().is_ok()
+                }),
+            }
         })
     }
 
@@ -785,7 +812,7 @@ impl BackendDispatch for Vulkan {
         let n_blocks_per_row = row_bytes / block_bytes;
         if weights.len() != rows * row_bytes
             || row_bytes != n_blocks_per_row * block_bytes
-            || x.len() != n_blocks_per_row * frink_vulkan::q8_0_shader::BLOCK_ELEMS
+            || x.len() != n_blocks_per_row * vulkan_block_elems(kind)
             || rows == 0
             || n_blocks_per_row == 0
         {
@@ -1008,7 +1035,7 @@ mod tests {
     /// property of the kernel set, so it is checked on every build,
     /// including the CPU-only one that runs `cargo test --workspace`.
     #[test]
-    fn vulkan_claims_exactly_one_matvec_kind_and_no_gemm() {
+    fn vulkan_claims_exactly_its_shader_kinds_and_no_gemm() {
         let claimed: Vec<QuantKind> = QuantKind::ALL
             .iter()
             .copied()
@@ -1016,8 +1043,15 @@ mod tests {
             .collect();
         assert_eq!(
             claimed,
-            vec![QuantKind::Q8_0],
-            "frink-vulkan has one shader (q8_0_shader); the capability table claims {claimed:?}"
+            vec![
+                QuantKind::Q8_0,
+                QuantKind::Q4_0,
+                QuantKind::Q4K,
+                QuantKind::Q5K,
+                QuantKind::Q6K
+            ],
+            "frink-vulkan has these shaders (q8_0_shader plus shaders::MATVEC); the capability \
+             table claims {claimed:?}"
         );
         for &k in QuantKind::ALL {
             assert!(
@@ -1138,13 +1172,78 @@ mod tests {
     /// Skips, loudly, when no device is reachable, so it is not a test
     /// that cannot fail: on a host with Vulkan it asserts, and it was
     /// checked by sabotage (feeding `rows + 1`) before being committed.
+    /// The K-quant shaders through the same seam a model uses, against
+    /// the CPU matvec of the same bytes: rows written by `frink_quant`'s
+    /// own Q4_K, Q5_K and Q6_K encoders, two 256-value blocks per row.
+    /// This is the test that catches a shape check written for Q8_0's
+    /// 32-value blocks, which refused every K-quant into a silent CPU
+    /// fallback.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn the_vulkan_seam_kquant_matvecs_match_the_cpu_matvecs() {
+        use crate::weight_matrix::{WeightBytes, WeightMatrix};
+        if !Vulkan::dense_enabled() {
+            eprintln!("Vulkan not selected (FRINK_VULKAN=1) or no device; the K-quant seam was NOT checked");
+            return;
+        }
+        let (rows, cols) = (11usize, 512usize);
+        let f: Vec<f32> = (0..rows * cols)
+            .map(|i| (((i * 37) % 101) as f32 - 50.0) / 31.0)
+            .collect();
+        let x: Vec<f32> = (0..cols).map(|i| ((i % 17) as f32 - 8.0) / 7.0).collect();
+        type Enc = fn(&[f32]) -> Vec<u8>;
+        let kinds: [(QuantKind, Enc); 3] = [
+            (QuantKind::Q4K, |r| {
+                let mut o = Vec::new();
+                frink_quant::encode_row_q4_k(r, None, &mut o).expect("encodes");
+                o
+            }),
+            (QuantKind::Q5K, |r| {
+                let mut o = Vec::new();
+                frink_quant::encode_row_q5_k(r, None, &mut o).expect("encodes");
+                o
+            }),
+            (QuantKind::Q6K, |r| {
+                let mut o = Vec::new();
+                frink_quant::encode_row_q6_k(r, None, &mut o).expect("encodes");
+                o
+            }),
+        ];
+        for (kind, enc) in kinds {
+            let mut data = Vec::new();
+            for r in 0..rows {
+                data.extend(enc(&f[r * cols..(r + 1) * cols]));
+            }
+            let row_bytes = data.len() / rows;
+            let m = WeightMatrix::Quantized {
+                data: WeightBytes::Owned(data),
+                rows,
+                cols,
+                kind,
+            };
+            let WeightMatrix::Quantized { data, .. } = &m else {
+                unreachable!()
+            };
+            let got = Vulkan::launch_matvec(kind, data.as_slice(), &x, rows, row_bytes)
+                .unwrap_or_else(|| panic!("{kind:?} has a Vulkan kernel"))
+                .unwrap_or_else(|e| panic!("{kind:?} launch: {e}"));
+            let want = m.apply(&x);
+            for (r, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+                    "{kind:?} row {r}: vulkan {g} vs cpu {w}"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "vulkan")]
     #[test]
     fn the_vulkan_seam_matvec_matches_the_cpu_matvec() {
         use crate::weight_matrix::{WeightBytes, WeightMatrix};
 
         if !Vulkan::dense_enabled() {
-            eprintln!("no Vulkan device reachable; the seam matvec was NOT checked");
+            eprintln!("Vulkan not selected (FRINK_VULKAN=1) or no device; the seam matvec was NOT checked");
             return;
         }
 
