@@ -82,7 +82,7 @@ fn admit_prefilled(
     max_tokens: usize,
 ) -> Option<(Slot, mpsc::Receiver<BatcherEvent>)> {
     let (job, rx) = paged_job(prompt, max_tokens);
-    let mut prefill = accept(decoder, job, /* chunk_size = */ 1, Some(config))?;
+    let mut prefill = accept(decoder, job, /* chunk_size = */ 1, Some(config)).into_prefill()?;
     while !prefill.state.step_chunk(prefill.state.chunk_ceiling()) {}
     Some((prefill.into_slot(), rx))
 }
@@ -225,7 +225,9 @@ fn a_batched_prefill_over_an_adopted_prefix_ends_exactly_at_the_prompt_length() 
     finish_row(first);
 
     let (job, _rx2) = paged_job(prompt.clone(), 4);
-    let mut prefill = accept(&decoder, job, /* chunk_size = */ 3, Some(&config)).expect("admitted");
+    let mut prefill = accept(&decoder, job, /* chunk_size = */ 3, Some(&config))
+        .into_prefill()
+        .expect("admitted");
 
     // The starting cursor is the adopted prefix, not zero.
     let adopted = prefill.state.tokens_processed();
@@ -272,7 +274,9 @@ fn a_warm_batched_request_produces_the_same_logits_as_a_cold_one() {
 
     let cold = {
         let (job, _rx) = paged_job(prompt.clone(), 4);
-        let mut prefill = accept(&decoder, job, 3, Some(&config)).expect("admitted");
+        let mut prefill = accept(&decoder, job, 3, Some(&config))
+            .into_prefill()
+            .expect("admitted");
         assert_eq!(
             prefill.state.tokens_processed(),
             0,
@@ -287,7 +291,9 @@ fn a_warm_batched_request_produces_the_same_logits_as_a_cold_one() {
     finish_row(first);
 
     let (job, _rx2) = paged_job(prompt.clone(), 4);
-    let mut prefill = accept(&decoder, job, 3, Some(&config)).expect("admitted");
+    let mut prefill = accept(&decoder, job, 3, Some(&config))
+        .into_prefill()
+        .expect("admitted");
     assert!(
         prefill.state.tokens_processed() > 0,
         "this test proves nothing unless the second request adopted a prefix"
