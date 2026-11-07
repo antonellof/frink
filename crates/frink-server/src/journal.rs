@@ -311,6 +311,8 @@ mod tests {
     use super::*;
     use std::io::BufRead;
 
+    const TEST_THREAD: &str = "journal-test-thread";
+
     fn read_lines(path: &Path) -> Vec<String> {
         let file = std::fs::File::open(path).expect("journal file must exist");
         std::io::BufReader::new(file)
@@ -475,7 +477,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(|| {
             std::thread::Builder::new()
-                .name("journal-test-thread".to_string())
+                .name(TEST_THREAD.to_string())
                 .spawn(|| {
                     panic!("deliberate test panic for the journal");
                 })
@@ -489,9 +491,20 @@ mod tests {
             "the spawned thread must have actually panicked"
         );
 
-        let lines = read_lines(&path);
-        assert_eq!(lines.len(), 1, "exactly one panic record expected");
-        let record: Record = serde_json::from_str(&lines[0]).unwrap();
+        // The hook is process-global while installed, so a test on
+        // another thread that panics in this window (any `should_panic`)
+        // is journaled too. Count only this thread's records: exactly one.
+        let ours: Vec<Record> = read_lines(&path)
+            .iter()
+            .map(|l| serde_json::from_str::<Record>(l).unwrap())
+            .filter(|r| matches!(r, Record::Panic { thread, .. } if thread == TEST_THREAD))
+            .collect();
+        assert_eq!(
+            ours.len(),
+            1,
+            "exactly one panic record from this test's thread"
+        );
+        let record = ours.into_iter().next().unwrap();
         match record {
             Record::Panic {
                 message,
@@ -501,7 +514,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(message, "deliberate test panic for the journal");
-                assert_eq!(thread, "journal-test-thread");
+                assert_eq!(thread, TEST_THREAD);
                 assert!(location.is_some(), "location must be captured");
                 assert!(
                     location.unwrap().contains("journal.rs"),
