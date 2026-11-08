@@ -148,6 +148,15 @@ becomes a top-level template variable, which is how `enable_thinking`
 driven. It can never shadow `messages`, `tools`, or
 `add_generation_prompt`.
 
+`preserve_reasoning` is `true` unless the server was started with
+`--no-reasoning-preserve` or a request sets it, as in llama-server. A
+boolean `preserve_reasoning` also reaches the template as
+`preserve_thinking`, and its opposite as `clear_thinking`,
+`truncate_history_thinking` and `drop_thinking`, which is what decides
+whether GLM-4.7, LFM2.5, LFM3, Nemotron-3, Laguna and DeepSeek-V4 keep
+the reasoning of earlier assistant turns. A request that sets one of
+those four itself keeps its own value.
+
 Five rules are applied to it before rendering:
 
 * An explicit knob wins wholesale. A caller who already set any of

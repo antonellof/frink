@@ -37,6 +37,7 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_CHAT_TEMPLATE_KWARGS", "chat-template-kwargs"),
     ("LLAMA_ARG_REASONING", "reasoning"),
     ("LLAMA_ARG_REASONING_EFFORT", "reasoning-effort"),
+    ("LLAMA_ARG_REASONING_PRESERVE", "reasoning-preserve"),
     ("LLAMA_ARG_CACHE_TYPE_K", "ctk"),
     ("LLAMA_ARG_JINJA", "jinja"),
     ("LLAMA_ARG_FLASH_ATTN", "flash-attn"),
@@ -139,6 +140,7 @@ pub fn prepend_llama_arg_env(
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use serde_json::json;
 
     fn built() -> Command {
         let mut cmd = crate::ServerArgs::command();
@@ -203,6 +205,33 @@ mod tests {
             .unwrap(),
             ["--chat-template={{ x }}", "--chat-template-file", "t.jinja"]
         );
+    }
+
+    /// A pair of switches: the variable's value picks the spelling, and
+    /// the command line's own spelling still comes after it.
+    #[test]
+    fn llama_arg_reasoning_preserve_is_the_preserve_pair() {
+        let preserve = |tail: &[&str], value: &str| {
+            let argv = with_env(tail, &[("LLAMA_ARG_REASONING_PRESERVE", value)]).unwrap();
+            let args = crate::ServerArgs::try_parse_from(
+                std::iter::once("frink-server".to_string()).chain(argv.clone()),
+            )
+            .unwrap();
+            let flags = crate::cli::template_flags(&args).unwrap();
+            (argv, flags.kwargs["preserve_reasoning"].clone())
+        };
+        let (argv, keep) = preserve(&[], "0");
+        assert_eq!(
+            (argv.as_slice(), keep),
+            (&["--no-reasoning-preserve".to_string()][..], json!(false))
+        );
+        let (argv, keep) = preserve(&[], "on");
+        assert_eq!(
+            (argv.as_slice(), keep),
+            (&["--reasoning-preserve".to_string()][..], json!(true))
+        );
+        let (_, keep) = preserve(&["--no-reasoning-preserve"], "1");
+        assert_eq!(keep, json!(false));
     }
 
     #[test]

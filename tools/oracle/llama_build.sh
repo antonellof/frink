@@ -9,6 +9,8 @@
 #   build/        the cmake build; libllama under build/bin
 #   llama_logits  tools/llama_logits.c, what `frink parity` runs
 #   ref_logits    scripts/gptoss_reference_logits.cpp, what writes the goldens
+#   chat_render   tools/oracle/chat_render.cpp, llama-server's prompt for
+#                 one request, against libllama-common
 #
 # Source, in order: an existing <work-dir>/src at <sha>; a clone of
 # $LLAMA_CPP_LOCAL (default .scratch/llama.cpp, read only: --shared
@@ -87,14 +89,14 @@ fi
 # A build made with other flags (an older native one) is rebuilt.
 STAMP="$BUILD/oracle-cmake-flags"
 if [[ "$(cat "$STAMP" 2>/dev/null || true)" != "${isa[*]}" ]] ||
-  ! ls "$BUILD"/bin/libllama.* >/dev/null 2>&1; then
+  ! ls "$BUILD"/bin/libllama.* "$BUILD"/bin/libllama-common.* >/dev/null 2>&1; then
   rm -rf "$BUILD"
   cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON -DLLAMA_CURL=OFF -DLLAMA_OPENSSL=OFF \
     -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
     -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_SERVER=OFF \
     -DGGML_METAL=OFF -DGGML_BLAS=OFF "${isa[@]}" >/dev/null
-  cmake --build "$BUILD" --target llama -j "$(getconf _NPROCESSORS_ONLN)" >/dev/null
+  cmake --build "$BUILD" --target llama llama-common -j "$(getconf _NPROCESSORS_ONLN)" >/dev/null
   printf '%s\n' "${isa[*]}" > "$STAMP"
 fi
 
@@ -103,4 +105,7 @@ LLAMA_CPP_PREFIX="$BUILD" LLAMA_CPP_SOURCE="$SRC" LLAMA_LOGITS_OUT="$WORK/llama_
 c++ -std=c++17 -O2 "$ROOT/scripts/gptoss_reference_logits.cpp" \
   -I"$SRC/include" -I"$SRC/ggml/include" \
   -L"$BUILD/bin" -lllama -Wl,-rpath,"$BUILD/bin" -o "$WORK/ref_logits"
+c++ -std=c++17 -O2 "$ROOT/tools/oracle/chat_render.cpp" \
+  -I"$SRC/common" -I"$SRC/include" -I"$SRC/ggml/include" -I"$SRC/vendor" \
+  -L"$BUILD/bin" -lllama-common -lllama -Wl,-rpath,"$BUILD/bin" -o "$WORK/chat_render"
 echo "llama.cpp $SHA built under $WORK"

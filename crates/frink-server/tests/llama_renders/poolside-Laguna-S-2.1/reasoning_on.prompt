@@ -1,0 +1,7 @@
+〈|EOS|〉<system>You are a helpful, conversationally-fluent assistant made by Poolside. You are here to be helpful to users through natural language conversations.</system>
+<user>What is 2+2?</user>
+<assistant><think>Two and two make four.</think>4.</assistant>
+<user>And 3+3?</user>
+<assistant><think>Three and three make six.</think>6.</assistant>
+<user>And 4+4?</user>
+<assistant><think>

@@ -414,6 +414,15 @@ pub struct InferArgs {
     #[arg(long = "reasoning-effort", value_name = "LEVEL")]
     pub reasoning_effort: Option<String>,
 
+    /// The `preserve_reasoning` template variable, llama.cpp's
+    /// `--reasoning-preserve` and its default.
+    #[arg(long = "reasoning-preserve", overrides_with = "no_reasoning_preserve")]
+    pub reasoning_preserve: bool,
+
+    /// `preserve_reasoning` false. The later of the pair wins.
+    #[arg(long = "no-reasoning-preserve", overrides_with = "reasoning_preserve")]
+    pub no_reasoning_preserve: bool,
+
     /// The flags above, read by `apply_llama_flags`.
     #[arg(skip)]
     pub template_flags: frink_models::template_flags::TemplateFlags,
@@ -614,6 +623,10 @@ impl InferArgs {
                 kwargs: &self.chat_template_kwargs,
                 reasoning,
                 reasoning_effort: self.reasoning_effort.as_deref(),
+                reasoning_preserve: frink_core::argv::flag_pair(
+                    self.reasoning_preserve,
+                    self.no_reasoning_preserve,
+                ),
             },
         )
         .map_err(anyhow::Error::msg)?;

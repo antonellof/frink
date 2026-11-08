@@ -11,8 +11,13 @@
 # 4. runs `frink parity` on every fixture (first-token logits and a
 #    32-step greedy decode, on token ids) and holds each to the outcome
 #    tools/oracle/fixtures.tsv expects;
-# 5. fails if 2 or 3 changed a tracked file or 4 found an unexpected
-#    outcome. A golden is a cache of the oracle's answer: when this
+# 5. renders every chat template llama.cpp bundles through frink and
+#    through llama.cpp's own chat code (tools/oracle/chat_render.cpp):
+#    regenerates the checked-in renders under
+#    crates/frink-server/tests/llama_renders, and runs the census over
+#    all of them;
+# 6. fails if 2, 3 or 5 changed a tracked file or 4 or 5 found an
+#    unexpected outcome. A golden is a cache of the oracle's answer: when this
 #    fails on a diff, the diff IS the new answer, and committing it is
 #    the fix only after reading why it moved.
 #
@@ -79,15 +84,22 @@ python3 tools/oracle/parity.py target/release/frink "$WORK/llama_logits" \
   --summary "$WORK/summary.md" || status=1
 FRINK_LLAMA_TEMPLATES="$WORK/src/models/templates" \
   cargo test --release -p frink-models --test upstream_template_census -- --ignored || status=1
+python3 tools/oracle/chat_renders.py "$WORK/chat_render" "$WORK/src/models/templates" \
+  crates/frink-server/tests/llama_renders || status=1
+rm -rf "$WORK/chat_renders"
+python3 tools/oracle/chat_renders.py "$WORK/chat_render" "$WORK/src/models/templates" \
+  "$WORK/chat_renders" --all || status=1
+FRINK_LLAMA_RENDERS="$WORK/chat_renders" \
+  cargo test --release -p frink-server --lib llama_renders::census -- --ignored --nocapture || status=1
 
-changed="$(git status --porcelain -- crates/frink-models/tests | awk '{print $2}')"
+changed="$(git status --porcelain -- crates/frink-models/tests crates/frink-server/tests/llama_renders | awk '{print $2}')"
 if [[ -n "$changed" ]]; then
   status=1
   note "### Tracked files the oracle rewrote"
   note ""
   while read -r f; do note "- \`$f\`"; done <<< "$changed"
   note ""
-  git --no-pager diff --stat -- crates/frink-models/tests
+  git --no-pager diff --stat -- crates/frink-models/tests crates/frink-server/tests/llama_renders
 fi
 
 if [[ "$REPORT_ONLY" == 1 && -n "$changed" ]]; then
@@ -95,7 +107,8 @@ if [[ "$REPORT_ONLY" == 1 && -n "$changed" ]]; then
   # report: each failing test binary is an architecture that drifts.
   note "### frink against the regenerated goldens"
   note ""
-  cargo test --release -p frink-models --no-fail-fast 2>&1 | tee "$WORK/test.log" >/dev/null || true
+  { cargo test --release -p frink-models --no-fail-fast 2>&1
+    cargo test --release -p frink-server --lib llama_renders 2>&1; } | tee "$WORK/test.log" >/dev/null || true
   grep -E "^test .* FAILED$" "$WORK/test.log" | sed 's/^/- /' | tee -a "$WORK/summary.md" || true
   note ""
 fi

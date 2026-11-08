@@ -179,6 +179,18 @@ pub struct ServerArgs {
     #[arg(long = "reasoning-effort", value_name = "LEVEL")]
     reasoning_effort: Option<String>,
 
+    /// Keep every earlier turn's reasoning in the prompt, llama.cpp's
+    /// `--reasoning-preserve` and its default: the `preserve_reasoning`
+    /// template variable, which a template that can drop old thoughts
+    /// reads. A request's own `chat_template_kwargs` win.
+    #[arg(long = "reasoning-preserve", overrides_with = "no_reasoning_preserve")]
+    reasoning_preserve: bool,
+
+    /// Let such a template drop earlier turns' reasoning
+    /// (`preserve_reasoning` false). The later of the pair wins.
+    #[arg(long = "no-reasoning-preserve", overrides_with = "reasoning_preserve")]
+    no_reasoning_preserve: bool,
+
     /// Accepted; frink does no warm-up pass, so there is none to skip.
     #[arg(long = "no-warmup", default_value_t = false)]
     no_warmup: bool,
@@ -564,6 +576,42 @@ fn check_cors_origins(spec: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `FRINK_CHAT_TEMPLATE_KWARGS` as the flags set it, or `None` when no
+/// flag wrote a kwarg. llama.cpp's defaults alone are put back by every
+/// load, and writing them would replace a value set in the environment.
+fn kwargs_env_value(flags: &frink_models::template_flags::TemplateFlags) -> Option<String> {
+    flags
+        .kwargs_given
+        .then(|| serde_json::Value::Object(flags.kwargs.clone()).to_string())
+}
+
+/// What the chat-template flags mean, checked before a model loads.
+pub(crate) fn template_flags(
+    args: &ServerArgs,
+) -> anyhow::Result<frink_models::template_flags::TemplateFlags> {
+    let reasoning = args
+        .reasoning
+        .as_deref()
+        .map(frink_core::argv::reasoning_switch)
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten();
+    frink_models::template_flags::TemplateFlags::resolve(
+        frink_models::template_flags::TemplateFlagValues {
+            template: args.chat_template.as_deref(),
+            template_file: args.chat_template_file.as_deref(),
+            kwargs: &args.chat_template_kwargs,
+            reasoning,
+            reasoning_effort: args.reasoning_effort.as_deref(),
+            reasoning_preserve: frink_core::argv::flag_pair(
+                args.reasoning_preserve,
+                args.no_reasoning_preserve,
+            ),
+        },
+    )
+    .map_err(anyhow::Error::msg)
+}
+
 pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
     if let Some(token) = &args.hf_token {
         // Before `-hf` is resolved below, which is what reads it.
@@ -801,29 +849,12 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         unsafe { std::env::set_var("FRINK_SLOT_SAVE_PATH", dir) };
     }
 
-    let reasoning = args
-        .reasoning
-        .as_deref()
-        .map(frink_core::argv::reasoning_switch)
-        .transpose()
-        .map_err(anyhow::Error::msg)?
-        .flatten();
-    let template_flags = frink_models::template_flags::TemplateFlags::resolve(
-        frink_models::template_flags::TemplateFlagValues {
-            template: args.chat_template.as_deref(),
-            template_file: args.chat_template_file.as_deref(),
-            kwargs: &args.chat_template_kwargs,
-            reasoning,
-            reasoning_effort: args.reasoning_effort.as_deref(),
-        },
-    )
-    .map_err(anyhow::Error::msg)?;
+    let template_flags = template_flags(args)?;
     if let Some(source) = &template_flags.source {
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var(crate::chat_template::TEMPLATE_ENV, source) };
     }
-    if !template_flags.kwargs.is_empty() {
-        let kwargs = serde_json::Value::Object(template_flags.kwargs).to_string();
+    if let Some(kwargs) = kwargs_env_value(&template_flags) {
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var(crate::chat_template::TEMPLATE_KWARGS_ENV, kwargs) };
     }

@@ -1,0 +1,12 @@
+<s><|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+<think></think>4.<|im_end|>
+<|im_start|>user
+And 3+3?<|im_end|>
+<|im_start|>assistant
+<think></think>6.<|im_end|>
+<|im_start|>user
+And 4+4?<|im_end|>
+<|im_start|>assistant
+<think>
