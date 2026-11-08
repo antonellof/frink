@@ -19,5 +19,4 @@ fireworks-ai-llama-3-firefunction-v2/reasoning_on #522
 fireworks-ai-llama-3-firefunction-v2/reasoning_request_no_preserve #522
 fireworks-ai-llama-3-firefunction-v2/tool_round_trip #522
 llama-cpp-rwkv-world/tool_round_trip deviation:tool-preamble
-meetkai-functionary-medium-v3.2/tool_round_trip #509
 microsoft-Phi-3.5-mini-instruct/tool_round_trip deviation:tool-preamble
