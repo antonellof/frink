@@ -8142,6 +8142,19 @@ pub(crate) mod tests {
             misses > 0,
             "decode must have read experts through the store: {after}"
         );
+        // The request families are on every deployment, not only one
+        // that streams experts or batches.
+        for family in [
+            "frink_prompt_tokens_cached_total",
+            "frink_time_to_first_token_seconds_bucket",
+            "frink_time_per_output_token_seconds_count",
+            "frink_request_duration_seconds_sum",
+        ] {
+            assert!(
+                after.contains(family),
+                "/metrics must expose {family}: {after}"
+            );
+        }
     }
 
     fn weather_tool() -> serde_json::Value {

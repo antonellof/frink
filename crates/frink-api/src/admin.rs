@@ -287,6 +287,10 @@ pub struct RecentRequest {
     /// Time inside the decode loop only. `null` when the engine did not
     /// time itself, or the answer came from cache.
     pub decode_ms: Option<f64>,
+    /// Prompt tokens served from the prefix cache rather than
+    /// prefilled. `null` from a path that does not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<usize>,
     pub stream: bool,
     /// Completion tokens per verification step when this request used
     /// speculative decoding; `null` when it did not. See
@@ -488,6 +492,7 @@ mod tests {
             ttft_ms: Some(900.0),
             duration_ms: 1_100,
             decode_ms: Some(100.0),
+            cached_tokens: None,
             stream: true,
             acceptance_length: None,
             draft_accept_rate_per_position: None,
@@ -515,6 +520,7 @@ mod tests {
             ttft_ms: None,
             duration_ms: 1,
             decode_ms: None,
+            cached_tokens: None,
             stream: false,
             via_api_key: None,
             client: None,

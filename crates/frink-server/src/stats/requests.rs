@@ -20,6 +20,7 @@ use std::sync::Mutex;
 use frink_api::RecentRequest;
 use frink_core::summary_stats::{mean_of_present, percentile};
 
+use super::histogram::Histogram;
 use super::ring::RequestRing;
 
 use crate::attribution::Attribution;
@@ -33,12 +34,34 @@ pub(crate) const RING_CAPACITY: usize = 200;
 /// ring, not a longer page.
 pub(crate) const MAX_PAGE: usize = RING_CAPACITY;
 
+/// Seconds to the first token: a short prompt on a warm cache is tens of
+/// milliseconds, a long cold prefill is seconds.
+const TTFT_BOUNDS: [f64; 11] = [0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+/// Seconds per output token, decode alone: a small model on Metal is a
+/// few milliseconds, a large one on a CPU is a fraction of a second.
+const PER_TOKEN_BOUNDS: [f64; 11] = [
+    0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0,
+];
+/// Seconds per whole request: queue wait, prefill and decode.
+const DURATION_BOUNDS: [f64; 11] = [
+    0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+
 /// Everything `/admin/stats` reports that is not already an
 /// `AppState` counter.
 pub(crate) struct Stats {
     recent: Mutex<RequestRing<RecentRequest>>,
     tokens_prompt_total: AtomicU64,
     tokens_generated_total: AtomicU64,
+    /// Prompt tokens the prefix cache served, beside
+    /// `tokens_prompt_total`: their ratio is the cache's hit rate in
+    /// tokens.
+    tokens_cached_total: AtomicU64,
+    /// Over every request, where the ring keeps only the last few:
+    /// `/metrics` is scraped as a rate, so it has to count from start.
+    ttft: Histogram,
+    per_token: Histogram,
+    duration: Histogram,
 }
 
 impl Default for Stats {
@@ -53,6 +76,10 @@ impl Stats {
             recent: Mutex::new(RequestRing::new(RING_CAPACITY)),
             tokens_prompt_total: AtomicU64::new(0),
             tokens_generated_total: AtomicU64::new(0),
+            tokens_cached_total: AtomicU64::new(0),
+            ttft: Histogram::new(&TTFT_BOUNDS),
+            per_token: Histogram::new(&PER_TOKEN_BOUNDS),
+            duration: Histogram::new(&DURATION_BOUNDS),
         }
     }
 
@@ -66,6 +93,21 @@ impl Stats {
             .fetch_add(entry.prompt_tokens as u64, Ordering::Relaxed);
         self.tokens_generated_total
             .fetch_add(entry.completion_tokens as u64, Ordering::Relaxed);
+        if let Some(cached) = entry.cached_tokens {
+            self.tokens_cached_total
+                .fetch_add(cached as u64, Ordering::Relaxed);
+        }
+        // Each from the field that measured it, and none derived from
+        // another: a request that did not time its first token or its
+        // decode loop adds nothing to that histogram.
+        if let Some(ttft) = entry.ttft_ms {
+            self.ttft.observe(ttft / 1e3);
+        }
+        if let (Some(decode), true) = (entry.decode_ms, entry.completion_tokens > 0) {
+            self.per_token
+                .observe(decode / 1e3 / entry.completion_tokens as f64);
+        }
+        self.duration.observe(entry.duration_ms as f64 / 1e3);
         self.recent
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -129,6 +171,38 @@ impl Stats {
     pub(crate) fn tokens_generated_total(&self) -> u64 {
         self.tokens_generated_total.load(Ordering::Relaxed)
     }
+
+    /// The `/metrics` lines these counters and histograms make, on every
+    /// decode path: the batcher's own counters are only part of it.
+    pub(crate) fn render_metrics(&self) -> String {
+        let mut out = format!(
+            "# HELP frink_prompt_tokens_total Prompt tokens of every finished request.\n\
+             # TYPE frink_prompt_tokens_total counter\n\
+             frink_prompt_tokens_total {}\n\
+             # HELP frink_prompt_tokens_cached_total Prompt tokens the prefix cache served instead of a prefill.\n\
+             # TYPE frink_prompt_tokens_cached_total counter\n\
+             frink_prompt_tokens_cached_total {}\n\
+             # HELP frink_generation_tokens_total Completion tokens of every finished request.\n\
+             # TYPE frink_generation_tokens_total counter\n\
+             frink_generation_tokens_total {}\n",
+            self.tokens_prompt_total(),
+            self.tokens_cached_total.load(Ordering::Relaxed),
+            self.tokens_generated_total(),
+        );
+        out.push_str(&self.ttft.render(
+            "frink_time_to_first_token_seconds",
+            "Time from the request to its first token, for requests that timed it.",
+        ));
+        out.push_str(&self.per_token.render(
+            "frink_time_per_output_token_seconds",
+            "Decode time per completion token, the decode loop alone.",
+        ));
+        out.push_str(&self.duration.render(
+            "frink_request_duration_seconds",
+            "Whole server-side request time: queue wait, prefill and decode.",
+        ));
+        out
+    }
 }
 
 /// Everything a finished request knows about itself, named at the call
@@ -174,6 +248,7 @@ pub(crate) fn entry(record: Record<'_>) -> RecentRequest {
         ttft_ms: usage.and_then(|u| u.time_to_first_token_ms),
         duration_ms: record.duration_ms,
         decode_ms: usage.and_then(|u| u.generation_duration_ms),
+        cached_tokens: usage.and_then(|u| u.cached_tokens),
         stream: record.stream,
         acceptance_length: usage.and_then(|u| u.acceptance_length),
         draft_accept_rate_per_position: usage
@@ -210,6 +285,57 @@ mod tests {
         assert_eq!(e.ttft_ms, Some(900.0));
         assert_eq!(e.prompt_tokens, 100);
         assert_eq!(e.completion_tokens, 10);
+    }
+
+    /// One finished request reaches every family `/metrics` renders:
+    /// its tokens, the cached share of its prompt, and one observation
+    /// in each latency histogram, in the bucket its own field puts it.
+    /// A request that timed nothing adds to the counts and the duration
+    /// only.
+    #[test]
+    fn a_finished_request_reaches_the_metrics() {
+        let stats = Stats::new();
+        let timed = frink_api::Usage::new(100, 10)
+            .with_timings(1.0, 0.1)
+            .with_ttft(0.9)
+            .with_cached_tokens(60);
+        for (usage, duration_ms) in [(Some(&timed), 1_100), (None, 50)] {
+            stats.record(entry(Record {
+                request_id: "chatcmpl-m",
+                route: frink_api::routes::V1_CHAT_COMPLETIONS,
+                model: None,
+                status: 200,
+                stream: true,
+                duration_ms,
+                usage,
+                attribution: &Attribution::default(),
+            }));
+        }
+        let body = stats.render_metrics();
+        for line in [
+            "frink_prompt_tokens_total 100\n",
+            "frink_prompt_tokens_cached_total 60\n",
+            "frink_generation_tokens_total 10\n",
+            // 0.9 s to the first token: above 0.5, inside 1.
+            "frink_time_to_first_token_seconds_bucket{le=\"0.5\"} 0\n",
+            "frink_time_to_first_token_seconds_bucket{le=\"1\"} 1\n",
+            "frink_time_to_first_token_seconds_count 1\n",
+            // 100 ms of decode over 10 tokens is 10 ms each.
+            "frink_time_per_output_token_seconds_bucket{le=\"0.005\"} 0\n",
+            "frink_time_per_output_token_seconds_bucket{le=\"0.01\"} 1\n",
+            "frink_time_per_output_token_seconds_count 1\n",
+            // Both requests have a duration: 0.05 s and 1.1 s.
+            "frink_request_duration_seconds_bucket{le=\"0.1\"} 1\n",
+            "frink_request_duration_seconds_bucket{le=\"1\"} 1\n",
+            "frink_request_duration_seconds_bucket{le=\"2.5\"} 2\n",
+            "frink_request_duration_seconds_count 2\n",
+        ] {
+            assert!(
+                body.contains(line),
+                "missing `{}` in:\n{body}",
+                line.trim_end()
+            );
+        }
     }
 
     #[test]

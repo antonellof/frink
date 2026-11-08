@@ -35,6 +35,8 @@
 #[allow(dead_code)]
 pub(crate) mod rate;
 
+/// A Prometheus histogram, behind `/metrics`' latency families.
+pub(crate) mod histogram;
 pub(crate) mod requests;
 
 /// Wired: `new`, `push`, `since`, `rows` and `recorded_total`, all from

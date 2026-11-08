@@ -994,6 +994,22 @@ While a batcher is active, `GET /metrics` reports
 `frink_scheduler_prefill_chunk` (`-ub`), so a flag can be read back from
 the process that received it.
 
+On every deployment, batched or not, it also reports what each finished
+request adds:
+
+| Family | Type | What |
+|---|---|---|
+| `frink_prompt_tokens_total` | counter | prompt tokens |
+| `frink_prompt_tokens_cached_total` | counter | prompt tokens the prefix cache served instead of a prefill. Over `frink_prompt_tokens_total`, the cache's hit rate in tokens |
+| `frink_generation_tokens_total` | counter | completion tokens |
+| `frink_time_to_first_token_seconds` | histogram | request to first token, for the requests that timed it |
+| `frink_time_per_output_token_seconds` | histogram | decode time over completion tokens, the decode loop alone |
+| `frink_request_duration_seconds` | histogram | the whole request: queue wait, prefill and decode |
+
+Each histogram counts a request only from the field that measured it,
+so one that did not time its first token adds nothing to that family.
+`/v1/requests` carries the same `cached_tokens` per request.
+
 ## Slot save and restore
 
 llama.cpp's `POST /slots/{id_slot}?action=save|restore`, so a long

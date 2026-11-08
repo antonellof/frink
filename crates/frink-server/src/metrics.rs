@@ -58,6 +58,9 @@ pub(crate) async fn metrics(State(state): State<Arc<AppState>>) -> Response {
             .map(|a| a.is_synthetic() as u8)
             .unwrap_or(0),
     );
+    // Every finished request, on every decode path: token counts, the
+    // prefix cache's share of the prompt, and the latency histograms.
+    let body = format!("{body}{}", state.stats.render_metrics());
 
     // Expert-store counters, present only when the model streams
     // routed experts through the bounded cache

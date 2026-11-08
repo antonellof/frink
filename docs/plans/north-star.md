@@ -80,9 +80,8 @@ buys on one machine.
    speculation inside the batch, then multi-token-prediction heads as
    a second drafter (untracked).
 5. **Scheduling.** Preemption on by default after a measurement, and
-   a request priority (#408). Prefix reuse reported: a hit rate, and
-   time-to-first-token and per-token latency histograms on `/metrics`
-   (untracked).
+   a request priority (#408). `/metrics` reports prefix reuse and the
+   latency histograms a scheduler is tuned against.
 6. **Memory.** Sliding-window eviction in the paged store and the pool
    (#61). KV quantization on the host and CUDA stores, not only Metal's
    device store (untracked). The disk KV tier wired into serving
