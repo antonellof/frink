@@ -49,7 +49,7 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 sha2 = { version = "0.10", default-features = false }
 # Jinja2 evaluator for `tokenizer.chat_template` (crates/frink-models/src/chat_template.rs).
 # `loop_controls` for `{% break %}`/`{% continue %}`, which real templates use.
-minijinja = { version = "2.21", features = ["loop_controls", "json"] }
+minijinja = { version = "2.24", features = ["loop_controls", "json"] }
 # `statvfs` only, for the KV disk tier's free-space budget
 # (frink-core::kv_disk). std has no portable free-space call, and the
 # alternative -- letting the filesystem be the thing that says "full" --

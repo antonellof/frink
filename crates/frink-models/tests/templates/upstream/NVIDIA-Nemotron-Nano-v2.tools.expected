@@ -1,0 +1,21 @@
+<SPECIAL_10>System
+You can use the following tools to assist the user if required:
+<AVAILABLE_TOOLS>[{"description": "The weather in a city", "name": "get_weather", "parameters": {"properties": {"city": {"description": "La città", "type": "string"}}, "required": ["city"], "type": "object"}}]</AVAILABLE_TOOLS>
+
+If you decide to call any tool(s), use the following format:
+<TOOLCALL>[{{"name": "tool_name1", "arguments": "tool_args1"}}, {{"name": "tool_name2", "arguments": "tool_args2"}}]</TOOLCALL>
+
+The user will execute tool-calls and return responses from tool(s) in this format:
+<TOOL_RESPONSE>[{{"tool_response1"}}, {{"tool_response2"}}]</TOOL_RESPONSE>
+
+Based on the tool responses, you can call additional tools if needed, correct tool calls if any errors are found, or just respond to the user.
+
+<SPECIAL_11>User
+What is the capital of France?
+<SPECIAL_11>Assistant
+Paris.
+<SPECIAL_12>
+<SPECIAL_11>User
+And of Italy?
+<SPECIAL_11>Assistant
+<think>
