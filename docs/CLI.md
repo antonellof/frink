@@ -1379,7 +1379,9 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `--n-gpu-layers`, `-cb` / `--cont-batching`, `-nocb` /
 `--no-cont-batching`, `-np` / `--parallel`, `-b` / `--batch-size`,
 `-ub` / `--ubatch-size`, `--slot-save-path DIR`, `--lora`,
-`--lora-scaled`, `--lora-init-without-apply`, `--reasoning-budget N`,
+`--lora-scaled`, `--lora-init-without-apply`, `-md` / `--model-draft` /
+`--spec-draft-model`, `--draft-max` / `--draft` / `--draft-n`,
+`--draft-p-min` / `--spec-draft-p-min`, `--reasoning-budget N`,
 `--prefill-assistant` / `--no-prefill-assistant`, `--jinja`,
 `--chat-template`, `--chat-template-file`, `--chat-template-kwargs`,
 `-rea` / `--reasoning`, `--reasoning-effort`,
@@ -1424,6 +1426,16 @@ Notes that are frink's own:
   DeepSeek-V4 keep earlier turns' reasoning in the prompt.
 - `--reasoning-budget` sets `FRINK_REASONING_BUDGET`, the default a
   request's `reasoning_budget_tokens` falls back to.
+- `-md` loads a draft model once, and every request on the private
+  decode loop drafts with it, in place of prompt lookup. Its KV is the
+  request's own, and the output is the output without it
+  ([`API.md`](API.md#usage-timings)). It is refused at startup, naming why, with
+  continuous batching (on by default on Metal: add `--no-cont-batching`),
+  the paged KV store, a recurrent or dedicated-engine model, a drafter
+  of another vocabulary size, and a drafter whose KV lands on the
+  device (`--device cpu`). A model swapped in through
+  `/admin/models/load` is held to the same drafter. `--draft-max`
+  (default 5) and `--draft-p-min` (default 0.75) are `frink run`'s.
 
 **Environment.** llama-server's own variables (`LLAMA_ARG_MODEL`,
 `LLAMA_ARG_CTX_SIZE`, `LLAMA_ARG_N_GPU_LAYERS`, `LLAMA_API_KEY`, ...)

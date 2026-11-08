@@ -579,6 +579,17 @@ fn run_load_task(state: Arc<AppState>, task: Arc<Task>, id: String, path: String
         return;
     }
 
+    // A drafter that cannot serve the new model refuses the swap, as it
+    // would have refused the model at startup.
+    {
+        let target = crate::server_draft::generic_config(&loaded);
+        if let Err(e) = crate::server_draft::check_swap(state.draft.as_ref(), target, &id) {
+            tracing::warn!("admin load of '{id}' refused: {e}");
+            state.set_last_load_error(Some((id, e.to_string())));
+            task.fail(e);
+            return;
+        }
+    }
     // The path this task resolved, not `FRINK_MODEL_PATH`: a swapped-in
     // model must be priced against its own weights, or the new model
     // would admit on the startup model's arithmetic.
@@ -589,6 +600,7 @@ fn run_load_task(state: Arc<AppState>, task: Arc<Task>, id: String, path: String
         // A hot-swapped model reuses the server's paged store: the
         // pages are the deployment's memory, not the model's.
         state.paged_kv.as_ref(),
+        state.draft.as_ref(),
     );
     let previous = state.swap_active(Some(Arc::new(ActiveModel {
         id: Some(id.clone()),

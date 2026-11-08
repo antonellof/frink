@@ -74,11 +74,10 @@ buys on one machine.
 
 4. **Speculative decoding in the batched server.** The engine half is
    lossless and shipped (`frink run -md`). The server speculates only
-   with prompt lookup on its private loop, so on Metal, where
-   continuous batching is the default, it does not speculate at all.
-   Next: the draft model over HTTP (`llama-server` takes `-md`), then
-   speculation inside the batch, then multi-token-prediction heads as
-   a second drafter (untracked).
+   with prompt lookup or a draft model (`-md`, as `llama-server`) on its
+   private loop, so on Metal, where continuous batching is the default,
+   it does not speculate at all. Next: speculation inside the batch,
+   then multi-token-prediction heads as a second drafter (untracked).
 5. **Scheduling.** Preemption on by default after a measurement, and
    a request priority (#408). `/metrics` reports prefix reuse and the
    latency histograms a scheduler is tuned against.

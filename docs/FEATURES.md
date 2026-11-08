@@ -379,7 +379,8 @@ OpenAI-compatible HTTP API:
   token. The latency effect has not been measured yet
 - Speculative decoding on the server. A request whose sampling the
   verifier can reproduce drafts tokens by prompt lookup (an n-gram match
-  over its own history, no second model) and verifies them in one
+  over its own history, no second model), or with the draft model `-md`
+  names, and verifies them in one
   batched forward. A drafted token is kept only if it equals the
   sampler's own draw, so the output does not change. Grammar-constrained
   requests, the continuous-batching worker (the default on Metal) and
