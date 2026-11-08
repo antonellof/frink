@@ -8,11 +8,10 @@
 //! would be two binaries of the same engine disagreeing about what
 //! hardware exists.
 //!
-//! KNOWN GAP, recorded rather than fixed here: neither copy listed
-//! Vulkan, which frink has a backend for (`--features vulkan`). It is
-//! not added in this function yet because `frink-vulkan` is reachable
-//! only through `frink-core`'s optional feature and wiring that is a
-//! change of its own, part of #409.
+//! Vulkan is listed by a `--features vulkan` build, which can load the
+//! Vulkan loader and ask it (`frink_vulkan::device::probe`). A build
+//! without the feature has no loader to ask, so it lists nothing for
+//! Vulkan rather than guessing.
 
 /// Print the detected devices, one per line, after a header.
 pub fn print_available_devices() {
@@ -33,9 +32,38 @@ pub fn print_available_devices() {
         }
     }
 
+    #[cfg(feature = "vulkan")]
+    println!("  {}", vulkan_line(frink_vulkan::device::probe()));
+
     // Listed so a Ryzen AI machine is not silent about its NPU, and says
     // plainly that frink does not use it yet.
     for npu in crate::amd_npu::detect() {
         println!("  {}", crate::amd_npu::describe(&npu));
+    }
+}
+
+/// The `--list-devices` row for what the Vulkan loader answered: the
+/// device it would run on, or why there is none, so a Vulkan build on a
+/// machine without a driver says so rather than printing nothing.
+#[cfg(feature = "vulkan")]
+fn vulkan_line(probe: Result<String, frink_vulkan::device::VulkanError>) -> String {
+    match probe {
+        Ok(device) => format!("Vulkan: {device}"),
+        Err(e) => format!("Vulkan: none usable ({e})"),
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_vulkan_row_names_the_device_or_why_there_is_none() {
+        assert_eq!(
+            vulkan_line(Ok("Apple M2 Pro (Vulkan 1.2.3)".into())),
+            "Vulkan: Apple M2 Pro (Vulkan 1.2.3)"
+        );
+        let none = vulkan_line(Err(frink_vulkan::device::VulkanError::NoPhysicalDevice));
+        assert!(none.starts_with("Vulkan: none usable ("), "{none}");
     }
 }

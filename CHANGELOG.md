@@ -41,6 +41,11 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **`--list-devices` did not list Vulkan** on either binary, though
+  `--features vulkan` builds a Vulkan backend. A Vulkan build now asks
+  the loader and prints the device it found, or why there is none, and
+  `frink-server` takes the `vulkan` feature too (#543).
+
 - **Three request fields were accepted and ignored.**
   `max_completion_tokens`, OpenAI's current name for the output budget,
   was dropped, so a request that set it ran to the 32768-token default.
@@ -50,6 +55,7 @@ are the ones worth reading twice.
   `/v1/responses`. `stream: true` on `/v1/completions` was answered in
   one JSON body, and is now refused by name, pointing at the two
   endpoints that stream.
+
 
 ## [0.57.0] - 2026-11-08
 

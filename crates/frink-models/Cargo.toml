@@ -31,6 +31,9 @@ frink-safetensors = { workspace = true }
 # off. Only the *kernels* are feature-gated, and still are below.
 frink-metal = { workspace = true }
 frink-cuda = { workspace = true }
+# For `--list-devices`. Without its `vulkan` feature it builds no Vulkan
+# code and pulls in no `ash`.
+frink-vulkan = { workspace = true }
 serde = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -60,4 +63,4 @@ cuda = ["frink-moe/cuda", "frink-cuda/cuda"]
 hub = ["dep:ureq"]
 metal = ["frink-moe/metal", "frink-metal/metal"]
 # Decode matvecs for the kinds `frink-vulkan` has shaders for (#409).
-vulkan = ["frink-moe/vulkan"]
+vulkan = ["frink-moe/vulkan", "frink-vulkan/vulkan"]
