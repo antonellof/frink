@@ -38,10 +38,22 @@ are the ones worth reading twice.
   frink-server, and fails on a difference that
   `crates/frink-server/tests/llama_renders/known_differences.txt` does
   not list with its issue. It found 161 of 525 prompts that differ,
-  filed as #512, #513, #514, #515 and #509. 89 differ now.
+  filed as #512, #513, #514, #515 and #509. 38 differ now.
 
 ### Fixed
 
+- **Every tool request rendered another prompt from llama.cpp's** on
+  the templates that print their tools: Qwen 2.5, QwQ, Qwen3 and 3.5,
+  GLM, Kimi K2, MiniMax, DeepSeek V3.2 and V4, Llama 3.1 to 3.3,
+  Granite, Mistral, Hermes, LFM, Laguna and others. A map reached the
+  template with its keys sorted (`{"function": ..., "type": "function"}`)
+  where llama.cpp keeps the request's order, and `{{ tool }}` printed
+  JSON where llama.cpp prints Python's literal syntax, which Apriel 1.5
+  and 1.6 use. `serde_json` and minijinja keep insertion order now, and
+  a replayed call and a message reach the template in llama.cpp's key
+  order. All 51 of those census rows match libllama (#513). A
+  `json_schema` or forced tool call also enforces `required` members in
+  the schema's order now, as llama.cpp does, not alphabetically.
 - **Thinking models did not think by default, and Llama 3.1 and 3.3
   dated every prompt 26 Jul 2024.** llama.cpp passes `enable_thinking`
   to every render, `true` where the template supports thinking, and

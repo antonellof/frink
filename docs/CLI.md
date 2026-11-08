@@ -316,11 +316,12 @@ was meant for. It now stops and says so. Use
   bundles the two answers agree wherever the answer reaches the prompt,
   which `llama_renders::census` checks in CI's oracle job. A template
   outside that set can get the other default.
-- One deviation: `{{ x | tojson }}` sorts object keys.
-  That is stock jinja2's policy, but transformers and llama.cpp both
-  preserve the author's order. Frink cannot: `serde_json::Map` is a
-  `BTreeMap` here, so the order is gone before the filter runs. It
-  changes the order of keys inside a `<tools>` block, nothing else.
+- A map keeps the order its keys were written in, as llama.cpp keeps
+  it: a tool's schema prints in the request's order, and a replayed
+  call or message in llama.cpp's (`common_chat_msg::to_json_oaicompat`).
+  `{{ x }}` and `x | string` print a list or a map in Python's literal
+  syntax, `{'type': 'function'}`, as llama.cpp's engine does, and
+  `x ~ y` still joins minijinja's JSON-like text.
 - A Python method frink has not implemented is an error, as is
   mutating a list outside a `namespace(...)`, because a dropped
   `.append` would silently change every later turn. `.format()` takes

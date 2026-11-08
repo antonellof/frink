@@ -8,7 +8,9 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use minijinja::value::{Enumerator, Kwargs, Object, ObjectRepr, Rest, Value as JinjaValue};
+use minijinja::value::{
+    Enumerator, Kwargs, Object, ObjectRepr, Rest, Value as JinjaValue, ValueKind,
+};
 use minijinja::{Error, ErrorKind};
 use serde_json::Value;
 
@@ -29,17 +31,12 @@ fn invalid(message: impl Into<Cow<'static, str>>) -> Error {
 /// argument is an error, because a filter that ignored one would change
 /// the prompt without saying so.
 ///
-/// Two disclosed deviations, both deliberate:
+/// Keys come out in the order they went in, as llama.cpp keeps them:
+/// `serde_json` and minijinja are both built with `preserve_order`, so a
+/// tool's schema prints in the order the request wrote it.
 ///
-/// 1. **Key order.** Keys are sorted. Neither engine that renders chat
-///    templates does: transformers uses `sort_keys=False`, and llama.cpp
-///    keeps insertion order. Frink cannot follow them today for a reason
-///    below this module: `serde_json::Map` is a `BTreeMap` unless the
-///    whole workspace turns on `serde_json/preserve_order`, so a tool
-///    schema arrives here already sorted. The visible effect is the
-///    order of the keys inside a `<tools>` block, not their content.
-/// 2. No `htmlsafe_json_dumps` escaping of `< > & '`. llama.cpp does not
-///    do it either, and it is llama.cpp this engine is checked against.
+/// No `htmlsafe_json_dumps` escaping of `< > & '`. llama.cpp does not do
+/// it either, and it is llama.cpp this engine is checked against.
 pub(super) fn tojson(
     value: JinjaValue,
     positional: Rest<JinjaValue>,
@@ -100,18 +97,15 @@ impl JsonStyle {
     fn write(&self, value: &Value, level: usize, out: &mut String) {
         match value {
             Value::Object(map) if !map.is_empty() => {
-                // See the key-order note on `tojson`.
-                let mut keys: Vec<&String> = map.keys().collect();
-                keys.sort();
                 out.push('{');
-                for (i, key) in keys.iter().enumerate() {
+                for (i, (key, value)) in map.iter().enumerate() {
                     if i > 0 {
                         out.push_str(&self.item_sep);
                     }
                     self.line_break(level + 1, out);
-                    out.push_str(&Value::String((*key).clone()).to_string());
+                    out.push_str(&Value::String(key.clone()).to_string());
                     out.push_str(&self.key_sep);
-                    self.write(&map[*key], level + 1, out);
+                    self.write(value, level + 1, out);
                 }
                 self.line_break(level, out);
                 out.push('}');
@@ -159,6 +153,105 @@ fn ascii_json(json: &str) -> String {
 /// chat.
 pub(super) fn is_iterable(value: JinjaValue) -> bool {
     !value.is_none() && value.try_iter().is_ok()
+}
+
+/// What `{{ value }}` writes, as llama.cpp's engine writes it
+/// (`common/jinja/value.h`, `as_string`): a list or a map in Python's
+/// literal syntax (`{'type': 'function', 'name': 'f'}`), where
+/// minijinja writes `{"type": "function", "name": "f"}`, and a float to
+/// six places with the trailing zeros dropped. Anything else as
+/// minijinja writes it.
+pub(super) fn formatter(
+    out: &mut minijinja::Output,
+    state: &minijinja::State,
+    value: &JinjaValue,
+) -> Result<(), Error> {
+    if is_python_shaped(value) {
+        out.write_str(&py_str(value))
+            .map_err(|e| Error::new(ErrorKind::WriteFailure, "formatter").with_source(e))
+    } else {
+        minijinja::escape_formatter(out, state, value)
+    }
+}
+
+/// `value | string`, which is `str(value)`: the same text
+/// [`formatter`] prints. Apriel 1.5 and 1.6 print each tool with
+/// `{{ tool | string }}`.
+pub(super) fn string(value: JinjaValue) -> JinjaValue {
+    if is_python_shaped(&value) {
+        JinjaValue::from(py_str(&value))
+    } else if value.kind() == ValueKind::String {
+        value
+    } else {
+        JinjaValue::from(value.to_string())
+    }
+}
+
+fn is_python_shaped(value: &JinjaValue) -> bool {
+    matches!(value.kind(), ValueKind::Map | ValueKind::Seq) || is_float(value)
+}
+
+fn is_float(value: &JinjaValue) -> bool {
+    value.kind() == ValueKind::Number && !value.is_integer()
+}
+
+/// `str(value)` for a list, a map or a float.
+fn py_str(value: &JinjaValue) -> String {
+    let mut out = String::new();
+    py_repr(value, &mut out);
+    out
+}
+
+/// `value_to_string_repr` (`common/jinja/value.cpp`). A string goes in
+/// single quotes unless it holds one, and then it is a JSON string,
+/// which is upstream's rule and not quite Python's.
+fn py_repr(value: &JinjaValue, out: &mut String) {
+    match value.kind() {
+        ValueKind::String => {
+            let text = value.as_str().unwrap_or_default();
+            if text.contains('\'') {
+                out.push_str(&Value::String(text.to_string()).to_string());
+            } else {
+                out.push('\'');
+                out.push_str(text);
+                out.push('\'');
+            }
+        }
+        ValueKind::Seq => {
+            out.push('[');
+            for (i, item) in value.try_iter().into_iter().flatten().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                py_repr(&item, out);
+            }
+            out.push(']');
+        }
+        ValueKind::Map => {
+            out.push('{');
+            for (i, key) in value.try_iter().into_iter().flatten().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                py_repr(&key, out);
+                out.push_str(": ");
+                py_repr(&value.get_item(&key).unwrap_or_default(), out);
+            }
+            out.push('}');
+        }
+        ValueKind::Undefined => out.push_str("Undefined"),
+        _ if is_float(value) => {
+            // `std::to_string` on a double is `%f`.
+            let f = f64::try_from(value.clone()).unwrap_or_default();
+            let mut text = format!("{f:.6}");
+            text.truncate(text.trim_end_matches('0').len());
+            if text.ends_with('.') {
+                text.push('0');
+            }
+            out.push_str(&text);
+        }
+        _ => out.push_str(&value.to_string()),
+    }
 }
 
 /// `{% generation %}` and `{% endgeneration %}`, a transformers tag that
@@ -353,6 +446,41 @@ mod tests {
         assert_eq!(
             rendered(r#"{{ {"a": [1, 2]} | tojson }}"#),
             r#"{"a": [1, 2]}"#
+        );
+    }
+
+    /// A map's keys come out in the order they were written, nested and
+    /// in a tool's schema alike, as llama.cpp keeps them.
+    #[test]
+    fn tojson_keeps_the_order_keys_were_written_in() {
+        assert_eq!(
+            rendered(r#"{{ {"b": 1, "a": {"z": 2, "y": 3}} | tojson }}"#),
+            r#"{"b": 1, "a": {"z": 2, "y": 3}}"#
+        );
+        let tool = json!({"type": "function", "function": {"name": "f", "description": "d"}});
+        assert_eq!(
+            render("{{ tools[0] | tojson }}", vec![tool]).unwrap(),
+            r#"{"type": "function", "function": {"name": "f", "description": "d"}}"#
+        );
+    }
+
+    /// `{{ value }}` and `value | string` print a list or a map as
+    /// llama.cpp does: Python's literal syntax, a string holding a single
+    /// quote as JSON, and a float to six places less its trailing zeros.
+    #[test]
+    fn a_printed_map_or_list_is_pythons_literal() {
+        let tool = json!({"type": "function", "function": {
+            "name": "f", "required": ["a"], "strict": true, "default": null,
+            "note": "it's", "min": 0.5, "max": 3, "step": 1e-7,
+        }});
+        let want = "{'type': 'function', 'function': {'name': 'f', 'required': ['a'], \
+                    'strict': True, 'default': None, 'note': \"it's\", 'min': 0.5, \
+                    'max': 3, 'step': 0.0}}";
+        assert_eq!(render("{{ tools[0] }}", vec![tool.clone()]).unwrap(), want);
+        assert_eq!(render("{{ tools[0] | string }}", vec![tool]).unwrap(), want);
+        assert_eq!(
+            rendered("{{ [1, 'x', [2.25]] }}|{{ 2.5 }}|{{ 'a' | string }}|{{ 7 }}"),
+            "[1, 'x', [2.25]]|2.5|a|7"
         );
     }
 

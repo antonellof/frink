@@ -81,11 +81,9 @@
 //! members are emitted in declaration order. [`json_schema_to_grammar`]
 //! parses the schema text with [`value::JsonValue`], which keeps document
 //! order the way llama.cpp's `nlohmann::ordered_json` does.
-//! [`json_schema_to_grammar_value`] can only carry the order its
-//! `serde_json::Value` already has, and this workspace builds `serde_json`
-//! without `preserve_order`, so that entry point orders properties
-//! lexicographically. Prefer the text entry point when the caller has the
-//! raw JSON.
+//! [`json_schema_to_grammar_value`] carries the order its
+//! `serde_json::Value` has, which is document order: this workspace builds
+//! `serde_json` with `preserve_order`.
 
 mod branch;
 mod converter;
@@ -114,10 +112,8 @@ pub fn json_schema_to_grammar(schema_text: &str) -> Result<String, SchemaError> 
 
 /// Convert an already-parsed `serde_json::Value` schema.
 ///
-/// See the module docs on property order: without `serde_json`'s
-/// `preserve_order` feature a `Value` has already lost the schema's
-/// declaration order, and required members will be required in
-/// lexicographic order instead.
+/// Properties keep the order the `Value` holds them in, which is the
+/// schema's own (see the module docs on property order).
 pub fn json_schema_to_grammar_value(schema: &serde_json::Value) -> Result<String, SchemaError> {
     convert(&JsonValue::from(schema))
 }
@@ -181,12 +177,8 @@ impl GrammarBuilder {
 
     /// As [`Self::add_schema`], for an already-parsed `serde_json::Value`.
     ///
-    /// See the module docs on property order: a `Value` built without
-    /// `serde_json`'s `preserve_order` has already lost the schema's
-    /// declaration order, so required members are required in
-    /// lexicographic order instead. That constrains a model harder than
-    /// the schema does, never softer, so the JSON it is forced to emit is
-    /// still JSON the schema accepts.
+    /// Properties keep the order the `Value` holds them in (see the
+    /// module docs on property order).
     pub fn add_schema_value(
         &mut self,
         name: &str,
