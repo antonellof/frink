@@ -57,6 +57,8 @@ mod journal;
 mod json_mode;
 mod limits;
 pub mod llama_env;
+#[cfg(test)]
+mod llama_renders;
 mod loaded;
 mod logit_bias;
 mod logprobs;

@@ -163,8 +163,6 @@ fn reasoning_budget_parses_llama_cpps_range_and_refuses_the_rest() {
     assert!(err.contains("--reasoning-budget"), "{err}");
 }
 
-/// Both spellings of llama.cpp's prefill switch parse, and they
-/// conflict rather than letting the last one win silently.
 #[test]
 fn chat_template_flags_parse_like_llama_server() {
     let args = server_args(&[
@@ -212,6 +210,60 @@ fn a_bad_chat_template_or_reasoning_value_is_refused_at_startup() {
     }
 }
 
+/// llama.cpp's default, both spellings, and the later of the pair
+/// winning, as it does upstream.
+#[test]
+fn reasoning_preserve_is_on_by_default_and_the_later_spelling_wins() {
+    let preserve = |argv: &[&str]| {
+        template_flags(&server_args(argv)).unwrap().kwargs["preserve_reasoning"].clone()
+    };
+    assert_eq!(preserve(&[]), serde_json::json!(true));
+    assert_eq!(
+        preserve(&["--no-reasoning-preserve"]),
+        serde_json::json!(false)
+    );
+    assert_eq!(preserve(&["--reasoning-preserve"]), serde_json::json!(true));
+    assert_eq!(
+        preserve(&["--reasoning-preserve", "--no-reasoning-preserve"]),
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        preserve(&["--no-reasoning-preserve", "--reasoning-preserve"]),
+        serde_json::json!(true)
+    );
+    let error = template_flags(&server_args(&[
+        "--no-reasoning-preserve",
+        "--chat-template-kwargs",
+        r#"{"preserve_reasoning": true}"#,
+    ]))
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("--no-reasoning-preserve"),
+        "{error}"
+    );
+}
+
+/// The defaults alone must not replace a FRINK_CHAT_TEMPLATE_KWARGS
+/// from the environment; a flag that writes a kwarg does.
+#[test]
+fn only_a_kwarg_flag_writes_the_kwargs_variable() {
+    for argv in [
+        &[][..],
+        &["--chat-template", "chatml"][..],
+        &["--reasoning", "auto"][..],
+    ] {
+        let flags = template_flags(&server_args(argv)).unwrap();
+        assert_eq!(kwargs_env_value(&flags), None, "{argv:?}");
+    }
+    let flags = template_flags(&server_args(&["--no-reasoning-preserve"])).unwrap();
+    assert_eq!(
+        kwargs_env_value(&flags).as_deref(),
+        Some(r#"{"preserve_reasoning":false}"#)
+    );
+}
+
+/// Both spellings of llama.cpp's prefill switch parse, and they
+/// conflict rather than letting the last one win silently.
 #[test]
 fn prefill_assistant_has_both_of_llama_cpps_spellings() {
     let on = ServerArgs::try_parse_from(

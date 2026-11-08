@@ -23,10 +23,36 @@ are the ones worth reading twice.
   is checked at startup, as llama.cpp checks it. A bare name other than
   `chatml` is refused: under `--jinja`, llama.cpp's default, `llama3`
   compiles as plain text and every prompt becomes that word. Server
-  defaults sit under anything a request says.
+  defaults sit under anything a request says. `-rea`,
+  `--reasoning-effort` or `--reasoning-preserve` beside a
+  `--chat-template-kwargs` that sets the same key to another value is
+  refused: llama.cpp keeps the later of the two, an order frink does not
+  keep.
+- **`--reasoning-preserve` and `--no-reasoning-preserve`**, with
+  `LLAMA_ARG_REASONING_PRESERVE`, on `frink run` and `frink-server`
+  (#508).
+- **A libllama chat-render oracle.** `tools/oracle/chat_render.cpp`
+  prints the prompt llama-server builds for a request, through
+  llama.cpp's own flag parser and chat code at the pin. CI's oracle job
+  renders every template llama.cpp bundles through it and through
+  frink-server, and fails on a difference that
+  `crates/frink-server/tests/llama_renders/known_differences.txt` does
+  not list with its issue. It found 161 of 525 prompts that differ
+  today, filed as #512, #513, #514, #515 and #509.
 
 ### Fixed
 
+- **Multi-turn reasoning rendered a different prompt from llama.cpp's**
+  on GLM-4.7-Flash, LFM3, LFM2.5 and Nemotron-3-Nano, on Laguna-S-2.1
+  with thinking off, and on DeepSeek-V4 with thinking on. llama.cpp sets
+  `preserve_reasoning` by default and passes it to templates as four
+  variables (`preserve_thinking`, `clear_thinking`,
+  `truncate_history_thinking`, `drop_thinking`). frink set none, so
+  those templates dropped every earlier turn's reasoning where
+  llama.cpp keeps it, and the same conversation gave different tokens.
+  Their reasoning conversations now render libllama's bytes (#508).
+  Their tool requests still differ (#513), and so does DeepSeek-V4 with
+  thinking left at its default (#512).
 - **A `LLAMA_ARG_*` variable could beat an explicit flag.** Variables
   were added after the command line, so between two flags where the
   last wins, the variable won. llama.cpp applies them first.

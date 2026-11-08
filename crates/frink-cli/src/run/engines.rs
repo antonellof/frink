@@ -451,6 +451,8 @@ pub(super) fn refuse_what_dedicated_engines_ignore(
         chat_template_kwargs: _,
         reasoning: _,
         reasoning_effort: _,
+        reasoning_preserve: _,
+        no_reasoning_preserve: _,
         template_flags: _,
         flash_attn: _,
         hf_token: _,

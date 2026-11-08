@@ -311,6 +311,16 @@ impl ChatTemplate {
                 if let Some(effort) = effort.filter(|e| e.as_str().is_some_and(|s| !s.is_empty())) {
                     ctx.entry("reasoning_strength").or_insert(effort);
                 }
+                // And `caps_apply_preserve_reasoning`: a boolean
+                // `preserve_reasoning` (on by default, see
+                // `template_flags`) under the four names templates read
+                // it by. Upstream sets these before the kwargs, so a
+                // kwarg of the same name still wins.
+                if let Some(&Value::Bool(keep)) = ctx.get("preserve_reasoning") {
+                    for (name, value) in preserve_reasoning_spellings(keep) {
+                        ctx.entry(name).or_insert(Value::Bool(value));
+                    }
+                }
                 ctx.insert("messages".into(), Value::Array(messages.to_vec()));
                 ctx.insert(
                     "add_generation_prompt".into(),
@@ -345,6 +355,18 @@ impl ChatTemplate {
             }
         }
     }
+}
+
+/// `common/jinja/caps.cpp`'s `caps_apply_preserve_reasoning`: GLM reads
+/// `clear_thinking`, LFM `preserve_thinking`, Nemotron
+/// `truncate_history_thinking`, DeepSeek-V4 `drop_thinking`.
+fn preserve_reasoning_spellings(keep: bool) -> [(&'static str, bool); 4] {
+    [
+        ("preserve_thinking", keep),
+        ("clear_thinking", !keep),
+        ("truncate_history_thinking", !keep),
+        ("drop_thinking", !keep),
+    ]
 }
 
 /// minijinja reports the interesting part of a failure in the *cause*
@@ -1197,6 +1219,44 @@ mod tests {
         assert_eq!(
             render(serde_json::json!({"reasoning_effort": "high", "reasoning_strength": "low"})),
             "[low]"
+        );
+    }
+
+    /// GLM-4.7-Flash keeps earlier thoughts only under
+    /// `clear_thinking=false`, and llama.cpp's default keeps them.
+    #[test]
+    fn preserve_reasoning_also_reads_as_the_four_names_templates_use() {
+        let render = |extra: serde_json::Value| {
+            let serde_json::Value::Object(extra) = extra else {
+                panic!("not an object");
+            };
+            ChatTemplate::from_jinja(
+                "{{ preserve_thinking }}{{ clear_thinking }}\
+                 {{ truncate_history_thinking }}{{ drop_thinking }}",
+            )
+            .unwrap()
+            .render(
+                &[msg("user", "x")],
+                &RenderOptions {
+                    extra,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            render(serde_json::json!({"preserve_reasoning": true})),
+            "TrueFalseFalseFalse"
+        );
+        assert_eq!(
+            render(serde_json::json!({"preserve_reasoning": false})),
+            "FalseTrueTrueTrue"
+        );
+        // Not a boolean: upstream skips it, so the template sees none.
+        assert_eq!(render(serde_json::json!({"preserve_reasoning": "yes"})), "");
+        assert_eq!(
+            render(serde_json::json!({"preserve_reasoning": false, "clear_thinking": false})),
+            "FalseFalseTrueTrue"
         );
     }
 

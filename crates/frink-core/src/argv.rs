@@ -75,6 +75,17 @@ pub fn reasoning_switch(value: &str) -> Result<Option<bool>, String> {
     }
 }
 
+/// A `--x` / `--no-x` pair declared to override each other, so at most
+/// one is set: `Some(true)`, `Some(false)`, or `None` for neither.
+pub fn flag_pair(on: bool, off: bool) -> Option<bool> {
+    debug_assert!(!(on && off), "the pair must be declared overrides_with");
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
 /// `-fa` / `--flash-attn`, on every front end that takes it.
 ///
 /// `on` and `auto` are accepted: fused attention is a backend property

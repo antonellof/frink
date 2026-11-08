@@ -1,11 +1,16 @@
 //! The chat-template flags `frink run` and `frink-server` share, read
 //! from llama.cpp's `common/arg.cpp`: `--chat-template`,
-//! `--chat-template-file`, `--chat-template-kwargs`, `-rea` and
-//! `--reasoning-effort`.
+//! `--chat-template-file`, `--chat-template-kwargs`, `-rea`,
+//! `--reasoning-effort` and `--reasoning-preserve`.
 //!
 //! One resolver, so the two entry points cannot disagree about what a
 //! value means. Everything is checked here, before a model loads, as
 //! llama.cpp checks it while parsing (`common_chat_verify_template`).
+//!
+//! The kwargs it returns hold llama.cpp's own default too:
+//! `preserve_reasoning` is `true` unless a flag says otherwise, set after
+//! parsing (`common_params_parse_ex`), so every render on every path
+//! carries it.
 
 use std::path::Path;
 
@@ -14,7 +19,8 @@ use serde_json::{json, Map, Value};
 use crate::chat_template::{BuiltinTemplate, ChatTemplate, RenderOptions};
 
 /// The flags as given. `reasoning` is `-rea` already read: `Some(true)`
-/// on, `Some(false)` off, `None` auto or absent.
+/// on, `Some(false)` off, `None` auto or absent. `reasoning_preserve` is
+/// `--reasoning-preserve` (`Some(true)`) or `--no-reasoning-preserve`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TemplateFlagValues<'a> {
     pub template: Option<&'a str>,
@@ -22,6 +28,7 @@ pub struct TemplateFlagValues<'a> {
     pub kwargs: &'a [String],
     pub reasoning: Option<bool>,
     pub reasoning_effort: Option<&'a str>,
+    pub reasoning_preserve: Option<bool>,
 }
 
 /// What the flags mean.
@@ -31,14 +38,24 @@ pub struct TemplateFlags {
     pub source: Option<String>,
     /// `source`, compiled and verified.
     pub template: Option<ChatTemplate>,
-    /// Defaults for every render. A request's own keys win over these.
+    /// Defaults for every render, llama.cpp's own among them. A request's
+    /// own keys win over these.
     pub kwargs: Map<String, Value>,
+    /// Whether a flag that writes kwargs was given, as opposed to only
+    /// llama.cpp's defaults being in `kwargs`.
+    pub kwargs_given: bool,
 }
 
 impl TemplateFlags {
     /// An empty template, or an empty file, is no template, as in
-    /// llama.cpp. `--reasoning-effort` applies after
-    /// `--chat-template-kwargs` whatever their order on the command line.
+    /// llama.cpp.
+    ///
+    /// llama.cpp writes `--chat-template-kwargs`, `-rea`,
+    /// `--reasoning-effort` and `--reasoning-preserve` into one map in
+    /// command-line order, so between a dedicated flag and a kwarg that
+    /// set the same key the later one wins. That order is not kept here,
+    /// so the two may agree, and if they disagree the pair is refused by
+    /// name rather than settled one way that is wrong half the time.
     pub fn resolve(values: TemplateFlagValues<'_>) -> Result<Self, String> {
         let source = match (values.template, values.template_file) {
             (Some(template), _) => Some(template.to_string()),
@@ -55,28 +72,57 @@ impl TemplateFlags {
         for value in values.kwargs {
             kwargs.extend(parse_kwargs(value)?);
         }
+        let mut dedicated = |flag: &str, key: &str, value: Option<Value>| {
+            if let Some(given) = kwargs
+                .get(key)
+                .filter(|given| Some(*given) != value.as_ref())
+            {
+                return Err(format!(
+                    "{flag} and --chat-template-kwargs both set {key} ({given} there). llama.cpp \
+                     applies the later of the two on the command line, and frink does not keep \
+                     that order. Give one of them"
+                ));
+            }
+            match value {
+                Some(value) => kwargs.insert(key.to_string(), value),
+                None => kwargs.remove(key),
+            };
+            Ok(())
+        };
         if let Some(on) = values.reasoning {
-            kwargs.insert("enable_thinking".to_string(), json!(on));
+            dedicated("-rea", "enable_thinking", Some(json!(on)))?;
         }
         match values.reasoning_effort {
             None => {}
-            Some("default") => {
-                kwargs.remove("reasoning_effort");
-            }
-            Some(level) => {
-                kwargs.insert("reasoning_effort".to_string(), json!(level));
-            }
+            Some("default") => dedicated("--reasoning-effort default", "reasoning_effort", None)?,
+            Some(level) => dedicated("--reasoning-effort", "reasoning_effort", Some(json!(level)))?,
         }
+        if let Some(on) = values.reasoning_preserve {
+            let flag = if on {
+                "--reasoning-preserve"
+            } else {
+                "--no-reasoning-preserve"
+            };
+            dedicated(flag, "preserve_reasoning", Some(json!(on)))?;
+        }
+        let kwargs_given = !kwargs.is_empty() || values.reasoning_effort.is_some();
+        // `common_params_parse_ex`, after every flag: "if the
+        // preserve_reasoning kwarg was not specified explicitly, enable
+        // it by default".
+        kwargs
+            .entry("preserve_reasoning")
+            .or_insert(Value::Bool(true));
         Ok(Self {
             source,
             template,
             kwargs,
+            kwargs_given,
         })
     }
 
-    /// Whether the flags change anything.
+    /// Whether no flag was given, so only llama.cpp's defaults apply.
     pub fn is_empty(&self) -> bool {
-        self.source.is_none() && self.kwargs.is_empty()
+        self.source.is_none() && !self.kwargs_given
     }
 }
 
@@ -117,13 +163,6 @@ fn parse_kwargs(value: &str) -> Result<Map<String, Value>, String> {
     let Value::Object(kwargs) = parsed else {
         return Err("--chat-template-kwargs: expected a JSON object".to_string());
     };
-    if kwargs.contains_key("preserve_reasoning") {
-        return Err(
-            "--chat-template-kwargs: preserve_reasoning is not honoured yet. frink does not set \
-             the template variables llama.cpp derives from it (#508)"
-                .to_string(),
-        );
-    }
     Ok(kwargs)
 }
 
@@ -239,11 +278,90 @@ mod tests {
         }
     }
 
-    /// Accepted and inert would be a flag not honoured (ADR 0005).
+    /// llama.cpp sets it after parsing, whatever else was given, and a
+    /// flag or a kwarg can turn it off.
     #[test]
-    fn preserve_reasoning_is_refused_until_it_is_honoured() {
-        let error = kwargs(&[r#"{"preserve_reasoning": false}"#]).unwrap_err();
-        assert!(error.contains("#508"), "{error}");
+    fn preserve_reasoning_is_on_unless_a_flag_turns_it_off() {
+        let flags = resolve(TemplateFlagValues::default()).unwrap();
+        assert_eq!(flags.kwargs["preserve_reasoning"], json!(true));
+        assert!(flags.is_empty(), "the default alone is no flag");
+        for (values, keep) in [
+            (
+                TemplateFlagValues {
+                    reasoning_preserve: Some(false),
+                    ..Default::default()
+                },
+                false,
+            ),
+            (
+                TemplateFlagValues {
+                    reasoning_preserve: Some(true),
+                    ..Default::default()
+                },
+                true,
+            ),
+        ] {
+            let flags = resolve(values).unwrap();
+            assert_eq!(flags.kwargs["preserve_reasoning"], json!(keep));
+            assert!(!flags.is_empty());
+        }
+        let off = kwargs(&[r#"{"preserve_reasoning": false}"#]).unwrap();
+        assert_eq!(off["preserve_reasoning"], json!(false));
+    }
+
+    /// Upstream applies the later of the two, an order not kept here.
+    #[test]
+    fn a_dedicated_flag_and_a_kwarg_that_disagree_are_refused() {
+        let values = |kwarg: &str| vec![kwarg.to_string()];
+        let thinking = values(r#"{"enable_thinking": false}"#);
+        let effort = values(r#"{"reasoning_effort": "low"}"#);
+        let preserve = values(r#"{"preserve_reasoning": true}"#);
+        let refused = [
+            TemplateFlagValues {
+                kwargs: &thinking,
+                reasoning: Some(true),
+                ..Default::default()
+            },
+            TemplateFlagValues {
+                kwargs: &effort,
+                reasoning_effort: Some("high"),
+                ..Default::default()
+            },
+            TemplateFlagValues {
+                kwargs: &effort,
+                reasoning_effort: Some("default"),
+                ..Default::default()
+            },
+            TemplateFlagValues {
+                kwargs: &preserve,
+                reasoning_preserve: Some(false),
+                ..Default::default()
+            },
+        ];
+        for values in refused {
+            let error = resolve(values).unwrap_err();
+            assert!(error.contains("--chat-template-kwargs"), "{error}");
+        }
+        let agreed = [
+            TemplateFlagValues {
+                kwargs: &thinking,
+                reasoning: Some(false),
+                ..Default::default()
+            },
+            TemplateFlagValues {
+                kwargs: &effort,
+                reasoning_effort: Some("low"),
+                ..Default::default()
+            },
+            TemplateFlagValues {
+                kwargs: &preserve,
+                reasoning_preserve: Some(true),
+                ..Default::default()
+            },
+        ];
+        for values in agreed {
+            resolve(values).unwrap();
+        }
     }
 
     #[test]
@@ -265,18 +383,20 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_overrides_kwargs_and_default_erases() {
-        let values = [r#"{"reasoning_effort": "low"}"#.to_string()];
+    fn reasoning_effort_sets_the_level_and_default_leaves_it_unset() {
         let with = |effort| {
             resolve(TemplateFlagValues {
-                kwargs: &values,
                 reasoning_effort: Some(effort),
                 ..Default::default()
             })
             .unwrap()
-            .kwargs
         };
-        assert_eq!(with("high")["reasoning_effort"], json!("high"));
-        assert!(!with("default").contains_key("reasoning_effort"));
+        assert_eq!(with("high").kwargs["reasoning_effort"], json!("high"));
+        let default = with("default");
+        assert!(!default.kwargs.contains_key("reasoning_effort"));
+        assert!(
+            !default.is_empty(),
+            "--reasoning-effort default is a flag given"
+        );
     }
 }

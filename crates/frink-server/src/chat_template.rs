@@ -216,6 +216,23 @@ impl PromptTemplate {
         Self::build(template, None, None, default_kwargs)
     }
 
+    /// A GGUF's template with its tokens and the server-wide kwargs, as
+    /// [`Self::for_gguf`] builds it, without reading the environment.
+    #[cfg(test)]
+    pub(crate) fn as_served(
+        source: &str,
+        bos_token: &str,
+        eos_token: &str,
+        default_kwargs: Map<String, Value>,
+    ) -> Self {
+        Self::build(
+            JinjaTemplate::from_gguf_metadata(Some(source), None, false, false),
+            Some(bos_token.to_string()),
+            Some(eos_token.to_string()),
+            default_kwargs,
+        )
+    }
+
     fn build(
         template: JinjaTemplate,
         bos_token: Option<String>,

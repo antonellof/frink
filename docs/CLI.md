@@ -50,8 +50,10 @@ to name a real flag of its tool.
 | server | `-a` | One name. A comma-separated list is refused | `/v1/models` serves one model name |
 | cli, server | `--jinja` | Always on; `--no-jinja` is refused | frink always renders the GGUF's own template and has no template-free mode |
 | cli, server | `--chat-template` | Jinja source, or `chatml`. Any other bare name is refused, and `--chat-template-file` follows the same rule | Under `--jinja`, llama.cpp's default, a name like `llama3` compiles as plain text and every prompt becomes that word. Its named templates need `--no-jinja`, which frink does not have |
-| cli, server | `--chat-template-kwargs` | A JSON object, repeatable. `preserve_reasoning` is refused until #508. On the server, the flag replaces `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` rather than merging with it | Accepting a key frink does not act on would be a flag not honoured |
-| cli, server | `--reasoning-effort` | Wins over `reasoning_effort` in `--chat-template-kwargs` whichever comes first | llama.cpp's last flag wins, and frink does not keep the order across two flags |
+| cli, server | `--chat-template-kwargs` | A JSON object, repeatable. On the server, the flag replaces `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` rather than merging with it | A variable stands in for its flag only when the command line does not give that flag |
+| cli, server | `-rea` | Refused beside a `--chat-template-kwargs` that sets `enable_thinking` to the other value | llama.cpp applies the later of the two on the command line, and frink does not keep the order across two flags |
+| cli, server | `--reasoning-effort` | Refused beside a `--chat-template-kwargs` that sets `reasoning_effort` to another value | Same |
+| cli, server | `--reasoning-preserve` | Refused beside a `--chat-template-kwargs` that sets `preserve_reasoning` to the other value. `--no-reasoning-preserve` likewise | Same |
 | cli, server | `-fa` | `on` / `auto` accepted, `off` refused. A bare `-fa` means `auto` | Fused attention is a backend property here; `FRINK_METAL_ATTN=0` or `--device cpu` |
 | bench | `-p` | One value per run; llama-bench's lists and ranges are refused by the parser | Run the command once per value |
 | bench | `-n` | One value per run, as `-p` | Same |
@@ -131,6 +133,7 @@ These have llama.cpp's meaning (differences above): `-m` / `--model`,
 `--warmup` / `--no-warmup`, `--show-timings` / `--no-show-timings`,
 `-co` / `--color`, `--jinja`, `--chat-template`, `--chat-template-file`,
 `--chat-template-kwargs`, `-rea` / `--reasoning`, `--reasoning-effort`,
+`--reasoning-preserve` / `--no-reasoning-preserve`,
 `-fa` / `--flash-attn`, `-st` /
 `--single-turn`, `-e` / `--escape`, `--no-escape`, `--ignore-eos`,
 `--verbose-prompt`, and `--usage` (llama.cpp's third spelling of
@@ -1342,6 +1345,7 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `--prefill-assistant` / `--no-prefill-assistant`, `--jinja`,
 `--chat-template`, `--chat-template-file`, `--chat-template-kwargs`,
 `-rea` / `--reasoning`, `--reasoning-effort`,
+`--reasoning-preserve` / `--no-reasoning-preserve`,
 `--no-warmup` (there is no warm-up pass), `-fa` / `--flash-attn`,
 `-hft` / `--hf-token` (sets `HF_TOKEN` before `-hf` downloads),
 `--offline` / `LLAMA_ARG_OFFLINE` (`-hf` resolves from the cache only),
@@ -1370,11 +1374,16 @@ Notes that are frink's own:
   every load path. Both are checked at startup by rendering one user
   turn, as llama.cpp does, so a template that cannot render stops the
   server before the model loads.
-- `--chat-template-kwargs`, `-rea` and `--reasoning-effort` set
-  `FRINK_CHAT_TEMPLATE_KWARGS`, the variables every render starts from.
-  A request's `chat_template_kwargs` and its top-level `reasoning_effort`
-  or `thinking` win over them, and `reasoning_effort: "none"` clears a
-  default effort.
+- `--chat-template-kwargs`, `-rea`, `--reasoning-effort` and
+  `--reasoning-preserve` set `FRINK_CHAT_TEMPLATE_KWARGS`, the variables
+  every render starts from. A request's `chat_template_kwargs` and its
+  top-level `reasoning_effort` or `thinking` win over them, and
+  `reasoning_effort: "none"` clears a default effort.
+- `preserve_reasoning` is on unless `--no-reasoning-preserve` or a
+  kwarg turns it off, as in llama.cpp. A template reads it as
+  `preserve_thinking`, `clear_thinking`, `truncate_history_thinking` or
+  `drop_thinking`, so GLM-4.7, LFM2.5, LFM3, Nemotron-3, Laguna and
+  DeepSeek-V4 keep earlier turns' reasoning in the prompt.
 - `--reasoning-budget` sets `FRINK_REASONING_BUDGET`, the default a
   request's `reasoning_budget_tokens` falls back to.
 

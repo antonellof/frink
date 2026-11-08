@@ -1,0 +1,13 @@
+<s><|im_start|>system
+List of tools: [{"type": "function", "function": {"name": "get_weather", "description": "Weather for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]<|im_end|>
+<|im_start|>user
+Weather in Rome?<|im_end|>
+<|im_start|>assistant
+<|tool_call_start|>[get_weather(city='Rome')]<|tool_call_end|><|im_end|>
+<|im_start|>tool
+Sunny<|im_end|>
+<|im_start|>assistant
+It is sunny.<|im_end|>
+<|im_start|>user
+And tomorrow?<|im_end|>
+<|im_start|>assistant

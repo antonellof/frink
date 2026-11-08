@@ -1,0 +1,15 @@
+〈|EOS|〉<system>You are a helpful, conversationally-fluent assistant made by Poolside. You are here to be helpful to users through natural language conversations.
+
+### Tools
+
+You may call functions to assist with the user query.
+All available function signatures are listed below:
+<available_tools>
+{"type": "function", "function": {"name": "get_weather", "description": "Weather for a city", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
+</available_tools></system>
+<user>Weather in Rome?</user>
+<assistant><think></think><tool_call>get_weather<arg_key>city</arg_key><arg_value>Rome</arg_value></tool_call></assistant>
+<tool_response>Sunny</tool_response>
+<assistant><think></think>It is sunny.</assistant>
+<user>And tomorrow?</user>
+<assistant><think>
