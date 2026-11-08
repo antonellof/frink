@@ -33,69 +33,58 @@ own. It does not bind to llama.cpp or wrap ggml: the loader, the
 quantized kernels, attention and expert routing are all written here,
 in Rust.
 
-- Everything ships as one 23 MB binary (macOS arm64, with Metal and the
-  server): completions, the API server, `download`, `bench`,
+- **One binary, no Python.** On macOS arm64 it is 23 MB, with Metal and
+  the server built in: completions, the API server, `download`, `bench`,
   `batched-bench`, `quantize`, `imatrix`, `gguf-split` and `verify`.
-  There are no Python wheels to install and no CUDA userspace to match
-  against a driver. For comparison, PyTorch alone is 402 MB before a
-  serving stack sits on top.
-- Weights stay quantized on mmap and are dequantized inside the matmul,
-  so an 8B model fits on a laptop. Supported formats are the K-quants,
-  the IQ tiers, MXFP4, F16 and BF16.
-- It works as a drop-in for llama.cpp. The flags are the same, the
-  sampler chain runs in the same order, and the tools match: `quantize`
-  writes Q8_0 and the K-quants byte-identically to `llama-quantize`,
-  with or without an importance matrix, and `gguf-split`, `imatrix` and
-  `batched-bench` are ports. Tokenization is verified against libllama
-  on twenty checkpoints under both special-token settings, and every
-  engine number in [the speed table](benchmarks/RESULTS.md) was measured
-  against llama.cpp on the same host with the same file. 101
-  architectures run with a logit comparison behind them. Any other
-  architecture stops with an error that says what is missing.
-- The server is OpenAI-compatible. On Metal, concurrent clients share
-  one batched decode worker (llama.cpp slots plus continuous batching,
-  on by default). It also has paged KV shared across conversations,
-  runtime model swap and sleep/wake, slot save and restore that names
-  the checkpoint when it refuses a mismatch, resumable streams,
-  Anthropic and Responses endpoints, and speculative decoding that
-  stays lossless at any temperature. Your existing client can point at
-  it unchanged.
-  [Measured](benchmarks/RESULTS.md#serving-features-measured), that comes
-  to 1.28x aggregate throughput at eight concurrent requests, and 736 of
-  757 prompt tokens reused on a shared system prompt.
-- The full sampling API is there: `n` and `best_of` from one shared
-  prefill, interleaved when streaming; `logprobs` and
-  `prompt_logprobs`; `logit_bias`, `allowed_token_ids` and `bad_words`;
-  `echo`, `truncate_prompt_tokens` and `cache_salt`. A field the server
-  does not implement gets an error naming that field. Silently dropping
-  it would look the same to the client as honouring it.
-- Speculative decoding with a draft model, as llama.cpp's `-md`: a
-  smaller GGUF from the same family and tokenizer proposes up to
-  `--draft-max` tokens and the target checks them in one batched pass.
-  The verification is the speculative-sampling rejection rule, so the
-  text is exactly what the target alone would write, at any
-  temperature; the drafter can only save forward passes, and the run
-  prints its acceptance length and per-position accept rate so you can
-  see whether it did. The server speculates by itself with prompt
-  lookup and reports what it bought in `usage`.
-- Structured output is enforced per token. Given a GBNF grammar, a
-  forced `tool_choice` in ten of the eleven tool-call wire formats, or a
-  tool's own `parameters` schema, a stack machine masks every token that
-  would break the constraint, so the model cannot produce an invalid
-  answer and there is nothing to retry or repair.
-- For agents, reasoning streams into `reasoning_content`, tool calls
-  parse in the eleven formats real checkpoints emit, and prompts are
-  framed by the GGUF's own `tokenizer.chat_template`, which is compiled
-  and evaluated.
-- Mixture-of-experts models get GPU routing, indexed expert GEMMs and
-  residency planning. Experts stream from the checkpoint when they do
-  not fit in memory, and never when they do.
-- Embeddings, reranking and scoring run on real encoder models. Point
-  `-m` at a BGE, E5 or GTE checkpoint and `/v1/embeddings` serves it,
-  pooled the way the file specifies, with no decoder hidden states
-  standing in. A cross-encoder with a rank head answers `/v1/rerank`
-  through that head; `/v1/score` accepts either kind and reports which
-  one answered.
+  There are no wheels to install and no CUDA userspace to match against
+  a driver.
+- **Weights stay quantized.** They are memory-mapped and dequantized
+  inside the matmul, so an 8B model fits on a laptop. K-quants, the IQ
+  tiers, MXFP4, F16 and BF16 all load.
+- **A drop-in for llama.cpp.** The flags, the sampler order and the
+  tools are the same. `quantize` writes Q8_0 and the K-quants
+  byte-identically to `llama-quantize`, with or without an importance
+  matrix. Tokenization is checked against libllama on twenty
+  checkpoints, and 101 architectures run with a logit comparison
+  behind them. Any other architecture stops with an error that says
+  what is missing.
+- **llama-server's chat prompts.** The GGUF's own Jinja chat template
+  renders with the variables llama-server passes (`enable_thinking`,
+  today's date, `preserve_reasoning`), so a thinking model thinks by
+  default and earlier turns keep their reasoning. CI renders every
+  template llama.cpp bundles through both engines and lists each prompt
+  that still differs. `--chat-template`, `--chat-template-kwargs`,
+  `-rea` and `--reasoning-effort` are accepted with llama-server's spelling.
+- **An OpenAI-compatible server.** Point your existing client at it.
+  It also serves the Anthropic and Responses APIs, with paged KV shared
+  across conversations, model swap, sleep and wake, slot save and
+  restore, and resumable streams. On Metal, concurrent clients share
+  one batched decode worker. [Measured](benchmarks/RESULTS.md#serving-features-measured),
+  that is 1.28x aggregate throughput at eight concurrent requests, and
+  736 of 757 prompt tokens reused on a shared system prompt.
+- **The full sampling API.** `n` and `best_of` from one prefill,
+  `logprobs` and `prompt_logprobs`, `logit_bias`, `allowed_token_ids`,
+  `bad_words`, `echo`, `truncate_prompt_tokens` and `cache_salt`. A
+  field the server does not implement is refused by name, never
+  silently dropped.
+- **Structured output, enforced per token.** A GBNF grammar, a JSON
+  schema or a forced `tool_choice` (in ten of the eleven tool-call
+  formats) masks every token that would break it, so there is nothing
+  to retry or repair.
+- **Built for agents.** Reasoning streams into `reasoning_content`, and
+  tool calls parse in the eleven formats real checkpoints emit.
+- **Lossless speculative decoding.** A draft model (`-md`, as in
+  llama.cpp) proposes tokens and the target checks them with the
+  speculative-sampling rejection rule, so the text is exactly the
+  target's at any temperature. The server also speculates on its own
+  with prompt lookup and reports what that saved in `usage`.
+- **Mixture of experts.** GPU routing, indexed expert GEMMs and
+  residency planning. Experts stream from the checkpoint only when they
+  do not fit in memory.
+- **Embeddings, reranking and scoring** on real encoder models. A BGE,
+  E5 or GTE checkpoint serves `/v1/embeddings`, pooled the way the file
+  says. A cross-encoder answers `/v1/rerank` through its rank head, and
+  `/v1/score` takes either.
 
 ## Install
 
@@ -136,36 +125,69 @@ in the CLI or the server.
 
 ## Quick start
 
-```bash
-# 0. Or skip step 1 entirely: -hf is llama.cpp's, and fetches on first use.
-#    Most llama-server flags work as spelled: -c, --api-key, --alias, --jinja.
-frink serve -hf bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M -c 8192 --alias local
+Every command here is spelled as it is in llama.cpp. Frink uses the GPU
+it was built for by default. Add `-ngl 0` to run on the CPU.
 
-# 1. Get a model. No Python, no huggingface_hub: same syntax as `hf download`.
-#    The `:QUANT` tag works here too and picks the file for you.
+### Run a model
+
+`-hf` fetches the GGUF from Hugging Face on first use. The prompt is
+wrapped in the model's own chat template. Add `--no-cnv` for a raw
+completion.
+
+```bash
+frink -hf bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M \
+  -p "Explain quantization in two sentences" -n 128
+```
+
+To keep the file in a folder of your own, download it first. The syntax
+is `hf download`'s, and needs no Python:
+
+```bash
 frink download bartowski/Llama-3.2-3B-Instruct-GGUF \
   Llama-3.2-3B-Instruct-Q4_K_M.gguf --local-dir models
+frink -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p "Hi" -n 64
+```
 
-# 2. Run it. Frink evaluates the GGUF's own chat template and wraps your
-#    prompt in it. Add --no-cnv for a raw completion.
-frink -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf \
-  -p "Explain quantization in two sentences" -n 128 -dev metal -ngl all
+### Serve it
 
-# 3. Or serve it on 127.0.0.1:8383 and point any OpenAI client at /v1.
-#    On Metal, continuous batching is on by default, so several clients can
-#    stream in parallel. `frink-server` is the same server standalone.
-frink serve -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -dev metal -ngl all &
-curl -s -X POST http://127.0.0.1:8383/v1/chat/completions \
+The server listens on `127.0.0.1:8383`. Point any OpenAI client at
+`/v1`. Most llama-server flags work as spelled (`-c`, `--api-key`,
+`--alias`, `--jinja`). `frink-server` is the same server as its own
+binary.
+
+```bash
+frink serve -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -c 8192 --alias local &
+
+curl -s http://127.0.0.1:8383/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"m","messages":[{"role":"user","content":"Hi"}],"max_tokens":64}'
+  -d '{"model": "local", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 64}'
+```
 
-# 4. Check it against llama.cpp on your own machine.
+### Compare it with llama.cpp
+
+`--compare` also runs `llama-bench` on the same file and prints the
+gap:
+
+```bash
 frink bench -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 512 -n 128 -r 3 --compare
+```
 
-# 5. Speculative decoding: a 1B drafter from the same family proposes,
-#    the 3B target verifies. The output is the target's own; the summary
-#    line reports the acceptance length (tokens per verification step).
-#    The drafter runs on the CPU, so the whole run does (-dev cpu).
+On `Q8_0` and `IQ4_NL` frink's logits match llama.cpp's. On the
+K-quants and `IQ4_XS` they drift, for a
+[known reason](docs/plans/llama-cpp-gap-inventory.md) that is not a
+frink bug: llama.cpp quantizes the activations to `Q8_K` before those
+dot products, and frink keeps them in f32. `frink parity` says so when
+it reports `DRIFT`. To compare the two engines, use `Q8_0`.
+[docs/MODELS.md](docs/MODELS.md) lists what runs today, and which
+checkpoints stop with an error instead.
+
+### Speculative decoding
+
+A 1B drafter from the same family proposes and the 3B target verifies,
+so the output is the target's own. The drafter runs on the CPU, so the
+whole run does (`-dev cpu`).
+
+```bash
 frink download bartowski/Llama-3.2-1B-Instruct-GGUF \
   Llama-3.2-1B-Instruct-Q4_K_M.gguf --local-dir models
 frink -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf \
@@ -174,9 +196,8 @@ frink -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf \
   -n 96 --temp 0 --no-cnv -dev cpu
 ```
 
-The run ends with lines like these, from a CPU run of exactly that
-command (the token rate is elided: it is one laptop run, not a
-benchmark):
+The run ends with lines like these, from one CPU run of that command.
+The token rate is left out, because one laptop run is not a benchmark.
 
 ```
 frink: predict 96 tokens, … t/s over 18 verification steps
@@ -184,24 +205,10 @@ frink: acceptance length 5.33 tokens/step, accepted 77 of 81 drafted
 frink: accept rate per position [0.89, 1.00, 1.00, 0.94, 0.93]
 ```
 
-Compare against the same command without `-md` to see whether the
-drafter helps on your text. [docs/CLI.md](docs/CLI.md) has
-`--draft-p-min` and the cases it refuses (grammar-constrained runs,
-recurrent models, a drafter placed on the GPU).
-
-On `Q8_0` and `IQ4_NL`, frink's logits match llama.cpp's. On K-quants
-they drift, for a [known reason](docs/plans/llama-cpp-gap-inventory.md)
-that is not a frink bug: llama.cpp quantizes activations to `Q8_K`
-before the dot product, and frink keeps them in f32.
-
-Despite the similar name, `IQ4_XS` drifts too. ggml declares
-`vec_dot_type = Q8_K` for `IQ4_XS` and `Q8_0` for `IQ4_NL`, so
-`frink parity` on an `IQ4_XS` checkpoint reports `DRIFT` and explains
-why in its output. Use whichever quant you would use with llama.cpp.
-If you want to compare the two engines, use `Q8_0`, which takes
-activation quantization out of the comparison.
-[docs/MODELS.md](docs/MODELS.md) lists what runs today and which
-checkpoints stop with an error instead.
+Run the same command without `-md` to see whether the drafter helps on
+your text. [docs/CLI.md](docs/CLI.md) covers `--draft-p-min` and the
+cases it refuses: grammar-constrained runs, recurrent models, and a
+drafter placed on the GPU.
 
 ## Frink Studio
 
@@ -257,8 +264,8 @@ published separately if you want one rather than the stack:
 [api](https://crates.io/crates/frink-api),
 [metal](https://crates.io/crates/frink-metal),
 [cuda](https://crates.io/crates/frink-cuda),
-[vulkan](https://crates.io/crates/frink-vulkan) (an early Vulkan
-backend, one kernel wide). All share one version.
+[vulkan](https://crates.io/crates/frink-vulkan) (early and opt-in:
+decode matvecs only). All share one version.
 
 ## AI full disclosure
 
