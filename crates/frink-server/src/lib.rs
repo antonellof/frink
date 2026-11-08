@@ -921,8 +921,17 @@ enum StopParam {
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
-    #[serde(default = "default_max_tokens")]
-    max_tokens: usize,
+    /// The output budget, `max_tokens` or `max_completion_tokens`
+    /// (OpenAI's current name), as llama-server aliases them. Read
+    /// through [`Self::output_budget`], never directly.
+    #[serde(default)]
+    max_tokens: Option<usize>,
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
+    /// `false` returns at most one tool call. Absent or `true` returns
+    /// every call the model made.
+    #[serde(default)]
+    parallel_tool_calls: Option<bool>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
@@ -1113,11 +1122,30 @@ const THINKING_KWARG_KEYS: [&str; 4] = [
 /// `"None"` means the same thing.
 const DISABLE_EFFORTS: [&str; 2] = ["none", "off"];
 
-fn default_max_tokens() -> usize {
-    DEFAULT_CHAT_MAX_TOKENS
-}
-
 impl ChatCompletionRequest {
+    /// How this request's output is read: the formats the served
+    /// template implies, and `parallel_tool_calls: false` as at most one
+    /// call. ONE constructor, so the whole-answer route and the stream
+    /// cannot read the same request two ways.
+    pub(crate) fn output_posture(
+        &self,
+        reasoning: Option<crate::policy::parser::ReasoningFormat>,
+        tools: crate::policy::parser::ToolCallFormat,
+        prompt: &str,
+    ) -> output::OutputPosture {
+        output::OutputPosture::resolve_full(reasoning, tools, prompt)
+            .one_call(self.parallel_tool_calls == Some(false))
+    }
+
+    /// `max_completion_tokens`, else `max_tokens`, else a whole answer
+    /// ([`DEFAULT_CHAT_MAX_TOKENS`]). Two that disagree are refused in
+    /// `validate_supported_fields` before this is read.
+    pub(crate) fn output_budget(&self) -> usize {
+        self.max_completion_tokens
+            .or(self.max_tokens)
+            .unwrap_or(DEFAULT_CHAT_MAX_TOKENS)
+    }
+
     /// This request's sampler knobs. Resolved to `SamplingParams` by
     /// `sampling_knobs`, shared with `/v1/completions`, so the two
     /// routes cannot disagree about what a knob means or which ones
@@ -1373,10 +1401,26 @@ impl ChatCompletionRequest {
         // wrote, and the engine cannot serve a zero-token budget: the
         // request would never become decodable and the client would wait
         // for an answer that cannot arrive.
-        if self.max_tokens == 0 {
+        if let (Some(old), Some(new)) = (self.max_tokens, self.max_completion_tokens) {
+            if old != new {
+                return Err(invalid_request(
+                    &format!(
+                        "max_tokens ({old}) and max_completion_tokens ({new}) name two output \
+                         budgets; send one"
+                    ),
+                    "max_completion_tokens",
+                ));
+            }
+        }
+        if self.output_budget() == 0 {
+            let field = if self.max_completion_tokens.is_some() {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
             return Err(invalid_request(
-                "max_tokens must be at least 1",
-                "max_tokens",
+                &format!("{field} must be at least 1"),
+                field,
             ));
         }
         // An unrecognized switch is refused rather than read as "on":
@@ -2447,10 +2491,23 @@ fn tool_preamble(tools: &[ToolDef]) -> String {
 fn tool_call_deltas(
     events: Vec<crate::policy::parser::ToolCallEvent>,
     opened: &std::cell::Cell<usize>,
+    one_call: bool,
 ) -> (String, Vec<ToolCallDelta>) {
     let mut text = String::new();
     let mut deltas = Vec::new();
     for event in events {
+        // `parallel_tool_calls: false`: a call after the first is not
+        // sent, as the whole-answer parse drops it
+        // (`output::OutputPosture::one_call`).
+        let beyond_first = match &event {
+            crate::policy::parser::ToolCallEvent::CallStart { index, .. }
+            | crate::policy::parser::ToolCallEvent::CallArguments { index, .. }
+            | crate::policy::parser::ToolCallEvent::CallEnd { index, .. } => *index > 0,
+            crate::policy::parser::ToolCallEvent::Text(_) => false,
+        };
+        if one_call && beyond_first {
+            continue;
+        }
         match event {
             crate::policy::parser::ToolCallEvent::Text(chunk) => text.push_str(&chunk),
             crate::policy::parser::ToolCallEvent::CallStart { index, name } => {
@@ -2764,7 +2821,7 @@ async fn chat_completions_full(
     // calls and reasoning in its own right: a tool call in choice 2 is
     // a tool call, and reading only choice 0 would return the others
     // as raw marker text.
-    let posture = output::OutputPosture::resolve_full(
+    let posture = req.output_posture(
         active.reasoning_format(),
         active.tool_call_format(),
         &prompt,
@@ -2902,7 +2959,7 @@ async fn chat_completions_stream(
     // How to read this stream, fixed before the first token: the family
     // from the served checkpoint, and whether the prompt that was
     // actually rendered left the model inside a reasoning block.
-    let posture = output::OutputPosture::resolve_full(
+    let posture = req.output_posture(
         active.reasoning_format(),
         active.tool_call_format(),
         &prompt,
@@ -2990,6 +3047,7 @@ async fn chat_completions_stream(
                         crate::chat_stream_choice::ChoiceEmitter::new(
                             posture.reasoning_parser(),
                             tools_active.then(|| posture.tool_call_parser(&offered_tools)),
+                            posture.is_one_call(),
                         )
                     })
                     .collect(),
@@ -3417,8 +3475,8 @@ fn protected_routes() -> Router<Arc<AppState>> {
         .route(routes::ADMIN_MODELS_LOAD, post(admin::load_model))
         .route(routes::ADMIN_MODELS_UNLOAD, post(admin::unload_model))
         // Not under `/admin`: a scheduler that puts a server to sleep
-        // between jobs is not administering it, and vLLM's own routes
-        // are at the root.
+        // between jobs is not administering it, and the clients that
+        // call these routes expect them at the root.
         .route(routes::SLEEP, post(admin::sleep))
         .route(routes::WAKE_UP, post(admin::wake_up))
         .route(routes::IS_SLEEPING, get(admin::is_sleeping))
@@ -8223,11 +8281,11 @@ pub(crate) mod tests {
         let mut text = String::new();
         for piece in wire.as_bytes().chunks(7) {
             let chunk = String::from_utf8_lossy(piece).into_owned();
-            let (more_text, more) = tool_call_deltas(parser.push(&chunk), &opened);
+            let (more_text, more) = tool_call_deltas(parser.push(&chunk), &opened, false);
             text.push_str(&more_text);
             deltas.extend(more);
         }
-        let (more_text, more) = tool_call_deltas(parser.finish(), &opened);
+        let (more_text, more) = tool_call_deltas(parser.finish(), &opened, false);
         text.push_str(&more_text);
         deltas.extend(more);
 
@@ -8276,10 +8334,10 @@ pub(crate) mod tests {
         let mut text = String::new();
         for piece in wire.as_bytes().chunks(5) {
             let chunk = String::from_utf8_lossy(piece).into_owned();
-            let (more, _) = tool_call_deltas(parser.push(&chunk), &opened);
+            let (more, _) = tool_call_deltas(parser.push(&chunk), &opened, false);
             text.push_str(&more);
         }
-        let (more, _) = tool_call_deltas(parser.finish(), &opened);
+        let (more, _) = tool_call_deltas(parser.finish(), &opened, false);
         text.push_str(&more);
 
         assert_eq!(opened.get(), 1);
@@ -8944,6 +9002,111 @@ pub(crate) mod tests {
         serde_json::from_value(value).expect("request")
     }
 
+    /// `max_completion_tokens` is the output budget, as llama-server
+    /// reads it. It agrees with `max_tokens` or the request is refused
+    /// naming both, and a zero names the field the caller sent.
+    #[test]
+    fn max_completion_tokens_is_the_output_budget() {
+        let budget = |extra: serde_json::Value| {
+            let mut body =
+                serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let req = chat_request(body);
+            req.validate_supported_fields()
+                .map(|()| req.output_budget())
+        };
+        assert_eq!(
+            budget(serde_json::json!({"max_completion_tokens": 7})).unwrap(),
+            7
+        );
+        assert_eq!(budget(serde_json::json!({"max_tokens": 9})).unwrap(), 9);
+        assert_eq!(
+            budget(serde_json::json!({"max_tokens": 5, "max_completion_tokens": 5})).unwrap(),
+            5
+        );
+        let (status, payload) =
+            budget(serde_json::json!({"max_tokens": 5, "max_completion_tokens": 6})).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["error"]["param"], "max_completion_tokens");
+        let (_, payload) = budget(serde_json::json!({"max_completion_tokens": 0})).unwrap_err();
+        assert_eq!(payload["error"]["param"], "max_completion_tokens");
+        let (_, payload) = budget(serde_json::json!({"max_tokens": 0})).unwrap_err();
+        assert_eq!(payload["error"]["param"], "max_tokens");
+    }
+
+    /// The budget the generation runs under is the alias's.
+    #[test]
+    fn max_completion_tokens_reaches_the_generation_params() {
+        let req = chat_request(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 11,
+        }));
+        let params = req
+            .generation_params_for_template(
+                &graded_template(),
+                "Qwen3-8B",
+                crate::sampling_knobs::SamplerModel::absent(),
+            )
+            .expect("compiles");
+        assert_eq!(params.max_tokens, 11);
+    }
+
+    /// The request's `parallel_tool_calls` reaches the posture both
+    /// routes read: `false` is one call, absent and `true` are all.
+    #[test]
+    fn parallel_tool_calls_false_reaches_the_output_posture() {
+        let posture = |extra: serde_json::Value| {
+            let mut body =
+                serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            chat_request(body)
+                .output_posture(None, crate::policy::parser::ToolCallFormat::Qwen25, "")
+                .is_one_call()
+        };
+        assert!(posture(serde_json::json!({"parallel_tool_calls": false})));
+        assert!(!posture(serde_json::json!({"parallel_tool_calls": true})));
+        assert!(!posture(serde_json::json!({})));
+    }
+
+    /// `parallel_tool_calls: false` on the stream: the second call's
+    /// events are not sent, and the first call and the text are.
+    #[test]
+    fn a_stream_with_one_call_sends_only_the_first() {
+        use crate::policy::parser::ToolCallEvent as E;
+        let events = || {
+            vec![
+                E::Text("ok ".into()),
+                E::CallStart {
+                    index: 0,
+                    name: "f".into(),
+                },
+                E::CallArguments {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                E::CallStart {
+                    index: 1,
+                    name: "g".into(),
+                },
+                E::CallArguments {
+                    index: 1,
+                    fragment: "{}".into(),
+                },
+            ]
+        };
+        let opened = std::cell::Cell::new(0);
+        let (text, both) = tool_call_deltas(events(), &opened, false);
+        assert_eq!((text.as_str(), both.len(), opened.get()), ("ok ", 4, 2));
+        let opened = std::cell::Cell::new(0);
+        let (text, one) = tool_call_deltas(events(), &opened, true);
+        assert_eq!((text.as_str(), one.len(), opened.get()), ("ok ", 2, 1));
+    }
+
     /// The wire field reaches the sampler, compiled.
     ///
     /// Serde is the failure mode here, not the grammar engine: an
@@ -9260,7 +9423,7 @@ pub(crate) mod tests {
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
         }));
-        assert_eq!(req.max_tokens, DEFAULT_CHAT_MAX_TOKENS);
+        assert_eq!(req.output_budget(), DEFAULT_CHAT_MAX_TOKENS);
     }
 
     /// A knob the wire accepts must reach the sampler. Serde declaring

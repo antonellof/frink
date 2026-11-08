@@ -698,7 +698,9 @@ fn prepare_prompt(
         samplers: None,
         model,
         messages: convert_prompt(prompt),
-        max_tokens,
+        max_tokens: Some(max_tokens),
+        max_completion_tokens: None,
+        parallel_tool_calls: None,
         temperature: None,
         top_p: None,
         // Neither wire has a min_p; 0.0 (off) is what None resolves to.
@@ -2321,7 +2323,7 @@ mod tests {
             "stop_sequences": ["END"],
             "messages": [{"role": "user", "content": "hi"}],
         }));
-        assert_eq!(prepared.chat.max_tokens, 128);
+        assert_eq!(prepared.chat.output_budget(), 128);
         assert_eq!(prepared.chat.temperature, Some(0.5));
         assert_eq!(prepared.chat.top_p, Some(0.9));
         assert_eq!(prepared.chat.top_k, Some(40));

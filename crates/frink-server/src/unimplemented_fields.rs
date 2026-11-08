@@ -119,7 +119,7 @@ pub(crate) struct UnimplementedFields {
     /// `stop` ENDS the generation, this one steers around a token.
     /// SERVED; see above.
     pub(crate) bad_words: Option<Vec<String>>,
-    /// vLLM's `cache_salt`: the caller's prefix-cache namespace.
+    /// `cache_salt`: the caller's prefix-cache namespace.
     ///
     /// Deserialized here because the table is where every route reads
     /// its shared fields from, but it is SERVED rather than refused --

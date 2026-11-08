@@ -194,6 +194,12 @@ pub(crate) struct CompletionsRequest {
     /// `DEFAULT_CHAT_MAX_TOKENS`).
     #[serde(default = "default_max_tokens")]
     max_tokens: usize,
+    /// Declared to be refused: this route answers in one JSON body, and
+    /// a client that asked for a stream and got one would read nothing
+    /// until the end. `/completion` (llama.cpp's own) and
+    /// `/v1/chat/completions` stream.
+    #[serde(default)]
+    stream: Option<bool>,
     #[serde(default)]
     model: Option<String>,
     // Sampler knobs. These four were NOT declared until now, so serde
@@ -255,7 +261,7 @@ pub(crate) struct CompletionsRequest {
     /// caller has to guess at.
     #[serde(default)]
     logprobs: Option<serde_json::Value>,
-    /// vLLM's `prompt_logprobs: N`: score the PROMPT rather than the
+    /// `prompt_logprobs: N`: score the PROMPT rather than the
     /// completion. Read as a `Value` so a non-integer is refused by
     /// name.
     #[serde(default)]
@@ -424,6 +430,14 @@ impl CompletionsRequest {
         if self.suffix.is_some() {
             return Err(crate::unsupported_feature(
                 "`suffix` is not implemented on /v1/completions (see docs/API.md)",
+            ));
+        }
+        // `false` is what this route does, so it is served. `true` used
+        // to be accepted and answered in one JSON body.
+        if self.stream == Some(true) {
+            return Err(crate::unsupported_feature(
+                "`stream` is not implemented on /v1/completions: use /completion \
+                 (llama.cpp's native endpoint) or /v1/chat/completions, which both stream",
             ));
         }
         // Compiled here so an unparseable grammar is a 400 before any
@@ -737,7 +751,7 @@ pub async fn completions(
         "model": model_name,
         "choices": rendered,
         "usage": usage,
-        // vLLM's field: one entry per PROMPT token, the first `null`
+        // One entry per PROMPT token, the first `null`
         // because nothing predicted it. Absent unless asked.
         "prompt_logprobs": match n_prompt {
             Some(k) => crate::logprobs::render_prompt(
@@ -1336,6 +1350,23 @@ mod tests {
                 .contains("suffix"),
             "the refusal must name `suffix`"
         );
+    }
+
+    /// A stream this route cannot send is refused by name, and the value
+    /// that means what it does is served.
+    #[test]
+    fn stream_is_refused_by_name_and_false_is_served() {
+        let (status, payload) = request(serde_json::json!({"prompt": "hi", "stream": true}))
+            .validate()
+            .expect_err("`stream: true` must be refused");
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("`stream`"));
+        request(serde_json::json!({"prompt": "hi", "stream": false}))
+            .validate()
+            .expect("`stream: false` is what this route does");
     }
 
     /// `{"type": "text"}` is the default and means nothing to refuse;

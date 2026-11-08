@@ -1474,7 +1474,7 @@ pub struct GenerationParams {
     /// STRINGS and turning them into ids needs the model's tokenizer:
     /// one seam that has both, rather than two answers that can drift.
     pub token_mask: crate::token_mask::TokenMask,
-    /// vLLM's `cache_salt`: which caller's namespace this request's
+    /// `cache_salt`: which caller's namespace this request's
     /// prefix cache entries belong to, hashed to a `u64`.
     ///
     /// `None` is the shared namespace, which is what every request got

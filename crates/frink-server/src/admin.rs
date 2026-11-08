@@ -630,9 +630,9 @@ pub(crate) async fn unload_model(State(state): State<Arc<AppState>>) -> Response
 /// server can wake itself. That is the difference that makes the pair
 /// usable from a scheduler which does not know the deployment.
 ///
-/// **One level, and it is honest about that.** vLLM offers two --
-/// offload the weights to host memory, or discard them -- because it
-/// holds them in device memory it allocated. frink mmaps its weights,
+/// **One level, and it is honest about that.** A server that holds its
+/// weights in device memory it allocated can offer two: offload them
+/// to host memory, or discard them. frink mmaps its weights,
 /// so "discard" is what dropping the handle already does and the OS
 /// page cache decides how much of a reload touches disk. What sleep
 /// really frees here is the allocations around the weights: the KV
