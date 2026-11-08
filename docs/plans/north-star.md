@@ -39,7 +39,7 @@ no figure of its own. Checked 2026-11-08.
 | 1. Loads | `frink archs`, `tests/arch_coverage.rs`, the triage in [`MODELS.md`](../MODELS.md) | Every text-generation architecture llama.cpp names runs or refuses by name. A handful refuse as unaudited and need new code |
 | 2. Same tokens | `frink parity` and the decode-step goldens in CI's oracle job; the render census (`crates/frink-server/tests/llama_renders/known_differences.txt`) for prompts | Every served architecture matches. Every chat-prompt difference left is a deviation the docs list |
 | 3. Backend | [`KERNELS.md`](../KERNELS.md), generated and drift-tested | Every kind has a kernel on CPU, Metal and CUDA. Some CUDA kinds have never run on a GPU (#405). Vulkan runs decode matvecs for a few kinds, opt-in (#409) |
-| 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Most published rows predate the current code and are marked stale |
+| 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Most published rows predate the current code and are marked stale (#542) |
 | 5. Same command | `crates/frink-cli/src/llama_flags.rs`, which pins the gap | The common flags work. A long tail of `llama-cli` and `llama-server` flags and `LLAMA_ARG_*` variables is still unaccepted (#404) |
 
 ## Priorities
@@ -47,8 +47,7 @@ no figure of its own. Checked 2026-11-08.
 In order. Ranked by what each buys the people the goal names, then by
 how cheaply it can be verified. Code that needs hardware is finished
 with its ignored tests first, and the checks are batched into one
-rental, asked for before it is booked. "Untracked" means the item still
-needs an issue before it is started.
+rental, asked for before it is booked (#542).
 
 ### The parity floor
 
@@ -58,12 +57,9 @@ needs an issue before it is started.
    largest gap, on the hardware most people own. Next step: the batched
    rental.
 2. **Same commands, same API.** The flag and `LLAMA_ARG_*` tail (#404).
-   OpenAI fields the server accepts and ignores
-   (`max_completion_tokens`, `stream_options`, `user`,
-   `parallel_tool_calls`, `stream` on `/v1/completions`), which breaks
-   the rule that an unimplemented field is refused by name (untracked).
    The `llama-server` endpoints frink does not serve: `/infill`,
-   `/props`, `GET /slots`, `/apply-template`, slot erase (untracked).
+   `/props`, `GET /slots`, `/apply-template`, slot erase (#534), and
+   `stream` on `/v1/completions`, which is refused by name today.
 3. **Numerics.** The activation quantizers' last bit (#476), and the
    statistic `frink bench` prints (#481).
 
@@ -77,16 +73,16 @@ buys on one machine.
    with prompt lookup or a draft model (`-md`, as `llama-server`) on its
    private loop, so on Metal, where continuous batching is the default,
    it does not speculate at all. Next: speculation inside the batch,
-   then multi-token-prediction heads as a second drafter (untracked).
-5. **Scheduling.** Preemption on by default after a measurement, and
-   a request priority (#408). `/metrics` reports prefix reuse and the
+   then multi-token-prediction heads as a second drafter (#533).
+5. **Scheduling.** Preemption on by default after a measurement (#408),
+   and a request priority (#541). `/metrics` reports prefix reuse and the
    latency histograms a scheduler is tuned against.
 6. **Memory.** Sliding-window eviction in the paged store and the pool
    (#61). KV quantization on the host and CUDA stores, not only Metal's
-   device store (untracked). The disk KV tier wired into serving
-   (untracked). MoE models larger than memory (#406).
+   device store (#535). The disk KV tier wired into serving (#536). MoE
+   models larger than memory (#406).
 7. **CUDA graph capture for decode.** `FRINK_CUDA_GRAPH` exists and
-   changes nothing yet (untracked). Rides the same rental as item 1.
+   changes nothing yet (#537). Rides the same rental as item 1.
 
 ### Reach
 
@@ -96,20 +92,21 @@ buys on one machine.
 9. **One file per architecture** (#403,
    [ADR 0003](../adr/0003-one-file-per-architecture.md)), then the
    architectures that refuse as unaudited, from the 2026-10-28 pin move
-   and the triage in [`MODELS.md`](../MODELS.md) (untracked).
-10. **Other GPUs.** Vulkan beyond decode matvecs (#409), and AMD:
+   and the triage in [`MODELS.md`](../MODELS.md) (#538).
+10. **Other GPUs.** Vulkan beyond decode matvecs (#409, with #543), and AMD:
     ROCm on RDNA and CDNA, and the Ryzen AI NPU spike (#494,
     [`amd.md`](amd.md)).
 11. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
-    quantizing a BF16 checkpoint while loading it (untracked).
+    quantizing a BF16 checkpoint while loading it (#539).
 12. **The CPU and Metal leftovers.** CPU decode's quiet-host receipt
     and the last fixed threshold (#27). Bonsai's PTQ1_0 prefill GEMM on
-    Metal, decode being at parity (untracked).
+    Metal, decode being at parity (#540).
 
 **Not now:** tensor and pipeline parallel and multi-node serving,
 prefill/decode disaggregation, MCP tool invocation, a desktop shell,
 and the 2023 architecture tail beyond what the generic path covers.
-Docker images are small and can land whenever someone wants them. Each
+Container images are small and can land whenever someone wants them
+(#544). Each
 comes back when the items above are done, or when someone argues it
 ahead of one.
 
