@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-11-08
+
 ### Added
 
 - **`--chat-template`, `--chat-template-file`, `--chat-template-kwargs`,
