@@ -17,6 +17,7 @@ comes back the same way.
 | `POST /completion` · `POST /completions` | llama.cpp's native completion endpoint, JSON + its own SSE shape. Not an alias of the line above (see below) |
 | `POST /v1/tokenize` · `POST /tokenize` | Supported. The unprefixed spelling is llama.cpp's, on the same handler (see below) |
 | `POST /v1/detokenize` · `POST /detokenize` | Supported, same aliasing |
+| `POST /apply-template` | llama-server's prompt preview: a chat completions body in, `{"prompt": ...}` out, nothing generated. The prompt is the one `/v1/chat/completions` would decode, through the same rendering |
 | `POST /v1/score` · `POST /score` | Sentence-pair scoring. One text against many, or two lists of the same length paired element by element; different lengths are a **400** naming both counts. A cross-encoder answers with its head, a bi-encoder with the cosine of two embeddings, and `frink_score_kind` says which. A generative model is a **501** |
 | `POST /v1/embeddings` | Supported. A real BERT/BGE encoder when one is loaded (`cls`/`mean`/`last`, L2-normalized), otherwise a mean/last pool of a GGUF decoder's hidden states (see below) |
 | `POST /v1/rerank` · `POST /rerank` | Cross-encoder reranking with the checkpoint's own classification head. The unprefixed spelling is llama.cpp's, on the same handler (see below) |
@@ -1514,9 +1515,9 @@ disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
 speculative decoding for grammar-constrained, paged or continuously
 batched requests, so their speculation fields in `usage` are absent · llama.cpp's `/infill`,
-`/props`, `GET /slots` (the live slot listing; `POST /slots/{id}` save
-and restore is supported, see above) and `/apply-template`, none of
-which has a frink counterpart.
+`/props` and `GET /slots` (the live slot listing; `POST /slots/{id}` save
+and restore is supported, see above), none of which has a frink
+counterpart yet (#534).
 
 A few request fields deserialize and then go nowhere, accepted so a
 stock client's body does not fail validation over something this server

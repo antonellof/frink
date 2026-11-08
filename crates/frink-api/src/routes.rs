@@ -54,6 +54,11 @@ pub const TOKENIZE: &str = "/tokenize";
 /// handler (`tools/server/server.cpp:260`). The response carries the
 /// text under both `content` (llama.cpp's key) and `text` (frink's).
 pub const DETOKENIZE: &str = "/detokenize";
+
+/// llama-server's prompt preview (`tools/server/server.cpp`): a chat
+/// request in, the rendered prompt out as `{"prompt": ...}`, nothing
+/// generated.
+pub const APPLY_TEMPLATE: &str = "/apply-template";
 pub const V1_EMBEDDINGS: &str = "/v1/embeddings";
 
 /// Cross-encoder reranking: one query against N documents, scored by
