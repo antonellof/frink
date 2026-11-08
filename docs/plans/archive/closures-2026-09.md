@@ -6,7 +6,7 @@ moved here from `CLAUDE.md` on 2026-10-28, word for word, so that file
 could stay short guidance. Current counts live in code
 (`capability::AUDITED_GENERIC_GQA`) and in `docs/MODELS.md`; the
 current reference pin and its census are in
-[`../parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md).
+[`../parity-audit-2026-10-28.md`](../parity-audit-2026-10-28.md).
 Counts and file sizes below are as of the day each paragraph was
 written.
 

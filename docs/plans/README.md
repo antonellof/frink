@@ -28,6 +28,11 @@ become ADRs and the plan moves to `archive/`
 
 ## Audits
 
+- **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)**, the
+  llama.cpp surface at the pinned commit: its new architecture names,
+  the served behaviour that moved upstream, and what was fixed.
+  `tests/oracle_manifest.rs` holds its title to `tools/llama_cpp_pin`,
+  so it stays here until the pin moves and a new audit replaces it.
 - **[`serving-parity-audit.md`](serving-parity-audit.md)**, continuous
   batching, paged KV, prefix caching and cache-aware admission read
   against the code, every claim carrying the line that decides it
