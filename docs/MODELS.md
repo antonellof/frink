@@ -113,7 +113,7 @@ line that decides it, so trust `frink -m <file>` over this table.
 The count was 4 until 2026-10-28, when the llama.cpp pin moved from
 `5b59b83` to `604cc430` and seven of its thirteen new architecture names
 turned out to be generic-path candidates
-([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md)).
+([`plans/parity-audit-2026-10-28.md`](plans/archive/parity-audit-2026-10-28.md)).
 Because upstream keeps adding architectures, this count rises whenever
 the pin moves. Of the two that read as a single match arm, `lfm3` closed
 the same day on a libllama golden and a 32-step greedy decode, and

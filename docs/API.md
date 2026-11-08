@@ -1502,4 +1502,4 @@ has no use for: `metadata` on `/v1/messages`, and `store`, `metadata`
 and `parallel_tool_calls` on `/v1/responses`. Everything else this
 server does not implement is refused by name.
 
-See [`ROADMAP.md`](ROADMAP.md).
+See [`plans/north-star.md`](plans/north-star.md).

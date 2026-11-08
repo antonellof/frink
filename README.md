@@ -20,7 +20,7 @@
 **[Benchmarks](benchmarks/README.md)** ·
 **[Studio UI](ui/)** ·
 **[Agents](docs/AGENTS_COOKBOOK.md)** ·
-**[Roadmap](docs/ROADMAP.md)** ·
+**[Roadmap](docs/plans/north-star.md)** ·
 **[Changelog](CHANGELOG.md)** ·
 **[Contributing](CONTRIBUTING.md)**
 
@@ -174,7 +174,7 @@ frink bench -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 512 -n 128 -r 3 --com
 
 On `Q8_0` and `IQ4_NL` frink's logits match llama.cpp's. On the
 K-quants and `IQ4_XS` they drift, for a
-[known reason](docs/plans/llama-cpp-gap-inventory.md) that is not a
+[known reason](docs/plans/archive/llama-cpp-gap-inventory.md) that is not a
 frink bug: llama.cpp quantizes the activations to `Q8_K` before those
 dot products, and frink keeps them in f32. `frink parity` says so when
 it reports `DRIFT`. To compare the two engines, use `Q8_0`.

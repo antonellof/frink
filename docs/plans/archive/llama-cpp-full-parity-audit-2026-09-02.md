@@ -1,6 +1,6 @@
 # llama.cpp full parity audit (2026-09-02)
 
-**Companion to** [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) (evidence-backed differential) and [`llama-cpp-parity-review-2026-09-02.md`](llama-cpp-parity-review-2026-09-02.md) (prioritized actions). This document is the **complete audit run**: file-by-file C++→Rust mapping, live `frink parity` sweep on all local checkpoints, and a ranked priority plan.
+**Companion to** [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) (evidence-backed differential) and [`llama-cpp-parity-review-2026-09-02.md`](llama-cpp-parity-review-2026-09-02.md) (prioritized actions). This document is the **complete audit run**: file-by-file C++→Rust mapping, live `frink parity` sweep on all local checkpoints, and a ranked priority plan.
 
 **North star:** same GGUF, same command shapes, same or better performance on hardware people own ([`north-star.md`](../north-star.md)).
 

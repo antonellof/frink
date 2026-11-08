@@ -882,7 +882,7 @@ tokenization and chunking agree.
 The gaps are not noise, and their shape is informative. frink sits below llama.cpp on every quantized checkpoint and the gap
 widens as the quant coarsens. That is the `vec_dot_type` difference this
 repo already documents
-([`plans/llama-cpp-gap-inventory.md`](plans/llama-cpp-gap-inventory.md)
+([`plans/llama-cpp-gap-inventory.md`](plans/archive/llama-cpp-gap-inventory.md)
 §10) showing up on a second axis, with the sign it should have:
 llama.cpp quantizes the activation to the weight's vec_dot type and
 frink keeps it in f32, so frink is slightly less surprised. Qwen3 is

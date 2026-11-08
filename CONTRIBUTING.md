@@ -130,10 +130,10 @@ that is not on an audited list is refused, and each refusal says why
 | `docs/AGENTS_COOKBOOK.md` | Pointing an IDE or agent at the server |
 | `benchmarks/RESULTS.md` | Speed vs llama.cpp (generated) |
 | `benchmarks/README.md` | How those numbers are measured |
-| `docs/ROADMAP.md` | Planned work, summarised |
+| `docs/plans/north-star.md` | The goal and the ranking of the open work |
 | `docs/plans/README.md` | Index of the plans, in priority order |
 
 Do not duplicate those. Plans live in `docs/plans/`, one file each,
-listed in `docs/plans/README.md`; `ROADMAP.md` summarises them. Git
+listed in `docs/plans/README.md`, and `north-star.md` ranks them. Git
 holds the history. Keep counts that go stale fast (test totals and the like) out
 of prose.

@@ -104,7 +104,7 @@ Not here:
 - **Serving integration with a model drafter.** Since 0.28.0 `frink-server`
   speculates with prompt lookup and fills the acceptance metrics when it
   does. It cannot load a draft model; that is `spec-server-integration` and
-  [`../server-speculative-decoding.md`](../server-speculative-decoding.md).
+  [`../server-speculative-decoding.md`](../archive/server-speculative-decoding.md).
 
 ## The constraint that decides whether this plan is real
 
@@ -134,7 +134,7 @@ whenever a checkpoint does appear.
 **Where the go/no-go stands, 2026-10-28.** Question (2) has moved:
 llama.cpp at the `604cc430` pin names a `dflash` architecture and has a
 `src/models/dflash.cpp` graph
-([`../parity-audit-2026-10-28.md`](../parity-audit-2026-10-28.md) lists it
+([`../parity-audit-2026-10-28.md`](../archive/parity-audit-2026-10-28.md) lists it
 among the callers of several builder changes), so a GGUF representation
 exists and its tensor names and keys can be settled by reading. frink
 catalogs `dflash` as enum-only ("speculative draft head; not a standalone

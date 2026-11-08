@@ -279,7 +279,7 @@ either pool: a fixed cost of about 60 ms per token (#128).
 
 ## Coverage: which kinds have a kernel
 
-This table is history; [`docs/KERNELS.md`](../KERNELS.md) is generated
+This table is history; [`docs/KERNELS.md`](../../KERNELS.md) is generated
 from the dispatch and is the current answer (#405 closed the CUDA
 rows, matvec, GEMM and get_rows, pending a hardware run).
 
