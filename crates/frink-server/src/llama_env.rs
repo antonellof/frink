@@ -51,6 +51,9 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_BATCH", "batch-size"),
     ("LLAMA_ARG_UBATCH", "ubatch-size"),
     ("LLAMA_ARG_SLOT_SAVE_PATH", "slot-save-path"),
+    ("LLAMA_ARG_SPEC_DRAFT_MODEL", "model-draft"),
+    ("LLAMA_ARG_DRAFT_MAX", "draft-max"),
+    ("LLAMA_ARG_SPEC_DRAFT_P_MIN", "draft-p-min"),
     ("LLAMA_ARG_THINK_BUDGET", "reasoning-budget"),
     ("LLAMA_ARG_PREFILL_ASSISTANT", "prefill-assistant"),
     // llama.cpp declares the plain `HF_TOKEN` on `--hf-token`, which is

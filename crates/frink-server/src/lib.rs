@@ -83,6 +83,7 @@ mod sampling_knobs;
 mod sampling_loop;
 mod score;
 mod security;
+mod server_draft;
 mod serving;
 mod session;
 mod slots;
@@ -157,6 +158,9 @@ pub(crate) struct GgufModel {
     bos_id: Option<usize>,
     is_synthetic: bool,
     chat_template: chat_template::PromptTemplate,
+    /// `--model-draft`, checked against this model when it was
+    /// activated (`server_draft::ServerDraft::check`).
+    draft: Option<server_draft::ServerDraft>,
 }
 
 pub(crate) struct KimiModel {
@@ -511,6 +515,9 @@ pub(crate) struct AppState {
     /// worker, decided once at startup from the same env var and
     /// exclusions as the initial load.
     pub(crate) continuous_batching_enabled: bool,
+    /// `--model-draft`, loaded at startup. A swapped-in model is
+    /// checked against it before it is published (`admin`).
+    pub(crate) draft: Option<server_draft::ServerDraft>,
     /// Serializes private-loop Metal decodes when continuous batching is
     /// off. Shared `metal_attn_kv` is not safe across concurrent
     /// `forward_token` calls yet; see `docs/plans/archive/metal-parallel-concurrency.md`.
@@ -2244,6 +2251,7 @@ fn run_generation_emit(
                     paged_kv,
                     prefix_cache,
                     ceiling,
+                    m.draft.as_ref(),
                     |choice, chunk| {
                         chunks[choice].push(chunk.to_string());
                         // Every choice streams, each saying which it
@@ -3645,6 +3653,7 @@ pub(crate) fn activate_loaded_model(
     enable_continuous_batching: bool,
     path: Option<&str>,
     paged_kv: Option<&generate::PagedKvConfig>,
+    draft: Option<&server_draft::ServerDraft>,
 ) -> Activated {
     match loaded {
         model::LoadedModel::Gguf(g) => {
@@ -3683,6 +3692,7 @@ pub(crate) fn activate_loaded_model(
                     bos_id: g.bos_id,
                     is_synthetic: g.is_synthetic,
                     chat_template: g.chat_template,
+                    draft: draft.cloned(),
                 }))),
                 batcher,
                 Some(ceiling),
@@ -3751,6 +3761,8 @@ pub(crate) fn activate_loaded_model(
 struct StartupModels {
     loaded: model::LoadedModel,
     embedding: Option<Arc<frink_models::EmbeddingModel>>,
+    /// `--model-draft`, already checked against `loaded`.
+    draft: Option<server_draft::ServerDraft>,
 }
 
 fn continuous_batching_env() -> Option<bool> {
@@ -3825,13 +3837,18 @@ fn build_app_state(
     mcp: Option<mcp::LoadedMcpConfig>,
     detection: Arc<health::Detection>,
 ) -> AppState {
-    let StartupModels { loaded, embedding } = models;
+    let StartupModels {
+        loaded,
+        embedding,
+        draft,
+    } = models;
     let configured_path = std::env::var("FRINK_MODEL_PATH").ok();
     let (loaded, batcher, ceiling) = activate_loaded_model(
         loaded,
         enable_continuous_batching,
         configured_path.as_deref(),
         paged_kv.as_ref(),
+        draft.as_ref(),
     );
     // The startup model's admin id is whichever discovered entry sits
     // at the configured path; `None` when it was not discovered (the
@@ -3877,6 +3894,7 @@ fn build_app_state(
         detection,
         mcp,
         continuous_batching_enabled: enable_continuous_batching,
+        draft,
         metal_private_decode_gate,
         loading_model: Mutex::new(None),
         last_load_error: Mutex::new(None),
@@ -4640,11 +4658,15 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
     // binding the port: by the time a client can ask, it has usually
     // already landed.
     let detection = health::Detection::spawn();
+    // Loaded and checked against the startup model before the port is
+    // bound: a drafter that cannot serve is a refusal, not a warning.
+    let draft = server_draft::from_env(&loaded, enable_cb, paged_kv.is_some())?;
 
     let state = Arc::new(build_app_state(
         StartupModels {
             loaded,
             embedding: embedding_model,
+            draft,
         },
         kv_pool,
         paged_kv,
@@ -4832,6 +4854,7 @@ pub(crate) mod tests {
             bos_id: None,
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         })
     }
 
@@ -4894,6 +4917,7 @@ pub(crate) mod tests {
             bos_id: None,
             is_synthetic: synthetic,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         })
     }
 
@@ -4940,6 +4964,7 @@ pub(crate) mod tests {
             detection: Arc::new(health::Detection::ready(health::probe_backends())),
             mcp: None,
             continuous_batching_enabled: false,
+            draft: None,
             metal_private_decode_gate: None,
             loading_model: Mutex::new(None),
             last_load_error: Mutex::new(None),
@@ -4994,6 +5019,7 @@ pub(crate) mod tests {
             bos_id: None,
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         })
     }
 
@@ -5018,6 +5044,7 @@ pub(crate) mod tests {
                 None,
                 None,
             ),
+            draft: None,
         })
     }
 
@@ -5469,6 +5496,7 @@ pub(crate) mod tests {
             bos_id: None,
             is_synthetic: false,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         test_app_with_state(Arc::new(test_state(
             model,
@@ -6909,6 +6937,7 @@ pub(crate) mod tests {
             bos_id: Some(7),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         let app = test_app_with_state(Arc::new(test_state(
             model,
@@ -7933,7 +7962,7 @@ pub(crate) mod tests {
             matches!(loaded, model::LoadedModel::Encoder(_)),
             "an encoder-only GGUF reached a decoder loader"
         );
-        let (loaded, batcher, ceiling) = activate_loaded_model(loaded, true, None, None);
+        let (loaded, batcher, ceiling) = activate_loaded_model(loaded, true, None, None, None);
         assert!(
             matches!(loaded, Loaded::Encoder(_)),
             "the encoder did not stay an encoder through activation"
@@ -8102,6 +8131,7 @@ pub(crate) mod tests {
             bos_id: None,
             is_synthetic: false,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         let state = Arc::new(test_state(
             model,
@@ -10506,6 +10536,7 @@ pub(crate) mod tests {
             StartupModels {
                 loaded: model::LoadedModel::Kimi(loaded),
                 embedding: None,
+                draft: None,
             },
             None,
             None,
@@ -10555,6 +10586,7 @@ pub(crate) mod tests {
             StartupModels {
                 loaded: model::LoadedModel::Kimi(loaded),
                 embedding: None,
+                draft: None,
             },
             None,
             None,
@@ -10622,6 +10654,7 @@ pub(crate) mod tests {
             StartupModels {
                 loaded: model::LoadedModel::Kimi(loaded),
                 embedding: None,
+                draft: None,
             },
             None,
             None,

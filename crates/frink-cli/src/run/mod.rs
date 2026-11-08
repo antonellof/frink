@@ -852,34 +852,15 @@ fn run_infer_speculative(
     if tokens.is_empty() {
         anyhow::bail!("--model-draft needs a prompt to continue");
     }
-    if decoder.config.has_recurrent_layers() {
-        anyhow::bail!(
-            "--model-draft cannot be used with a target model that has recurrent (Mamba) \
-             layers: a rejected draft rolls the KV caches back to the last accepted position, \
-             and a Mamba layer's state is a reduction over the whole prefix that cannot be \
-             rolled back (llama.cpp's server re-prefills such models for the same reason)"
-        );
-    }
-
-    let mut config =
-        frink_models::ModelConfig::from_gguf(&frink_gguf::ShardedGguf::open(draft_path)?)?;
-    // The draft's caches at the target's width: one `--ctk` for the run.
-    config.kv_dtype = decoder.config.kv_dtype;
-    if config.has_recurrent_layers() {
-        anyhow::bail!(
-            "--model-draft cannot be a model with recurrent (Mamba) layers: the draft cache is \
-             rolled back after every verification block"
-        );
-    }
-    let draft = frink_models::Decoder::from_gguf(draft_path, config)?;
+    let draft = frink_models::draft_model::load(draft_path, &decoder.config)?;
     eprintln!("frink: draft model {draft_path}");
 
     // Refused at construction when the vocabularies differ. The two
     // models must number their tokens identically or the rejection rule
     // is comparing probabilities of different tokens, which produces
     // fluent text with a plausible accept rate and no error at all.
-    let mut drafter = frink_models::DraftModelSpeculator::new(
-        draft,
+    let mut drafter = frink_models::DraftModelSpeculator::from_weights(
+        &draft,
         &decoder.config,
         sampling.clone(),
         seed,

@@ -288,7 +288,9 @@ means the cache was consulted and missed.
 
 The server drafts with prompt lookup: an n-gram match over the
 request's own history, with no second checkpoint, so it costs no memory
-and no load time and helps where output quotes input. Verification
+and no load time and helps where output quotes input. A server started
+with `-md` drafts with that model instead, with KV of the request's own
+([`CLI.md`](CLI.md#server-flags) says where it is refused). Verification
 draws with the server's own sampler and keeps a drafted token only when
 it equals that draw, so speculation never changes the answer. The four
 speculation fields are present whenever a request drafted.

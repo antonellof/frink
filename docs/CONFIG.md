@@ -71,6 +71,9 @@ library or overriding the CLI.
 | Variable | Purpose |
 |---|---|
 | `FRINK_CONTINUOUS_BATCHING` | `1` enables, `0` disables. When unset on Metal builds with fused attention, continuous batching is on by default for safe parallel serving. Also: `frink serve --cont-batching` / `-cb`, `--no-cont-batching`. |
+| `FRINK_MODEL_DRAFT` | A draft GGUF of the target's family and tokenizer for speculative decoding on the server's private decode loop. CLI: `-md` / `--model-draft`. Refused at startup with continuous batching, the paged store, or a drafter that cannot serve the model (see `docs/CLI.md`) |
+| `FRINK_DRAFT_MAX` | Tokens the draft model proposes per verification step. CLI: `--draft-max`. Default: `5` |
+| `FRINK_DRAFT_P_MIN` | The draft model stops a block at a token whose own probability is below this, between 0 and 1. CLI: `--draft-p-min`. Default: `0.75` |
 | `FRINK_CB_MAX_SEQS` | Continuous batching: cap on in-flight sequences (llama.cpp `-np`). CLI: `-np N` / `--parallel N`. Default: unlimited. Reported as `frink_scheduler_max_seqs` on `/metrics` |
 | `FRINK_CB_PREFILL_CHUNK`, `FRINK_CHUNKED_PREFILL` | Prompt tokens per forward pass, on the batch scheduler and the private decode loop respectively. Two knobs on two paths: on the scheduler the chunk is a scheduling quantum, the granularity at which a long prompt yields to in-flight decodes, since each tick runs one chunk plus one batched decode step. On the private loop it is the batch shape of each `forward_batch`. `-b` / `-ub` set both from one value (the smaller of the two flags, llama.cpp's own rule). Defaults: 128 on the scheduler, unchunked on the private loop |
 | `FRINK_SLOT_SAVE_PATH` | Directory for slot files (`POST /slots/{id}?action=save\|restore`). CLI: `--slot-save-path DIR`. Unset means the route refuses with a 501 naming the flag. Requires `FRINK_PREFIX_CACHE_ENTRIES`, which is where a restored slot lives |

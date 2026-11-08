@@ -23,6 +23,17 @@ are the ones worth reading twice.
   tokens the prefix cache served beside all prompt tokens, so the
   cache's hit rate is one division. `/v1/requests` carries
   `cached_tokens` per request.
+- **`-md` / `--model-draft` on `frink-server`**, with `--draft-max` and
+  `--draft-p-min` and their `LLAMA_ARG_*` variables, as llama-server
+  takes them. The draft model loads once and every request on the
+  private decode loop drafts with it, KV of its own, in place of prompt
+  lookup. The output is the output without it: a drafted token is kept
+  only when it is the target's own draw. A deployment that would accept
+  the flag and not draft (continuous batching, the paged store, a
+  recurrent or dedicated-engine model, a drafter of another vocabulary
+  or one whose KV lands on the device) is refused at startup by name,
+  and a model swapped in later is held to the same drafter.
+  `frink run -md` loads through the same function.
 
 ### Fixed
 

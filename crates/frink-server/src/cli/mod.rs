@@ -335,6 +335,35 @@ pub struct ServerArgs {
     #[arg(long = "ubatch-size", visible_alias = "ub", value_name = "N")]
     ubatch_size: Option<usize>,
 
+    /// A smaller checkpoint of the same family and tokenizer that drafts
+    /// for speculative decoding, llama.cpp's `-md`. Sets
+    /// `FRINK_MODEL_DRAFT`. The output is the output without it; see
+    /// `crate::server_draft` for where it runs and where it refuses.
+    #[arg(
+        long = "model-draft",
+        visible_aliases = ["md", "spec-draft-model"],
+        value_name = "GGUF"
+    )]
+    model_draft: Option<String>,
+
+    /// Tokens the drafter proposes per verification step, llama.cpp's
+    /// `--draft-max`. Sets `FRINK_DRAFT_MAX`.
+    #[arg(
+        long = "draft-max",
+        visible_aliases = ["draft", "draft-n"],
+        value_name = "N"
+    )]
+    draft_max: Option<usize>,
+
+    /// The drafter stops a block at a token whose own probability is
+    /// below this, llama.cpp's `--draft-p-min`. Sets `FRINK_DRAFT_P_MIN`.
+    #[arg(
+        long = "draft-p-min",
+        visible_alias = "spec-draft-p-min",
+        value_name = "P"
+    )]
+    draft_p_min: Option<f32>,
+
     /// Directory slot files are saved into and restored from,
     /// llama.cpp's `--slot-save-path`. Sets `FRINK_SLOT_SAVE_PATH`.
     ///
@@ -848,6 +877,21 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         }
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_SLOT_SAVE_PATH", dir) };
+    }
+
+    // Lowered to the variables `server_draft::from_env` reads, which
+    // also refuses, at load, a deployment that would not draft.
+    if let Some(path) = &args.model_draft {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::server_draft::DRAFT_ENV, path) };
+    }
+    if let Some(n) = args.draft_max {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::server_draft::DRAFT_MAX_ENV, n.to_string()) };
+    }
+    if let Some(p) = args.draft_p_min {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::server_draft::DRAFT_P_MIN_ENV, p.to_string()) };
     }
 
     let template_flags = template_flags(args)?;

@@ -421,6 +421,7 @@ mod http_tests {
             bos_id: None,
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         (model, decoder)
     }

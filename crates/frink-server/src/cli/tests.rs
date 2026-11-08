@@ -409,3 +409,41 @@ fn threads_http_metrics_and_version_parse_like_llama_server() {
         .unwrap_err();
     assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
 }
+
+/// llama-server's spellings of the draft flags (`common/arg.cpp`:
+/// `-md`, `--draft`, `--spec-draft-p-min`) reach the variables
+/// `server_draft` reads.
+#[test]
+fn the_draft_flags_lower_to_the_variables_the_drafter_reads() {
+    use crate::server_draft::{DRAFT_ENV, DRAFT_MAX_ENV, DRAFT_P_MIN_ENV};
+    let args = ServerArgs::try_parse_from(rewrite(
+        [
+            "frink-server",
+            "-md",
+            "draft.gguf",
+            "--draft",
+            "3",
+            "--spec-draft-p-min",
+            "0.5",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    ))
+    .unwrap();
+    apply_cli_overrides(&args).unwrap();
+    let read = |k: &str| std::env::var(k).ok();
+    let got = (read(DRAFT_ENV), read(DRAFT_MAX_ENV), read(DRAFT_P_MIN_ENV));
+    for k in [DRAFT_ENV, DRAFT_MAX_ENV, DRAFT_P_MIN_ENV] {
+        // SAFETY: test-only, and no other test reads these variables.
+        unsafe { std::env::remove_var(k) };
+    }
+    assert_eq!(
+        got,
+        (
+            Some("draft.gguf".to_string()),
+            Some("3".to_string()),
+            Some("0.5".to_string())
+        )
+    );
+}

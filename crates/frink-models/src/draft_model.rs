@@ -48,6 +48,8 @@
 //!
 //! **The vocabularies must match.** See [`VocabMismatch`].
 
+use std::sync::Arc;
+
 use crate::config::ModelConfig;
 use crate::decoder::Decoder;
 use crate::penalty_window::PenaltyWindow;
@@ -87,6 +89,53 @@ pub enum VocabMismatch {
     Size { draft: usize, target: usize },
 }
 
+/// A draft checkpoint, loaded once and shared by every drafter that
+/// runs it: a server holds one and gives each request a
+/// [`DraftModelSpeculator`] with KV of its own.
+///
+/// Built only by [`Self::new`] or [`load`], both of which turn the
+/// decoder's KV-window policy off, so no drafter can be handed a
+/// windowed cache it would have to roll back past (see
+/// [`DraftModelSpeculator::new`]).
+#[derive(Clone)]
+pub struct DraftWeights(Arc<Decoder>);
+
+impl DraftWeights {
+    pub fn new(mut decoder: Decoder) -> Self {
+        decoder.kv_window = crate::decoder::KvWindowPolicy::off();
+        DraftWeights(Arc::new(decoder))
+    }
+
+    pub fn config(&self) -> &ModelConfig {
+        &self.0.config
+    }
+}
+
+/// Opens `path` as a drafter for `target`, refusing what a rolled-back
+/// draft cache cannot be: a recurrent target, whose state cannot be
+/// rolled back to the last accepted position, and a recurrent draft.
+/// The draft's KV takes the target's dtype, one `--ctk` for the run.
+/// `frink run -md` and `frink-server -md` both load through here.
+pub fn load(path: &str, target: &ModelConfig) -> anyhow::Result<DraftWeights> {
+    if target.has_recurrent_layers() {
+        anyhow::bail!(
+            "--model-draft cannot be used with a target model that has recurrent (Mamba) \
+             layers: a rejected draft rolls the KV caches back to the last accepted position, \
+             and a Mamba layer's state is a reduction over the whole prefix that cannot be \
+             rolled back (llama.cpp's server re-prefills such models for the same reason)"
+        );
+    }
+    let mut config = ModelConfig::from_gguf(&frink_gguf::ShardedGguf::open(path)?)?;
+    config.kv_dtype = target.kv_dtype;
+    if config.has_recurrent_layers() {
+        anyhow::bail!(
+            "--model-draft cannot be a model with recurrent (Mamba) layers: the draft cache is \
+             rolled back after every verification block"
+        );
+    }
+    Ok(DraftWeights::new(Decoder::from_gguf(path, config)?))
+}
+
 /// A [`Drafter`] backed by a second [`Decoder`].
 ///
 /// Owns its own KV caches, entirely separate from the target's. The two
@@ -94,7 +143,7 @@ pub enum VocabMismatch {
 /// counts, head counts and head dimensions, so nothing about the two
 /// caches is shared.
 pub struct DraftModelSpeculator {
-    decoder: Decoder,
+    decoder: Arc<Decoder>,
     kv_caches: Vec<KvCache>,
     /// How many tokens of the caller's history this drafter's KV holds.
     ///
@@ -142,14 +191,34 @@ impl DraftModelSpeculator {
     /// small model whose KV is a small fraction of the target's, so
     /// this gives up almost none of the saving.
     pub fn new(
-        mut decoder: Decoder,
+        decoder: Decoder,
         target_config: &ModelConfig,
         sampling: SamplingParams,
         seed: u64,
         max_draft: usize,
         min_prob: f32,
     ) -> Result<Self, VocabMismatch> {
-        decoder.kv_window = crate::decoder::KvWindowPolicy::off();
+        Self::from_weights(
+            &DraftWeights::new(decoder),
+            target_config,
+            sampling,
+            seed,
+            max_draft,
+            min_prob,
+        )
+    }
+
+    /// As [`Self::new`], over weights loaded once and shared: this
+    /// drafter's KV is its own, the weights are not copied.
+    pub fn from_weights(
+        weights: &DraftWeights,
+        target_config: &ModelConfig,
+        sampling: SamplingParams,
+        seed: u64,
+        max_draft: usize,
+        min_prob: f32,
+    ) -> Result<Self, VocabMismatch> {
+        let decoder = Arc::clone(&weights.0);
         let draft_vocab = decoder.config.vocab_size;
         let target_vocab = target_config.vocab_size;
         if draft_vocab != target_vocab {
