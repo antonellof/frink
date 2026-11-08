@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-11-08
+
 ### Fixed
 
 - **A replayed tool call failed on Functionary v3.2.** frink parsed
