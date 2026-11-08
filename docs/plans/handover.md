@@ -1,6 +1,6 @@
 # Handover: where development stands and how to pick it up
 
-Dated 2026-11-07, at `main` = `cf066c1c`, release **v0.55.0**. Read
+Dated 2026-11-07, at `main` = `c09c21dd`, release **v0.55.0**. Read
 this after [`CLAUDE.md`](../../CLAUDE.md) and
 [`north-star.md`](north-star.md); it says what changed recently, what
 is half-done, what is blocked on hardware, and the working recipes
@@ -12,8 +12,8 @@ stops being true.
 
 `main` is clean and green. Releases v0.51.0 to v0.55.0 shipped in the
 last stretch (GitHub tarballs for darwin-arm64 and linux-x86_64,
-every crate on crates.io). There are no open PRs. Work since v0.50
-went into four areas:
+every crate on crates.io). Four PRs are open, green and waiting for a
+merge: see "Open PRs" below. Work since v0.50 went into four areas:
 - CPU integer dots for every weight kind (#405)
 - llama-bench flag coverage (#404)
 - three correctness fixes (#470, #421, #408-adjacent)
@@ -21,15 +21,28 @@ went into four areas:
   RDNA, NPU detection, and a Vulkan backend that now decodes K-quant
   models correctly but is still slower than the CPU
 
+## Open PRs
+
+Each is cut from `main` and none depends on another, so any order
+works. `frink-core --features metal` stays red on #510 and #511 until
+#506 lands, because #506 holds the fix.
+
+| PR | What | Issue |
+|---|---|---|
+| #506 | `frink-core`'s unit tests pass on a device build, and CI now runs them | #501 |
+| #510 | Chat templates: 47 of llama.cpp's 75 bundled templates failed, most silently losing their tool format. Census in the oracle job, 36 jinja2 goldens | #507 |
+| #511 | `--chat-template`, `--chat-template-file`, `--chat-template-kwargs`, `-rea`, `--reasoning-effort` | #404 |
+| #505 | This file's corrections | none |
+
 ## Recent work (newest first)
 
 | PR | What | Issue |
 |---|---|---|
-| #503 | journal panic-hook test counted other threads' panics (flake) | — |
-| #502 | release 0.55.0 | — |
+| #503 | journal panic-hook test counted other threads' panics (flake) | none |
+| #502 | release 0.55.0 | none |
 | #500 | Vulkan: Q/K/V and gate/up as one submission each (`Runtime::matvec_many`); seam tests compared Vulkan with itself, now `apply_cpu` | #409 |
 | #499 | Vulkan: `frink_vulkan::runtime::Runtime` (resident weights, cached pipelines), a workgroup per row, Q8_0 in GLSL, hand-emitted SPIR-V emitter deleted; `frink_quant::fingerprint` shared with `frink-cuda` | #409 |
-| #498 | release 0.54.0 | — |
+| #498 | release 0.54.0 | none |
 | #497 | Vulkan Q4_0/Q4_K/Q5_K/Q6_K matvecs (GLSL → committed SPIR-V); `WeightMatrix::apply` had no Vulkan gate at all | #409 |
 | #496 | `--list-devices` names a Ryzen AI NPU (sysfs, Linux) | #494 |
 | #495 | `crates/frink-rocm`: hiprtc via dlopen, every `frink-cuda` kernel compiles for 8 RDNA targets in CI; CDNA refused as wave64 | #494 |
@@ -115,11 +128,12 @@ Plan: [`amd.md`](amd.md).
   2026-11-07, and the account balance was $0. AMD GPUs are on AMD
   Developer Cloud, RunPod, TensorWave and Hot Aisle, which need an
   account the owner creates. Per `CLAUDE.md`, agents do not rent
-  hardware unless the user explicitly asks. The user did authorise
-  vast.ai for Vulkan/AMD testing in this session; create the instance
-  and destroy it afterwards (see `.local-scripts/vast_gpu_receipts.sh`
-  for the safety pattern: a cost cap, `trap` teardown, no credentials
-  on the box).
+  hardware. The user authorised vast.ai for Vulkan/AMD testing in the
+  session that wrote this file, and that approval ended with it: ask
+  again before any rental. When one is approved, see
+  `.local-scripts/vast_gpu_receipts.sh` for the safety pattern (a cost
+  cap, `trap` teardown, no credentials on the box), and destroy the
+  instance afterwards.
 - Local Docker images for the ROCm census: `frink-hiprtc`,
   `frink-hiprtc-rust` (x86_64, ROCm 6.4). Run with:
   ```
@@ -135,7 +149,10 @@ Plan: [`amd.md`](amd.md).
 |---|---|---|
 | #409 Vulkan | in progress | see above; no hardware needed for steps 1–4 (MoltenVK) |
 | #494 AMD | R1 done | RDNA GPU for R2; XDNA hardware for the NPU |
-| #501 `frink-core --features metal` has 3 failing tests | open, unassigned | they assume the host path; pin to host or gate. Not run by CI |
+| #501 `frink-core --features metal` has 3 failing tests | fixed in #506 | waiting for a merge |
+| #507 templates llama.cpp renders fail or lose their tool format | fixed in #510 | waiting for a merge |
+| #508 `preserve_reasoning` default missing: multi-turn reasoning renders a different prompt on five template families | open | changes tokens, so it needs a check against libllama's own render, which `frink parity` does not cover. Add `--reasoning-preserve` with it |
+| #509 tool-call `arguments` always a map | open | needs a `supports_object_arguments` probe. Check first for templates that PRINT arguments, which would be silent |
 | #476 Q8/Q8_K quantizer last bit vs ggml | open | a bit-exact port made parity *worse*; needs a decision |
 | #481 bench median±pop-stddev vs llama-bench mean±sample-stddev | open | user decision (receipts comparability) |
 | #408 preempt instead of refusing admission | partly done | "preempt on by default" needs a measurement/decision |
@@ -145,10 +162,15 @@ Plan: [`amd.md`](amd.md).
 | #403 one file per architecture | open | stale worktree `registry-step9b` (see below) |
 | #406, #407, #61, #27 | open | per `north-star.md` order |
 
-Suggested next items that need no hardware: Vulkan step 1 or 2,
-#501, more #404 flags, MTP draft heads (`--mtp` currently errors by
-name). For MTP, see [`speculative-decoding.md`](speculative-decoding.md);
-vLLM's EAGLE and n-gram drafters are the comparison points.
+Items that need no hardware, in `north-star.md` order: #508 (same
+tokens, ahead of everything here), more #404 flags (priority 4), then
+Vulkan step 1 or 2 (priority 9, ahead of its rank only if the user
+argues it there). For #404, go by what real command lines use:
+`-l`/`--logit-bias`, `--pooling`, `--embeddings`, `--reranking`,
+`-to`/`--timeout`, `--api-prefix` and `--keep` are the likely next
+batch. MTP draft heads (`--mtp` errors by name today) sit under "Not
+now" in `north-star.md`; see
+[`speculative-decoding.md`](speculative-decoding.md) if that changes.
 
 ## Things not to touch
 
@@ -172,9 +194,11 @@ vLLM's EAGLE and n-gram drafters are the comparison points.
 3. Run the gates: `cargo fmt --all`, clippy `-D warnings` in debug and
    `--release` (plus the feature builds you touched, for example
    `-p frink-cli --features vulkan`), and `cargo test --workspace`.
-4. Open the PR, wait for CI to be green, and squash-merge.
-5. Delete the worktree's `target/`, the worktree, and the local and
-   remote branch. The disk is shared; check `df -h .`.
+4. Open the PR and wait for CI to be green. Merging is the user's call:
+   in auto mode `gh pr merge` is denied as a merge without review, so
+   say the PR is ready rather than looking for another way to land it.
+5. After the merge, delete the worktree's `target/`, the worktree, and
+   the local and remote branch. The disk is shared; check `df -h .`.
 
 **Release** (only when the user asks):
 1. Open a `chore(release): X - title` PR that bumps:
@@ -195,6 +219,9 @@ vLLM's EAGLE and n-gram drafters are the comparison points.
 - The reference is llama.cpp at `tools/llama_cpp_pin` (`604cc430`),
   built with `tools/oracle/llama_build.sh $PIN target/oracle/$PIN`
   (BLAS off).
+- `.scratch/llama.cpp-604cc430` is the source at the pin: read
+  `common/arg.cpp` and `common/jinja/` here, and `models/templates/` is
+  the corpus for `FRINK_LLAMA_TEMPLATES`.
 - `.scratch/llama.cpp` (at `5b59b83`, BLAS on) is for requantizing
   only: `build-nofma/bin/llama-quantize --allow-requantize [--pure]
   [--imatrix]`. IQ kinds need an imatrix from `frink imatrix`.
@@ -227,6 +254,26 @@ The output must be token-identical to the same command with
 
 ## Lessons from this stretch
 
+- **A probe that treats an error as "no" hides the bug behind it.**
+  `probe_tools_consumed` read a render error as "this template has no
+  tool support", so a broken filter became a silent fallback and every
+  request still returned 200. Failures that change behaviour need to
+  be loud.
+- **A sweep is only as wide as its inputs.** The GGUF sweep rendered one
+  plain conversation and missed 47 of 75 templates. Upstream's own test
+  corpus, with tools, found them in minutes.
+- **Before believing a sabotage result, check that the baseline was
+  green and that the named test is the one that failed.** One pass read
+  all red because the suite was already failing. And when a mutation
+  survives, check that it changed anything: `matrix.clone()` on a
+  non-`Clone` type copies the reference, and clap's overrides are mutual.
+- **Compare with a recent baseline.** A plain-chat difference against an
+  installed 0.52 looked like a regression, and disappeared against 0.54.
+- **`\u` in a command can be decoded before it reaches the file.**
+  A test's `\u00e9` became `é`, so the test compared correct output with
+  the wrong expectation. Write the backslash escaped.
+- **`cd` persists between Bash calls here.** A `cd` into `.scratch` left
+  the next command running in the wrong tree. Use absolute paths.
 - **Run the real model, not only the unit tests.** The Vulkan seam
   passed its tests while no model matvec could reach it (#497).
   Implausible numbers gave it away: a "Vulkan" run at the CPU's speed.
