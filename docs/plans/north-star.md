@@ -58,7 +58,7 @@ rental, asked for before it is booked (#542).
    rental.
 2. **Same commands, same API.** The flag and `LLAMA_ARG_*` tail (#404).
    The `llama-server` endpoints frink does not serve: `/infill`,
-   `/props`, `GET /slots`, `/apply-template`, slot erase (#534), and
+   `/props`, `GET /slots`, slot erase (#534), and
    `stream` on `/v1/completions`, which is refused by name today.
 3. **Numerics.** The activation quantizers' last bit (#476), and the
    statistic `frink bench` prints (#481).
@@ -93,7 +93,7 @@ buys on one machine.
    [ADR 0003](../adr/0003-one-file-per-architecture.md)), then the
    architectures that refuse as unaudited, from the 2026-10-28 pin move
    and the triage in [`MODELS.md`](../MODELS.md) (#538).
-10. **Other GPUs.** Vulkan beyond decode matvecs (#409, with #543), and AMD:
+10. **Other GPUs.** Vulkan beyond decode matvecs (#409), and AMD:
     ROCm on RDNA and CDNA, and the Ryzen AI NPU spike (#494,
     [`amd.md`](amd.md)).
 11. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
