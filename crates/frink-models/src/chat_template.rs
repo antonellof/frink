@@ -57,7 +57,8 @@
 //! | `strftime_now(fmt)` | provided here, local time as llama.cpp's, subset of `strftime` (see [`strftime_now`]) |
 //! | `enable_thinking`, `date_string`, `datetime`, `reasoning_strength`, `preserve_thinking` and its kin | set under the kwargs, as every llama.cpp render sets them (see [`llama_defaults`]) |
 //! | `dictsort`, `map`, `default`, `trim`, `reject`, `join`, slicing | minijinja builtins |
-//! | `tojson` | reimplemented, with `indent`, `ensure_ascii` and `separators`; keys sorted (see [`py_compat::tojson`]) |
+//! | `tojson` | reimplemented, with `indent`, `ensure_ascii` and `separators`; keys in the order they were written (see [`py_compat::tojson`]) |
+//! | `{{ value }}`, `value \| string` | a list or a map in Python's literal syntax, as llama.cpp prints it (see [`py_compat::formatter`]) |
 //! | `is iterable`, `{% generation %}`, a `namespace(...)` list that `.append`s | [`py_compat`] |
 //! | Python methods `.get()`, `.split()`, `.strip()`, `.items()`, `.replace()`, `.format()` | provided here (see [`python_method`]) |
 //! | anything else | **hard error**, never silently empty |
@@ -407,6 +408,8 @@ fn new_environment() -> minijinja::Environment<'static> {
     env.add_function("strftime_now", strftime_now);
     env.add_function("namespace", py_compat::namespace);
     env.add_filter("tojson", py_compat::tojson);
+    env.add_filter("string", py_compat::string);
+    env.set_formatter(py_compat::formatter);
     env.add_test("iterable", py_compat::is_iterable);
     env.set_unknown_method_callback(python_method);
     env
@@ -937,11 +940,11 @@ mod tests {
                 "You may call one or more functions to assist with the user query.\n\n",
                 "You are provided with function signatures within <tools></tools> XML tags:\n",
                 "<tools>\n",
-                // `tojson`: sorted keys and `", "` / `": "` separators,
-                // exactly as jinja2's `json.dumps(sort_keys=True)` does.
-                "{\"function\": {\"description\": \"Current weather\", \"name\": \"get_weather\", ",
-                "\"parameters\": {\"properties\": {\"city\": {\"type\": \"string\"}}, ",
-                "\"type\": \"object\"}}, \"type\": \"function\"}\n",
+                // `tojson`: the keys in the order the tool wrote them and
+                // `", "` / `": "` separators, as llama.cpp prints it.
+                "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", ",
+                "\"description\": \"Current weather\", \"parameters\": {\"type\": \"object\", ",
+                "\"properties\": {\"city\": {\"type\": \"string\"}}}}}\n",
                 "</tools>\n\n",
                 "For each function call, return a json object with function name and arguments ",
                 "within <tool_call></tool_call> XML tags:\n",

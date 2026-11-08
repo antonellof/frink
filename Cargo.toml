@@ -32,7 +32,10 @@ memmap2 = "0.9"
 rayon = "1"
 half = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: a map keeps the order its keys were written in, as
+# llama.cpp's JSON does. A chat template prints a tool's schema in that
+# order, so sorting it changes the prompt (#513).
+serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 axum = "0.7"
@@ -49,7 +52,8 @@ ureq = { version = "2.12", default-features = false, features = ["tls"] }
 sha2 = { version = "0.10", default-features = false }
 # Jinja2 evaluator for `tokenizer.chat_template` (crates/frink-models/src/chat_template.rs).
 # `loop_controls` for `{% break %}`/`{% continue %}`, which real templates use.
-minijinja = { version = "2.24", features = ["loop_controls", "json"] }
+# `preserve_order` keeps a map's keys in the order serde_json gave them (#513).
+minijinja = { version = "2.24", features = ["loop_controls", "json", "preserve_order"] }
 # `statvfs` only, for the KV disk tier's free-space budget
 # (frink-core::kv_disk). std has no portable free-space call, and the
 # alternative -- letting the filesystem be the thing that says "full" --

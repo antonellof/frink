@@ -1426,11 +1426,8 @@ A `grammar` and a `json_schema` in one request are two constraints on
 one generation and are refused (400). A forced `tool_choice` beside
 either is refused the same way.
 
-One observable difference from llama.cpp: `required` members are
-enforced in lexicographic order rather than the schema's declaration
-order, because the request body reaches the converter as a parsed value
-and this workspace builds `serde_json` without `preserve_order`. Both
-are valid grammars for the schema.
+`required` members are enforced in the order the schema declares them,
+as llama.cpp enforces them.
 
 `tool_choice: "required"` and a named `tool_choice` are supported by a
 lazy grammar built from the request's own `tools`. Each tool's

@@ -417,24 +417,23 @@ fn message_json(m: &ChatMessage, structured: bool) -> Value {
         .as_ref()
         .map(crate::MessageContent::as_text)
         .unwrap_or_default();
-    match (&m.tool_calls, structured) {
+    // Keys in llama.cpp's order (`common_chat_msg::to_json_oaicompat`):
+    // role, content, the reasoning, `tool_call_id`, `tool_calls`. A
+    // template that prints a message, or walks its items, shows it.
+    let tool_calls = match (&m.tool_calls, structured) {
         (Some(calls), true) => {
             obj.insert("content".into(), json!(text));
-            obj.insert(
-                "tool_calls".into(),
-                Value::Array(calls.iter().map(tool_call_json).collect()),
-            );
+            Some(Value::Array(calls.iter().map(tool_call_json).collect()))
         }
         (Some(_), false) => {
             obj.insert("content".into(), json!(m.rendered_content()));
+            None
         }
         (None, _) => {
             obj.insert("content".into(), json!(text));
+            None
         }
-    }
-    if let Some(id) = &m.tool_call_id {
-        obj.insert("tool_call_id".into(), json!(id));
-    }
+    };
     // Under every spelling, because templates disagree and a template
     // reads a key it does not know as undefined rather than erroring:
     // the DeepSeek/GLM family iterates `message.reasoning_content`, the
@@ -461,6 +460,12 @@ fn message_json(m: &ChatMessage, structured: bool) -> Value {
             obj.insert("thinking".into(), json!(reasoning));
         }
     }
+    if let Some(id) = &m.tool_call_id {
+        obj.insert("tool_call_id".into(), json!(id));
+    }
+    if let Some(calls) = tool_calls {
+        obj.insert("tool_calls".into(), calls);
+    }
     Value::Object(obj)
 }
 
@@ -480,11 +485,17 @@ fn tool_call_json(call: &crate::ToolCallIn) -> Value {
         Ok(v @ Value::Object(_)) => v,
         _ => json!(raw),
     };
-    json!({
+    // llama.cpp's order (`common_chat_msg::to_json_oaicompat`), which a
+    // template printing the call shows: the id last, and only when there
+    // is one.
+    let mut out = json!({
         "type": "function",
-        "id": call.id,
         "function": {"name": call.function.name, "arguments": args},
-    })
+    });
+    if !call.id.is_empty() {
+        out["id"] = json!(call.id);
+    }
+    out
 }
 
 pub(crate) fn tool_json(t: &ToolDef) -> Value {
@@ -975,6 +986,43 @@ mod tests {
             tmpl.render(&[replayed], &tools, Map::new())
                 .expect("renders"),
             "Paristools:1"
+        );
+    }
+
+    /// A message and a replayed call reach the template with their keys
+    /// in llama.cpp's order, the call's id last and only when it has one.
+    #[test]
+    fn a_replayed_turn_keeps_llama_cpps_key_order() {
+        let src = "{% for m in messages %}{{ m | tojson }}\n\
+                   {% for c in m.tool_calls %}{% endfor %}{% endfor %}{{ tools | length }}";
+        let tmpl =
+            PromptTemplate::from_gguf_metadata(Some(src), Some("qwen3"), false, true, None, None);
+        let mut no_id = tool_call_in("g", "{}");
+        no_id.id.clear();
+        let replayed = ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(MessageContent::Text("hi".to_string())),
+            tool_calls: Some(vec![tool_call_in("f", r#"{"b":1,"a":2}"#), no_id]),
+            tool_call_id: None,
+            reasoning_content: Some("why".to_string()),
+        };
+        let result = ChatMessage {
+            tool_call_id: Some("call_0".to_string()),
+            ..msg("tool", "18C")
+        };
+        let tools = vec![tool_def("f")];
+        assert_eq!(
+            tmpl.render(&[replayed, result], &tools, Map::new())
+                .expect("renders"),
+            concat!(
+                r#"{"role": "assistant", "content": "hi", "reasoning_content": "why", "#,
+                r#""reasoning": "why", "tool_calls": ["#,
+                r#"{"type": "function", "function": {"name": "f", "arguments": {"b": 1, "a": 2}}, "id": "call_0"}, "#,
+                r#"{"type": "function", "function": {"name": "g", "arguments": {}}}]}"#,
+                "\n",
+                r#"{"role": "tool", "content": "18C", "tool_call_id": "call_0"}"#,
+                "\n1",
+            )
         );
     }
 

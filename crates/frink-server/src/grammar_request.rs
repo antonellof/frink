@@ -56,14 +56,11 @@
 //! # Property order, stated because it is observable
 //!
 //! The grammar requires an object's `required` members in a fixed order,
-//! the way llama.cpp's does. Upstream that order is the schema's
-//! declaration order; here it is LEXICOGRAPHIC, because a
-//! `response_format` reaches this module as a `serde_json::Value` and this
-//! workspace builds `serde_json` without `preserve_order`, so declaration
-//! order is gone before the converter is called. Both are valid grammars
-//! for the schema and neither accepts a document the schema rejects. This
-//! is the same order [`crate::tool_grammar`] already gives a forced tool
-//! call's `arguments`.
+//! the way llama.cpp's does: the order the schema declares them in. A
+//! `response_format` reaches this module as a `serde_json::Value`, which
+//! keeps that order because the workspace builds `serde_json` with
+//! `preserve_order`. A forced tool call's `arguments`
+//! ([`crate::tool_grammar`]) follow the same order.
 //!
 //! # Why a refusal is never a silent ignore
 //!
