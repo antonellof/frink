@@ -41,7 +41,9 @@ are the ones worth reading twice.
   codes (`en-GB` unless `chat_template_kwargs` names them). 20 more
   prompts of the libllama render census match: 15 of 525 differ now
   (#514). Firefunction v2 and Command R+ still fail where llama.cpp's
-  engine reads a missing value as empty in `+` (#522).
+  engine reads a missing value as empty in `+`. minijinja has no hook
+  for that, so `docs/CLI.md` lists it as a difference from llama.cpp
+  (#522).
 
 ## [0.56.0] - 2026-11-08
 

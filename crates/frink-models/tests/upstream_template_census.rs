@@ -37,7 +37,8 @@ const EXPECTED_REFUSALS: &[(&str, &str)] = &[
         "Conversation roles must alternate",
     ),
     // `functions`, which no caller sets, added to a string: llama.cpp's
-    // engine reads it as empty and minijinja raises (#522).
+    // engine reads it as empty and minijinja raises, a deviation
+    // `docs/CLI.md` lists (#522).
     (
         "fireworks-ai-llama-3-firefunction-v2.jinja",
         "+ operator on unsupported types string and undefined",

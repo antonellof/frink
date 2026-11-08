@@ -183,7 +183,7 @@ fn census_of(dir: &Path) -> Census {
 
 /// `tests/llama_renders/known_differences.txt`: `template/request` to
 /// the issue that tracks it, or to `deviation:<name>`, a difference
-/// `docs/API.md` lists as deliberate.
+/// `docs/API.md` or `docs/CLI.md` lists as deliberate.
 fn known_differences() -> BTreeMap<String, String> {
     include_str!("../tests/llama_renders/known_differences.txt")
         .lines()
@@ -267,25 +267,33 @@ fn checked_in_renders_match_libllama() {
     );
 }
 
-/// A row is an open issue or a deviation the API docs name, so nothing
-/// sits in the list as deliberate without saying why.
+/// A row is an open issue or a deviation the docs name, so nothing sits
+/// in the list as deliberate without saying why.
 #[test]
 fn every_listed_difference_names_an_issue_or_a_documented_deviation() {
     // Read, not included: an `include_str!` outside the crate would not
     // build from the published package.
-    let api =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/API.md"))
-            .expect("docs/API.md");
+    let docs: String = ["API.md", "CLI.md"]
+        .iter()
+        .map(|doc| {
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../docs")
+                    .join(doc),
+            )
+            .unwrap_or_else(|e| panic!("docs/{doc}: {e}"))
+        })
+        .collect();
     for (key, reason) in known_differences() {
         let issue = reason
             .strip_prefix('#')
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
         let deviation = reason
             .strip_prefix("deviation:")
-            .is_some_and(|name| !name.is_empty() && api.contains(&format!("`{reason}`")));
+            .is_some_and(|name| !name.is_empty() && docs.contains(&format!("`{reason}`")));
         assert!(
             issue || deviation,
-            "{key} {reason}: neither #<issue> nor a deviation docs/API.md names"
+            "{key} {reason}: neither #<issue> nor a deviation docs/API.md or docs/CLI.md names"
         );
     }
 }
