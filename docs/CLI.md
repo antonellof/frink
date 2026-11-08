@@ -335,6 +335,16 @@ was meant for. It now stops and says so. Use
   object. llama.cpp asks whether the template read the value, and frink
   whether it printed it. The two answers differ only for a template that
   reads a value and drops it, or prints a whole `arguments` map raw.
+- One deviation: a string plus an undefined value, or plus `none`, is
+  an error, as in jinja2. llama.cpp's engine reads the missing side as
+  empty there (`workaround_concat_null_with_str`), and concatenates any
+  other value's string form. minijinja has no hook for `+`, so frink
+  refuses the request with a 400 naming the template line. Two bundled
+  templates reach it: Firefunction v2 on every request
+  (`system_prompt_suffix + "\n" + functions`, a variable no caller
+  sets), and Command R+ (tool use) when an offered tool has a parameter
+  without a description. The render census lists them under
+  `deviation:string-plus-undefined` (#522).
 - A Python method frink has not implemented is an error, as is
   mutating a list outside a `namespace(...)`, because a dropped
   `.append` would silently change every later turn. `.format()` takes
