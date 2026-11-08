@@ -1,0 +1,12 @@
+<s><|im_start|>system
+<tools>
+{"description": "The weather in a city", "name": "get_weather", "parameters": {"properties": {"city": {"description": "La città", "type": "string"}}, "required": ["city"], "type": "object"}}
+</tools><|im_end|>
+<|im_start|>user
+What is the capital of France?<|im_end|>
+<|im_start|>assistant
+<think></think>Paris.<|im_end|>
+<|im_start|>user
+And of Italy?<|im_end|>
+<|im_start|>assistant
+<think>

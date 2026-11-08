@@ -1,0 +1,8 @@
+<s><|im_start|>user
+What is the capital of France?<|im_end|>
+<|im_start|>assistant
+<think></think>Paris.<|im_end|>
+<|im_start|>user
+And of Italy?<|im_end|>
+<|im_start|>assistant
+<think>

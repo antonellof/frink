@@ -56,8 +56,9 @@
 //! | `raise_exception(msg)` | provided here; aborts the render with the message |
 //! | `strftime_now(fmt)` | provided here, UTC, subset of `strftime` (see [`strftime_now`]) |
 //! | `dictsort`, `map`, `default`, `trim`, `reject`, `join`, slicing | minijinja builtins |
-//! | `tojson` | reimplemented here; `json.dumps` separators, keys sorted (see [`tojson`]) |
-//! | Python methods `.get()`, `.split()`, `.strip()/.lstrip()/.rstrip()` | provided here (see [`python_method`]) |
+//! | `tojson` | reimplemented, with `indent`, `ensure_ascii` and `separators`; keys sorted (see [`py_compat::tojson`]) |
+//! | `is iterable`, `{% generation %}`, a `namespace(...)` list that `.append`s | [`py_compat`] |
+//! | Python methods `.get()`, `.split()`, `.strip()`, `.items()`, `.replace()`, `.format()` | provided here (see [`python_method`]) |
 //! | anything else | **hard error**, never silently empty |
 //!
 //! The one deliberate difference from `jinja2`: undefined variables are
@@ -71,6 +72,8 @@ use std::sync::Arc;
 
 use minijinja::value::Value as JinjaValue;
 use serde_json::Value;
+
+mod py_compat;
 
 /// Everything that can go wrong between a GGUF's template string and a
 /// rendered prompt. Every variant is a refusal, not a fallback.
@@ -163,8 +166,11 @@ impl ChatTemplate {
     /// Compiles `source` as Jinja2. Errors are returned, never swallowed.
     pub fn from_jinja(source: &str) -> Result<Self, TemplateError> {
         let mut env = new_environment();
-        env.add_template_owned("chat".to_string(), source.to_string())
-            .map_err(|e| TemplateError::Compile(format_jinja_error(&e)))?;
+        env.add_template_owned(
+            "chat".to_string(),
+            py_compat::neutralise_generation_tags(source),
+        )
+        .map_err(|e| TemplateError::Compile(format_jinja_error(&e)))?;
         Ok(Self(Arc::new(Kind::Jinja(Box::new(JinjaTemplate {
             env,
             source: source.to_string(),
@@ -394,78 +400,11 @@ fn new_environment() -> minijinja::Environment<'static> {
     // nested JSON schemas, so keep the default rather than lowering it.
     env.add_function("raise_exception", raise_exception);
     env.add_function("strftime_now", strftime_now);
-    env.add_filter("tojson", tojson);
+    env.add_function("namespace", py_compat::namespace);
+    env.add_filter("tojson", py_compat::tojson);
+    env.add_test("iterable", py_compat::is_iterable);
     env.set_unknown_method_callback(python_method);
     env
-}
-
-/// `{{ tool | tojson }}` — how every tool-calling template serialises a
-/// function schema into the prompt, so its exact byte output is part of
-/// the prompt the model was trained on.
-///
-/// Overrides minijinja's builtin, which emits `{"a":1}`. Both reference
-/// engines use `json.dumps`' default `", "` / `": "` separators, i.e.
-/// `{"a": 1}`, and matching that is the difference between the prompt
-/// HuggingFace produces and a near-miss.
-///
-/// Two disclosed deviations, both deliberate:
-///
-/// 1. **Key order.** This sorts, which is *stock* jinja2's default
-///    policy (`policies["json.dumps_kwargs"] = {"sort_keys": True}`).
-///    Neither engine that actually renders chat templates does:
-///    transformers replaces the filter with
-///    `json.dumps(..., sort_keys=False)`, and llama.cpp's refuses
-///    `sort_keys=true` outright (`common/jinja/value.cpp:251`). Frink
-///    cannot follow them today for a reason below this module:
-///    `serde_json::Map` is a `BTreeMap` unless the whole workspace turns
-///    on `serde_json/preserve_order`, so a tool schema arrives here
-///    already sorted and the author's key order is gone before `tojson`
-///    ever sees it. The visible effect is the order of the keys inside a
-///    `<tools>` block, not their content.
-/// 2. No `htmlsafe_json_dumps` escaping of `< > & '` into `<`-style
-///    escapes. llama.cpp does not do it either, and it is llama.cpp that
-///    this engine is checked against.
-fn tojson(value: JinjaValue) -> Result<String, minijinja::Error> {
-    let json: Value = serde_json::to_value(&value).map_err(|e| {
-        minijinja::Error::new(
-            minijinja::ErrorKind::InvalidOperation,
-            format!("tojson: value is not serialisable: {e}"),
-        )
-    })?;
-    let mut out = String::new();
-    write_python_json(&json, &mut out);
-    Ok(out)
-}
-
-fn write_python_json(v: &Value, out: &mut String) {
-    match v {
-        Value::Object(map) => {
-            // jinja2's default policy is `json.dumps(..., sort_keys=True)`.
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (i, k) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&Value::String((*k).clone()).to_string());
-                out.push_str(": ");
-                write_python_json(&map[*k], out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                write_python_json(item, out);
-            }
-            out.push(']');
-        }
-        other => out.push_str(&other.to_string()),
-    }
 }
 
 /// jinja2 runs on Python, so templates call Python *methods* on the
@@ -518,6 +457,44 @@ fn python_method(
                 .filter(|v| !v.is_undefined())
                 .unwrap_or(default))
         }
+        // dict.items() / .keys() / .values(): how tool schemas are walked.
+        "items" | "keys" | "values" if args.is_empty() => {
+            if !matches!(value.kind(), minijinja::value::ValueKind::Map) {
+                return Err(unknown());
+            }
+            py_compat::map_view(value, method)
+        }
+        "append" => {
+            let list = value
+                .downcast_object_ref::<py_compat::PyList>()
+                .ok_or_else(unknown)?;
+            let [item] = args else {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    "append() takes exactly one argument",
+                ));
+            };
+            list.append(item.clone());
+            Ok(value.clone())
+        }
+        "pop" => {
+            let list = value
+                .downcast_object_ref::<py_compat::PyList>()
+                .ok_or_else(unknown)?;
+            let index = match args {
+                [] => -1,
+                [index] => i64::try_from(index.clone())?,
+                _ => {
+                    return Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "pop() takes at most one argument",
+                    ))
+                }
+            };
+            list.pop(index)
+        }
+        "format" => py_compat::format(value.as_str().ok_or_else(unknown)?, args),
+        "replace" => py_compat::replace(value.as_str().ok_or_else(unknown)?, args),
         // str.split(sep) -- Python's whitespace split when sep is absent.
         "split" => {
             let s = value.as_str().ok_or_else(unknown)?;
@@ -1189,7 +1166,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(out, "real|false");
+        // `False`: jinja2 and llama.cpp print Python's spelling of a bool.
+        assert_eq!(out, "real|False");
     }
 
     /// llama.cpp sets both spellings at render, so `frink run` needs this
@@ -1372,7 +1350,7 @@ mod tests {
                 &RenderOptions::default(),
             )
             .unwrap();
-        assert_eq!(out, "truetruefalse;");
+        assert_eq!(out, "TrueTrueFalse;");
     }
 
     #[test]

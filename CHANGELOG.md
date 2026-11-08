@@ -30,6 +30,30 @@ are the ones worth reading twice.
 - **A `LLAMA_ARG_*` variable could beat an explicit flag.** Variables
   were added after the command line, so between two flags where the
   last wins, the variable won. llama.cpp applies them first.
+- **Tool calling used frink's own prompt on most models, without saying
+  so.** At load, frink renders a template with a probe tool to learn
+  whether it handles tools, and read an error as "no". `tojson` took no
+  arguments and maps had no `.items()`, so that probe failed on Llama
+  3.1/3.2/3.3, GLM, Kimi K3, MiniMax, DeepSeek R1/V3.2/V4, GPT-OSS,
+  Gigachat and others. Those models were sent a generic text preamble
+  instead of the tool format they were trained on, and a call often came
+  back as plain text with `tool_calls` empty. On Llama 3.2 the same
+  request now returns `finish_reason: tool_calls` and a parsed call.
+- **Chat templates that llama.cpp renders and frink refused.** Plain chat
+  failed with a render error on Qwen3-Coder and Nemotron-3 (`is iterable`
+  accepted `none`, then `length` failed on it). LFM3, LFM2.5, Laguna and
+  IFM-K2 did not compile (`{% generation %}`). Kimi K2 failed on a tool
+  round trip (no `.append` or `.pop`), and `.replace()` and `.format()`
+  are new too. The sweep over local GGUFs missed all of this because it
+  renders one plain conversation. `upstream_template_census` now runs
+  every template llama.cpp bundles through four conversation shapes in
+  CI's oracle job, and nine of them are pinned to real jinja2's bytes on
+  every PR.
+- **Booleans and `none` printed as `true` and `none` in a template**,
+  where jinja2 and llama.cpp print `True` and `None`. A template that
+  prints one got a different prompt, silently. minijinja 2.24 fixes it
+  and also parses an inline `if` in a keyword argument, which MUSE's
+  templates need.
 
 ## [0.55.0] - 2026-11-07
 

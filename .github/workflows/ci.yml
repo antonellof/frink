@@ -122,6 +122,9 @@ jobs:
       # the `--ignored` set is the one that has never run here.
       - run: cargo test -p frink-metal --features metal --verbose
       - run: cargo test -p frink-metal --features metal -- --ignored --test-threads=1
+      # frink-core's own unit tests on a device build, where a projection
+      # that a test assumes is on the host goes to the GPU instead (#501).
+      - run: cargo test -p frink-core --features metal --lib --verbose
 
   # What the release tarball actually ships, in the PROFILE it ships in.
   #
