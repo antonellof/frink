@@ -77,7 +77,8 @@ in Rust.
   llama.cpp) proposes tokens and the target checks them with the
   speculative-sampling rejection rule, so the text is exactly the
   target's at any temperature. The server also speculates on its own
-  with prompt lookup and reports what that saved in `usage`.
+  with prompt lookup and reports what that saved in `usage`, on its
+  private decode loop. Inside the continuous batch it does not yet.
 - **Mixture of experts.** GPU routing, indexed expert GEMMs and
   residency planning. Experts stream from the checkpoint only when they
   do not fit in memory.

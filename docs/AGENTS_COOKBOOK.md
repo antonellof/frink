@@ -1,8 +1,8 @@
 # Agents & IDEs
 
 Point coding agents at a running Frink server. Start it either way:
-`frink serve` from the main binary (needs `--features serve` at build
-time) or the standalone `frink-server`. Both take the same flags.
+`frink serve` from the main binary or the standalone `frink-server`.
+Both take the same flags.
 
 ```bash
 cargo build -p frink-cli --release --features "serve metal"
@@ -32,7 +32,8 @@ whole call. A reasoning model's chain of thought arrives separately as
 `reasoning_content` (`thinking` blocks on `/v1/messages`).
 
 Also available: `POST /v1/tokenize`, `/v1/detokenize`, `/v1/embeddings`
-(Decoder pool), `POST /v1/messages/count_tokens`, and `POST /v1/cancel`
+(an encoder checkpoint, or a decoder's pooled hidden states),
+`POST /v1/messages/count_tokens`, and `POST /v1/cancel`
 to stop a generation by the `request_id` its first streamed chunk
 carries. Full list: [API.md](API.md).
 
@@ -42,12 +43,18 @@ Run `npm run dev` from that directory.
 
 ## Continuous batching
 
+On by default on a Metal build with fused attention. Elsewhere, turn it
+on, or off on Metal, with the flag or its variable:
+
 ```bash
-FRINK_CONTINUOUS_BATCHING=1 ./target/release/frink-server -m model.gguf …
+./target/release/frink-server -m model.gguf -cb      # or FRINK_CONTINUOUS_BATCHING=1
+./target/release/frink-server -m model.gguf --no-cont-batching
 ```
 
-- Mutually exclusive with `FRINK_KV_POOL_BLOCKS` and `FRINK_PREFIX_CACHE_ENTRIES`
-- GGUF Decoder only (Kimi / MLA ignore CB)
+- Not with `FRINK_KV_POOL_BLOCKS` or `FRINK_PREFIX_CACHE_ENTRIES`, unless
+  paged KV is on
+- The generic GGUF decoder only. The dedicated engines (MLA, Gemma 4,
+  GLM-5.2, Kimi) serve on the private loop
 
 ## Sharing a system prompt between conversations
 

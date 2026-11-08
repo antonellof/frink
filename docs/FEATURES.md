@@ -6,19 +6,20 @@ happens inside the matvec. Backends: CPU, Apple Metal, and CUDA.
 
 ## Models
 
-101 architectures run with a benchmark row, a pinned logit
-comparison against real `libllama`, or a fixture behind each. Nine
-more on the same path have been read and stop with an error that names
-what is missing. `frink archs` prints the
+Every architecture in `capability::AUDITED_GENERIC_GQA` runs with a
+benchmark row, a pinned logit comparison against real `libllama`, or a
+fixture behind it (the README states the count, which a test pins). The
+architectures on the same path that have been read but not audited stop
+with an error that names what is missing. `frink archs` prints the
 current list; [`MODELS.md`](MODELS.md) says what runs, what refuses and
 why; [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md) has the speed
 against llama.cpp on the same host and file.
 
-Speed, re-measured on a quiet M2 Pro: all 16 comparable Metal
-`tg128` rows are faster than llama.cpp, 0.60x (SmolLM2-135M,
-Qwen2.5-0.5B) to 0.96x (OLMoE), with dense Metal prefill 0.99x to
-1.09x. CPU is behind on every row: prefill 6.3x to 10.1x, decode 1.06x
-to 1.92x on x86.
+Speed against llama.cpp is in
+[`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md), one row per host,
+backend and checkpoint, each with the build it was measured on and
+whether that build is stale. In short: Metal is level with llama.cpp or
+ahead on decode, CPU is behind on prefill, and CUDA is behind on both.
 
 The model shapes the decoder can express:
 
@@ -105,7 +106,8 @@ with f16 operands on `sm_80` and up (#261): pp512 on that model went
 305 to 1932 tok/s on an RTX 3090 against llama.cpp's ~8,200. What is
 left is a host third of the step between launches, the GEMM's
 remaining distance to int8 `mmq`, and a K/V-tiled attention kernel.
-Decode is 2.2x to 5.0x behind on the same cards (#133). A Windows or
+Decode is behind on the same cards (#133). The resident decode stack
+that should close most of it has landed and not yet run on a GPU. A Windows or
 Linux install runs and answers correctly, but is not yet the choice for
 speed. `/health` reports the same per capability, with a reason string,
 instead of greying out a control without explanation.
@@ -117,21 +119,22 @@ Parsed and executable on CPU: `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`,
 `IQ4_NL`, `IQ4_XS`, `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`,
 `IQ3_XXS`, `IQ3_S`, `MXFP4`, `TQ1_0`, `PTQ1_0`.
 
-"Executable" covers several speeds. What each format gets, read off
-the kernel tables:
+"Executable" covers several speeds. Every format has a matvec and a
+GEMM kernel on CPU, Metal and CUDA. [`KERNELS.md`](KERNELS.md) shows it
+per op and backend, generated from the dispatch tables and held to them
+by a drift test. Some of the CUDA kernels have not yet run on a GPU
+(#405). Vulkan covers a few formats and falls back to the host for the
+rest (#409). What differs between formats is the CPU's vector path:
 
-| Tier | Formats | CPU SIMD | GPU |
-|---|---|---|---|
-| Full | `Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` | AVX2 + NEON, plus the int-dot path | Metal matvec + GEMM, CUDA matvec + GEMM |
-| Metal only | `IQ4_XS`, `Q5_0` | AVX2 + NEON | Metal matvec + GEMM |
-| Metal only, scalar CPU | `PTQ1_0` (PrismML ternary), `TQ1_0` | scalar | Metal matvec + GEMM |
-| GPU, f32 CPU dot | `Q2_K`, `Q3_K` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
-| Codebook | `IQ4_NL` | AVX2 + NEON | Metal matvec + GEMM, CUDA matvec + GEMM |
-| Codebook, scalar CPU | GGUF-block `MXFP4` (gpt-oss's experts) | scalar | Metal matvec + GEMM, CUDA matvec + GEMM |
-| Legacy with a min | `Q4_1`, `Q5_1` | AVX2 + NEON | Metal matvec + GEMM |
-| CPU-vectorized | `Q8_1`, safetensors two-buffer `MXFP4` | AVX2 + NEON | none; `Q8_1` is ggml's activation format, with no weight path to match (`n/a` in KERNELS.md) |
-| Grid codebook, AVX2 CPU | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` | AVX2; **scalar on ARM** | Metal matvec + GEMM |
-| Grid codebook, scalar CPU | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M` | none | Metal matvec + GEMM |
+| CPU path | Formats |
+|---|---|
+| AVX2 and NEON, plus the int-dot path | `Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` |
+| AVX2 and NEON | `Q2_K`, `Q3_K`, `Q4_1`, `Q5_0`, `Q5_1`, `IQ4_NL`, `IQ4_XS`, safetensors two-buffer `MXFP4` |
+| AVX2, scalar on ARM | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` |
+| Scalar | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M`, `TQ1_0`, `PTQ1_0` (PrismML ternary), GGUF-block `MXFP4` (gpt-oss's experts) |
+
+`Q8_1` is ggml's activation format. It has no weight path to match,
+which `KERNELS.md` marks `n/a`.
 
 Metal's MoE id kernels (`mul_mv_id` for decode, `mul_mm_id` for
 prefill) cover every kind in the table above with a Metal kernel but
@@ -236,10 +239,10 @@ Add `--compare` to run `llama-bench` alongside it and print the gap.
 ## Server
 
 Two ways to start the same server. `frink serve` is a subcommand of the
-main binary behind an optional `serve` feature, off by default for
-`cargo install` because it pulls in 98 crates a completion-only user
-does not need. `frink-server` is that same server as its own
-executable, and both parse identical arguments through identical code.
+main binary, built in by default (the `serve` feature, which
+`--no-default-features` leaves out for a completion-only build).
+`frink-server` is that same server as its own executable, and both
+parse identical arguments through identical code.
 The prebuilt release binary is built with `serve`, so the downloaded
 `frink` does both.
 
@@ -261,7 +264,7 @@ OpenAI-compatible HTTP API:
   checkpoint belongs on `/v1/rerank` instead). A decoder GGUF still
   pools its hidden states (mean/last) as before (`llama-embed`, which
   llama.cpp runs with no output head, refuses by name until its pooled
-  embedding is checked against llama.cpp's, #421), and
+  embedding is checked against llama.cpp's), and
   `FRINK_EMBEDDING_MODEL_PATH` runs an encoder side-by-side with a
   generative model in one process
 - Reranking. A `bert` checkpoint carrying a rank head (`cls`,
@@ -351,11 +354,11 @@ OpenAI-compatible HTTP API:
   json_object` is still the best-effort character mask, and composes
 - Parallel serving (Metal). Multiple concurrent streaming clients
   share one batched decode worker (llama.cpp slots model). Continuous
-  batching is on by default when compatible; streaming emits tokens
-  incrementally under CB (0.15.2). Metal CB prefill keeps host K/V
-  authoritative for batched decode (0.15.3). Host B receipt on
-  Llama-3.2-3B Q4_K_M: 16/16 OK at concurrency 8, ~24 aggregate tok/s,
-  ~118 ms mean TTFT sequential. CLI: `-cb`, `-np` / `--parallel N`,
+  batching is on by default when compatible, and streaming emits
+  tokens incrementally under it. The measured throughput at each
+  concurrency is in
+  [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured).
+  CLI: `-cb`, `-np` / `--parallel N`,
   `--no-cont-batching` for the serialized private path. See
   [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
 - Cache-aware admission. When a radix prefix cache is configured,
@@ -379,8 +382,9 @@ OpenAI-compatible HTTP API:
   over its own history, no second model) and verifies them in one
   batched forward. A drafted token is kept only if it equals the
   sampler's own draw, so the output does not change. Grammar-constrained
-  requests and the paged and recurrent stores do not speculate, and
-  `usage` reports the speculation fields only when it ran
+  requests, the continuous-batching worker (the default on Metal) and
+  the paged and recurrent stores do not speculate, and `usage` reports
+  the speculation fields only when it ran
 - Slot save/restore (llama.cpp's `POST /slots/{id}?action=save|restore`):
   a prompt prefix's KV written to `--slot-save-path` and restored into
   the prefix cache after a restart, so a long system prompt is prefilled
@@ -431,7 +435,7 @@ OpenAI-compatible HTTP API:
   reports prefix-cache reuse from the server's own `cached_tokens`, as
   a share of all prompt tokens in the run (`--cache-salt` gives the run
   its own namespace).
-  Host B receipts for Metal CB at 0.15.3:
+  The serving receipts are in
   [`benchmarks/receipts/serving/`](../benchmarks/receipts/serving/)
 - Live serving telemetry (`GET /v1/stats`, `GET /v1/requests`) and an
   elastic KV/expert split that can be reported and re-sized without a
@@ -492,7 +496,7 @@ stops matching the code turns a test red.
 | NVFP4 / FP8 | **Refused by name, not executed.** NVFP4 is recognized and sized by `frink-gguf` (tag 40) and has no execution path, so a file carrying it stops instead of computing something else. FP8 appears only as a KV cache wire (`--ctk fp8`), not as a weight format. |
 | DeepSeek-V4-Flash, GLM-5.2, Kimi K3 | **Loaders and primitives only.** Nothing has run end to end on a real checkpoint. |
 | OpenAI + Anthropic compatible APIs | **Yes**, both, plus Responses. Tool calls parsed in eleven wire formats. |
-| NVIDIA RTX 30/40/50 | **Runs, correct, behind, and the published receipts are stale.** Receipts on a GTX 1080, an RTX 3060 and an RTX 3090; correct by `frink verify`. Those receipts read 22x to 43x on prefill and were taken on 0.17.1 and 0.21.0, before the resident prefill and the tensor-core GEMM; the ledger marks them stale for that reason. The last prefill number measured after those landed is 4.2x on an RTX 3090 (1932 tok/s against ~8,200), and decode is 2.2x to 5.0x. No GPU in CI, and no receipt on this build. |
+| NVIDIA RTX 30/40/50 | **Runs, correct, behind, and the published receipts are stale.** Receipts on a GTX 1080, an RTX 3060 and an RTX 3090; correct by `frink verify`. Those receipts read 22x to 43x on prefill and were taken on 0.17.1 and 0.21.0, before the resident prefill and the tensor-core GEMM; the ledger marks them stale for that reason. The last prefill number measured after those landed is 4.2x on an RTX 3090 (1932 tok/s against ~8,200). Decode's rows are stale too, and the resident decode stack (#133) has not run on a GPU. No GPU in CI, and no receipt on this build. |
 
 Two notes. Frink runs on Apple Metal, which that description does not
 cover, and Metal is where it is fastest: every `pp512` row is 0.99x to
@@ -538,21 +542,22 @@ budget.
 
 ### Complete, tested, and waiting for a consumer
 
-`qstar` (the `q*` bandwidth split), `expert_cache`, `expert_slots`,
-`expert_budget`, `placement` and `residency`, all in `frink-core`.
-Each is covered by unit tests and none of them is on a serving path,
-so do not read a benchmark as evidence for any of them. They are waiting on
+`qstar` (the `q*` bandwidth split), `expert_cache`, `expert_budget`,
+`placement` and `residency`, all in `frink-core`. Each is covered by
+unit tests and none of them is on a serving path, so do not read a
+benchmark as evidence for any of them. They are waiting on
 [`plans/out-of-core-moe.md`](plans/out-of-core-moe.md): running a model
 larger than memory, which is the largest thing they would enable.
 
-`expert_slots` sits closest to real memory: it executes the expert
-cache's copy plans against a bounded slot pool, and a warm decode step
-copies zero bytes on a host pool. `frink-core`'s `CudaExpertPool`
-implements its `SlotDevice` trait under `--features cuda`, and that pool
-is compile-verified with its hardware test left `#[ignore]`d, so on a
-real card the property is written down and not yet measured. A host
-`SlotDevice` (`HostSlotMemory`) also exists. A Metal one does not, and
-that is the concrete gap.
+`expert_slots` is on the decode path. With `FRINK_EXPERT_CACHE_BYTES`
+set, the expert store keeps its entries in the fixed slots of a
+`SlotDevice` (`frink-core/src/expert_slab.rs`): an anonymous host
+mapping on CPU, and on Metal one Shared buffer that the CPU writes and
+the kernels read in place, built at load by
+`frink-models/src/loader/expert_store_build.rs`. `frink-core`'s
+`CudaExpertPool` implements the same trait under `--features cuda`,
+compile-verified with its hardware test left `#[ignore]`d, so on a real
+card the property is written down and not yet measured.
 
 Inside `frink-server::policy`, the modules carrying an unwired half
 name the roadmap item that would close it, at their declaration in
