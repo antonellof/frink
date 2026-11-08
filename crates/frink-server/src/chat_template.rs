@@ -479,22 +479,13 @@ fn message_json(m: &ChatMessage, structured: bool) -> Value {
     Value::Object(obj)
 }
 
-/// A replayed tool call.
-///
-/// `arguments` arrives on the wire as a JSON *string*, and templates
-/// disagree about what they expect: HuggingFace's own
-/// `apply_chat_template` hands the model a dict, so a template that
-/// writes `{{ call.function.arguments | tojson }}` would emit a
-/// double-encoded string if the wire form were passed through. Parsing
-/// it back to an object when it is one gives every template the shape it
-/// was written against; a value that is not a JSON object stays a
-/// string, because that is all that can honestly be said about it.
+/// A replayed tool call, with `arguments` as the JSON string the
+/// request carried, as llama.cpp builds it
+/// (`common_chat_msg::to_json_oaicompat`). [`Reshape`] parses it into an
+/// object for a template that reads one, as llama.cpp's
+/// `func_args_not_string` does.
 fn tool_call_json(call: &crate::ToolCallIn) -> Value {
-    let raw = call.function.arguments.as_str();
-    let args = match serde_json::from_str::<Value>(raw) {
-        Ok(v @ Value::Object(_)) => v,
-        _ => json!(raw),
-    };
+    let args = json!(call.function.arguments);
     // llama.cpp's order (`common_chat_msg::to_json_oaicompat`), which a
     // template printing the call shows: the id last, and only when there
     // is one.
@@ -979,23 +970,40 @@ mod tests {
     /// The wire form of `arguments` is a string; a template written
     /// against HuggingFace's `apply_chat_template` expects the parsed
     /// object, and `| tojson` on the string form would double-encode it.
+    /// A template that reads the arguments' members gets an object, and
+    /// one that concatenates them gets the request's JSON string, as
+    /// llama.cpp decides per template (#509).
     #[test]
-    fn replayed_call_arguments_reach_a_structural_template_as_an_object() {
-        let src = "{% for m in messages %}{% for c in m.tool_calls %}{{ c.function.arguments.city }}{% endfor %}{% endfor %}tools:{{ tools | length }}";
-        let tmpl =
-            PromptTemplate::from_gguf_metadata(Some(src), Some("qwen3"), false, true, None, None);
-        let replayed = ChatMessage {
-            role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![tool_call_in("get_weather", r#"{"city":"Paris"}"#)]),
-            tool_call_id: None,
-            reasoning_content: None,
+    fn replayed_call_arguments_are_an_object_only_where_the_template_reads_one() {
+        let render = |src: &str| {
+            let tmpl = PromptTemplate::from_gguf_metadata(
+                Some(src),
+                Some("qwen3"),
+                false,
+                true,
+                None,
+                None,
+            );
+            let replayed = ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![tool_call_in("get_weather", r#"{"city":"Paris"}"#)]),
+                tool_call_id: None,
+                reasoning_content: None,
+            };
+            tmpl.render(&[replayed], &[tool_def("get_weather")], Map::new())
+                .expect("renders")
         };
-        let tools = vec![tool_def("get_weather")];
+        let reads = "{% for m in messages %}{% for c in m.tool_calls %}\
+                     {% for k, v in c.function.arguments.items() %}{{ k }}={{ v }}{% endfor %}\
+                     {% endfor %}{% endfor %}tools:{{ tools | length }}";
+        assert_eq!(render(reads), "city=Paristools:1");
+        let concatenates = "{% for m in messages %}{% for c in m.tool_calls %}\
+                            {{ '>>>' + c.function.name + '\\n' + c.function.arguments }}\
+                            {% endfor %}{% endfor %}tools:{{ tools | length }}";
         assert_eq!(
-            tmpl.render(&[replayed], &tools, Map::new())
-                .expect("renders"),
-            "Paristools:1"
+            render(concatenates),
+            ">>>get_weather\n{\"city\":\"Paris\"}tools:1"
         );
     }
 

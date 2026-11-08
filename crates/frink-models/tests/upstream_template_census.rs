@@ -20,6 +20,7 @@
 //! [`upstream_templates_render_byte_for_byte_like_jinja2`] does that, on
 //! every PR, for one template per construct in `tests/templates/upstream/`.
 
+use frink_models::chat_template::reshape::Reshape;
 use frink_models::chat_template::{ChatTemplate, RenderOptions};
 use serde_json::{json, Map, Value};
 
@@ -27,34 +28,19 @@ use serde_json::{json, Map, Value};
 /// failure. A template listed here is still held to every other shape,
 /// and a row nothing matches any more fails the test.
 const EXPECTED_REFUSALS: &[(&str, &str)] = &[
-    // The template's own `raise_exception`, on any engine: it refuses a
-    // conversation shape, and the model's users never send that shape.
-    ("google-gemma-2-2b-it.jinja", "System role not supported"),
+    // The template's own `raise_exception` on a shape it refuses, after
+    // the reshape, which llama.cpp raises too: a tool turn where the
+    // roles must alternate.
     ("google-gemma-2-2b-it.jinja", "roles must alternate"),
     (
-        "IFM-K2-Horizon.jinja",
-        "Assistant message is missing a thinking field",
-    ),
-    (
         "google-translategemma-4b-it.jinja",
-        "Conversations must start with a user prompt",
+        "Conversation roles must alternate",
     ),
-    (
-        "google-translategemma-4b-it.jinja",
-        "User role must provide `content` as an iterable",
-    ),
-    // Both of these are #509. This one reads `functions` and `datetime`,
-    // which its caller must pass.
+    // `functions`, which no caller sets, added to a string: llama.cpp's
+    // engine reads it as empty and minijinja raises (#522).
     (
         "fireworks-ai-llama-3-firefunction-v2.jinja",
         "+ operator on unsupported types string and undefined",
-    ),
-    // Concatenates a tool call's `arguments`, so it needs a JSON string
-    // where frink always sends a map. llama.cpp picks per template, from
-    // its `supports_object_arguments` probe.
-    (
-        "meetkai-functionary-medium-v3.2.jinja",
-        "+ operator on unsupported types string and map",
     ),
 ];
 
@@ -103,7 +89,9 @@ fn conversations() -> Vec<(&'static str, Vec<Value>, Vec<Value>)> {
         json!({"role": "assistant", "content": "", "tool_calls": [{
             "id": "call00001",
             "type": "function",
-            "function": {"name": "get_weather", "arguments": {"city": "Rome"}},
+            // The wire's JSON string. The reshape parses it for a
+            // template that reads an object, as a front end does.
+            "function": {"name": "get_weather", "arguments": "{\"city\": \"Rome\"}"},
         }]}),
         json!({"role": "tool", "tool_call_id": "call00001", "name": "get_weather", "content": "Sunny"}),
         json!({"role": "assistant", "content": "It is sunny."}),
@@ -117,16 +105,26 @@ fn conversations() -> Vec<(&'static str, Vec<Value>, Vec<Value>)> {
     ]
 }
 
-/// Everything that failed on one template.
+/// Everything that failed on one template, after the reshape both front
+/// ends apply ([`Reshape`]), so a shape the front ends never send does
+/// not count as a failure.
 fn failures(source: &str) -> Vec<String> {
     let template = match ChatTemplate::from_jinja(source) {
         Ok(t) => t,
         Err(e) => return vec![format!("compile: {e}")],
     };
+    let reshape = Reshape::for_template(&template, Some("<s>"), Some("</s>"));
     conversations()
         .into_iter()
-        .filter_map(|(shape, messages, tools)| {
-            let rendered = template.render(&messages, &opts(tools));
+        .filter_map(|(shape, mut messages, tools)| {
+            let rendered = reshape
+                .apply(&mut messages, &Map::new())
+                .map_err(|e| format!("reshape: {e}"))
+                .and_then(|()| {
+                    template
+                        .render(&messages, &opts(tools))
+                        .map_err(|e| e.to_string())
+                });
             rendered.err().map(|e| format!("{shape}: {e}"))
         })
         .collect()

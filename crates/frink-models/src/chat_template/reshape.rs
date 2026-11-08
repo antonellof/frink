@@ -1,14 +1,18 @@
 //! What llama.cpp does to a conversation before it renders it, for the
 //! templates that need it (`common/chat.cpp`, `common_chat_templates_apply_jinja`).
 //!
-//! Two kinds, applied in upstream's order:
+//! Three kinds, applied in upstream's order:
 //!
 //! 1. A system turn the template will not show is folded into the next
 //!    message, or dropped when it is alone
 //!    (`workaround::system_message_not_supported`). Gemma 2 raises
 //!    "System role not supported" on one, and TranslateGemma insists the
 //!    conversation start with the user.
-//! 2. The handler `common_chat_template_detect_params_init` picks from
+//! 2. A replayed call's `arguments`, a JSON string on the wire, is parsed
+//!    into an object for a template that reads one
+//!    (`workaround::func_args_not_string`). Every other template gets the
+//!    string: Functionary v3.2 concatenates it.
+//! 3. The handler `common_chat_template_detect_params_init` picks from
 //!    the template's source rewrites the messages for its family. Four
 //!    of them do: [`Family`].
 
@@ -65,6 +69,9 @@ pub struct Reshape {
     /// The template does not show a system turn's content (llama.cpp's
     /// `supports_system_role` is false).
     pub fold_system: bool,
+    /// The template reads a call's `arguments` as an object (llama.cpp's
+    /// `supports_object_arguments`), so the wire string is parsed.
+    pub object_arguments: bool,
     pub family: Option<Family>,
 }
 
@@ -74,6 +81,7 @@ impl Reshape {
     pub fn for_template(template: &ChatTemplate, bos: Option<&str>, eos: Option<&str>) -> Self {
         Self {
             fold_system: !shows_system(template, bos, eos),
+            object_arguments: reads_object_arguments(template, bos, eos),
             family: template.source().and_then(Family::detect),
         }
     }
@@ -88,6 +96,9 @@ impl Reshape {
     ) -> Result<(), String> {
         if self.fold_system {
             fold_system(messages);
+        }
+        if self.object_arguments {
+            parse_arguments(messages)?;
         }
         match self.family {
             Some(Family::Ministral3) => ministral3(messages),
@@ -120,6 +131,87 @@ fn shows_system(template: &ChatTemplate, bos: Option<&str>, eos: Option<&str>) -
     template
         .render(&messages, &opts)
         .is_ok_and(|out| out.contains("System message"))
+}
+
+/// llama.cpp's `supports_object_arguments` (`common/jinja/caps.cpp`):
+/// does the template read a replayed call's `arguments` as an object?
+///
+/// Upstream renders this conversation with `arguments` as
+/// `{"arg": ...}` and asks whether the template read `arg`. minijinja
+/// cannot say what a template read, so this asks whether the value
+/// reached the prompt. `arguments.arg`, `arguments.items()`,
+/// `arguments | tojson` and `arguments | string` agree with upstream. A
+/// template that prints the whole map with `{{ arguments }}` gets an
+/// object here and the string upstream, and no template llama.cpp
+/// bundles does that, which frink-server's render census holds. A render
+/// that fails, as Functionary v3.2's string plus map does, reads no
+/// object. As upstream does, a failed render is tried once more with an
+/// empty `reasoning_content` on each assistant turn, which K2 Horizon
+/// insists on.
+fn reads_object_arguments(template: &ChatTemplate, bos: Option<&str>, eos: Option<&str>) -> bool {
+    const ARG: &str = "frink_probe_argument_value";
+    let mut messages = vec![
+        json!({"role": "user", "content": "User message"}),
+        json!({"role": "assistant", "content": "", "tool_calls": [{
+            "id": "call00001",
+            "type": "function",
+            "function": {"name": "tool1", "arguments": {"arg": ARG}},
+        }]}),
+        json!({"role": "tool", "content": "Tool response", "tool_call_id": "call00001"}),
+        json!({"role": "assistant", "content": "The tool response was 'tool response'"}),
+        json!({"role": "user", "content": "User message"}),
+    ];
+    let opts = RenderOptions {
+        add_generation_prompt: true,
+        bos_token: bos.map(str::to_string),
+        eos_token: eos.map(str::to_string),
+        tools: vec![json!({
+            "name": "tool",
+            "type": "function",
+            "function": {
+                "name": "tool1",
+                "description": "Tool description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"arg": {"type": "string", "description": "Arg description"}},
+                    "required": ["arg"],
+                },
+            },
+        })],
+        ..Default::default()
+    };
+    let shown = |messages: &[Value]| {
+        template
+            .render(messages, &opts)
+            .map(|out| out.contains(ARG))
+    };
+    shown(&messages).unwrap_or_else(|_| {
+        for message in &mut messages {
+            if role(message) == "assistant" && message.get("reasoning_content").is_none() {
+                message["reasoning_content"] = json!("");
+            }
+        }
+        shown(&messages).unwrap_or(false)
+    })
+}
+
+/// `func_args_not_string`: each call's string `arguments` parsed as
+/// JSON. A string that is not JSON is an error, as it is upstream.
+fn parse_arguments(messages: &mut [Value]) -> Result<(), String> {
+    for message in messages {
+        let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for call in calls {
+            if let Some(args) = call.pointer_mut("/function/arguments") {
+                if let Value::String(text) = args {
+                    *args = serde_json::from_str(text)
+                        .map_err(|e| format!("Failed to parse tool call arguments as JSON: {e}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn role(message: &Value) -> &str {
@@ -309,6 +401,7 @@ mod tests {
         };
         Reshape {
             fold_system,
+            object_arguments: false,
             family,
         }
         .apply(&mut messages, &kwargs)
@@ -449,6 +542,73 @@ mod tests {
         );
     }
 
+    fn reads_arguments(source: &str) -> bool {
+        ChatTemplate::from_jinja(source)
+            .map(|t| Reshape::for_template(&t, None, None).object_arguments)
+            .unwrap()
+    }
+
+    /// Reading a member, walking the items or `tojson` reads an object.
+    /// Concatenating the arguments, ignoring them, or a render that
+    /// fails does not. A template that insists on a reasoning field gets
+    /// the second try upstream gives it.
+    #[test]
+    fn a_template_reads_object_arguments_when_their_value_reaches_the_prompt() {
+        let each_call = |body: &str| {
+            format!("{{% for m in messages %}}{{% for c in m.tool_calls %}}{body}{{% endfor %}}{{% endfor %}}")
+        };
+        assert!(reads_arguments(&each_call(
+            "{{ c.function.arguments.arg }}"
+        )));
+        assert!(reads_arguments(&each_call(
+            "{% for k, v in c.function.arguments.items() %}{{ v }}{% endfor %}"
+        )));
+        assert!(reads_arguments(&each_call(
+            "{{ c.function.arguments | tojson }}"
+        )));
+        assert!(!reads_arguments(&each_call(
+            "{{ '>>>' + c.function.arguments }}"
+        )));
+        assert!(!reads_arguments(&each_call("{{ c.function.name }}")));
+        let insists = "{% for m in messages %}{% if m.role == 'assistant' and m.reasoning_content is not defined %}\
+                       {{ raise_exception('missing a thinking field') }}{% endif %}\
+                       {% for c in m.tool_calls %}{{ c.function.arguments | tojson }}{% endfor %}{% endfor %}";
+        assert!(reads_arguments(insists));
+    }
+
+    /// The wire string becomes an object where the template reads one,
+    /// a string that is not JSON is refused as upstream refuses it, and
+    /// every other template keeps the string.
+    #[test]
+    fn arguments_are_parsed_only_for_a_template_that_reads_an_object() {
+        let call = |args: &str| {
+            json!([{"role": "assistant", "content": "", "tool_calls": [
+                {"type": "function", "function": {"name": "f", "arguments": args}},
+            ]}])
+        };
+        let parse = |object_arguments: bool, messages: Value| {
+            let Value::Array(mut messages) = messages else {
+                unreachable!()
+            };
+            Reshape {
+                fold_system: false,
+                object_arguments,
+                family: None,
+            }
+            .apply(&mut messages, &Map::new())
+            .map(|()| messages[0]["tool_calls"][0]["function"]["arguments"].clone())
+        };
+        assert_eq!(
+            parse(true, call(r#"{"b": 1, "a": 2}"#)).unwrap(),
+            json!({"b": 1, "a": 2})
+        );
+        assert_eq!(
+            parse(false, call(r#"{"b": 1}"#)).unwrap(),
+            json!(r#"{"b": 1}"#)
+        );
+        assert!(parse(true, call("not json")).is_err_and(|e| e.contains("as JSON")));
+    }
+
     #[test]
     fn translategemma_types_each_user_turn_with_its_languages() {
         let messages =
@@ -471,6 +631,7 @@ mod tests {
         };
         let refused = Reshape {
             fold_system: false,
+            object_arguments: false,
             family: Some(Family::TranslateGemma),
         }
         .apply(&mut messages, &kwargs);

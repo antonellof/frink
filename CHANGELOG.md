@@ -17,6 +17,14 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **A replayed tool call failed on Functionary v3.2.** frink parsed
+  every call's `arguments` into an object, and Functionary v3.2 adds
+  them to a string, so a tool round trip raised "string and map".
+  llama.cpp parses them only for a template that reads an object
+  (`supports_object_arguments`), and so does frink now, on a probe it
+  runs at load. A call whose `arguments` are not JSON is refused for
+  such a template, as llama.cpp refuses it. 14 of 525 census prompts
+  differ now (#509).
 - **Gemma 2, TranslateGemma and K2 Horizon refused conversations that
   llama-server renders, and Ministral 3, Devstral and Gemma 4 rendered
   them differently.** llama.cpp reshapes the messages for these
