@@ -568,6 +568,7 @@ dependencies = [
  "frink-moe",
  "frink-quant",
  "frink-safetensors",
+ "frink-vulkan",
  "half",
  "libc",
  "minijinja",

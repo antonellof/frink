@@ -83,3 +83,6 @@ cuda = ["frink-models/cuda"]
 # Apple Silicon Metal kernels through the same WeightMatrix::apply_gpu /
 # ExpertPlacement::GpuDevice path. macOS only.
 metal = ["frink-models/metal"]
+# Vulkan decode matvecs through frink-core's seam, selected with
+# FRINK_VULKAN=1 (#409), and Vulkan in `--list-devices`.
+vulkan = ["frink-models/vulkan"]

@@ -1545,7 +1545,7 @@ line up.
 | `-t/--threads` | CPU threads (`0` = performance-core default) |
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
 | `-fa/--flash-attn` | `on` or `auto` (the default); `off` and sweeps are refused |
-| `--list-devices` | Print the devices this build can run on and exit |
+| `--list-devices` | Print the devices this build can run on and exit. A build with cargo's `vulkan` feature asks the Vulkan loader and prints the device it found, or why there is none |
 | `--no-warmup` | Time every repetition, with no discarded warmup first. Refused with `--receipt` |
 | `--delay` | Seconds to sleep before each test, to let the host cool off |
 | `--prio` | Process priority: `-1` low, `0` normal, `1` medium, `2` high, `3` realtime (`nice` 5, 0, -5, -10, -20, as llama.cpp sets it). A priority the OS refuses is an error |
