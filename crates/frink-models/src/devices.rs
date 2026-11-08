@@ -12,7 +12,7 @@
 //! Vulkan, which frink has a backend for (`--features vulkan`). It is
 //! not added in this function yet because `frink-vulkan` is reachable
 //! only through `frink-core`'s optional feature and wiring that is a
-//! change of its own; `docs/ROADMAP.md` carries the row.
+//! change of its own, part of #409.
 
 /// Print the detected devices, one per line, after a header.
 pub fn print_available_devices() {

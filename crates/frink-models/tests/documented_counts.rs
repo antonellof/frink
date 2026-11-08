@@ -358,12 +358,13 @@ fn docs_state_the_unaudited_triage_distribution_the_catalog_holds() {
         );
     }
 
-    // The same number, stated in prose elsewhere. `docs/ROADMAP.md`
+    // The same number, stated in prose elsewhere. The old roadmap
     // ranked the work as "close the 41 unaudited architectures" long
     // after the count reached single digits, which is the same drift
-    // in the document a reader uses to decide what to work on.
+    // in the document a reader uses to decide what to work on. The
+    // goal doc that replaced it is held to the same rule.
     let total: usize = counts.iter().sum();
-    for (doc_name, doc_text) in [("docs/ROADMAP.md", read("docs/ROADMAP.md"))] {
+    for (doc_name, doc_text) in [("docs/plans/north-star.md", read("docs/plans/north-star.md"))] {
         for (line_no, line) in doc_text.lines().enumerate() {
             if let Some(at) = line.find(" unaudited architectures") {
                 let claimed: String = line[..at]

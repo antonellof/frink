@@ -3,7 +3,7 @@
 **This is not a plan. It is an inventory**, produced 2026-09-01 by
 reading both trees. Its job is to be the first systematic, evidence-
 backed answer to the question
-[`north-star.md`](north-star.md) asks: for any GGUF a user can run under
+[`north-star.md`](../north-star.md) asks: for any GGUF a user can run under
 llama.cpp, what happens under frink?
 
 **The standard every row here is held to.** A row exists only when the
@@ -25,7 +25,7 @@ file per layout, with `avx2/` and `neon/` beside them), and
 points at the tree as it was read on 2026-09-01; the three `repack.rs`
 paths are re-pointed to the directory, and the line numbers on them are
 dropped. The `roadmap.md` it cites is archived as
-[`archive/roadmap-2026-09.md`](archive/roadmap-2026-09.md), and its
+[`archive/roadmap-2026-09.md`](roadmap-2026-09.md), and its
 `roadmap.md:N` line cites refer to that file as it stood then.
 
 **Read the body as a SNAPSHOT dated 2026-09-01, not as current

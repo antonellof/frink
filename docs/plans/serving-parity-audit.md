@@ -254,10 +254,11 @@ the one number in this document that did not come off a socket.
 | Per-layer sliding-window eviction on paged KV | Not implemented. A page group holds one block in every layer, so the paged store slides only a model whose every layer shares one window; an alternating model (Gemma-2/3, gpt-oss) holds its whole context there. The contiguous store, which the server uses without `FRINK_PAGED_KV_BLOCKS`, evicts per layer by default, with speculative rollback, the prefix cache and `n > 1` forks working on it ([#61](https://github.com/antonellof/frink/issues/61)). |
 | Tensor / pipeline parallel | Not implemented. Single process, single device. |
 | Disaggregated prefill | Not implemented. |
-| Multi-device expert residency | Policy only. `frink-core`'s expert-residency stack decides and nothing executes it except a compile-only CUDA pool whose hardware test is `#[ignore]`d. |
+| Multi-device expert residency | Not implemented. Expert residency executes on one device, through the host and Metal expert slots (`frink-core/src/expert_slab.rs`, #406). Nothing spreads experts across devices. |
 
 Present and worth naming because they are usually listed beside the
-above: speculative decoding with a draft model (`--model-draft`),
+above: speculative decoding (a draft model on `frink run`, prompt lookup on
+the server's private loop),
 grammar- and schema-constrained decoding, LoRA adapters
 (`frink-models/src/lora.rs`), and an OpenAI- plus Anthropic-compatible
 API surface.

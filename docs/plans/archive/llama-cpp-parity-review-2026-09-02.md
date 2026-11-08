@@ -1,6 +1,6 @@
 # llama.cpp parity review (2026-09-02)
 
-Companion to [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) (evidence-backed differential). This document ranks **what to do next** for parity with llama.cpp as a serving + CLI stack.
+Companion to [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) (evidence-backed differential). This document ranks **what to do next** for parity with llama.cpp as a serving + CLI stack.
 
 **North star:** same GGUF, same command shapes, same or better performance on hardware people own ([`north-star.md`](../north-star.md)).
 
@@ -135,7 +135,7 @@ Align: `-n` default (-1 = EOS), `-cnv`/`-no-cnv`, `-sys` spelling, `-hf` on run 
 
 - **Engine bench:** `frink bench` vs `llama-bench` — keep receipt discipline ([`benchmarks/README.md`](../../../benchmarks/README.md))
 - **HTTP bench:** `frink serve-bench` vs `llama-server` load — extend parallel/concurrency scenarios
-- **Kernel parity:** Metal/CUDA gap inventory in [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) §2
+- **Kernel parity:** Metal/CUDA gap inventory in [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) §2
 
 ---
 
@@ -166,7 +166,7 @@ Every parity claim needs:
 2. Test that fails when reverted
 3. Receipt or HTTP bench JSON checked in
 
-Use [`llama-cpp-gap-inventory.md`](../llama-cpp-gap-inventory.md) as the evidence ledger; update counts when code changes, not docs alone.
+Use [`llama-cpp-gap-inventory.md`](llama-cpp-gap-inventory.md) as the evidence ledger; update counts when code changes, not docs alone.
 
 ---
 
