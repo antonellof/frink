@@ -13,7 +13,7 @@ comes back the same way.
 | `GET /health` | Supported (capability handshake, see below) |
 | `GET /v1/models` | Supported |
 | `POST /v1/chat/completions` | Supported (JSON + SSE) |
-| `POST /v1/completions` | Supported (`prompt`, `max_tokens`, sampling subset) |
+| `POST /v1/completions` | Supported, JSON only (`stream` is not served yet). The fields are in the tables below |
 | `POST /completion` · `POST /completions` | llama.cpp's native completion endpoint, JSON + its own SSE shape. Not an alias of the line above (see below) |
 | `POST /v1/tokenize` · `POST /tokenize` | Supported. The unprefixed spelling is llama.cpp's, on the same handler (see below) |
 | `POST /v1/detokenize` · `POST /detokenize` | Supported, same aliasing |
@@ -44,9 +44,11 @@ comes back the same way.
 | `GET /` | 404. The web UI in [`ui/`](../ui) is a separate app and this server does not serve it |
 | Audio / images | Not supported |
 
-That is the complete list. Every path is defined as one constant in the
-`frink-api` crate, and the server mounts nothing that is not in it, so
-the UI and the server cannot disagree about a URL.
+That is the complete list. Every path a client of the public API uses is
+one constant in the `frink-api` crate, so the UI and the server cannot
+disagree about a URL. The `/v1/conversations` routes are the exception:
+they are the server's own (`frink-server/src/conversations.rs`) and
+`frink-api` does not carry them.
 
 ## Authentication
 
@@ -218,7 +220,7 @@ described under [Tool-call formats](#tool-call-formats).
       "reason": "metal_not_built",       // stable code, safe to switch on
       "detail": "Apple M2 Pro is present but this binary was built without --features metal; rebuild to use it." }
   ],
-  "version": "0.50.0", "pid": 4242, "uptime_seconds": 12.5,
+  "version": "0.57.0", "pid": 4242, "uptime_seconds": 12.5,
   "server_time_unix_ms": 1786000000000,
   "last_request_age_seconds": 0.4    // absent until one is served
 }
@@ -297,7 +299,8 @@ opposite block sizes. `/admin/stats` rows carry `acceptance_length` and
 `draft_accept_rate_per_position` for the same reason.
 
 The speculation fields are absent for a request that did not draft: a
-grammar-constrained or `json_object` request (verification draws
+request the continuous-batching worker serves (the default on Metal,
+which has no speculation yet), a grammar-constrained or `json_object` request (verification draws
 through the same grammar machine, and a rejected block would leave it
 advanced over tokens that were never emitted), a paged or recurrent KV
 store (a rejected draft has to be rolled back and neither can), a
@@ -627,7 +630,7 @@ scorers) refuse by name, each saying what it needs;
 is among them: llama.cpp runs Llama's decoder body for it with no
 output head and with the mask its `attention.causal` key sets, so it
 has no logits to generate from, and its pooled embedding is not yet
-checked against llama.cpp's (#421).
+checked against llama.cpp's.
 
 ## Reranking
 
@@ -1491,8 +1494,8 @@ nothing is called) · the embedding architectures listed above as
 refused by name · multi-GPU, tensor parallel, prefill/decode
 disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained or paged requests, so
-their speculation fields in `usage` are absent · llama.cpp's `/infill`,
+speculative decoding for grammar-constrained, paged or continuously
+batched requests, so their speculation fields in `usage` are absent · llama.cpp's `/infill`,
 `/props`, `GET /slots` (the live slot listing; `POST /slots/{id}` save
 and restore is supported, see above) and `/apply-template`, none of
 which has a frink counterpart.

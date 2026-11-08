@@ -141,7 +141,7 @@ The table above is single-stream kernel throughput against llama.cpp.
 These are the **serving** numbers: what continuous batching, paged KV
 and the prefix cache are worth once several requests are in flight.
 
-Self-relative — one build against itself on one box, each figure taken
+Self-relative: one build against itself on one box, each figure taken
 twice in interleaved order, passes agreeing within 1.2%. Not a
 cross-engine comparison, and not comparable to the gap columns above.
 Apple M2 Pro, Metal, all layers offloaded, Llama-3.2-1B-Instruct

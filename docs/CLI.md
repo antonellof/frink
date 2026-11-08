@@ -43,7 +43,7 @@ to name a real flag of its tool.
 | cli | `--repeat-penalty` | Default `1.1`; llama.cpp's is `1.0` (off) | A deliberate default (`docs/FEATURES.md`), so a run left to defaults is not token-identical; `--repeat-penalty 1.0` gives upstream's |
 | cli, server | `-dev` | One of `auto`, `none`, `cpu`, `metal`, `cuda`; llama.cpp takes a device list (`CUDA0,CUDA1`) | frink places a model on one backend, not on named devices |
 | cli, server, bench | `-ngl` | `0`, `auto`, `all`, or a count at or above the layer count. A PARTIAL count is refused | frink has no partial layer placement. It used to offload everything and run out of memory on the machine the flag was meant for |
-| cli, server | `-ctk` | llama.cpp's types are accepted; `f16`, `q8_0`, `q4_0` and frink's `fp8` are served, the rest fall back and the banner says so. The quantized wires are Metal's device store only | Only the Metal KV store has a selectable dtype |
+| cli, server | `-ctk` | llama.cpp's types are accepted; `f16`, `q8_0`, `q4_0` and frink's `fp8` are served, the rest fall back and the banner says so. The quantized wires are Metal's device store only | The host store keeps `f16` or `f32`, CUDA's is `f32`, and only Metal's device store takes a quantized type |
 | server | `-c` | `0` is refused. Unset derives the ceiling from the device budget, capped at the trained context | llama.cpp's `-c 0` means "the trained context", which may not fit; omit the flag instead |
 | server | `-np` | The cap on concurrent sequences under continuous batching; implies `-cb`. `-1` (auto) is refused, omit it | frink has no fixed slots; sequences share one batched worker |
 | server | `-b` | `-b` and `-ub` resolve to ONE prefill chunk (the smaller named) | frink has no logical/physical batch split |
@@ -1332,7 +1332,7 @@ FRINK_MODEL_PATH=model.gguf FRINK_ADDR=127.0.0.1:8383 ./target/release/frink-ser
 ## Server
 
 Two ways to start the same server. `frink serve` is a subcommand of the
-main binary and needs the optional `serve` feature at build time.
+main binary, built in by default (the `serve` feature).
 `frink-server` is that same server as its own executable, and both
 parse identical arguments through the same code.
 
@@ -1475,7 +1475,7 @@ curl -s -X POST http://127.0.0.1:8383/v1/chat/completions \
 ```bash
 # The kernel picks the port. The bound address is announced on stdout.
 ./target/release/frink-server -m model.gguf --port 0 --exit-on-stdin-close
-{"event":"frink.server.ready","addr":"127.0.0.1:52091","port":52091,"scheme":"http","pid":4242,"version":"0.15.2"}
+{"event":"frink.server.ready","addr":"127.0.0.1:52091","port":52091,"scheme":"http","pid":4242,"version":"0.57.0"}
 ```
 
 `--port 0` plus that one line saves a parent process from probing
