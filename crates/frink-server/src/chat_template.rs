@@ -54,6 +54,8 @@
 //! the same mechanism and the same reason: what a template PRINTS is the
 //! question, and its source is a proxy that answers a different one.
 
+mod reshape;
+
 use std::sync::Arc;
 
 use crate::policy::effort::{
@@ -98,6 +100,9 @@ struct Inner {
     /// flag sets it ([`JinjaTemplate::supports_thinking`]). Probed once,
     /// at load, as llama-server does.
     supports_thinking: bool,
+    /// What llama.cpp does to a conversation before rendering it with
+    /// this template ([`reshape`]).
+    reshape: reshape::Reshape,
 }
 
 impl std::fmt::Debug for PromptTemplate {
@@ -256,6 +261,10 @@ impl PromptTemplate {
         let implied_reasoning =
             probe_implied_reasoning(probe_render(&template, bos, eos, supports_thinking));
         let implied_tools = probe_implied_tool_format(&template, bos, eos);
+        let reshape = reshape::Reshape {
+            fold_system: !probe_shows_system(&template, bos, eos),
+            family: template.source().and_then(reshape::Family::detect),
+        };
         Self {
             inner: Arc::new(Inner {
                 // A terminator that IS the EOS adds nothing to the stop
@@ -273,6 +282,7 @@ impl PromptTemplate {
                 implied_tools,
                 default_kwargs,
                 supports_thinking,
+                reshape,
             }),
         }
     }
@@ -363,10 +373,14 @@ impl PromptTemplate {
         extra: Map<String, Value>,
     ) -> Result<String, TemplateError> {
         let structured = self.handles_tools() && !tools.is_empty();
-        let json: Vec<Value> = messages
+        let mut json: Vec<Value> = messages
             .iter()
             .map(|m| message_json(m, structured))
             .collect();
+        self.inner
+            .reshape
+            .apply(&mut json, &extra)
+            .map_err(TemplateError::Render)?;
         let opts = RenderOptions {
             add_generation_prompt: true,
             bos_token: self.inner.bos_token.clone(),
@@ -510,6 +524,28 @@ pub(crate) fn tool_json(t: &ToolDef) -> Value {
             })),
         },
     })
+}
+
+/// llama.cpp's `supports_system_role` (`common/jinja/caps.cpp`): does a
+/// system turn's text reach the prompt? Upstream renders the same two
+/// turns and asks whether the template read the system text. This asks
+/// whether it printed it, which is the same answer unless a template
+/// reads the text and then throws it away. A render that fails, as
+/// Gemma 2's raise on a system turn does, has not shown it.
+fn probe_shows_system(template: &JinjaTemplate, bos: Option<&str>, eos: Option<&str>) -> bool {
+    let messages = [
+        json!({"role": "system", "content": "System message"}),
+        json!({"role": "user", "content": "User message"}),
+    ];
+    let opts = RenderOptions {
+        add_generation_prompt: true,
+        bos_token: bos.map(str::to_string),
+        eos_token: eos.map(str::to_string),
+        ..Default::default()
+    };
+    template
+        .render(&messages, &opts)
+        .is_ok_and(|out| out.contains("System message"))
 }
 
 /// Does this template actually *consume* the tools it is handed?
@@ -1024,6 +1060,42 @@ mod tests {
                 "\n1",
             )
         );
+    }
+
+    /// A template that raises on a system turn, as Gemma 2's does, gets
+    /// it folded into the user's turn, as llama.cpp folds it. One that
+    /// prints it keeps it.
+    #[test]
+    fn a_system_turn_the_template_refuses_is_folded_into_the_next() {
+        let gemma2 = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}\
+                      {% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}";
+        let conversation = [msg("system", "Be brief."), msg("user", "Hi")];
+        let folded = PromptTemplate::from_gguf_metadata(
+            Some(gemma2),
+            Some("gemma2"),
+            false,
+            true,
+            None,
+            None,
+        );
+        assert_eq!(
+            folded
+                .render(&conversation, &[], Map::new())
+                .expect("renders"),
+            "<user>Be brief.\nHi"
+        );
+        let chatml = PromptTemplate::from_gguf_metadata(
+            Some(CHATML),
+            Some("qwen2"),
+            false,
+            true,
+            None,
+            None,
+        );
+        assert!(chatml
+            .render(&conversation, &[], Map::new())
+            .expect("renders")
+            .starts_with("<|im_start|>system\nBe brief.<|im_end|>"));
     }
 
     #[test]
