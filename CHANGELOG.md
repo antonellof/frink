@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-11-08
+
 ### Added
 
 - **`POST /apply-template`**, llama-server's prompt preview: a chat
