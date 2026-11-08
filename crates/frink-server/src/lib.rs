@@ -1316,11 +1316,15 @@ impl ChatCompletionRequest {
         &self,
         template: &chat_template::PromptTemplate,
     ) -> serde_json::Map<String, serde_json::Value> {
-        let mut kwargs = self.chat_template_kwargs.clone().unwrap_or_default();
+        let request = self.chat_template_kwargs.clone().unwrap_or_default();
         // Whether the caller steered the template themselves. Read
         // BEFORE anything is added, or every request looks explicit
-        // from the second statement on.
-        let caller_steered = THINKING_KWARG_KEYS.iter().any(|k| kwargs.contains_key(*k));
+        // from the second statement on. The server's own defaults do not
+        // count: `--chat-template-kwargs` sits under whatever a request
+        // says, including its top-level knobs, as in llama.cpp.
+        let caller_steered = THINKING_KWARG_KEYS.iter().any(|k| request.contains_key(*k));
+        let mut kwargs = template.default_kwargs().clone();
+        kwargs.extend(request);
 
         if !caller_steered {
             match self.thinking_direction() {
@@ -1329,7 +1333,9 @@ impl ChatCompletionRequest {
                         kwargs.insert(k, v);
                     }
                     // Nothing below applies: an effort would re-enter a
-                    // block this request just closed.
+                    // block this request just closed. A server default
+                    // would too, so it goes.
+                    kwargs.remove("reasoning_effort");
                     return kwargs;
                 }
                 Some(true) => {
@@ -1340,9 +1346,7 @@ impl ChatCompletionRequest {
                 None => {}
             }
             if let Some(effort) = &self.reasoning_effort {
-                kwargs
-                    .entry("reasoning_effort".to_string())
-                    .or_insert_with(|| serde_json::json!(effort));
+                kwargs.insert("reasoning_effort".to_string(), serde_json::json!(effort));
             }
         }
 
@@ -9520,6 +9524,67 @@ pub(crate) mod tests {
         assert!(!kwargs.contains_key("reasoning_effort"));
         let prompt = prompt_from_messages(&req.messages, &template, &[], kwargs).expect("renders");
         assert_eq!(prompt, "hi");
+    }
+
+    /// A template with `--chat-template-kwargs`-style defaults.
+    fn defaulted(defaults: serde_json::Value) -> chat_template::PromptTemplate {
+        let serde_json::Value::Object(defaults) = defaults else {
+            panic!("defaults must be an object");
+        };
+        chat_template::PromptTemplate::with_default_kwargs(GRADED, defaults)
+    }
+
+    fn kwargs_for(
+        template: &chat_template::PromptTemplate,
+        extra: serde_json::Value,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        chat_request(body).resolve_template_kwargs(template)
+    }
+
+    #[test]
+    fn server_kwargs_fill_what_a_request_leaves_out_and_lose_to_what_it_sets() {
+        let template = defaulted(serde_json::json!({"a": 1, "b": 2}));
+        let kwargs = kwargs_for(
+            &template,
+            serde_json::json!({"chat_template_kwargs": {"b": 3}}),
+        );
+        assert_eq!(kwargs["a"], serde_json::json!(1));
+        assert_eq!(kwargs["b"], serde_json::json!(3));
+    }
+
+    /// A default is not the caller speaking. If it counted, one operator
+    /// flag would make every request look explicitly steered, and a
+    /// client's own `reasoning_effort` would be dropped without a word.
+    #[test]
+    fn a_server_default_does_not_silence_a_requests_top_level_knobs() {
+        let template = defaulted(serde_json::json!({"enable_thinking": true}));
+        let kwargs = kwargs_for(&template, serde_json::json!({"reasoning_effort": "high"}));
+        assert_eq!(kwargs["reasoning_effort"], serde_json::json!("high"));
+        assert_eq!(kwargs["enable_thinking"], serde_json::json!(true));
+    }
+
+    /// As in llama.cpp's `oaicompat_chat_params_parse`: the request's
+    /// top-level field goes on after the command line's defaults.
+    #[test]
+    fn a_requests_effort_beats_a_server_default_effort() {
+        let template = defaulted(serde_json::json!({"reasoning_effort": "low"}));
+        let kwargs = kwargs_for(&template, serde_json::json!({"reasoning_effort": "high"}));
+        assert_eq!(kwargs["reasoning_effort"], serde_json::json!("high"));
+    }
+
+    #[test]
+    fn turning_thinking_off_clears_a_server_default_effort() {
+        let template = defaulted(serde_json::json!({"reasoning_effort": "high"}));
+        let kwargs = kwargs_for(&template, serde_json::json!({"reasoning_effort": "none"}));
+        assert_eq!(kwargs["enable_thinking"], serde_json::json!(false));
+        assert!(!kwargs.contains_key("reasoning_effort"), "{kwargs:?}");
     }
 
     /// `chat_template_kwargs` is the specific spelling and wins over the

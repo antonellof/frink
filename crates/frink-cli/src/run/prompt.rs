@@ -15,19 +15,27 @@ use super::*;
 /// way, including for the families the sniffer never recognised.
 pub(super) struct ChatKind {
     template: frink_models::chat_template::ChatTemplate,
+    kwargs: serde_json::Map<String, serde_json::Value>,
     bos_token: Option<String>,
     eos_token: Option<String>,
 }
 
 impl ChatKind {
-    pub(super) fn detect_for_gguf(file: &ShardedGguf, byte_tokenizer: bool) -> Self {
+    pub(super) fn detect_for_gguf(
+        file: &ShardedGguf,
+        byte_tokenizer: bool,
+        flags: &frink_models::template_flags::TemplateFlags,
+    ) -> Self {
         ChatKind {
-            template: frink_models::chat_template::ChatTemplate::from_gguf_metadata(
-                file.metadata_str("tokenizer.chat_template"),
-                file.metadata_str("general.architecture"),
-                byte_tokenizer,
-                frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
-            ),
+            template: flags.template.clone().unwrap_or_else(|| {
+                frink_models::chat_template::ChatTemplate::from_gguf_metadata(
+                    file.metadata_str("tokenizer.chat_template"),
+                    file.metadata_str("general.architecture"),
+                    byte_tokenizer,
+                    frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
+                )
+            }),
+            kwargs: flags.kwargs.clone(),
             bos_token: file.token_text("tokenizer.ggml.bos_token_id"),
             eos_token: file.token_text("tokenizer.ggml.eos_token_id"),
         }
@@ -49,6 +57,7 @@ impl ChatKind {
             add_generation_prompt: true,
             bos_token: self.bos_token.clone(),
             eos_token: self.eos_token.clone(),
+            extra: self.kwargs.clone(),
             ..Default::default()
         };
         self.template
@@ -102,7 +111,8 @@ pub(super) fn final_prompt(args: &InferArgs, file: &ShardedGguf) -> anyhow::Resu
         }
         user_prompt
     } else {
-        ChatKind::detect_for_gguf(file, false).wrap_user(args.system.as_deref(), &user_prompt)?
+        ChatKind::detect_for_gguf(file, false, &args.template_flags)
+            .wrap_user(args.system.as_deref(), &user_prompt)?
     };
     if args.verbose_prompt {
         eprintln!("----- prompt -----");
@@ -125,4 +135,28 @@ pub(super) fn resolve_prompt(args: &InferArgs) -> anyhow::Result<String> {
         prompt = apply_escapes(&prompt);
     }
     Ok(prompt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frink_models::template_flags::{TemplateFlagValues, TemplateFlags};
+
+    #[test]
+    fn the_template_flags_reach_the_rendered_prompt() {
+        let kwargs = [r#"{"mode": "x"}"#.to_string()];
+        let flags = TemplateFlags::resolve(TemplateFlagValues {
+            template: Some("{{ messages[0].content }}:{{ mode }}"),
+            kwargs: &kwargs,
+            ..Default::default()
+        })
+        .unwrap();
+        let kind = ChatKind {
+            template: flags.template.clone().unwrap(),
+            kwargs: flags.kwargs.clone(),
+            bos_token: None,
+            eos_token: None,
+        };
+        assert_eq!(kind.wrap_user(None, "hi").unwrap(), "hi:x");
+    }
 }

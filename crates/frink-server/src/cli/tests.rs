@@ -166,6 +166,53 @@ fn reasoning_budget_parses_llama_cpps_range_and_refuses_the_rest() {
 /// Both spellings of llama.cpp's prefill switch parse, and they
 /// conflict rather than letting the last one win silently.
 #[test]
+fn chat_template_flags_parse_like_llama_server() {
+    let args = server_args(&[
+        "--chat-template",
+        "chatml",
+        "--chat-template-kwargs",
+        r#"{"a": 1}"#,
+        "--chat-template-kwargs",
+        r#"{"b": 2}"#,
+        "--reasoning-effort",
+        "high",
+    ]);
+    assert_eq!(args.chat_template.as_deref(), Some("chatml"));
+    assert_eq!(args.chat_template_kwargs.len(), 2);
+    assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
+}
+
+/// Both set one thing upstream, so the later one wins there.
+#[test]
+fn the_later_of_chat_template_and_its_file_wins() {
+    let args = server_args(&["--chat-template", "a", "--chat-template-file", "b"]);
+    assert_eq!(args.chat_template, None);
+    assert!(args.chat_template_file.is_some());
+    let args = server_args(&["--chat-template-file", "b", "--chat-template", "a"]);
+    assert_eq!(args.chat_template.as_deref(), Some("a"));
+    assert_eq!(args.chat_template_file, None);
+}
+
+#[test]
+fn reasoning_takes_its_short_spelling_and_auto_as_minus_one() {
+    let argv = rewrite(vec!["frink-server".into(), "-rea".into(), "-1".into()]);
+    let args = ServerArgs::try_parse_from(argv).unwrap();
+    assert_eq!(args.reasoning.as_deref(), Some("-1"));
+}
+
+#[test]
+fn a_bad_chat_template_or_reasoning_value_is_refused_at_startup() {
+    for argv in [
+        vec!["--reasoning", "maybe"],
+        vec!["--chat-template", "llama3"],
+        vec!["--chat-template-kwargs", "[1]"],
+    ] {
+        let args = server_args(&argv);
+        assert!(apply_cli_overrides(&args).is_err(), "{argv:?} was accepted");
+    }
+}
+
+#[test]
 fn prefill_assistant_has_both_of_llama_cpps_spellings() {
     let on = ServerArgs::try_parse_from(
         ["frink-server", "--prefill-assistant"]
