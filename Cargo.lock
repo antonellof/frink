@@ -569,6 +569,7 @@ dependencies = [
  "frink-quant",
  "frink-safetensors",
  "half",
+ "libc",
  "minijinja",
  "rayon",
  "regex",

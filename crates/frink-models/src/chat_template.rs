@@ -54,7 +54,8 @@
 //! | `{% set x %}…{% endset %}` block set | supported |
 //! | `loop.index0` / `loop.last` / `loop.first` | supported |
 //! | `raise_exception(msg)` | provided here; aborts the render with the message |
-//! | `strftime_now(fmt)` | provided here, UTC, subset of `strftime` (see [`strftime_now`]) |
+//! | `strftime_now(fmt)` | provided here, local time as llama.cpp's, subset of `strftime` (see [`strftime_now`]) |
+//! | `enable_thinking`, `date_string`, `datetime`, `reasoning_strength`, `preserve_thinking` and its kin | set under the kwargs, as every llama.cpp render sets them (see [`llama_defaults`]) |
 //! | `dictsort`, `map`, `default`, `trim`, `reject`, `join`, slicing | minijinja builtins |
 //! | `tojson` | reimplemented, with `indent`, `ensure_ascii` and `separators`; keys sorted (see [`py_compat::tojson`]) |
 //! | `is iterable`, `{% generation %}`, a `namespace(...)` list that `.append`s | [`py_compat`] |
@@ -73,6 +74,7 @@ use std::sync::Arc;
 use minijinja::value::Value as JinjaValue;
 use serde_json::Value;
 
+mod llama_defaults;
 mod py_compat;
 
 /// Everything that can go wrong between a GGUF's template string and a
@@ -160,6 +162,11 @@ pub struct RenderOptions {
     /// [`ChatTemplate::handles_tools`]).
     pub tools: Vec<Value>,
     pub extra: serde_json::Map<String, Value>,
+    /// llama.cpp's `inputs.enable_thinking`: passed to every render under
+    /// a kwarg of the same name. llama-server and llama-cli set it to
+    /// whether the template supports thinking
+    /// ([`ChatTemplate::supports_thinking`]); `None` leaves it undefined.
+    pub enable_thinking: Option<bool>,
 }
 
 impl ChatTemplate {
@@ -305,22 +312,10 @@ impl ChatTemplate {
                 for (k, v) in &opts.extra {
                     ctx.insert(k.clone(), v.clone());
                 }
-                // llama.cpp's `caps_apply_reasoning_effort`: a graded
-                // template reads the same value as `reasoning_strength`.
-                let effort = ctx.get("reasoning_effort").cloned();
-                if let Some(effort) = effort.filter(|e| e.as_str().is_some_and(|s| !s.is_empty())) {
-                    ctx.entry("reasoning_strength").or_insert(effort);
-                }
-                // And `caps_apply_preserve_reasoning`: a boolean
-                // `preserve_reasoning` (on by default, see
-                // `template_flags`) under the four names templates read
-                // it by. Upstream sets these before the kwargs, so a
-                // kwarg of the same name still wins.
-                if let Some(&Value::Bool(keep)) = ctx.get("preserve_reasoning") {
-                    for (name, value) in preserve_reasoning_spellings(keep) {
-                        ctx.entry(name).or_insert(Value::Bool(value));
-                    }
-                }
+                // What every llama.cpp render carries beside the kwargs,
+                // under them.
+                llama_defaults::fill(&mut ctx, opts.enable_thinking)
+                    .map_err(TemplateError::Render)?;
                 ctx.insert("messages".into(), Value::Array(messages.to_vec()));
                 ctx.insert(
                     "add_generation_prompt".into(),
@@ -355,18 +350,6 @@ impl ChatTemplate {
             }
         }
     }
-}
-
-/// `common/jinja/caps.cpp`'s `caps_apply_preserve_reasoning`: GLM reads
-/// `clear_thinking`, LFM `preserve_thinking`, Nemotron
-/// `truncate_history_thinking`, DeepSeek-V4 `drop_thinking`.
-fn preserve_reasoning_spellings(keep: bool) -> [(&'static str, bool); 4] {
-    [
-        ("preserve_thinking", keep),
-        ("clear_thinking", !keep),
-        ("truncate_history_thinking", !keep),
-        ("drop_thinking", !keep),
-    ]
 }
 
 /// minijinja reports the interesting part of a failure in the *cause*
@@ -608,27 +591,17 @@ fn raise_exception(msg: String) -> Result<JinjaValue, minijinja::Error> {
 /// `{{ strftime_now("%d %b %Y") }}` — Llama-3.1's template stamps
 /// today's date into its system preamble with it.
 ///
-/// UTC, and a deliberately small `strftime` subset: `%Y %y %m %d %e %H
+/// Local time, as llama.cpp's `std::localtime`, and a deliberately small `strftime` subset: `%Y %y %m %d %e %H
 /// %M %S %j %B %b %A %a %F %T %%`, plus the `-` no-pad flag
 /// (`%-d`, `%-m`). Anything else is an error rather than a silently
 /// wrong date — a model told the wrong year is a real quality bug and it
 /// would never show up as a crash.
 ///
-/// `FRINK_TEST_CHAT_TEMPLATE_NOW` (Unix seconds) pins the clock, which is
-/// how the regression tests below assert an exact string.
+/// `FRINK_TEST_CHAT_TEMPLATE_NOW` (Unix seconds, read as UTC) pins the
+/// clock ([`llama_defaults::local_now`]).
 fn strftime_now(fmt: String) -> Result<String, minijinja::Error> {
-    let secs = match std::env::var("FRINK_TEST_CHAT_TEMPLATE_NOW") {
-        Ok(v) => v.trim().parse::<i64>().map_err(|_| {
-            minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                "FRINK_TEST_CHAT_TEMPLATE_NOW must be Unix seconds",
-            )
-        })?,
-        Err(_) => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    };
+    let secs = llama_defaults::local_now()
+        .map_err(|e| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e))?;
     format_utc(secs, &fmt).map_err(|spec| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
@@ -1024,6 +997,8 @@ mod tests {
     /// got Llama's ipython tool-calling preamble.
     #[test]
     fn llama31_binds_tools_to_null_so_a_plain_chat_gets_no_tool_preamble() {
+        // `date_string` is today's, as in llama.cpp, so pin today.
+        let _clock = llama_defaults::PinnedClock::at(1_721_952_000); // 2024-07-26
         let out = ChatTemplate::from_jinja(LLAMA31_TEMPLATE)
             .unwrap()
             .render(
@@ -1066,14 +1041,13 @@ mod tests {
     #[test]
     fn strftime_now_stamps_a_pinned_clock() {
         // 2024-07-04T12:34:56Z
-        std::env::set_var("FRINK_TEST_CHAT_TEMPLATE_NOW", "1720096496");
+        let _clock = llama_defaults::PinnedClock::at(1_720_096_496);
         let out = ChatTemplate::from_jinja(
             "{{ strftime_now(\"%d %b %Y\") }}|{{ strftime_now('%A %F %T %j %-d') }}",
         )
         .unwrap()
         .render(&[], &opts())
         .unwrap();
-        std::env::remove_var("FRINK_TEST_CHAT_TEMPLATE_NOW");
         assert_eq!(out, "04 Jul 2024|Thursday 2024-07-04 12:34:56 186 4");
     }
 

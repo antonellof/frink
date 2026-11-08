@@ -93,6 +93,11 @@ struct Inner {
     implied_reasoning: Option<crate::policy::parser::ReasoningFormat>,
     default_kwargs: Map<String, Value>,
     implied_tools: Option<crate::policy::parser::ToolCallFormat>,
+    /// Whether llama.cpp calls the template thinking-capable, which is
+    /// `enable_thinking`'s value in every render unless the request or a
+    /// flag sets it ([`JinjaTemplate::supports_thinking`]). Probed once,
+    /// at load, as llama-server does.
+    supports_thinking: bool,
 }
 
 impl std::fmt::Debug for PromptTemplate {
@@ -240,12 +245,16 @@ impl PromptTemplate {
         default_kwargs: Map<String, Value>,
     ) -> Self {
         let (bos, eos) = (bos_token.as_deref(), eos_token.as_deref());
+        // First, because the probes below render as a request would, and
+        // a request's render carries its answer.
+        let supports_thinking = template.supports_thinking(bos, eos);
         let thinking = probe_thinking_profile(
-            probe_render(&template, bos, eos),
-            probe_efforts(&template, bos, eos),
+            probe_render(&template, bos, eos, supports_thinking),
+            probe_efforts(&template, bos, eos, supports_thinking),
         );
         let handles_tools = probe_tools_consumed(&template, bos, eos);
-        let implied_reasoning = probe_implied_reasoning(probe_render(&template, bos, eos));
+        let implied_reasoning =
+            probe_implied_reasoning(probe_render(&template, bos, eos, supports_thinking));
         let implied_tools = probe_implied_tool_format(&template, bos, eos);
         Self {
             inner: Arc::new(Inner {
@@ -263,6 +272,7 @@ impl PromptTemplate {
                 implied_reasoning,
                 implied_tools,
                 default_kwargs,
+                supports_thinking,
             }),
         }
     }
@@ -367,6 +377,7 @@ impl PromptTemplate {
                 Vec::new()
             },
             extra,
+            enable_thinking: Some(self.inner.supports_thinking),
         };
         self.inner.template.render(&json, &opts)
     }
@@ -520,6 +531,7 @@ fn probe_tools_consumed(
                 eos_token: eos_token.map(str::to_string),
                 tools,
                 extra: Map::new(),
+                enable_thinking: None,
             },
         )
     };
@@ -583,6 +595,7 @@ fn probe_implied_tool_format(
                 eos_token: eos_token.map(str::to_string),
                 tools: vec![probe],
                 extra: Map::new(),
+                enable_thinking: None,
             },
         )
         .ok()?;
@@ -617,6 +630,7 @@ fn probe_render<'a>(
     template: &'a JinjaTemplate,
     bos_token: Option<&'a str>,
     eos_token: Option<&'a str>,
+    supports_thinking: bool,
 ) -> impl FnMut(&Map<String, Value>, Option<&[Value]>) -> Result<String, TemplateError> + 'a {
     let messages = vec![json!({"role": "user", "content": "probe"})];
     move |kwargs, tools| {
@@ -626,6 +640,7 @@ fn probe_render<'a>(
             eos_token: eos_token.map(str::to_string),
             tools: tools.map(<[Value]>::to_vec).unwrap_or_default(),
             extra: kwargs.clone(),
+            enable_thinking: Some(supports_thinking),
         };
         template.render(&messages, &opts)
     }
@@ -654,8 +669,14 @@ fn probe_efforts(
     template: &JinjaTemplate,
     bos_token: Option<&str>,
     eos_token: Option<&str>,
+    supports_thinking: bool,
 ) -> EffortProfile {
-    probe_effort_profile(probe_render(template, bos_token, eos_token))
+    probe_effort_profile(probe_render(
+        template,
+        bos_token,
+        eos_token,
+        supports_thinking,
+    ))
 }
 
 /// A render closure that varies the CONVERSATION, for
@@ -679,6 +700,7 @@ pub(crate) fn turn_render<'a>(
                 eos_token: eos_token.map(str::to_string),
                 tools: Vec::new(),
                 extra: Map::new(),
+                enable_thinking: None,
             },
         )
     }

@@ -17,7 +17,9 @@
 //! writes to `FRINK_LLAMA_RENDERS`. Both hold frink to
 //! `known_differences.txt`, the pairs that differ today and the issue
 //! tracking each: a new difference fails, and so does a listed one that
-//! has stopped differing.
+//! has stopped differing. Beside the prompts, each template's
+//! `supports_thinking` (the default of `enable_thinking`) is held to
+//! llama.cpp's own answer wherever the template reads the variable.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -69,6 +71,33 @@ fn frink_prompt(source: &str, spec: &Spec, shape: &Shape) -> Result<String, Stri
             "oracle",
         )
         .map_err(|e| format!("{e:?}"))
+}
+
+/// Where frink's `supports_thinking` is not llama.cpp's, on a template
+/// whose one-turn prompt reads `enable_thinking`. Elsewhere the answer
+/// never reaches a prompt.
+fn thinking_disagreement(dir: &Path, name: &str, source: &str, spec: &Spec) -> Option<String> {
+    let llama = std::fs::read_to_string(dir.join(name).join("supports_thinking")).ok()?;
+    let llama = llama.trim() == "true";
+    let template = frink_models::chat_template::ChatTemplate::from_jinja(source).ok()?;
+    let render = |on: bool| {
+        let mut extra = serde_json::Map::new();
+        extra.insert("enable_thinking".to_string(), Value::Bool(on));
+        template.render(
+            &[serde_json::json!({"role": "user", "content": "hi"})],
+            &frink_models::chat_template::RenderOptions {
+                add_generation_prompt: true,
+                bos_token: Some(spec.bos_token.clone()),
+                eos_token: Some(spec.eos_token.clone()),
+                extra,
+                ..Default::default()
+            },
+        )
+    };
+    let reads = matches!((render(false), render(true)), (Ok(off), Ok(on)) if off != on);
+    let frink = template.supports_thinking(Some(&spec.bos_token), Some(&spec.eos_token));
+    (reads && frink != llama)
+        .then(|| format!("frink says supports_thinking {frink}, llama.cpp {llama}"))
 }
 
 /// libllama's answer, as `chat_renders.py` wrote it.
@@ -141,6 +170,11 @@ fn census_of(dir: &Path) -> Census {
                 (Ok(_), Err(e)) => format!("frink renders what llama.cpp refuses: {}", e.trim()),
             };
             census.differ.insert(format!("{name}/{}", shape.name), line);
+        }
+        if let Some(line) = thinking_disagreement(dir, &name, &source, &spec) {
+            census
+                .differ
+                .insert(format!("{name}/supports_thinking"), line);
         }
         census.templates.insert(name);
     }

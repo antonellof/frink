@@ -157,6 +157,14 @@ whether GLM-4.7, LFM2.5, LFM3, Nemotron-3, Laguna and DeepSeek-V4 keep
 the reasoning of earlier assistant turns. A request that sets one of
 those four itself keeps its own value.
 
+`enable_thinking` is `true` when the template supports thinking and the
+server was not started with `-rea off`, and `false` otherwise, as in
+llama-server. A request's own `enable_thinking`, `reasoning_effort:
+"none"` or `thinking: {"type": "disabled"}` still turns it off. So a
+thinking checkpoint (DeepSeek V3.1 to V4, QwQ, R1-Distill, Gemma 4,
+Laguna, MiniCPM5) thinks by default. `date_string`
+and `datetime` carry today's date in the server's local time.
+
 Five rules are applied to it before rendering:
 
 * An explicit knob wins wholesale. A caller who already set any of

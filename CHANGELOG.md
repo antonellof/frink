@@ -37,11 +37,21 @@ are the ones worth reading twice.
   renders every template llama.cpp bundles through it and through
   frink-server, and fails on a difference that
   `crates/frink-server/tests/llama_renders/known_differences.txt` does
-  not list with its issue. It found 161 of 525 prompts that differ
-  today, filed as #512, #513, #514, #515 and #509.
+  not list with its issue. It found 161 of 525 prompts that differ,
+  filed as #512, #513, #514, #515 and #509. 89 differ now.
 
 ### Fixed
 
+- **Thinking models did not think by default, and Llama 3.1 and 3.3
+  dated every prompt 26 Jul 2024.** llama.cpp passes `enable_thinking`
+  to every render, `true` where the template supports thinking, and
+  `date_string` and `datetime` with today's date. frink passed none of
+  them. So DeepSeek V3.1, V3.2, V4 and V4-Flash, QwQ, R1-Distill-Qwen,
+  Gemma 4, Laguna-XS, MiniCPM5, Reka-Edge, Bielik v3 and Command R7B
+  rendered with thinking closed where llama-server and llama-cli open
+  it, and Llama 3.1 and 3.3 printed their template's fallback date.
+  Dates, `strftime_now`'s included, are now local time, as llama.cpp's
+  are. 72 prompts of the libllama render census now match (#512).
 - **Multi-turn reasoning rendered a different prompt from llama.cpp's**
   on GLM-4.7-Flash, LFM3, LFM2.5 and Nemotron-3-Nano, on Laguna-S-2.1
   with thinking off, and on DeepSeek-V4 with thinking on. llama.cpp sets

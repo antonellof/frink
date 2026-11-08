@@ -163,8 +163,9 @@ pub struct ServerArgs {
     chat_template_kwargs: Vec<String>,
 
     /// Thinking in the chat, llama.cpp's `-rea`: `on`, `off` or `auto`
-    /// (the default), which leaves it to the template. `on` and `off` set
-    /// the `enable_thinking` template variable for every request.
+    /// (the default), which turns it on where the template supports it.
+    /// `on` and `off` set the `enable_thinking` template variable for
+    /// every request.
     #[arg(
         long = "reasoning",
         visible_alias = "rea",

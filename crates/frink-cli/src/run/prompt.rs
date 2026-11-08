@@ -18,6 +18,9 @@ pub(super) struct ChatKind {
     kwargs: serde_json::Map<String, serde_json::Value>,
     bos_token: Option<String>,
     eos_token: Option<String>,
+    /// `enable_thinking` under the kwargs: whether the template supports
+    /// thinking, as llama-cli passes it.
+    enable_thinking: bool,
 }
 
 impl ChatKind {
@@ -26,8 +29,8 @@ impl ChatKind {
         byte_tokenizer: bool,
         flags: &frink_models::template_flags::TemplateFlags,
     ) -> Self {
-        ChatKind {
-            template: flags.template.clone().unwrap_or_else(|| {
+        Self::new(
+            flags.template.clone().unwrap_or_else(|| {
                 frink_models::chat_template::ChatTemplate::from_gguf_metadata(
                     file.metadata_str("tokenizer.chat_template"),
                     file.metadata_str("general.architecture"),
@@ -35,9 +38,26 @@ impl ChatKind {
                     frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
                 )
             }),
-            kwargs: flags.kwargs.clone(),
-            bos_token: file.token_text("tokenizer.ggml.bos_token_id"),
-            eos_token: file.token_text("tokenizer.ggml.eos_token_id"),
+            flags.kwargs.clone(),
+            file.token_text("tokenizer.ggml.bos_token_id"),
+            file.token_text("tokenizer.ggml.eos_token_id"),
+        )
+    }
+
+    fn new(
+        template: frink_models::chat_template::ChatTemplate,
+        kwargs: serde_json::Map<String, serde_json::Value>,
+        bos_token: Option<String>,
+        eos_token: Option<String>,
+    ) -> Self {
+        let enable_thinking =
+            template.supports_thinking(bos_token.as_deref(), eos_token.as_deref());
+        ChatKind {
+            template,
+            kwargs,
+            bos_token,
+            eos_token,
+            enable_thinking,
         }
     }
 
@@ -58,6 +78,7 @@ impl ChatKind {
             bos_token: self.bos_token.clone(),
             eos_token: self.eos_token.clone(),
             extra: self.kwargs.clone(),
+            enable_thinking: Some(self.enable_thinking),
             ..Default::default()
         };
         self.template
@@ -151,12 +172,39 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let kind = ChatKind {
-            template: flags.template.clone().unwrap(),
-            kwargs: flags.kwargs.clone(),
-            bos_token: None,
-            eos_token: None,
-        };
+        let kind = ChatKind::new(
+            flags.template.clone().unwrap(),
+            flags.kwargs.clone(),
+            None,
+            None,
+        );
         assert_eq!(kind.wrap_user(None, "hi").unwrap(), "hi:x");
+    }
+
+    /// llama-cli's default: thinking on where the template supports it,
+    /// and `-rea off` still turns it off.
+    #[test]
+    fn enable_thinking_defaults_to_whether_the_template_thinks() {
+        // `if enable_thinking`, not `is false`: undefined and `true` must
+        // render differently, or the default could go unseen.
+        let source = "{{ messages[0].content }}{% if enable_thinking %}<think>{% endif %}";
+        let render = |reasoning| {
+            let flags = TemplateFlags::resolve(TemplateFlagValues {
+                template: Some(source),
+                reasoning,
+                ..Default::default()
+            })
+            .unwrap();
+            ChatKind::new(
+                flags.template.clone().unwrap(),
+                flags.kwargs.clone(),
+                None,
+                None,
+            )
+            .wrap_user(None, "hi")
+            .unwrap()
+        };
+        assert_eq!(render(None), "hi<think>");
+        assert_eq!(render(Some(false)), "hi");
     }
 }

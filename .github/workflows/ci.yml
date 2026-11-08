@@ -29,6 +29,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --verbose
       - run: cargo test --workspace --verbose
+      # The runners are on UTC, where a wrong sign on the zone offset
+      # cannot show. Chat templates stamp the date in local time, as
+      # llama.cpp's do, so check the clock in a zone with an offset.
+      - run: TZ=America/New_York cargo test -p frink-models --lib local_time_is_localtime_r
 
   cuda-scaffolding:
     name: build --features cuda (compile only, no GPU on CI)
