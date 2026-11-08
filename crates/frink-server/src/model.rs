@@ -414,7 +414,7 @@ pub fn load() -> anyhow::Result<LoadedModel> {
                 stop_tokens: StopTokens::default(),
                 bos_id: None,
                 is_synthetic: true,
-                chat_template: crate::chat_template::PromptTemplate::plain(),
+                chat_template: crate::chat_template::PromptTemplate::for_synthetic_weights()?,
             }))
         }
     }
@@ -483,14 +483,8 @@ fn load_glm52_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<Glm52
         None
     };
     let byte_tokenizer = matches!(tokenizer, ServerTokenizer::Byte);
-    let chat_template = crate::chat_template::PromptTemplate::from_gguf_metadata(
-        file.metadata_str("tokenizer.chat_template"),
-        Some(arch.as_str()),
-        byte_tokenizer,
-        frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
-        file.token_text("tokenizer.ggml.bos_token_id"),
-        file.token_text("tokenizer.ggml.eos_token_id"),
-    );
+    let chat_template =
+        crate::chat_template::PromptTemplate::for_gguf(file, Some(arch.as_str()), byte_tokenizer)?;
     tracing::info!("chat template: {}", chat_template.describe());
 
     Ok(Glm52Loaded {
@@ -532,14 +526,8 @@ fn load_mla_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<MlaLoad
         None
     };
     let byte_tokenizer = matches!(tokenizer, ServerTokenizer::Byte);
-    let chat_template = crate::chat_template::PromptTemplate::from_gguf_metadata(
-        file.metadata_str("tokenizer.chat_template"),
-        Some(arch.as_str()),
-        byte_tokenizer,
-        frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
-        file.token_text("tokenizer.ggml.bos_token_id"),
-        file.token_text("tokenizer.ggml.eos_token_id"),
-    );
+    let chat_template =
+        crate::chat_template::PromptTemplate::for_gguf(file, Some(arch.as_str()), byte_tokenizer)?;
     tracing::info!("chat template: {}", chat_template.describe());
 
     Ok(MlaLoaded {
@@ -582,14 +570,8 @@ fn load_gemma4_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<Gemm
         None
     };
     let byte_tokenizer = matches!(tokenizer, ServerTokenizer::Byte);
-    let chat_template = crate::chat_template::PromptTemplate::from_gguf_metadata(
-        file.metadata_str("tokenizer.chat_template"),
-        Some(arch.as_str()),
-        byte_tokenizer,
-        frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
-        file.token_text("tokenizer.ggml.bos_token_id"),
-        file.token_text("tokenizer.ggml.eos_token_id"),
-    );
+    let chat_template =
+        crate::chat_template::PromptTemplate::for_gguf(file, Some(arch.as_str()), byte_tokenizer)?;
     tracing::info!("chat template: {}", chat_template.describe());
 
     Ok(Gemma4Loaded {
@@ -634,14 +616,11 @@ fn load_real_gguf_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<G
     };
 
     let byte_tokenizer = matches!(tokenizer, ServerTokenizer::Byte);
-    let chat_template = crate::chat_template::PromptTemplate::from_gguf_metadata(
-        file.metadata_str("tokenizer.chat_template"),
+    let chat_template = crate::chat_template::PromptTemplate::for_gguf(
+        file,
         file.metadata_str("general.architecture"),
         byte_tokenizer,
-        frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
-        file.token_text("tokenizer.ggml.bos_token_id"),
-        file.token_text("tokenizer.ggml.eos_token_id"),
-    );
+    )?;
     tracing::info!("chat template: {}", chat_template.describe());
 
     // Opt-in expert streaming: with FRINK_EXPERT_CACHE_BYTES set (or
@@ -780,7 +759,7 @@ pub(crate) fn load_kimi_checkpoint_with_config(
             .and_then(|v| v.get("chat_template")?.as_str().map(str::to_string))
     });
     let chat_template =
-        crate::chat_template::PromptTemplate::from_source(chat_template_str.as_deref(), None, None);
+        crate::chat_template::PromptTemplate::for_tokenizer_config(chat_template_str.as_deref())?;
     tracing::info!("chat template: {}", chat_template.describe());
 
     let frink_models::config::AttentionKind::KimiHybrid(hybrid) = &model_cfg.attention else {

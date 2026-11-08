@@ -91,6 +91,7 @@ struct Inner {
     /// picked from the name alone left `<think>` prose in `content`
     /// with `reasoning_content` empty on exactly those checkpoints.
     implied_reasoning: Option<crate::policy::parser::ReasoningFormat>,
+    default_kwargs: Map<String, Value>,
     implied_tools: Option<crate::policy::parser::ToolCallFormat>,
 }
 
@@ -100,11 +101,72 @@ impl std::fmt::Debug for PromptTemplate {
     }
 }
 
+/// What `--chat-template` and `--chat-template-file` lower to: the
+/// template's text.
+pub(crate) const TEMPLATE_ENV: &str = "FRINK_CHAT_TEMPLATE";
+/// What `--chat-template-kwargs`, `-rea` and `--reasoning-effort` lower
+/// to: their merged JSON object.
+pub(crate) const TEMPLATE_KWARGS_ENV: &str = "FRINK_CHAT_TEMPLATE_KWARGS";
+
 impl PromptTemplate {
-    /// The load-time entry point for a GGUF: compile whatever
-    /// `tokenizer.chat_template` holds, or fall back to a builtin when
-    /// the checkpoint ships none at all (llama.cpp `--jinja` defaults to
-    /// ChatML the same way).
+    /// The template a GGUF is served with: the operator's, or whatever
+    /// `tokenizer.chat_template` holds, or a builtin when the checkpoint
+    /// ships none at all (llama.cpp `--jinja` defaults to ChatML the same
+    /// way).
+    ///
+    /// These three constructors are the only ones outside tests, so a
+    /// load path cannot miss the flags.
+    pub(crate) fn for_gguf(
+        file: &frink_gguf::ShardedGguf,
+        arch: Option<&str>,
+        byte_tokenizer: bool,
+    ) -> anyhow::Result<Self> {
+        Self::served(
+            JinjaTemplate::from_gguf_metadata(
+                file.metadata_str("tokenizer.chat_template"),
+                arch,
+                byte_tokenizer,
+                JinjaTemplate::vocab_has_chatml(file),
+            ),
+            file.token_text("tokenizer.ggml.bos_token_id"),
+            file.token_text("tokenizer.ggml.eos_token_id"),
+        )
+    }
+
+    /// For checkpoints that carry their template outside GGUF metadata:
+    /// Kimi K3 keeps it as a top-level string in `tokenizer_config.json`,
+    /// the real HuggingFace convention. No vocabulary here: this path
+    /// always carries its own template, so the ChatML fallback is
+    /// unreachable.
+    pub(crate) fn for_tokenizer_config(source: Option<&str>) -> anyhow::Result<Self> {
+        Self::served(
+            JinjaTemplate::from_gguf_metadata(source, None, false, false),
+            None,
+            None,
+        )
+    }
+
+    /// Role-labeled lines, no special tokens: the synthetic-weights demo
+    /// path, where there is no real vocabulary for markers to live in.
+    pub(crate) fn for_synthetic_weights() -> anyhow::Result<Self> {
+        Self::served(JinjaTemplate::builtin(BuiltinTemplate::Plain), None, None)
+    }
+
+    fn served(
+        native: JinjaTemplate,
+        bos_token: Option<String>,
+        eos_token: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let flags = operator_flags()?;
+        Ok(Self::build(
+            flags.template.unwrap_or(native),
+            bos_token,
+            eos_token,
+            flags.kwargs,
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_gguf_metadata(
         source: Option<&str>,
         arch: Option<&str>,
@@ -117,36 +179,48 @@ impl PromptTemplate {
             JinjaTemplate::from_gguf_metadata(source, arch, byte_tokenizer, chatml_tokens_present),
             bos_token,
             eos_token,
+            Map::new(),
         )
     }
 
-    /// For checkpoints that carry their template outside GGUF metadata
-    /// -- Kimi K3 keeps it as a top-level string in
-    /// `tokenizer_config.json`, the real HuggingFace convention.
+    /// A template from text, as `for_tokenizer_config` has one, with the
+    /// special tokens a test needs.
+    #[cfg(test)]
     pub(crate) fn from_source(
         source: Option<&str>,
         bos_token: Option<String>,
         eos_token: Option<String>,
     ) -> Self {
         Self::build(
-            // No vocabulary here: this path always carries its own
-            // template, so the ChatML fallback is unreachable.
             JinjaTemplate::from_gguf_metadata(source, None, false, false),
             bos_token,
             eos_token,
+            Map::new(),
         )
     }
 
-    /// Role-labeled lines, no special tokens: the synthetic-weights demo
-    /// path, where there is no real vocabulary for markers to live in.
+    #[cfg(test)]
     pub(crate) fn plain() -> Self {
-        Self::build(JinjaTemplate::builtin(BuiltinTemplate::Plain), None, None)
+        Self::build(
+            JinjaTemplate::builtin(BuiltinTemplate::Plain),
+            None,
+            None,
+            Map::new(),
+        )
+    }
+
+    /// A template with these server-wide kwargs, as flags would set them.
+    #[cfg(test)]
+    pub(crate) fn with_default_kwargs(source: &str, default_kwargs: Map<String, Value>) -> Self {
+        let template = JinjaTemplate::from_gguf_metadata(Some(source), None, false, true);
+        Self::build(template, None, None, default_kwargs)
     }
 
     fn build(
         template: JinjaTemplate,
         bos_token: Option<String>,
         eos_token: Option<String>,
+        default_kwargs: Map<String, Value>,
     ) -> Self {
         let (bos, eos) = (bos_token.as_deref(), eos_token.as_deref());
         let thinking = probe_thinking_profile(
@@ -171,8 +245,15 @@ impl PromptTemplate {
                 handles_tools,
                 implied_reasoning,
                 implied_tools,
+                default_kwargs,
             }),
         }
+    }
+
+    /// `--chat-template-kwargs` and friends: what every render starts
+    /// from, under anything the request says.
+    pub(crate) fn default_kwargs(&self) -> &Map<String, Value> {
+        &self.inner.default_kwargs
     }
 
     /// The reasoning parser for a checkpoint served under `served_model`:
@@ -272,6 +353,24 @@ impl PromptTemplate {
         };
         self.inner.template.render(&json, &opts)
     }
+}
+
+/// What the operator's flags say, read from the variables they lower to
+/// so that setting those directly is held to the same checks.
+fn operator_flags() -> anyhow::Result<frink_models::template_flags::TemplateFlags> {
+    let template = std::env::var(TEMPLATE_ENV).ok();
+    let kwargs: Vec<String> = std::env::var(TEMPLATE_KWARGS_ENV)
+        .ok()
+        .into_iter()
+        .collect();
+    frink_models::template_flags::TemplateFlags::resolve(
+        frink_models::template_flags::TemplateFlagValues {
+            template: template.as_deref(),
+            kwargs: &kwargs,
+            ..Default::default()
+        },
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 /// One OpenAI-shaped message, as a template reads it.

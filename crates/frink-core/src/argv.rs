@@ -63,6 +63,18 @@ pub fn llama_switch(value: &str) -> Option<Switch> {
     }
 }
 
+/// `-rea` / `--reasoning`: `Some(true)` on, `Some(false)` off, `None`
+/// auto, which leaves the choice to the template. One function, because
+/// `frink run` and `frink-server` both take the flag.
+pub fn reasoning_switch(value: &str) -> Result<Option<bool>, String> {
+    match llama_switch(value.trim()) {
+        Some(Switch::On) => Ok(Some(true)),
+        Some(Switch::Off) => Ok(Some(false)),
+        Some(Switch::Auto) => Ok(None),
+        None => Err(format!("--reasoning {value}: expected on, off or auto")),
+    }
+}
+
 /// `-fa` / `--flash-attn`, on every front end that takes it.
 ///
 /// `on` and `auto` are accepted: fused attention is a backend property
@@ -221,6 +233,20 @@ pub fn expand_single_dash_names(cmd: &Command, tail: Vec<String>) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_takes_llama_cpps_switch_spellings() {
+        for on in ["on", "enabled", "true", "1"] {
+            assert_eq!(reasoning_switch(on), Ok(Some(true)), "{on}");
+        }
+        for off in ["off", "disabled", "false", "0"] {
+            assert_eq!(reasoning_switch(off), Ok(Some(false)), "{off}");
+        }
+        for auto in ["auto", "-1"] {
+            assert_eq!(reasoning_switch(auto), Ok(None), "{auto}");
+        }
+        assert!(reasoning_switch("maybe").unwrap_err().contains("maybe"));
+    }
     use clap::ArgAction;
 
     fn cmd() -> Command {

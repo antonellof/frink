@@ -99,7 +99,7 @@ pub(crate) fn rewrite_llama_style_argv(args: Vec<String>) -> Result<Vec<String>,
     };
     #[cfg(feature = "serve")]
     let tail = if sub_name == "serve" {
-        frink_server::llama_env::append_llama_arg_env(sub, tail, |k| std::env::var(k).ok())?
+        frink_server::llama_env::prepend_llama_arg_env(sub, tail, |k| std::env::var(k).ok())?
     } else {
         tail
     };

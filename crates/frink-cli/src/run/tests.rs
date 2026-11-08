@@ -457,3 +457,49 @@ fn color_takes_llama_cpps_values() {
         .to_string();
     assert!(err.contains("expected on, off or auto"), "{err}");
 }
+
+/// The same rule as `--system`: the template is what `--no-cnv` skips.
+#[test]
+fn chat_template_flags_are_refused_with_no_cnv() {
+    for flag in [
+        &["--chat-template", "chatml"][..],
+        &["--chat-template-kwargs", r#"{"a": 1}"#][..],
+        &["--reasoning", "off"][..],
+        &["--reasoning-effort", "high"][..],
+    ] {
+        let mut argv = vec!["-m", "x.gguf", "--no-cnv"];
+        argv.extend_from_slice(flag);
+        let error = args(&argv).resolve_template_flags().unwrap_err();
+        assert!(error.to_string().contains("--no-cnv"), "{error}");
+
+        let without: Vec<&str> = argv.into_iter().filter(|a| *a != "--no-cnv").collect();
+        assert!(args(&without).resolve_template_flags().is_ok(), "{flag:?}");
+    }
+}
+
+/// `auto` and `default` change nothing, so they stay legal with `--no-cnv`.
+#[test]
+fn template_flags_that_change_nothing_are_not_refused_with_no_cnv() {
+    let mut parsed = args(&["-m", "x.gguf", "--no-cnv", "--reasoning", "auto"]);
+    parsed.resolve_template_flags().unwrap();
+}
+
+#[test]
+fn the_later_of_chat_template_and_its_file_wins() {
+    let parsed = args(&[
+        "-m",
+        "x",
+        "--chat-template",
+        "a",
+        "--chat-template-file",
+        "b",
+    ]);
+    assert_eq!(parsed.chat_template, None);
+    assert!(parsed.chat_template_file.is_some());
+}
+
+#[test]
+fn a_bad_reasoning_value_is_refused() {
+    let mut parsed = args(&["-m", "x", "--reasoning", "maybe"]);
+    assert!(parsed.resolve_template_flags().is_err());
+}
