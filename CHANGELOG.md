@@ -17,6 +17,10 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`POST /apply-template`**, llama-server's prompt preview: a chat
+  completions body in, the rendered prompt out as `{"prompt": ...}`,
+  nothing generated. It renders through the chat route's own path, so
+  the prompt is the one that request would be served (#534).
 - **Latency histograms and prefix reuse on `/metrics`**, on every
   deployment: time to first token, decode time per output token and
   whole-request duration as Prometheus histograms, and the prompt

@@ -34,6 +34,7 @@
 
 mod admin;
 mod anthropic;
+mod apply_template;
 mod attribution;
 mod best_of;
 mod budget;
@@ -3463,6 +3464,7 @@ fn protected_routes() -> Router<Arc<AppState>> {
         // llama.cpp client was getting a 404 that named nothing. Behind
         // the key with their twins: they read the loaded vocabulary.
         .route(routes::TOKENIZE, post(openai_extra::tokenize))
+        .route(routes::APPLY_TEMPLATE, post(apply_template::apply_template))
         .route(routes::DETOKENIZE, post(openai_extra::detokenize))
         .route(routes::V1_EMBEDDINGS, post(embeddings::embeddings))
         // Cross-encoder reranking, under the `/v1` spelling Cohere and
@@ -6870,6 +6872,45 @@ pub(crate) mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(both_ways["tokens"], v1["tokens"]);
+    }
+
+    /// `/apply-template` answers the prompt `/v1/chat/completions`
+    /// would decode, for the same body, and generates nothing.
+    #[tokio::test]
+    async fn apply_template_returns_the_prompt_the_chat_route_renders() {
+        let state = Arc::new(test_state(
+            test_model_full_byte_vocab(),
+            ResponseCache::new(1000, Duration::from_secs(3600)),
+        ));
+        let app = test_app_with_state(Arc::clone(&state));
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "hello"},
+            ],
+        });
+        let (status, answer) =
+            post_json_uri(&app, frink_api::routes::APPLY_TEMPLATE, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let req: ChatCompletionRequest = serde_json::from_value(body).unwrap();
+        let active = state.require_active().unwrap();
+        let template = active.generative().unwrap().chat_template();
+        let kwargs = req.resolve_template_kwargs(&template);
+        let want = req
+            .render_prompt(&req.messages, &template, &req.tools, kwargs, active.name())
+            .unwrap();
+        assert_eq!(answer["prompt"], want);
+        assert!(
+            want.contains("hello") && want.contains("Be brief."),
+            "{want}"
+        );
+        assert_eq!(
+            state.stats.tokens_generated_total(),
+            0,
+            "nothing is generated"
+        );
     }
 
     /// llama.cpp answers detokenize under `content`
