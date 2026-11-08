@@ -15,6 +15,15 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **Latency histograms and prefix reuse on `/metrics`**, on every
+  deployment: time to first token, decode time per output token and
+  whole-request duration as Prometheus histograms, and the prompt
+  tokens the prefix cache served beside all prompt tokens, so the
+  cache's hit rate is one division. `/v1/requests` carries
+  `cached_tokens` per request.
+
 ### Fixed
 
 - **Three request fields were accepted and ignored.**
