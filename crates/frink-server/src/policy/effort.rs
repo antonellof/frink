@@ -435,57 +435,6 @@ pub fn probe_thinking_profile<E>(
     }
 }
 
-/// The thinking mode a chat request resolves to.
-///
-/// One source of truth for the decision, because two sides depend on
-/// it and must not disagree: the encode side picks the prompt the model
-/// sees, and the parse side uses it to decide whether the model's
-/// output *begins inside* a reasoning block (some encoders open the
-/// block in the prompt and never emit its opening tag).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThinkingMode {
-    Chat,
-    Thinking,
-}
-
-impl ThinkingMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ThinkingMode::Chat => "chat",
-            ThinkingMode::Thinking => "thinking",
-        }
-    }
-}
-
-/// Resolve the thinking mode for a chat request.
-///
-/// Thinking is on when tools are offered -- some encoders emit
-/// well-formed tool calls only in thinking mode -- or when the caller
-/// asked for it through `chat_template_kwargs`. An unrecognized
-/// `thinking_mode` string falls back to `Chat` rather than reaching the
-/// template.
-pub fn resolve_thinking_mode(
-    chat_template_kwargs: Option<&Map<String, Value>>,
-    tools: Option<&[Value]>,
-) -> ThinkingMode {
-    let empty = Map::new();
-    let ctk = chat_template_kwargs.unwrap_or(&empty);
-    let mut mode = match ctk.get("thinking_mode").and_then(|v| v.as_str()) {
-        Some("thinking") => ThinkingMode::Thinking,
-        _ => ThinkingMode::Chat,
-    };
-    let truthy = |key: &str| match ctk.get(key) {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Number(n)) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
-        _ => false,
-    };
-    if tools.is_some_and(|t| !t.is_empty()) || truthy("enable_thinking") || truthy("thinking") {
-        mode = ThinkingMode::Thinking;
-    }
-    mode
-}
-
 /// What `sanitize_effort` did to a request's `reasoning_effort`, so the
 /// caller can log a mapping once instead of per request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -866,40 +815,6 @@ mod tests {
         assert!(p.toggleable);
         assert!(p.has_adaptive);
         assert_eq!(p.default_state, ThinkingState::Off);
-    }
-
-    /// Tools force thinking: an encoder that only emits well-formed
-    /// tool calls inside a reasoning block would otherwise be asked for
-    /// tool calls it cannot produce.
-    #[test]
-    fn tools_or_an_explicit_opt_in_turn_thinking_on() {
-        let tools = probe_tools();
-        assert_eq!(
-            resolve_thinking_mode(None, Some(&tools)),
-            ThinkingMode::Thinking
-        );
-        let mut ctk = Map::new();
-        ctk.insert("enable_thinking".into(), json!(true));
-        assert_eq!(
-            resolve_thinking_mode(Some(&ctk), None),
-            ThinkingMode::Thinking
-        );
-        assert_eq!(resolve_thinking_mode(None, None), ThinkingMode::Chat);
-        assert_eq!(resolve_thinking_mode(None, Some(&[])), ThinkingMode::Chat);
-    }
-
-    /// A `thinking_mode` this engine does not know must not reach the
-    /// template.
-    #[test]
-    fn an_unknown_thinking_mode_falls_back_to_chat() {
-        let mut ctk = Map::new();
-        ctk.insert("thinking_mode".into(), json!("ultra"));
-        assert_eq!(resolve_thinking_mode(Some(&ctk), None), ThinkingMode::Chat);
-        ctk.insert("thinking_mode".into(), json!("thinking"));
-        assert_eq!(
-            resolve_thinking_mode(Some(&ctk), None),
-            ThinkingMode::Thinking
-        );
     }
 
     #[test]
