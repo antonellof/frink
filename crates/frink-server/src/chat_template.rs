@@ -60,6 +60,7 @@ use crate::policy::effort::{
     derive_think_gears, probe_effort_profile, probe_thinking_profile, EffortProfile, ThinkGears,
 };
 use crate::policy::turn::probe_end_of_turn;
+use frink_models::chat_template::reshape::Reshape;
 use frink_models::chat_template::{
     BuiltinTemplate, ChatTemplate as JinjaTemplate, RenderOptions, TemplateError,
 };
@@ -98,6 +99,9 @@ struct Inner {
     /// flag sets it ([`JinjaTemplate::supports_thinking`]). Probed once,
     /// at load, as llama-server does.
     supports_thinking: bool,
+    /// What llama.cpp does to a conversation before rendering it with
+    /// this template ([`Reshape`]).
+    reshape: Reshape,
 }
 
 impl std::fmt::Debug for PromptTemplate {
@@ -256,6 +260,7 @@ impl PromptTemplate {
         let implied_reasoning =
             probe_implied_reasoning(probe_render(&template, bos, eos, supports_thinking));
         let implied_tools = probe_implied_tool_format(&template, bos, eos);
+        let reshape = Reshape::for_template(&template, bos, eos);
         Self {
             inner: Arc::new(Inner {
                 // A terminator that IS the EOS adds nothing to the stop
@@ -273,6 +278,7 @@ impl PromptTemplate {
                 implied_tools,
                 default_kwargs,
                 supports_thinking,
+                reshape,
             }),
         }
     }
@@ -363,10 +369,14 @@ impl PromptTemplate {
         extra: Map<String, Value>,
     ) -> Result<String, TemplateError> {
         let structured = self.handles_tools() && !tools.is_empty();
-        let json: Vec<Value> = messages
+        let mut json: Vec<Value> = messages
             .iter()
             .map(|m| message_json(m, structured))
             .collect();
+        self.inner
+            .reshape
+            .apply(&mut json, &extra)
+            .map_err(TemplateError::Render)?;
         let opts = RenderOptions {
             add_generation_prompt: true,
             bos_token: self.inner.bos_token.clone(),
@@ -1024,6 +1034,42 @@ mod tests {
                 "\n1",
             )
         );
+    }
+
+    /// A template that raises on a system turn, as Gemma 2's does, gets
+    /// it folded into the user's turn, as llama.cpp folds it. One that
+    /// prints it keeps it.
+    #[test]
+    fn a_system_turn_the_template_refuses_is_folded_into_the_next() {
+        let gemma2 = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}\
+                      {% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}";
+        let conversation = [msg("system", "Be brief."), msg("user", "Hi")];
+        let folded = PromptTemplate::from_gguf_metadata(
+            Some(gemma2),
+            Some("gemma2"),
+            false,
+            true,
+            None,
+            None,
+        );
+        assert_eq!(
+            folded
+                .render(&conversation, &[], Map::new())
+                .expect("renders"),
+            "<user>Be brief.\nHi"
+        );
+        let chatml = PromptTemplate::from_gguf_metadata(
+            Some(CHATML),
+            Some("qwen2"),
+            false,
+            true,
+            None,
+            None,
+        );
+        assert!(chatml
+            .render(&conversation, &[], Map::new())
+            .expect("renders")
+            .starts_with("<|im_start|>system\nBe brief.<|im_end|>"));
     }
 
     #[test]
