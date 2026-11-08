@@ -15,6 +15,18 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three request fields were accepted and ignored.**
+  `max_completion_tokens`, OpenAI's current name for the output budget,
+  was dropped, so a request that set it ran to the 32768-token default.
+  It is now the budget, as llama-server reads it, and a request whose
+  `max_tokens` disagrees is refused naming both. `parallel_tool_calls:
+  false` returned every call. It now returns the first, on chat and on
+  `/v1/responses`. `stream: true` on `/v1/completions` was answered in
+  one JSON body, and is now refused by name, pointing at the two
+  endpoints that stream.
+
 ## [0.57.0] - 2026-11-08
 
 ### Fixed

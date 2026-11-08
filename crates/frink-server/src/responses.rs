@@ -239,8 +239,8 @@ pub(crate) struct ResponsesRequest {
     #[serde(default)]
     #[allow(dead_code)]
     metadata: Option<Value>,
+    /// `false` returns at most one function call, as on chat.
     #[serde(default)]
-    #[allow(dead_code)]
     parallel_tool_calls: Option<bool>,
 }
 
@@ -620,7 +620,9 @@ fn to_chat_request(req: &ResponsesRequest) -> Result<ChatCompletionRequest, ApiE
         samplers: None,
         model: req.model.clone(),
         messages,
-        max_tokens,
+        max_tokens: Some(max_tokens),
+        max_completion_tokens: None,
+        parallel_tool_calls: req.parallel_tool_calls,
         temperature: req.temperature,
         top_p: req.top_p,
         // Neither wire has a min_p; 0.0 (off) is what None resolves to.
@@ -2127,9 +2129,10 @@ mod tests {
     #[test]
     fn an_absent_max_output_tokens_uses_the_responses_surfaces_own_budget() {
         let chat = converted(json!({"model": "m", "input": "hi"}));
-        assert_eq!(chat.max_tokens, DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(chat.output_budget(), DEFAULT_MAX_OUTPUT_TOKENS);
         assert_ne!(
-            chat.max_tokens, 16,
+            chat.output_budget(),
+            16,
             "the /v1/completions floor must never reach this surface"
         );
     }
@@ -2137,7 +2140,7 @@ mod tests {
     #[test]
     fn an_explicit_max_output_tokens_is_honoured() {
         let chat = converted(json!({"model": "m", "input": "hi", "max_output_tokens": 7}));
-        assert_eq!(chat.max_tokens, 7);
+        assert_eq!(chat.output_budget(), 7);
     }
 
     #[test]

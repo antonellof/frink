@@ -68,13 +68,14 @@ conversation or a large `/v1/embeddings` batch past that comes back
 | Field | Status |
 |---|---|
 | `model`, `messages` | Supported |
-| `max_tokens` | Supported; defaults to 32768 (OpenAI's legacy default is 16). An explicit `0` is a 400 |
+| `max_tokens` · `max_completion_tokens` | Supported, as one budget: `max_completion_tokens` is OpenAI's current name, and llama-server reads the two as aliases. Two that disagree are a 400 naming both. Defaults to 32768 (OpenAI's legacy default is 16). An explicit `0` is a 400 |
 | `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`, `stop` | Supported |
 | `typical_p`, `top_n_sigma`, `xtc_probability`, `xtc_threshold`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n`, `dry_sequence_breakers` | Supported. llama.cpp's own spellings; absent means the sampler is off |
 | `samplers` | Supported. The chain order, as a list of names or a `;`-separated string. Defaults to llama.cpp's own default chain |
 | `presence_penalty`, `frequency_penalty` | Supported |
 | `stream` | Supported (overlapped SSE when tools off and CB off) |
 | `tools` / `tool_choice: none\|auto` | Supported (prompt-engineered, parsed in eleven wire formats) |
+| `parallel_tool_calls` | Supported. `false` returns the first call the model made and drops any after it, in the whole answer and on the stream alike. Absent or `true` returns every call. Also on `/v1/responses` |
 | `tool_choice: required` / named function | Supported on ten of the eleven wire formats, by a lazy grammar built from the same marker description the parser reads with. **501 naming the format** on the remaining one (`muse_glimmer`), for the reason the refusal states |
 | `logprobs` | Served on `/v1/completions` (parallel arrays plus `text_offset`) and on `/v1/chat/completions` as `logprobs: true` + `top_logprobs` (OpenAI's `content[]` shape). Over the distribution the sampler drew from, so penalties and a grammar mask are in it; a candidate the chain removed is omitted rather than reported as `null`. Cap 5 on completions, 20 on chat, above which is a 400. Such a request always misses the response cache, which stores text and not distributions |
 | `n` (>1) | Served on `/v1/completions` and `/v1/chat/completions`: prefilled once and the KV forked per choice, so `prompt_tokens` counts the prompt once. Choice `i` samples from `seed + i`, so choice 0 is byte-identical to the `n = 1` answer. With `stream` on the chat route the choices are interleaved, and each chunk carries its own index. **501** on the native `/completion`, which returns a single `content` |
@@ -1498,8 +1499,11 @@ which has a frink counterpart.
 
 A few request fields deserialize and then go nowhere, accepted so a
 stock client's body does not fail validation over something this server
-has no use for: `metadata` on `/v1/messages`, and `store`, `metadata`
-and `parallel_tool_calls` on `/v1/responses`. Everything else this
-server does not implement is refused by name.
+has no use for: `metadata` on `/v1/messages`, `store` and `metadata` on
+`/v1/responses`, and `user` on the chat route, a tracing tag that
+cannot change the answer. `stream_options` is served as far as it goes:
+`usage` always rides the final chunk of a stream. Everything else this
+server does not implement is refused by name, `stream` on
+`/v1/completions` included.
 
 See [`ROADMAP.md`](ROADMAP.md).

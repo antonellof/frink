@@ -87,6 +87,9 @@ pub(crate) struct OutputPosture {
     reasoning: Option<ReasoningFormat>,
     reasoning_open: bool,
     tools: ToolCallFormat,
+    /// The request's `parallel_tool_calls: false`: at most one call
+    /// comes back ([`Self::one_call`]).
+    one_call: bool,
 }
 
 impl OutputPosture {
@@ -124,7 +127,22 @@ impl OutputPosture {
             reasoning,
             reasoning_open: reasoning.is_some_and(|f| f.prompt_opens_reasoning(prompt)),
             tools,
+            one_call: false,
         }
+    }
+
+    /// `parallel_tool_calls: false`. The caller asked for at most one
+    /// call, so the first is returned and any after it are dropped, on
+    /// the whole-answer parse and on the stream alike. The default,
+    /// `true`, returns every call the model made.
+    pub(crate) fn one_call(mut self, one: bool) -> Self {
+        self.one_call = one;
+        self
+    }
+
+    /// Whether at most one call may come back.
+    pub(crate) fn is_one_call(&self) -> bool {
+        self.one_call
     }
 
     /// The posture for text with no prompt behind it: a checkpoint's own
@@ -148,7 +166,10 @@ impl OutputPosture {
 /// Split generated text.
 pub(crate) fn parse_output(text: &str, tools: &[ToolDef], posture: OutputPosture) -> ParsedOutput {
     let (reasoning, remainder) = split_reasoning(text, posture);
-    let (content, calls) = extract_tool_calls(&remainder, tools, posture);
+    let (content, mut calls) = extract_tool_calls(&remainder, tools, posture);
+    if posture.one_call {
+        calls.truncate(1);
+    }
     ParsedOutput {
         reasoning,
         content,
@@ -298,6 +319,20 @@ mod tests {
         );
         assert_eq!(parsed.calls.len(), 2);
         assert_eq!(parsed.calls[1].arguments, r#"{"city":"Oslo"}"#);
+    }
+
+    /// `parallel_tool_calls: false` returns the first call and only the
+    /// first, from the same text that returns both by default.
+    #[test]
+    fn one_call_returns_the_first_call_only() {
+        let parsed = parse_output(
+            "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Rome\"}}</tool_call>\n\
+             <tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Oslo\"}}</tool_call>",
+            &tools(),
+            OutputPosture::for_model("qwen2.5-7b").one_call(true),
+        );
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(parsed.calls[0].arguments, r#"{"city":"Rome"}"#);
     }
 
     #[test]

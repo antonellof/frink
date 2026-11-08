@@ -107,7 +107,7 @@ impl ChatCompletionRequest {
             // so a path that never resolves it reports the field absent
             // rather than claiming the model did not think.
             reasoning: None,
-            max_tokens: self.max_tokens,
+            max_tokens: self.output_budget(),
             sampling: self.sampling_params(model)?,
             seed: self.resolved_seed(),
             stop: self.effective_stop_sequences(),
