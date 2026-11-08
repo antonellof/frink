@@ -6,18 +6,18 @@
 # line here that now matches, so this list only shrinks. The full census
 # (every template llama.cpp bundles) runs in CI's oracle job,
 # scripts/oracle.sh.
-CohereForAI-c4ai-command-r-plus-tool_use/tool_round_trip #514
+CohereForAI-c4ai-command-r-plus-tool_use/tool_round_trip #522
 HuggingFaceTB-SmolLM3-3B/tool_round_trip deviation:tool-preamble
 deepseek-ai-DeepSeek-R1-Distill-Llama-8B/tool_round_trip deviation:tool-preamble
 deepseek-ai-DeepSeek-R1-Distill-Qwen-32B/tool_round_trip deviation:tool-preamble
 deepseek-ai-DeepSeek-V3.1/tool_round_trip deviation:tool-preamble
-fireworks-ai-llama-3-firefunction-v2/plain #514
-fireworks-ai-llama-3-firefunction-v2/reasoning #514
-fireworks-ai-llama-3-firefunction-v2/reasoning_flag_no_preserve #514
-fireworks-ai-llama-3-firefunction-v2/reasoning_off #514
-fireworks-ai-llama-3-firefunction-v2/reasoning_on #514
-fireworks-ai-llama-3-firefunction-v2/reasoning_request_no_preserve #514
-fireworks-ai-llama-3-firefunction-v2/tool_round_trip #514
+fireworks-ai-llama-3-firefunction-v2/plain #522
+fireworks-ai-llama-3-firefunction-v2/reasoning #522
+fireworks-ai-llama-3-firefunction-v2/reasoning_flag_no_preserve #522
+fireworks-ai-llama-3-firefunction-v2/reasoning_off #522
+fireworks-ai-llama-3-firefunction-v2/reasoning_on #522
+fireworks-ai-llama-3-firefunction-v2/reasoning_request_no_preserve #522
+fireworks-ai-llama-3-firefunction-v2/tool_round_trip #522
 llama-cpp-rwkv-world/tool_round_trip deviation:tool-preamble
 meetkai-functionary-medium-v3.2/tool_round_trip #509
 microsoft-Phi-3.5-mini-instruct/tool_round_trip deviation:tool-preamble

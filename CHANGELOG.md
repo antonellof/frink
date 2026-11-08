@@ -15,6 +15,26 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gemma 2, TranslateGemma and K2 Horizon refused conversations that
+  llama-server renders, and Ministral 3, Devstral and Gemma 4 rendered
+  them differently.** llama.cpp reshapes the messages for these
+  templates before rendering, and frink did not. Both `frink run` and
+  `frink-server` now do. A system turn the template will not show
+  folds into the next message (`system_message_not_supported`), so
+  Gemma 2 no longer fails with
+  "System role not supported". Ministral 3 and Devstral get their
+  reasoning and text as typed content blocks, so Ministral's earlier
+  thoughts reach the prompt. K2 Horizon gets an empty reasoning field on
+  each assistant turn without one. An older Gemma 4 template gets a
+  call and its results as one turn with `tool_responses`, and
+  TranslateGemma gets each user turn as one item with its language
+  codes (`en-GB` unless `chat_template_kwargs` names them). 20 more
+  prompts of the libllama render census match: 15 of 525 differ now
+  (#514). Firefunction v2 and Command R+ still fail where llama.cpp's
+  engine reads a missing value as empty in `+` (#522).
+
 ## [0.56.0] - 2026-11-08
 
 ### Added

@@ -77,6 +77,7 @@ use serde_json::Value;
 
 mod llama_defaults;
 mod py_compat;
+pub mod reshape;
 
 /// Everything that can go wrong between a GGUF's template string and a
 /// rendered prompt. Every variant is a refusal, not a fallback.

@@ -54,14 +54,13 @@
 //! the same mechanism and the same reason: what a template PRINTS is the
 //! question, and its source is a proxy that answers a different one.
 
-mod reshape;
-
 use std::sync::Arc;
 
 use crate::policy::effort::{
     derive_think_gears, probe_effort_profile, probe_thinking_profile, EffortProfile, ThinkGears,
 };
 use crate::policy::turn::probe_end_of_turn;
+use frink_models::chat_template::reshape::Reshape;
 use frink_models::chat_template::{
     BuiltinTemplate, ChatTemplate as JinjaTemplate, RenderOptions, TemplateError,
 };
@@ -101,8 +100,8 @@ struct Inner {
     /// at load, as llama-server does.
     supports_thinking: bool,
     /// What llama.cpp does to a conversation before rendering it with
-    /// this template ([`reshape`]).
-    reshape: reshape::Reshape,
+    /// this template ([`Reshape`]).
+    reshape: Reshape,
 }
 
 impl std::fmt::Debug for PromptTemplate {
@@ -261,10 +260,7 @@ impl PromptTemplate {
         let implied_reasoning =
             probe_implied_reasoning(probe_render(&template, bos, eos, supports_thinking));
         let implied_tools = probe_implied_tool_format(&template, bos, eos);
-        let reshape = reshape::Reshape {
-            fold_system: !probe_shows_system(&template, bos, eos),
-            family: template.source().and_then(reshape::Family::detect),
-        };
+        let reshape = Reshape::for_template(&template, bos, eos);
         Self {
             inner: Arc::new(Inner {
                 // A terminator that IS the EOS adds nothing to the stop
@@ -524,28 +520,6 @@ pub(crate) fn tool_json(t: &ToolDef) -> Value {
             })),
         },
     })
-}
-
-/// llama.cpp's `supports_system_role` (`common/jinja/caps.cpp`): does a
-/// system turn's text reach the prompt? Upstream renders the same two
-/// turns and asks whether the template read the system text. This asks
-/// whether it printed it, which is the same answer unless a template
-/// reads the text and then throws it away. A render that fails, as
-/// Gemma 2's raise on a system turn does, has not shown it.
-fn probe_shows_system(template: &JinjaTemplate, bos: Option<&str>, eos: Option<&str>) -> bool {
-    let messages = [
-        json!({"role": "system", "content": "System message"}),
-        json!({"role": "user", "content": "User message"}),
-    ];
-    let opts = RenderOptions {
-        add_generation_prompt: true,
-        bos_token: bos.map(str::to_string),
-        eos_token: eos.map(str::to_string),
-        ..Default::default()
-    };
-    template
-        .render(&messages, &opts)
-        .is_ok_and(|out| out.contains("System message"))
 }
 
 /// Does this template actually *consume* the tools it is handed?

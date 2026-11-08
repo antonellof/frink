@@ -21,6 +21,10 @@ pub(super) struct ChatKind {
     /// `enable_thinking` under the kwargs: whether the template supports
     /// thinking, as llama-cli passes it.
     enable_thinking: bool,
+    /// What llama-cli does to the conversation before rendering it with
+    /// this template: a system turn folded in where the template will
+    /// not show one, TranslateGemma's typed user turn.
+    reshape: frink_models::chat_template::reshape::Reshape,
 }
 
 impl ChatKind {
@@ -52,12 +56,18 @@ impl ChatKind {
     ) -> Self {
         let enable_thinking =
             template.supports_thinking(bos_token.as_deref(), eos_token.as_deref());
+        let reshape = frink_models::chat_template::reshape::Reshape::for_template(
+            &template,
+            bos_token.as_deref(),
+            eos_token.as_deref(),
+        );
         ChatKind {
             template,
             kwargs,
             bos_token,
             eos_token,
             enable_thinking,
+            reshape,
         }
     }
 
@@ -73,6 +83,9 @@ impl ChatKind {
             messages.push(serde_json::json!({"role": "system", "content": sys}));
         }
         messages.push(serde_json::json!({"role": "user", "content": user}));
+        self.reshape
+            .apply(&mut messages, &self.kwargs)
+            .map_err(|e| anyhow::anyhow!("chat template failed to render: {e}"))?;
         let opts = frink_models::chat_template::RenderOptions {
             add_generation_prompt: true,
             bos_token: self.bos_token.clone(),
@@ -206,5 +219,28 @@ mod tests {
         };
         assert_eq!(render(None), "hi<think>");
         assert_eq!(render(Some(false)), "hi");
+    }
+
+    /// `-sys` on a template that raises on a system turn, as Gemma 2's
+    /// does, folds into the user's turn, as llama-cli folds it.
+    #[test]
+    fn a_system_prompt_the_template_refuses_is_folded_in() {
+        let gemma2 = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}\
+                      {% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}";
+        let flags = TemplateFlags::resolve(TemplateFlagValues {
+            template: Some(gemma2),
+            ..Default::default()
+        })
+        .unwrap();
+        let kind = ChatKind::new(
+            flags.template.clone().unwrap(),
+            flags.kwargs.clone(),
+            None,
+            None,
+        );
+        assert_eq!(
+            kind.wrap_user(Some("Be brief."), "Hi").unwrap(),
+            "<user>Be brief.\nHi"
+        );
     }
 }

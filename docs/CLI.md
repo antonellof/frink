@@ -322,6 +322,16 @@ was meant for. It now stops and says so. Use
   `{{ x }}` and `x | string` print a list or a map in Python's literal
   syntax, `{'type': 'function'}`, as llama.cpp's engine does, and
   `x ~ y` still joins minijinja's JSON-like text.
+- A conversation is reshaped before rendering where llama.cpp reshapes
+  it, on `frink run` and `frink-server` alike
+  (`frink_models::chat_template::reshape`). A system turn the template
+  does not show folds into the next message, as on Gemma 2 and
+  TranslateGemma. Ministral 3, Devstral, K2 Horizon, Gemma 4's older
+  template and TranslateGemma get the message shape their llama.cpp
+  handler builds. Whether a template shows a system turn is learned at
+  load by rendering one, where llama.cpp asks whether the template read
+  it. The two answers differ only for a template that reads the text
+  and drops it.
 - A Python method frink has not implemented is an error, as is
   mutating a list outside a `namespace(...)`, because a dropped
   `.append` would silently change every later turn. `.format()` takes

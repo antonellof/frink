@@ -14,11 +14,13 @@
 
 use serde_json::{json, Map, Value};
 
+use super::{ChatTemplate, RenderOptions};
+
 /// A family whose upstream handler rewrites the messages before
 /// rendering. Each is detected as `common_chat_template_detect_params_init`
 /// detects it, from markers in the template source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Family {
+pub enum Family {
     /// Ministral 3, Magistral and Devstral (`common/parsers/ministral3.cpp`):
     /// a system or assistant turn's reasoning and text become typed
     /// content blocks.
@@ -41,7 +43,7 @@ impl Family {
     /// In upstream's order, which is first match wins. No rule upstream
     /// checks before these matches one of them on a template llama.cpp
     /// bundles, which the render census holds.
-    pub(super) fn detect(source: &str) -> Option<Self> {
+    pub fn detect(source: &str) -> Option<Self> {
         let has = |marker: &str| source.contains(marker);
         if has("[SYSTEM_PROMPT]") && has("[TOOL_CALLS]") && has("[ARGS]") && !has("[CALL_ID]") {
             Some(Self::Ministral3)
@@ -59,15 +61,27 @@ impl Family {
 
 /// How one template's conversations are reshaped. Learned at load.
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) struct Reshape {
+pub struct Reshape {
     /// The template does not show a system turn's content (llama.cpp's
     /// `supports_system_role` is false).
-    pub(super) fold_system: bool,
-    pub(super) family: Option<Family>,
+    pub fold_system: bool,
+    pub family: Option<Family>,
 }
 
 impl Reshape {
-    pub(super) fn apply(
+    /// What llama.cpp does to conversations it renders with `template`,
+    /// learned once, by rendering it.
+    pub fn for_template(template: &ChatTemplate, bos: Option<&str>, eos: Option<&str>) -> Self {
+        Self {
+            fold_system: !shows_system(template, bos, eos),
+            family: template.source().and_then(Family::detect),
+        }
+    }
+
+    /// Reshapes `messages` for this template. `kwargs` are the render's
+    /// `chat_template_kwargs`, which TranslateGemma's language codes come
+    /// from. An error names what the reshape could not use.
+    pub fn apply(
         &self,
         messages: &mut Vec<Value>,
         kwargs: &Map<String, Value>,
@@ -84,6 +98,28 @@ impl Reshape {
         }
         Ok(())
     }
+}
+
+/// llama.cpp's `supports_system_role` (`common/jinja/caps.cpp`): does a
+/// system turn's text reach the prompt? Upstream renders the same two
+/// turns and asks whether the template read the system text. This asks
+/// whether it printed it, which is the same answer unless a template
+/// reads the text and then throws it away. A render that fails, as
+/// Gemma 2's raise on a system turn does, has not shown it.
+fn shows_system(template: &ChatTemplate, bos: Option<&str>, eos: Option<&str>) -> bool {
+    let messages = [
+        json!({"role": "system", "content": "System message"}),
+        json!({"role": "user", "content": "User message"}),
+    ];
+    let opts = RenderOptions {
+        add_generation_prompt: true,
+        bos_token: bos.map(str::to_string),
+        eos_token: eos.map(str::to_string),
+        ..Default::default()
+    };
+    template
+        .render(&messages, &opts)
+        .is_ok_and(|out| out.contains("System message"))
 }
 
 fn role(message: &Value) -> &str {
