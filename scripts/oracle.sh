@@ -77,6 +77,8 @@ fi
 python3 tools/oracle/goldens.py "$WORK" --tol "$GOLDEN_TOL" --summary "$WORK/summary.md" || status=1
 python3 tools/oracle/parity.py target/release/frink "$WORK/llama_logits" \
   --summary "$WORK/summary.md" || status=1
+FRINK_LLAMA_TEMPLATES="$WORK/src/models/templates" \
+  cargo test --release -p frink-models --test upstream_template_census -- --ignored || status=1
 
 changed="$(git status --porcelain -- crates/frink-models/tests | awk '{print $2}')"
 if [[ -n "$changed" ]]; then
