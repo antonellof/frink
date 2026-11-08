@@ -165,7 +165,7 @@ thinking checkpoint (DeepSeek V3.1 to V4, QwQ, R1-Distill, Gemma 4,
 Laguna, MiniCPM5) thinks by default. `date_string`
 and `datetime` carry today's date in the server's local time.
 
-Five rules are applied to it before rendering:
+Four rules are applied to it before rendering:
 
 * An explicit knob wins wholesale. A caller who already set any of
   `enable_thinking`, `thinking`, `thinking_mode` or `reasoning_effort`
@@ -177,9 +177,6 @@ Five rules are applied to it before rendering:
   gear, which would turn "do not think" into "think a little". The
   DeepSeek-wire `thinking: {"type": "disabled"}` does the same and beats
   any effort in the same request.
-* Offering tools turns thinking on. Some encoders emit well-formed tool
-  calls only in thinking mode, so `tools` implies `enable_thinking`
-  unless the request said otherwise.
 * Effort is quantized onto what this checkpoint grades. The template's
   effort vocabulary is probed once at load; a request asking for a gear
   outside it is mapped to the nearest one, or dropped (so the
@@ -198,6 +195,8 @@ then the gears, or a bare `on` when there is a toggle but no ladder) and
 nothing). A checkpoint that says nothing about thinking carries neither
 field. An empty list would read as "asked, and it has no gears", which
 is a different claim from "this is not a reasoning model".
+
+Offering tools leaves thinking where it was, as in llama-server.
 
 Whether the tools are described by the template or by a text preamble
 depends on the template, established at load by rendering it with and
@@ -1173,7 +1172,14 @@ what gets consulted.
 
 When the template does not consume `tools`, the server describes them
 in a preamble that asks for a Hermes-style
-`<tool_call>{"name": …, "arguments": {…}}</tool_call>`. A model trained
+`<tool_call>{"name": …, "arguments": {…}}</tool_call>`. This is a
+difference from llama-server, which hands `tools` to such a template
+and renders what it renders, so the model is not told what the tools
+are and has nothing to call them by. The preamble
+is an extra system turn of frink's own text, so the prompt is not
+llama-server's: on DeepSeek-R1-Distill, DeepSeek V3.1, SmolLM3,
+Phi-3.5 and RWKV World, the render census lists it under
+`deviation:tool-preamble`. A model trained
 on a different format frequently answers in its own, so parsing uses
 the format the checkpoint implies: the one its chat template prints
 when it prints one, otherwise the one the served model's name implies.

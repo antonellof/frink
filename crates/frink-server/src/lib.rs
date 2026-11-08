@@ -1258,7 +1258,7 @@ impl ChatCompletionRequest {
 
     /// The `chat_template_kwargs` this request actually renders with.
     ///
-    /// Five rules, all of them from `frink-edge`:
+    /// Four rules, all of them from `frink-edge`:
     ///
     /// * **An explicit knob wins wholesale.** A caller who already set
     ///   any of `enable_thinking` / `thinking` / `thinking_mode` /
@@ -1272,10 +1272,6 @@ impl ChatCompletionRequest {
     ///   not think" into "think a little". Same for the DeepSeek-wire
     ///   `thinking: {"type": "disabled"}`, which beats any effort.
     ///
-    /// * **Thinking follows the tools.** Offering tools turns thinking
-    ///   on even when the caller said nothing, because some encoders
-    ///   emit well-formed tool calls only in thinking mode
-    ///   ([`crate::policy::effort::resolve_thinking_mode`]).
     /// * **Effort is quantized onto what this checkpoint grades.** A
     ///   template that accepts only the OpenAI triple must not be sent
     ///   `minimal`; it is mapped to the nearest gear, or dropped when no
@@ -1352,17 +1348,6 @@ impl ChatCompletionRequest {
             }
         }
 
-        let offered: Vec<serde_json::Value> = if self.tools_active() {
-            self.tools.iter().map(chat_template::tool_json).collect()
-        } else {
-            Vec::new()
-        };
-        let thinking = crate::policy::effort::resolve_thinking_mode(Some(&kwargs), Some(&offered));
-        if thinking == crate::policy::effort::ThinkingMode::Thinking {
-            for (k, v) in crate::policy::effort::thinking_on_kwargs() {
-                kwargs.entry(k).or_insert(v);
-            }
-        }
         match crate::policy::effort::sanitize_effort(&mut kwargs, template.efforts()) {
             crate::policy::effort::EffortMapping::Mapped(to) => {
                 tracing::debug!("reasoning_effort quantized to {}", to.as_str());
@@ -9606,30 +9591,36 @@ pub(crate) mod tests {
         );
     }
 
-    /// Offering tools turns thinking on even when the caller asked for
-    /// nothing: some encoders emit well-formed calls only in thinking
-    /// mode.
+    /// Offering tools changes nothing about thinking, and a request's own
+    /// `enable_thinking` reaches the template alone, as in llama-server:
+    /// no `thinking_mode` is added beside it (#515).
     #[test]
-    fn offering_tools_turns_thinking_on_by_itself() {
+    fn offering_tools_leaves_thinking_as_llama_cpp_leaves_it() {
         let template = graded_template();
-        let quiet = chat_request(serde_json::json!({
+        let kwargs =
+            |body: serde_json::Value| chat_request(body).resolve_template_kwargs(&template);
+        let quiet = kwargs(serde_json::json!({
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
         }));
-        assert!(!quiet
-            .resolve_template_kwargs(&template)
-            .contains_key("enable_thinking"));
-
-        let with_tools = chat_request(serde_json::json!({
+        let with_tools = kwargs(serde_json::json!({
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"type": "function", "function": {"name": "get_weather"}}],
         }));
-        let kwargs = with_tools.resolve_template_kwargs(&template);
-        assert_eq!(kwargs["enable_thinking"], serde_json::json!(true));
-        let prompt =
-            prompt_from_messages(&with_tools.messages, &template, &[], kwargs).expect("renders");
-        assert!(prompt.starts_with("THINK|"), "{prompt}");
+        assert!(
+            !with_tools.contains_key("enable_thinking"),
+            "{with_tools:?}"
+        );
+        assert_eq!(with_tools, quiet);
+
+        let asked = kwargs(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": true},
+        }));
+        assert_eq!(asked["enable_thinking"], serde_json::json!(true));
+        assert!(!asked.contains_key("thinking_mode"), "{asked:?}");
     }
 
     /// The reason `force_reasoning` could only ever be `false` before:

@@ -38,10 +38,19 @@ are the ones worth reading twice.
   frink-server, and fails on a difference that
   `crates/frink-server/tests/llama_renders/known_differences.txt` does
   not list with its issue. It found 161 of 525 prompts that differ,
-  filed as #512, #513, #514, #515 and #509. 38 differ now.
+  filed as #512, #513, #514, #515 and #509. 35 differ now.
 
 ### Fixed
 
+- **Offering tools turned thinking on, and a request's
+  `enable_thinking: true` also sent `thinking_mode: "enabled"`.**
+  llama-server does neither, so Apertus said "Deliberation: enabled"
+  and MiniMax-M3 "Current thinking mode: enabled" where llama.cpp's
+  prompt says "disabled" and "adaptive". Thinking now follows the
+  template's default, `-rea` and the request, as in llama-server
+  (#515). The text preamble frink writes for a template that ignores
+  `tools` stays, and `docs/API.md` lists it as a difference from
+  llama-server.
 - **Every tool request rendered another prompt from llama.cpp's** on
   the templates that print their tools: Qwen 2.5, QwQ, Qwen3 and 3.5,
   GLM, Kimi K2, MiniMax, DeepSeek V3.2 and V4, Llama 3.1 to 3.3,
