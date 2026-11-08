@@ -7,7 +7,9 @@ frink-server's render is held to.
 For each template, copies <templates-dir>/<name>.jinja to
 <out-dir>/<name>.jinja and writes <out-dir>/<name>/<shape>.prompt with
 the bytes llama-server would render, or <shape>.error with llama.cpp's
-refusal. The shapes, and the bos/eos every render uses, are in
+refusal, and <out-dir>/<name>/supports_thinking with whether llama.cpp
+finds the template thinking-capable, which is enable_thinking's
+default. The shapes, and the bos/eos every render uses, are in
 crates/frink-server/tests/llama_renders/shapes.json, which frink's side
 reads too, so the two cannot drift apart.
 
@@ -17,10 +19,10 @@ from the pin by scripts/oracle.sh, which fails if a file moved. With
 --all it is every template in <templates-dir>, the census that
 `llama_renders::census` reads from FRINK_LLAMA_RENDERS.
 
-A template that prints the date (strftime_now) renders today's, in
-local time upstream, so the renders run under TZ=UTC and <out-dir>/
-rendered_at holds the Unix time they ran at, which frink's side pins its
-clock to. The checked-in set refuses such a template: its answer would
+A template that prints the date (strftime_now, date_string, datetime)
+renders today's, in local time, so the renders run under TZ=UTC and
+<out-dir>/rendered_at holds the Unix time they ran at, which frink's
+side pins its clock to. The checked-in set refuses such a template: its answer would
 move every day.
 
 <chat_render> is built by tools/oracle/llama_build.sh from
@@ -48,9 +50,9 @@ def render(binary, template, spec, shape):
         env = dict(os.environ, TZ="UTC")
         run = subprocess.run(args, input=json.dumps(shape["body"]).encode(), capture_output=True, env=env)
         if run.returncode == 0:
-            return out.read_bytes(), None
+            return out.read_bytes(), (pathlib.Path(f"{out}.supports_thinking").read_text(), None)
         lines = [l for l in run.stderr.decode(errors="replace").splitlines() if l.startswith("chat_render:")]
-        return None, (lines[-1] if lines else run.stderr.decode(errors="replace").strip()[-400:]) + "\n"
+        return None, (None, (lines[-1] if lines else run.stderr.decode(errors="replace").strip()[-400:]) + "\n")
 
 
 def main():
@@ -77,20 +79,27 @@ def main():
         source = args.templates / f"{name}.jinja"
         if not source.exists():
             sys.exit(f"{name}.jinja is not in {args.templates}: llama.cpp no longer bundles it")
-        if not args.all and "strftime_now" in source.read_text():
-            sys.exit(f"{name}.jinja prints today's date, so its render cannot be checked in")
+        dated = [v for v in ("strftime_now", "date_string", "datetime") if v in source.read_text()]
+        if not args.all and dated:
+            sys.exit(f"{name}.jinja prints today's date ({dated[0]}), so its render cannot be checked in")
         shutil.copyfile(source, args.out / f"{name}.jinja")
         rendered = args.out / name
         if rendered.exists():
             shutil.rmtree(rendered)
         rendered.mkdir()
+        supports = None
         for shape in spec["shapes"]:
-            prompt, error = render(args.chat_render, source, spec, shape)
+            prompt, (thinking, error) = render(args.chat_render, source, spec, shape)
             if prompt is not None:
                 (rendered / f"{shape['name']}.prompt").write_bytes(prompt)
+                if supports is not None and thinking != supports:
+                    sys.exit(f"{name}: supports_thinking differs between requests")
+                supports = thinking
             else:
                 refused += 1
                 (rendered / f"{shape['name']}.error").write_text(error)
+        if supports is not None:
+            (rendered / "supports_thinking").write_text(supports)
     print(f"{len(names)} templates x {len(spec['shapes'])} requests rendered by libllama "
           f"into {args.out}, {refused} refused")
 

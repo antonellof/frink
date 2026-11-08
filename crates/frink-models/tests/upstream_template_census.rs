@@ -65,6 +65,8 @@ fn opts(tools: Vec<Value>) -> RenderOptions {
         eos_token: Some("</s>".to_string()),
         tools,
         extra: Map::new(),
+        // These hold the engine to jinja2, which passes no such default.
+        enable_thinking: None,
     }
 }
 

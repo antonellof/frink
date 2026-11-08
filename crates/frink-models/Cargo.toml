@@ -45,6 +45,9 @@ rayon = { workspace = true }
 # it.
 ureq = { workspace = true, optional = true }
 half = { workspace = true }
+# `localtime_r`, for the local time llama.cpp stamps dates in
+# (chat_template/llama_defaults.rs).
+libc = { workspace = true }
 
 [dev-dependencies]
 byteorder = { workspace = true }

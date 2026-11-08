@@ -302,6 +302,20 @@ was meant for. It now stops and says so. Use
   `python3 scripts/chat_template_goldens.py`). Every template llama.cpp
   bundles at the pin is rendered in CI's oracle job. What frink refuses
   there is listed in `EXPECTED_REFUSALS`.
+- Every render carries what llama.cpp's do, under the request's own
+  kwargs: `enable_thinking`, `date_string` and `datetime` (today, local
+  time, as is `strftime_now`), `reasoning_strength` from
+  `reasoning_effort`, and the four spellings of `preserve_reasoning`.
+  `enable_thinking` is `true` where the template supports thinking, on
+  `frink run` and `frink-server` alike, so a thinking model thinks by
+  default, as under llama-server and llama-cli. `-rea off` turns it off.
+- One deviation: whether a template supports thinking is a simpler test
+  than llama.cpp's template analysis (`common/chat-diff-analyzer.cpp`,
+  and a handler per family). frink asks whether turning thinking on
+  changes what follows the user's turn. On every template llama.cpp
+  bundles the two answers agree wherever the answer reaches the prompt,
+  which `llama_renders::census` checks in CI's oracle job. A template
+  outside that set can get the other default.
 - One deviation: `{{ x | tojson }}` sorts object keys.
   That is stock jinja2's policy, but transformers and llama.cpp both
   preserve the author's order. Frink cannot: `serde_json::Map` is a

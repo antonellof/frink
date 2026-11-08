@@ -400,7 +400,7 @@ pub struct InferArgs {
     pub chat_template_kwargs: Vec<String>,
 
     /// Thinking in the chat, llama.cpp's `-rea`: `on`, `off` or `auto`
-    /// (the default), which leaves it to the template.
+    /// (the default), which turns it on where the template supports it.
     #[arg(
         long = "reasoning",
         visible_alias = "rea",

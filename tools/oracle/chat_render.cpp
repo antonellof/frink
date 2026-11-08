@@ -3,8 +3,11 @@
 //
 //   chat_render <out> <bos> <eos> [llama-server flags] < body.json
 //
-// writes the prompt's bytes to <out>. llama.cpp logs to stdout, so the
-// prompt cannot go there.
+// writes the prompt's bytes to <out>, and to <out>.supports_thinking
+// whether llama.cpp's analysis finds the template thinking-capable
+// (common_chat_templates_support_enable_thinking), the default of the
+// enable_thinking every render passes. llama.cpp logs to stdout, so
+// neither can go there.
 //
 // The flags go through llama.cpp's own parser as llama-server's
 // (common_params_parse), so a default such as preserve_reasoning's
@@ -117,6 +120,15 @@ int main(int argc, char ** argv) {
         FILE * out = fopen(out_path.c_str(), "wb");
         if (out == nullptr || fwrite(prompt.data(), 1, prompt.size(), out) != prompt.size() || fclose(out) != 0) {
             fprintf(stderr, "chat_render: cannot write %s\n", out_path.c_str());
+            return 1;
+        }
+        // What decided enable_thinking's default above, for the template
+        // alone: llama.cpp's own answer, beside the prompt.
+        const std::string caps_path = out_path + ".supports_thinking";
+        FILE * caps_out = fopen(caps_path.c_str(), "wb");
+        if (caps_out == nullptr || fputs(template_supports_thinking ? "true\n" : "false\n", caps_out) < 0 ||
+            fclose(caps_out) != 0) {
+            fprintf(stderr, "chat_render: cannot write %s\n", caps_path.c_str());
             return 1;
         }
     } catch (const std::exception & e) {

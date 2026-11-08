@@ -267,7 +267,7 @@ tests that read them skip instead.
 | `FRINK_TEST_RECEIPT_CHECKPOINT` | The pinned Llama-3.1 Q4_K_M GGUF the checkpoint-receipt test hashes |
 | `FRINK_TEST_KIMI_SHARD_DIR` · `FRINK_TEST_KIMI_MOE_SHARD_DIR` · `FRINK_TEST_KIMI_TOKENIZER_PATH` | Kimi shards and tokenizer for the real-data tests |
 | `FRINK_TEST_INSPECT_PATH` | A real `.gguf` for the tensor-table dump in `frink-gguf` (a print, not an assertion) |
-| `FRINK_TEST_CHAT_TEMPLATE_NOW` | Pins `strftime_now`'s clock to Unix seconds so a template that stamps the date renders the same string every run. The only one of these read from library code rather than a test |
+| `FRINK_TEST_CHAT_TEMPLATE_NOW` | Pins the clock chat templates read (`strftime_now`, `date_string`, `datetime`) to Unix seconds, read as UTC, so a template that stamps the date renders the same string every run. Unset, they read local time, as llama.cpp's do. The only one of these read from library code rather than a test |
 
 Two more that are development tools rather than deployment settings:
 
