@@ -15,14 +15,14 @@ Compared against **2 llama.cpp references**, one section each. A gap is a ratio 
 
 | Machine | Backend | llama.cpp | Measured at | Prefill | Decode |
 |---|---|---|---|---|---|
-| AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64 + NVIDIA L40S | CUDA | `604cc43` | `0.58.0` | 🔴 **5.07×** to 🔴 **265.92×** | 🔴 **1.42×** to 🔴 **7.70×** |
+| AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64 + NVIDIA L40S | CUDA | `604cc43` | `0.59.0` | 🔴 **3.13×** to 🔴 **253.99×** | 🔴 **1.16×** to 🔴 **5.39×** |
 | AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | unknown | `0.21.0` ⚠️ | ⚪ **1.04×** to 🔴 **4.45×** | ⚪ **1.04×** to 🔴 **1.34×** |
 | AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | unknown | `0.21.0` ⚠️ | 🔴 **25.53×** to 🔴 **43.29×** | 🔴 **2.75×** to 🔴 **9.25×** |
 | AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | unknown | `0.17.1` ⚠️ | 🔴 **6.26×** to 🔴 **10.14×** | 🔴 **1.06×** to 🔴 **1.92×** |
 | Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | unknown | `0.20.0` ⚠️ | ⚪ **0.99×** to 🔴 **1.09×** | 🟢 **0.60×** to ⚪ **0.96×** |
 | Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | unknown | `0.17.1` ⚠️ | 🔴 **22.55×** to 🔴 **33.79×** | 🔴 **2.18×** to 🔴 **5.04×** |
 
-⚠️ marks rows measured on a build older than this one (**0.58.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
+⚠️ marks rows measured on a build older than this one (**0.59.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
 
 ### AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64 + NVIDIA L40S
 
@@ -32,16 +32,16 @@ Against llama.cpp `604cc43` (build 1, CUDA).
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
 |---|---|---|---:|---:|---:|---:|
-| Gemma-3-12B-IT Q4_K_M | 🔴 **80.42×** | 🔴 **2.49×** | 82.4 | 6627 | 33.1 | 82.6 |
-| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **10.06×** | 🔴 **1.66×** | 1910 | 19203 | 165 | 273 |
-| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **7.86×** | 🔴 **1.45×** | 1346 | 10585 | 93.6 | 136 |
-| Meta-Llama-3.1-8B-Instruct Q8_0 | 🔴 **8.48×** | 🔴 **1.42×** | 1322 | 11207 | 58.5 | 83.2 |
-| Mistral-7B-Instruct-v0.3 Q4_K_M | 🔴 **8.01×** | 🔴 **1.49×** | 1335 | 10689 | 97.9 | 146 |
-| Phi-4-mini-Instruct Q4_K_M | 🔴 **10.47×** | 🔴 **1.69×** | 1674 | 17531 | 136 | 231 |
-| Qwen2.5-7B-Instruct Q4_K_M | 🔴 **5.07×** | 🔴 **1.48×** | 2222 | 11264 | 97.6 | 144 |
-| Qwen3-30B-A3B Q4_K_M | 🔴 **104.33×** | 🔴 **7.70×** | 83.9 | 8757 | 29.4 | 226 |
-| Qwen3-8B Q4_K_M | 🔴 **8.13×** | 🔴 **1.57×** | 1245 | 10127 | 83.8 | 132 |
-| gpt-oss-20b MXFP4 | 🔴 **265.92×** | 🔴 **5.69×** | 42.4 | 11284 | 36.6 | 208 |
+| Gemma-3-12B-IT Q4_K_M | 🔴 **3.72×** | 🔴 **1.27×** | 1797 | 6675 | 64.9 | 82.6 |
+| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **3.36×** | 🔴 **1.39×** | 5774 | 19396 | 196 | 272 |
+| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **3.45×** | 🔴 **1.21×** | 3104 | 10695 | 112 | 136 |
+| Meta-Llama-3.1-8B-Instruct Q8_0 | 🔴 **4.03×** | 🔴 **1.16×** | 2754 | 11087 | 71.8 | 83.2 |
+| Mistral-7B-Instruct-v0.3 Q4_K_M | 🔴 **3.63×** | 🔴 **1.23×** | 2971 | 10775 | 119 | 145 |
+| Phi-4-mini-Instruct Q4_K_M | 🔴 **3.96×** | 🔴 **1.44×** | 4389 | 17372 | 161 | 231 |
+| Qwen2.5-7B-Instruct Q4_K_M | 🔴 **3.13×** | 🔴 **1.28×** | 3590 | 11228 | 113 | 144 |
+| Qwen3-30B-A3B Q4_K_M | 🔴 **5.54×** | 🔴 **2.03×** | 1570 | 8689 | 112 | 226 |
+| Qwen3-8B Q4_K_M | 🔴 **3.60×** | 🔴 **1.26×** | 2891 | 10417 | 105 | 132 |
+| gpt-oss-20b MXFP4 | 🔴 **253.99×** | 🔴 **5.39×** | 43.9 | 11144 | 38.7 | 209 |
 
 ### AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic
 

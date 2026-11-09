@@ -3,9 +3,9 @@
   "backend_active": "CUDA",
   "threads": 4,
   "warmup_reps": 1,
-  "load_s": 0.006263401,
-  "host_load_1min_start": 1.4,
-  "host_load_1min_end": 1.42,
+  "load_s": 0.005913502,
+  "host_load_1min_start": 1.49,
+  "host_load_1min_end": 1.5,
   "host_thermal_start": {
     "measured": false,
     "pressure": null,
@@ -34,7 +34,7 @@
   "engine_env": {
     "FRINK_CPU_INT_DOT": "1"
   },
-  "frink_version": "0.58.0",
+  "frink_version": "0.59.0",
   "schema": 3,
   "kind": "engine",
   "id": "mistral_7b_v03_q4km",
@@ -47,28 +47,28 @@
   "tests": [
     {
       "test": "pp512",
-      "frink_tps": 1334.7359496432907,
-      "frink_stddev": 3.9173142840277864,
+      "frink_tps": 2971.403037260239,
+      "frink_stddev": 1.307824766693393,
       "frink_samples": [
-        1327.322859399269,
-        1336.305638990559,
-        1334.7359496432907
+        2971.403037260239,
+        2970.7932208796424,
+        2973.821714625447
       ],
-      "llama_tps": 10689.394993,
-      "gap": 8.00862147742162,
+      "llama_tps": 10774.571353,
+      "gap": 3.6260888266892985,
       "workload_digest": "b8d417040110e751"
     },
     {
       "test": "tg128",
-      "frink_tps": 97.89591439309434,
-      "frink_stddev": 0.15482119900836,
+      "frink_tps": 118.52895598083393,
+      "frink_stddev": 0.14414606307924618,
       "frink_samples": [
-        98.1361193163534,
-        97.89591439309434,
-        97.76187238279438
+        118.75520082255494,
+        118.40732034016814,
+        118.52895598083393
       ],
-      "llama_tps": 145.702355,
-      "gap": 1.48833948692631,
+      "llama_tps": 145.394992,
+      "gap": 1.2266622176568425,
       "workload_digest": "044655d19aa3baa5"
     }
   ],

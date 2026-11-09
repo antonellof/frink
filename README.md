@@ -97,11 +97,13 @@ published number has a receipt. The full table is
 
 - **Metal (Apple M2 Pro).** Level with llama.cpp on prefill and ahead
   of it on decode across most of the suite.
-- **CUDA (NVIDIA L40S, 0.58.0, 2026-11-09).** Correct on all ten models
-  measured: greedy tokens identical to frink's CPU path, and the
-  first-token distribution matching llama.cpp's. Not yet as fast. On
-  the dense 3B to 12B models decode is 1.4x to 1.7x slower and prefill
-  5x to 10x, and the two MoE models are further behind
+- **CUDA (NVIDIA L40S, 0.59.0, 2026-11-09).** Greedy tokens identical
+  to frink's CPU path on all ten models measured, and the first-token
+  distribution matching llama.cpp's on nine of them (gpt-oss drifts on
+  frink's CPU path as well). Not yet as fast. On the dense 3B to 12B
+  models decode is 1.2x to 1.4x slower and prefill 3x to 4x. Qwen3-30B-A3B,
+  whose expert layers now run on the GPU, is 2x behind on decode and
+  5.5x on prefill, and gpt-oss still runs on the host path
   ([the L40S rows](benchmarks/RESULTS.md#amd-epyc-7r13-processor-4c-linux-612113-138209amzn2023x86_64--nvidia-l40s)).
   Closing that is the top of the [roadmap](docs/plans/north-star.md)
   (#133, #259).
