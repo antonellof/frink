@@ -25,9 +25,10 @@
 use frink_core::cache::KvCache;
 use frink_core::kv_store::KvBuf;
 use frink_cuda::prefill::{
-    launch_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror, ExpertBiasCuda,
-    ExpertProjCuda, GluCuda, LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams,
-    ProjWeights, RopeLayoutCuda, RouterCuda, StackFfn, StackInput, StackKv,
+    device_routing_enabled, launch_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror,
+    DeviceGating, DeviceRouting, ExpertBiasCuda, ExpertProjCuda, ExpertSource, GluCuda,
+    LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams, ProjWeights, RopeLayoutCuda,
+    RouterCuda, StackFfn, StackInput, StackKv,
 };
 
 use rayon::prelude::*;
@@ -280,7 +281,60 @@ impl Decoder {
                 self.evict_layer_kv(li, cache);
             });
         drop(rows);
+        // A device-routed layer's experts, for the residency counts the
+        // host routing records as it routes.
+        for (i, ids) in out.device_routed.iter().enumerate() {
+            if let Some(ids) = ids {
+                self.layer_for(l + i).moe.record_activations(ids);
+            }
+        }
         Some((out.hidden, run_len))
+    }
+
+    /// A decode token's routing on the device for layer `l`, when its
+    /// gating is one the device has: gpt-oss's (`gpt_oss_route`), or the
+    /// plain softmax top-k `route_for_layer` takes when the layer has no
+    /// expert groups, no selection bias and no weight scale.
+    fn cuda_device_routing<'a>(
+        &'a self,
+        l: usize,
+        experts: &'a [frink_moe::ExpertWeights],
+    ) -> Option<DeviceRouting<'a>> {
+        if !device_routing_enabled() {
+            return None;
+        }
+        let layer = self.layer_for(l);
+        let moe = &self.config.moe;
+        let (gating, router_bias) = match &self.gpt_oss {
+            Some(g) => (
+                DeviceGating::SoftmaxWeight,
+                Some(g.layers.get(self.physical_index(l))?.router_bias.as_slice()),
+            ),
+            None => (
+                plain_softmax_gating(
+                    moe.expert_group_count,
+                    moe.expert_group_used_count,
+                    layer.moe.exp_probs_bias.is_some(),
+                    moe.expert_weights_scale,
+                    moe.gating,
+                    moe.norm_topk_prob,
+                )?,
+                None,
+            ),
+        };
+        Some(DeviceRouting {
+            key: experts.as_ptr() as usize,
+            probe: [
+                experts.first()?.gate.cuda_matvec_launch()?.weights,
+                experts.last()?.down.cuda_matvec_launch()?.weights,
+            ],
+            n_experts: experts.len(),
+            k: moe.n_experts_active,
+            gating,
+            router_bias,
+            source: self,
+            layer: l,
+        })
     }
 
     /// A routed layer the stack serves, with its router's view and its
@@ -429,7 +483,17 @@ impl Decoder {
         let (ffn, glu) = if routed {
             let (router, glu) = self.cuda_moe_layer_eligible(l, layer)?;
             let ffn_dim = experts.first()?.gate.rows();
-            (StackFfn::Moe { router, ffn_dim }, glu)
+            let device = (batch_size == 1)
+                .then(|| self.cuda_device_routing(l, experts))
+                .flatten();
+            (
+                StackFfn::Moe {
+                    router,
+                    ffn_dim,
+                    device,
+                },
+                glu,
+            )
         } else {
             let ex = experts.first()?;
             (
@@ -500,6 +564,69 @@ fn proj_view(m: &frink_core::WeightMatrix, batch_size: usize) -> Option<ProjWeig
     Some(ProjWeights { gemm, matvec })
 }
 
+/// The device gating `route_for_layer` amounts to for a layer without
+/// gpt-oss's rule: its last arm, `route_top_k`, with softmax gating, is
+/// `route_top_k_softmax`. The grouped and the biased arms, and sigmoid or
+/// sqrt-softplus gating, stay on the host.
+fn plain_softmax_gating(
+    groups: Option<usize>,
+    groups_used: Option<usize>,
+    selection_bias: bool,
+    weights_scale: f32,
+    gating: frink_moe::GatingFunction,
+    norm_topk_prob: bool,
+) -> Option<DeviceGating> {
+    let grouped = matches!((groups, groups_used), (Some(n), Some(k)) if n > 1 && k > 0);
+    if grouped || selection_bias || weights_scale != 1.0 {
+        return None;
+    }
+    match gating {
+        frink_moe::GatingFunction::Softmax => Some(DeviceGating::Softmax {
+            norm: norm_topk_prob,
+        }),
+        _ => None,
+    }
+}
+
+impl ExpertSource for Decoder {
+    /// Every expert of layer `l` in id order, as the device's routing
+    /// tables take them: stops at the first without a one-row view, and
+    /// the short list declines the layer.
+    fn experts(&self, l: usize) -> Vec<ExpertProjCuda<'_>> {
+        let layer = self.layer_for(l);
+        let ExpertBacking::Resident(experts) = &layer.moe.experts else {
+            return Vec::new();
+        };
+        let oai = self
+            .gpt_oss
+            .as_ref()
+            .and_then(|g| g.layers.get(self.physical_index(l)));
+        experts
+            .iter()
+            .enumerate()
+            .map_while(|(e, ex)| {
+                let bias = match oai {
+                    Some(o) => {
+                        let b = o.expert_bias.get(e)?;
+                        Some(ExpertBiasCuda {
+                            gate: &b.gate,
+                            up: &b.up,
+                            down: &b.down,
+                        })
+                    }
+                    None => None,
+                };
+                Some(ExpertProjCuda {
+                    gate: proj_view(&ex.gate, 1)?,
+                    up: proj_view(&ex.up, 1)?,
+                    down: proj_view(&ex.down, 1)?,
+                    bias,
+                })
+            })
+            .collect()
+    }
+}
+
 /// The launch's activation for `GluAct::fused_kernel_gelu_flag`'s
 /// answer: `Some(false)` is SwiGLU, `Some(true)` GeGLU, and `None` (an
 /// activation no fused kernel computes) declines the layer.
@@ -545,6 +672,29 @@ mod tests {
         );
         assert_eq!(cuda_glu(GluAct::Reglu.fused_kernel_gelu_flag()), None);
         assert_eq!(cuda_glu(GluAct::ReluSqr.fused_kernel_gelu_flag()), None);
+    }
+
+    /// The device takes exactly `route_for_layer`'s last arm with softmax
+    /// gating: a grouped layer, a selection bias, a weight scale or
+    /// another gating function routes on the host, as the arms say.
+    #[test]
+    fn the_device_takes_only_the_plain_softmax_arm_of_route_for_layer() {
+        use frink_moe::GatingFunction::{Sigmoid, Softmax, SqrtSoftplus};
+        let g = plain_softmax_gating;
+        assert_eq!(
+            g(None, None, false, 1.0, Softmax, true),
+            Some(DeviceGating::Softmax { norm: true })
+        );
+        assert_eq!(
+            g(Some(1), Some(1), false, 1.0, Softmax, false),
+            Some(DeviceGating::Softmax { norm: false }),
+            "one group is no grouping (the arm's guard)"
+        );
+        assert_eq!(g(Some(8), Some(4), false, 1.0, Softmax, true), None);
+        assert_eq!(g(None, None, true, 1.0, Softmax, true), None);
+        assert_eq!(g(None, None, false, 2.5, Softmax, true), None);
+        assert_eq!(g(None, None, false, 1.0, Sigmoid, true), None);
+        assert_eq!(g(None, None, false, 1.0, SqrtSoftplus, true), None);
     }
 
     /// The device's clamped SwiGLU computes with the constants the host

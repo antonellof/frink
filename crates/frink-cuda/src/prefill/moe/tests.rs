@@ -9,6 +9,7 @@ use super::super::tests::{
 use super::super::*;
 use crate::mul_mm::Q8_0;
 use crate::mul_mm_ref::mul_mm_reference;
+use crate::prefill::moe_device::{DeviceGating, DeviceRouting, ExpertSource};
 
 /// A routed layer through the stack at one token: the router's logits
 /// come back to the caller's routing, which picks two of four experts,
@@ -391,6 +392,7 @@ fn routed_layer_matches_its_host_twin(batch: usize, oai: bool) {
                 rows: fx.experts.len(),
             },
             ffn_dim: ffn,
+            device: None,
         },
         glu: fx.glu(),
         post_attn_norm: None,
@@ -480,6 +482,7 @@ fn a_routed_layer_s_router_is_held_to_its_layer() {
         ffn: StackFfn::Moe {
             router: RouterCuda::F32 { data, rows: 4 },
             ffn_dim: 96,
+            device: None,
         },
         glu: GluCuda::Silu,
         post_attn_norm: None,
@@ -505,5 +508,207 @@ fn a_routed_layer_s_router_is_held_to_its_layer() {
         assert!(check_layer_shapes(&good, &params, batch, hidden).is_ok());
         let err = check_layer_shapes(&bad, &params, batch, hidden).unwrap_err();
         assert!(format!("{err:?}").contains("router"), "{err:?}");
+    }
+}
+
+/// The device routing's arithmetic, `frink_moe`'s three rules as they
+/// are written there (`route_top_k_softmax`, its renormalised form, and
+/// `route_top_k_softmax_weight`), for the kernel test below. A tie goes
+/// to the lower id, which a stable sort by descending value gives.
+fn host_route(logits: &[f32], bias: Option<&[f32]>, k: usize, mode: i32) -> Vec<(usize, f32)> {
+    let l: Vec<f32> = logits
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| x + bias.map_or(0.0, |b| b[i]))
+        .collect();
+    let mut idx: Vec<usize> = (0..l.len()).collect();
+    idx.sort_by(|&a, &b| l[b].total_cmp(&l[a]));
+    let top = &idx[..k];
+    if mode == 2 {
+        let e: Vec<f32> = top.iter().map(|&i| (l[i] - l[top[0]]).exp()).collect();
+        let s: f32 = e.iter().sum();
+        return top.iter().zip(&e).map(|(&i, &x)| (i, x / s)).collect();
+    }
+    let max = l.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let sum: f32 = l.iter().map(|&x| (x - max).exp()).sum();
+    let mut w: Vec<f32> = top.iter().map(|&i| (l[i] - max).exp() / sum).collect();
+    if mode == 1 {
+        let ts: f32 = w.iter().sum();
+        w.iter_mut().for_each(|x| *x /= ts);
+    }
+    top.iter().copied().zip(w).collect()
+}
+
+/// The routing kernel against the host's rules: every mode, expert
+/// counts that fill and leave idle a lane's eight slots, `k` up to the
+/// kernel's 16, a router bias, and several tokens at once.
+#[test]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs)"]
+fn the_device_routing_picks_the_host_s_experts_and_weights() {
+    use super::super::enqueue::enqueue_moe_topk;
+    let dev = crate::gpu::shared_device().unwrap();
+    for (n, k, batch) in [
+        (128usize, 8usize, 3usize),
+        (32, 4, 1),
+        (256, 16, 2),
+        (45, 2, 5),
+    ] {
+        for mode in [0, 1, 2] {
+            for biased in [false, true] {
+                let logits: Vec<f32> = (0..batch * n)
+                    .map(|i| ((i as f32) * 0.37).sin() * 3.0 + ((i * 7 % 13) as f32) * 0.01)
+                    .collect();
+                let bias: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.11).cos() * 0.5).collect();
+                let d_l = crate::xfer::htod(&dev, "test logits", &logits).unwrap();
+                let d_b = crate::xfer::htod(&dev, "test bias", &bias).unwrap();
+                let mut ids = dev.alloc_zeros::<i32>(batch * k).unwrap();
+                let w = enqueue_moe_topk(
+                    &dev,
+                    &d_l,
+                    biased.then_some(&d_b),
+                    n,
+                    k,
+                    mode,
+                    batch,
+                    &mut ids.slice_mut(..),
+                )
+                .unwrap();
+                let got_ids = crate::xfer::dtoh(&dev, "test ids", &ids).unwrap();
+                let got_w = crate::xfer::dtoh(&dev, "test w", &w).unwrap();
+                for t in 0..batch {
+                    let want = host_route(
+                        &logits[t * n..(t + 1) * n],
+                        biased.then_some(&bias[..]),
+                        k,
+                        mode,
+                    );
+                    for (s, &(id, wt)) in want.iter().enumerate() {
+                        let what = format!("n={n} k={k} mode={mode} bias={biased} t={t} slot {s}");
+                        assert_eq!(got_ids[t * k + s] as usize, id, "{what}");
+                        assert!(
+                            (got_w[t * k + s] - wt).abs() <= 1e-5 * wt.max(1e-3),
+                            "{what}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The fixture's experts as the device's routing tables take them.
+struct FixtureExperts<'f>(&'f RoutedFixture);
+
+impl ExpertSource for FixtureExperts<'_> {
+    fn experts(&self, _layer: usize) -> Vec<ExpertProjCuda<'_>> {
+        let (hidden, ffn) = (self.0.hidden, self.0.ffn);
+        self.0
+            .experts
+            .iter()
+            .enumerate()
+            .map(|(e, &(gd, ud, dd))| ExpertProjCuda {
+                gate: q8_0_proj(gd, ffn, hidden),
+                up: q8_0_proj(ud, ffn, hidden),
+                down: q8_0_proj(dd, hidden, ffn),
+                bias: self.0.oai.as_ref().map(|o| o.expert_bias[e]),
+            })
+            .collect()
+    }
+}
+
+/// A decode token routed on the device matches the host twin, plain and
+/// gpt-oss alike, without asking the caller's routing, and the experts
+/// it chose come back in the host routing's order.
+#[test]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs)"]
+fn a_device_routed_token_matches_its_host_twin_without_the_host_routing() {
+    for oai in [false, true] {
+        let fx = RoutedFixture::new(1, oai);
+        let twin = fx.twin(1);
+        let (hidden, ffn) = (fx.hidden, fx.ffn);
+        let q_w = fx.n_heads * fx.head_dim;
+        let kv_w = fx.n_kv_heads * fx.head_dim;
+        let [qd, kd, vd, od] = fx.attn;
+        let source = FixtureExperts(&fx);
+        let (e0, e_last) = (fx.experts[0].0, fx.experts[fx.experts.len() - 1].2);
+        let device = DeviceRouting {
+            // Unique per form: the cache is keyed by it.
+            key: if oai { 0xD00D_0001 } else { 0xD00D_0000 },
+            probe: [e0, e_last],
+            n_experts: fx.experts.len(),
+            k: 2,
+            // Two of four renormalised is the twin's softmax over the two
+            // chosen; gpt-oss's rule adds its router bias first.
+            gating: if oai {
+                DeviceGating::SoftmaxWeight
+            } else {
+                DeviceGating::Softmax { norm: true }
+            },
+            router_bias: fx.oai.as_ref().map(|o| o.router_bias),
+            source: &source,
+            layer: 0,
+        };
+        let layer = PrefillDenseLayerCuda {
+            attn_norm_w: &fx.attn_norm_w,
+            ffn_norm_w: &fx.ffn_norm_w,
+            q: q8_0_proj(qd, q_w, hidden),
+            k: q8_0_proj(kd, kv_w, hidden),
+            v: q8_0_proj(vd, kv_w, hidden),
+            o: q8_0_proj(od, hidden, q_w),
+            ffn: StackFfn::Moe {
+                router: RouterCuda::F32 {
+                    data: &fx.router,
+                    rows: fx.experts.len(),
+                },
+                ffn_dim: ffn,
+                device: Some(device),
+            },
+            glu: fx.glu(),
+            post_attn_norm: None,
+            post_ffn_norm: None,
+            extras: AttnExtrasCuda {
+                sinks: fx.oai.as_ref().map(|o| o.sinks),
+                o_bias: fx.oai.as_ref().map(|o| o.o_bias),
+                ..AttnExtrasCuda::default()
+            },
+            rope: None,
+        };
+        let params = PrefillParams {
+            n_heads: fx.n_heads,
+            n_kv_heads: fx.n_kv_heads,
+            head_dim: fx.head_dim,
+            rms_eps: fx.eps,
+            attn_scale: fx.args().scale,
+            attn_softcap: None,
+            window: None,
+            prefix_k: &[],
+            prefix_v: &[],
+            start_pos: 0,
+        };
+        let mut asked = 0usize;
+        let mut host_route =
+            |_: usize, _: &[f32]| -> Result<Vec<(ExpertProjCuda<'static>, f32)>, CudaError> {
+                asked += 1;
+                Err(CudaError::Unsupported(
+                    "the device routes this layer".to_string(),
+                ))
+            };
+        let out = launch_stack(
+            StackInput::Hidden(&fx.hidden_in),
+            &[(&layer, &params)],
+            1,
+            StackKv::UploadPrefix,
+            Some(&mut host_route),
+        )
+        .unwrap();
+        assert_eq!(asked, 0, "oai={oai}: the host routing was asked");
+        let want_ids: Vec<usize> = twin.picks[0].iter().map(|&(e, _)| e).collect();
+        assert_eq!(out.device_routed, vec![Some(want_ids)], "oai={oai}");
+        assert_close(
+            &out.hidden,
+            &twin.hidden,
+            1e-2,
+            "device-routed layer hidden",
+        );
     }
 }
