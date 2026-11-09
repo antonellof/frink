@@ -192,6 +192,46 @@ pub struct AttnArgs {
     pub softcap: Option<f32>,
 }
 
+/// Dynamic shared bytes the tiled prefill attention needs at `rpw`
+/// rows per warp and `bc` keys per tile, for a head of `head_dim`: the
+/// block's Q rows, the K tile (rows padded by 4 floats), the V tile,
+/// and each warp's 32 probabilities.
+pub(crate) fn prefill_attn_smem(head_dim: usize, rpw: usize, bc: usize) -> usize {
+    4 * (4 * rpw * head_dim + bc * (head_dim + 4) + bc * head_dim + 4 * 32)
+}
+
+/// The largest tile that fits `limit` bytes, in the order a wider tile
+/// shares more: `(rows per warp, keys per tile, bytes)`.
+pub(crate) fn prefill_attn_tile(head_dim: usize, limit: usize) -> Option<(usize, usize, usize)> {
+    [(8, 32), (4, 32), (4, 16), (2, 16), (2, 8), (1, 8)]
+        .into_iter()
+        .map(|(rpw, bc)| (rpw, bc, prefill_attn_smem(head_dim, rpw, bc)))
+        .find(|&(_, _, bytes)| bytes <= limit)
+}
+
+/// The shared memory a launch of the prefill attention may ask for:
+/// the device's opt-in limit, which the function is opted into once
+/// (above 48 KiB a launch must be). 48 KiB on a driver that refuses.
+fn prefill_attn_smem_limit(dev: &Arc<CudaDevice>, func: &CudaFunction) -> Result<usize, CudaError> {
+    use cudarc::driver::sys::{CUdevice_attribute_enum as Dev, CUfunction_attribute_enum as Fun};
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    if let Some(&limit) = LIMIT.get() {
+        return Ok(limit);
+    }
+    let optin = dev
+        .attribute(Dev::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)
+        .map(|v| v.max(0) as usize)
+        .unwrap_or(48 * 1024);
+    let limit = match func.set_attribute(
+        Fun::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        optin as i32,
+    ) {
+        Ok(()) => optin,
+        Err(_) => 48 * 1024,
+    };
+    Ok(*LIMIT.get_or_init(|| limit))
+}
+
 /// Causal GQA for `n_q` query rows over `k_all` / `v_all` holding
 /// `start_pos + n_q` positions. Returns `[n_q, n_heads, head_dim]`.
 pub(crate) fn enqueue_causal_gqa_prefill(
@@ -216,26 +256,38 @@ pub(crate) fn enqueue_causal_gqa_prefill(
             "causal_gqa_prefill: head_dim {head_dim} (the kernel takes a multiple of 4 up to 256)"
         )));
     }
+    if n_heads >= 1 << 16 || n_kv_heads >= 1 << 16 {
+        return Err(CudaError::Unsupported(format!(
+            "causal_gqa_prefill: {n_heads} heads over {n_kv_heads} (the launch packs each in 16 bits)"
+        )));
+    }
     debug_assert!(q.len() >= n_q * n_heads * head_dim);
     debug_assert!(k_all.len() >= (start_pos + n_q) * n_kv_heads * head_dim);
     debug_assert!(v_all.len() >= (start_pos + n_q) * n_kv_heads * head_dim);
     let func = func_for(dev, CAUSAL_GQA_PREFILL_KERNEL_SRC, CAUSAL_GQA_PREFILL)?;
+    let optin = prefill_attn_smem_limit(dev, &func)?;
+    let (rpw, bc, smem) = prefill_attn_tile(head_dim, optin).ok_or_else(|| {
+        CudaError::Unsupported(format!(
+            "causal_gqa_prefill: no key tile of a head of {head_dim} fits {optin} bytes of shared \
+             memory"
+        ))
+    })?;
     let mut out = dev
         .alloc_zeros::<f32>(n_q * n_heads * head_dim)
         .map_err(|e| launch_err("causal_gqa_prefill alloc", e))?;
-    // Four query rows per block, one per warp (`FX_ATTN_WARPS`).
     let cfg = LaunchConfig {
-        grid_dim: ((n_q as u32).div_ceil(4), n_heads as u32, 1),
+        grid_dim: ((n_q as u32).div_ceil(4 * rpw as u32), n_heads as u32, 1),
         block_dim: (128, 1, 1),
-        shared_mem_bytes: 0,
+        shared_mem_bytes: smem as u32,
     };
-    // SAFETY: (const float* x3, float*, int x6, float, float) matched
-    // positionally; the grid covers `n_q x n_heads` in fours and the
-    // kernel returns past either, every key index is below `start_pos
-    // + n_q` which the K/V buffers cover, the `float4` views need
-    // `head_dim % 4 == 0` (checked above) on buffers cudarc allocates
-    // 256-byte aligned, and `out` is allocated at the size the kernel
-    // writes.
+    // SAFETY: (const float* x3, float*, int x5, float, float, int)
+    // matched positionally, the head counts and the tile packed as the
+    // kernel unpacks them (each below 2^16 and 2^8); the grid covers `n_q x n_heads`, every key
+    // index read is below `start_pos + n_q`, which the K/V buffers
+    // cover, the `float4` views need `head_dim % 4 == 0` (checked above)
+    // on buffers cudarc allocates 256-byte aligned, and the dynamic
+    // shared memory is `prefill_attn_tile`'s size for this `rpw` and
+    // `bc`, within the limit the function was opted into.
     unsafe {
         func.launch(
             cfg,
@@ -245,13 +297,13 @@ pub(crate) fn enqueue_causal_gqa_prefill(
                 v_all,
                 &mut out,
                 n_q as i32,
-                n_heads as i32,
-                n_kv_heads as i32,
+                (n_heads | (n_kv_heads << 16)) as i32,
                 head_dim as i32,
                 start_pos as i32,
                 window.map_or(0, |w| w as i32),
                 scale,
                 softcap.filter(|c| *c > 0.0).unwrap_or(0.0),
+                (rpw | (bc << 8)) as i32,
             ),
         )
         .map_err(|e| launch_err("causal_gqa_prefill", e))?;
