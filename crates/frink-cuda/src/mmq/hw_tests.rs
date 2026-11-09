@@ -112,15 +112,24 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
                     .unwrap();
             let rms =
                 (reference.iter().map(|v| v * v).sum::<f32>() / reference.len() as f32).sqrt();
-            for (i, ((g, t), r)) in got.iter().zip(&twin).zip(&reference).enumerate() {
+            let l1 = crate::mul_mm_ref::product_l1(mm, &w, &x, n_rows, n_cols, batch, row_bytes)
+                .unwrap();
+            for (i, (((g, t), r), l)) in got.iter().zip(&twin).zip(&reference).zip(&l1).enumerate()
+            {
                 let what = format!("{kind:?} {n_rows}x{n_cols}x{batch} [{i}]");
                 assert!(
                     (g - t).abs() <= 1e-5 * t.abs().max(rms),
                     "{what}: GPU {g} twin {t}"
                 );
-                // q8_1 rounds each activation by up to half a step, 1/254
-                // of its run's amax: well inside 2% of the row's scale.
-                assert!((g - r).abs() <= 2e-2 * rms, "{what}: GPU {g} reference {r}");
+                // q8_1 rounds each activation by up to 1/254 of its run's
+                // amax, and DS4's half-rounded scales and sums move the
+                // terms Q4_K's min cancels: the twin lands within 0.15% of
+                // the products' L1 of the reference on these fixtures, so
+                // 0.5% bounds it with room and still catches a wrong scale.
+                assert!(
+                    (g - r).abs() <= 5e-3 * l + 1e-6 * rms,
+                    "{what}: GPU {g} reference {r} (l1 {l})"
+                );
             }
         }
     }

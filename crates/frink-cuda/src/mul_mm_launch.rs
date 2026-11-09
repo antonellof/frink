@@ -160,7 +160,10 @@ fn mmq_kind(
     if !asked || crate::gpu::compute_capability_major(dev) < crate::mul_mm_tc::MIN_CC_MAJOR {
         return None;
     }
+    // Q6_K's int8 GEMM measured slower than the f16 tensor-core body on
+    // an A10G (two k16 dots a run, 2-byte loads), so it keeps that body.
     crate::mmq::kernel::MmqKind::by_name(kind.name)
+        .filter(|k| *k != crate::mmq::kernel::MmqKind::Q6_K)
 }
 
 /// [`enqueue_mul_mm`] with the body chosen by the caller: the hardware
