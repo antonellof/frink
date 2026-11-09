@@ -15,6 +15,13 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **CUDA prefill attention is tiled over the keys.** One warp per query
+  row read every key from global memory, about 4 GB of L2 traffic a
+  Llama-3.1-8B layer at `pp512`. A block of query rows now stages each
+  tile of keys in shared memory once (#259).
+
 ## [0.58.0] - 2026-11-08
 
 ### Added
