@@ -543,7 +543,7 @@ fn host_route(logits: &[f32], bias: Option<&[f32]>, k: usize, mode: i32) -> Vec<
 /// counts that fill and leave idle a lane's eight slots, `k` up to the
 /// kernel's 16, a router bias, and several tokens at once.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs)"]
 fn the_device_routing_picks_the_host_s_experts_and_weights() {
     use super::super::enqueue::enqueue_moe_topk;
     let dev = crate::gpu::shared_device().unwrap();
@@ -620,7 +620,7 @@ impl ExpertSource for FixtureExperts<'_> {
 /// gpt-oss alike, without asking the caller's routing, and the experts
 /// it chose come back in the host routing's order.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs)"]
 fn a_device_routed_token_matches_its_host_twin_without_the_host_routing() {
     for oai in [false, true] {
         let fx = RoutedFixture::new(1, oai);

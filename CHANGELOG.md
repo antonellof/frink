@@ -15,6 +15,23 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **A CUDA decode token routes its MoE layers on the device.** Each
+  routed layer downloaded its router's logits and waited for the host
+  to pick the experts, 48 waits a Qwen3-30B-A3B token while the GPU sat
+  idle. A kernel now takes the top-k and the weights by the host's own
+  rule for plain softmax routing (optionally renormalised) and for
+  gpt-oss's, each chosen expert's weights are gathered from a per-layer
+  table of all of them, and the routed matvecs read those; the chosen
+  ids come back with the stack's one download for the activation
+  counts. Other gating rules and prefill batches route on the host, and
+  `FRINK_CUDA_DEVICE_ROUTE=0` keeps every token there. On an L40S a
+  Qwen3-30B-A3B token went from 9.0 to 7.8 ms and a gpt-oss-20b token
+  from 7.3 to 6.3 ms, token-identical to the CPU (#133).
+
+## [0.60.0] - 2026-11-09
+
 ### Added
 
 - **gpt-oss runs in the resident CUDA stack.** Every gpt-oss layer took
