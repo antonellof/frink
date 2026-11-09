@@ -37,6 +37,7 @@
 pub mod enqueue;
 pub mod kernels;
 pub mod kv_mirror;
+pub mod moe;
 pub mod proj;
 
 pub use crate::gpu::GluCuda;
@@ -45,11 +46,12 @@ use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
 use cudarc::driver::{CudaDevice, CudaSlice};
 use enqueue::{
-    enqueue_add_bias_rows, enqueue_add_rows, enqueue_axpy, enqueue_causal_gqa_prefill,
-    enqueue_decode_attn, enqueue_moe_combine, enqueue_rmsnorm_rows, enqueue_rope_rows,
-    enqueue_router_f32, AttnArgs, RopeArgs,
+    enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
+    enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
 };
 pub use kv_mirror::CudaKvMirror;
+use moe::check_expert_shapes;
+pub use moe::routed_batch_supported;
 pub use proj::ProjWeights;
 use std::sync::Arc;
 
@@ -172,8 +174,8 @@ impl RouterCuda<'_> {
 pub enum StackFfn<'a> {
     /// One gated expert on every token.
     Dense(ExpertProjCuda<'a>),
-    /// Routed experts, one token at a time: the router's logits come
-    /// back to the host, the caller's routing ([`RouteFn`]) picks the
+    /// Routed experts ([`moe`]): the router's logits come back to the
+    /// host, the caller's routing ([`RouteFn`]) picks each token's
     /// experts and their weights, and the experts run on the device.
     /// The host routing is the one every other path routes with, so the
     /// experts chosen are the host's for the logits the device computed.
@@ -406,6 +408,13 @@ pub fn launch_stack<'e>(
                 "resident stack: an MoE layer with no routing".to_string(),
             ));
         }
+        // A routed batch runs its experts through the grouped
+        // tensor-core GEMM, which needs `sm_80`.
+        if matches!(layer.ffn, StackFfn::Moe { .. }) && batch > 1 && !routed_batch_supported() {
+            return Err(CudaError::Unsupported(
+                "resident stack: a routed batch needs the tensor-core GEMM (sm_80)".to_string(),
+            ));
+        }
         if params.start_pos != first_params.start_pos {
             return Err(CudaError::Unsupported(
                 "prefill dense stack: layers of one run at different positions".to_string(),
@@ -537,14 +546,9 @@ fn check_layer_shapes(
     let q_width = n_heads * head_dim;
     let kv_width = n_kv_heads * head_dim;
     if let StackFfn::Moe { router, ffn_dim } = layer.ffn {
-        if batch != 1 {
-            return Err(CudaError::Unsupported(format!(
-                "resident stack: an MoE layer in a batch of {batch} (decode only)"
-            )));
-        }
         let fits = match router {
             RouterCuda::F32 { data, rows } => data.len() == rows * hidden_dim,
-            RouterCuda::Quant(p) => p.cols() == hidden_dim && p.validate(1).is_ok(),
+            RouterCuda::Quant(p) => p.cols() == hidden_dim && p.validate(batch).is_ok(),
         };
         if !fits || router.rows() == 0 || ffn_dim == 0 {
             return Err(CudaError::Unsupported(
@@ -880,43 +884,12 @@ fn run_layer_resident<'e>(
             run_expert(dev, held, &ex, layer.glu, &normed2, batch, ffn_dim)?
         }
         StackFfn::Moe { router, ffn_dim } => {
-            // The layer's one host wait: the router's logits, for the
-            // caller's routing.
-            let logits = match router {
-                RouterCuda::F32 { data, rows } => {
-                    let w = held.vector(dev, data)?;
-                    enqueue_router_f32(dev, &w.slice, &normed2, rows, hidden_dim)?
-                }
-                RouterCuda::Quant(p) => held.proj(dev, &p, &normed2, 1)?,
-            };
-            let logits = xfer::dtoh(dev, "router logits", &logits)?;
             let route = route.ok_or_else(|| {
                 CudaError::Unsupported("resident stack: an MoE layer with no routing".to_string())
             })?;
-            let picks = route(index, &logits)?;
-            for (ex, _) in &picks {
-                check_expert_shapes(ex, hidden_dim, ffn_dim)?;
-            }
-            // The routed outputs summed from zero in the routing's order
-            // and only then added to the residual, as the host's
-            // `combine_expert_outputs` and `residual_add` do. All the
-            // experts' gate, up and down in one launch each when their
-            // kinds have a coalesced matvec; one expert at a time
-            // otherwise.
-            match run_experts_together(dev, held, &picks, layer.glu, &normed2, hidden_dim, ffn_dim)?
-            {
-                Some(sum) => sum,
-                None => {
-                    let mut sum = dev
-                        .alloc_zeros::<f32>(hidden_dim)
-                        .map_err(|e| CudaError::Launch(format!("MoE sum alloc: {e:?}")))?;
-                    for (ex, w) in &picks {
-                        let y = run_expert(dev, held, ex, layer.glu, &normed2, 1, ffn_dim)?;
-                        enqueue_axpy(dev, &mut sum, &y, *w, hidden_dim)?;
-                    }
-                    sum
-                }
-            }
+            moe::run_routed(
+                dev, held, router, layer.glu, &normed2, batch, hidden_dim, ffn_dim, index, route,
+            )?
         }
     };
     drop(normed2);
@@ -945,70 +918,6 @@ fn run_expert(
     let act = glu_mul_device(dev, glu, &gate, &up, batch * ffn_dim)?;
     drop((gate, up));
     held.proj(dev, &ex.down, &act, batch)
-}
-
-/// A token's routed experts as five launches: every expert's gate, every
-/// expert's up, the gated activation over all of them, every expert's
-/// down, and the weighted combine. `None`, before any launch, when the
-/// experts' projections do not share a coalesced kind
-/// (`gpu::enqueue_matvec_multi`), and the caller runs them one by one.
-fn run_experts_together(
-    dev: &Arc<CudaDevice>,
-    held: &mut Held,
-    picks: &[(ExpertProjCuda<'_>, f32)],
-    glu: GluCuda,
-    x: &CudaSlice<f32>,
-    hidden_dim: usize,
-    ffn_dim: usize,
-) -> Result<Option<CudaSlice<f32>>, CudaError> {
-    let k = picks.len();
-    let gate: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.gate.matvec).collect();
-    let up: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.up.matvec).collect();
-    let down: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.down.matvec).collect();
-    let (Some(gate), Some(up), Some(down)) = (gate, up, down) else {
-        return Ok(None);
-    };
-    let same = |ls: &[crate::gpu::MatvecLaunch<'_>]| {
-        ls.windows(2).all(|w| w[0].fn_name == w[1].fn_name)
-            && crate::matvec_kinds::coalesced::coalesced_kind(ls[0].fn_name).is_some()
-    };
-    if k == 0 || !same(&gate) || !same(&up) || !same(&down) {
-        return Ok(None);
-    }
-    let (g, wg) = crate::gpu::enqueue_matvec_multi(dev, &gate, x, 0)?;
-    let (u, wu) = crate::gpu::enqueue_matvec_multi(dev, &up, x, 0)?;
-    let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
-    drop((g, u));
-    let (d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
-    drop(act);
-    held.weights.extend(wg.into_iter().chain(wu).chain(wd));
-    let weights: Vec<f32> = picks.iter().map(|(_, w)| *w).collect();
-    let d_w = xfer::htod(dev, "routed weights", &weights)?;
-    Ok(Some(enqueue_moe_combine(dev, &d, &d_w, k, hidden_dim)?))
-}
-
-/// A routed expert's shapes against its layer, and the one-row view
-/// every projection needs, before it touches the device.
-fn check_expert_shapes(
-    ex: &ExpertProjCuda<'_>,
-    hidden_dim: usize,
-    ffn_dim: usize,
-) -> Result<(), CudaError> {
-    if ex.gate.rows() != ffn_dim
-        || ex.up.rows() != ffn_dim
-        || ex.gate.cols() != hidden_dim
-        || ex.up.cols() != hidden_dim
-        || ex.down.rows() != hidden_dim
-        || ex.down.cols() != ffn_dim
-    {
-        return Err(CudaError::Unsupported(
-            "resident stack: a routed expert's shapes do not agree with its layer".to_string(),
-        ));
-    }
-    for m in [&ex.gate, &ex.up, &ex.down] {
-        m.validate(1)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -266,8 +266,114 @@ pub(crate) fn enqueue_mul_mm_with_body(
     Ok((d_out, d_weights))
 }
 
+/// A routed layer's experts' projection in ONE tensor-core launch: group
+/// `g` multiplies the weights `weights[g]` by the activation rows
+/// `gather[group_off[g] .. group_off[g + 1]]` of `x16` (f16, `n_cols`
+/// wide), and writes output rows `group_off[g] ..` of the result,
+/// `group_off.last()` rows of `n_rows` in all. Every group's weights are
+/// one kind and shape. `Unsupported` below `sm_80`, where there is no
+/// tensor-core body, so the caller keeps the host path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_mul_mm_grouped(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    kind: &MulMmKind,
+    weights: &[&[u8]],
+    x16: &cudarc::driver::CudaSlice<u16>,
+    group_off: &[i32],
+    gather: &[i32],
+    n_rows: usize,
+    n_cols: usize,
+    row_bytes: usize,
+) -> Result<
+    (
+        cudarc::driver::CudaSlice<f32>,
+        Vec<std::sync::Arc<crate::gpu::ResidentCudaWeights>>,
+    ),
+    CudaError,
+> {
+    use cudarc::driver::{DevicePtr, LaunchAsync};
+    if MulMmBody::select(dev) != MulMmBody::TensorCore {
+        return Err(CudaError::Unsupported(
+            "grouped mul_mm: the tensor-core body needs sm_80".to_string(),
+        ));
+    }
+    let n_groups = weights.len();
+    let pairs = *group_off.last().unwrap_or(&0) as usize;
+    if n_groups == 0
+        || group_off.len() != n_groups + 1
+        || gather.len() != pairs
+        || group_off.windows(2).any(|w| w[1] < w[0])
+        || weights.iter().any(|w| w.len() != n_rows * row_bytes)
+        || !n_cols.is_multiple_of(kind.block_elems)
+        || row_bytes != n_cols / kind.block_elems * kind.block_bytes
+    {
+        return Err(CudaError::Unsupported(
+            "grouped mul_mm: groups, gather or weights do not agree with the shape".to_string(),
+        ));
+    }
+    let (module, fn_name) = crate::mul_mm_tc::tc_grouped_names(kind);
+    crate::gpu::ensure_module_loaded_lazy_for_arch(
+        dev,
+        module,
+        fn_name,
+        MulMmBody::TensorCore.arch(),
+        || crate::mul_mm_tc::tc_grouped_kernel_src(kind),
+    )?;
+    let func = dev.get_func(module, fn_name).ok_or_else(|| {
+        CudaError::KernelCompile(format!("function '{fn_name}' not found after load_ptx"))
+    })?;
+    let held: Vec<_> = weights
+        .iter()
+        .map(|w| resident_cuda_weights(dev, w))
+        .collect::<Result<_, _>>()?;
+    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
+    let d_table = crate::xfer::htod(dev, "grouped mul_mm table", &table)?;
+    let d_off = crate::xfer::htod(dev, "grouped mul_mm offsets", group_off)?;
+    let d_gather = crate::xfer::htod(dev, "grouped mul_mm gather", gather)?;
+    // SAFETY: every group's blocks write every one of its pairs' rows
+    // below `n_rows` (the grid covers the largest group and all rows), and
+    // the groups' pairs are `0 .. pairs`.
+    let mut d_out = unsafe { crate::gpu::alloc_out(dev, pairs * n_rows, "grouped mul_mm output") }?;
+    let max_group = group_off
+        .windows(2)
+        .map(|w| (w[1] - w[0]) as usize)
+        .max()
+        .unwrap_or(0);
+    let (gx, gy) = crate::mul_mm_tc::tc_grid_dims(n_rows, max_group.max(1));
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (gx as u32, gy as u32, n_groups as u32),
+        block_dim: (crate::mul_mm_tc::TTHREADS as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const u64*, const int*, const int*, const u16*, float*,
+    // int x4) matched positionally by the FX_GROUPED parameter list; the
+    // table holds `n_groups` live device pointers to `n_rows * row_bytes`
+    // bytes each (checked above, held by the caller until its wait), the
+    // offsets are `n_groups + 1` non-decreasing pair indices, every gather
+    // entry is a row of `x16` (the caller's), and `d_out` is
+    // `pairs * n_rows`.
+    unsafe {
+        func.launch(
+            cfg,
+            (
+                &d_table,
+                &d_off,
+                &d_gather,
+                x16,
+                &mut d_out,
+                n_rows as i32,
+                n_cols as i32,
+                0i32,
+                row_bytes as i32,
+            ),
+        )
+        .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
+    }
+    Ok((d_out, held))
+}
+
 /// `x[..n]` as f16 (round to nearest even), on the device.
-fn f32_to_f16(
+pub(crate) fn f32_to_f16(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     x: &cudarc::driver::CudaSlice<f32>,
     n: usize,
@@ -439,6 +545,85 @@ mod tests {
                     // this floor.
                     let tol = 1e-4 * w.abs().max(1.0) + 4e-6 * n_cols as f32;
                     assert!((g - w).abs() <= tol, "{where_}: GPU={g} twin={w}");
+                }
+            }
+        }
+    }
+
+    /// The grouped form, every expert of a routed layer in one launch,
+    /// against the plain tensor-core GEMM run once per group on that
+    /// group's gathered rows: bit-identical, for every kind, with an
+    /// empty group, a group of one, and one wider than a block's tokens,
+    /// and tokens shared between groups as top-k routing shares them.
+    #[test]
+    #[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+    fn the_grouped_gemm_equals_one_gemm_per_group() {
+        use crate::mul_mm::KINDS;
+        let dev = shared_device().expect("a CUDA device");
+        assert_eq!(MulMmBody::select(&dev), MulMmBody::TensorCore);
+        let (n_rows, cols, tokens) = (BM + 7, 256usize, 90usize);
+        // Group sizes 0, 1, 70 and 19: the 70 spans two blocks of tokens.
+        let groups: [Vec<i32>; 4] = [
+            vec![],
+            vec![17],
+            (0..70).map(|i| (i * 7 % tokens) as i32).collect(),
+            (0..19).map(|i| 89 - i * 3).collect(),
+        ];
+        for kind in KINDS {
+            let n_cols = cols.next_multiple_of(kind.block_elems);
+            let row_bytes = (n_cols / kind.block_elems) * kind.block_bytes;
+            let weights: Vec<Vec<u8>> = (0..groups.len() as u32)
+                .map(|g| crate::mul_mm_ref::fixtures::weights(kind, n_rows, n_cols, 500 + g))
+                .collect();
+            let x: Vec<f32> = (0..tokens * n_cols)
+                .map(|i| ((i as f32) * 0.023).sin())
+                .collect();
+            let mut group_off = vec![0i32];
+            let mut gather = Vec::new();
+            for g in &groups {
+                gather.extend_from_slice(g);
+                group_off.push(gather.len() as i32);
+            }
+            let d_x = dev.htod_copy(x.clone()).unwrap();
+            let x16 = f32_to_f16(&dev, &d_x, tokens * n_cols).unwrap();
+            let refs: Vec<&[u8]> = weights.iter().map(Vec::as_slice).collect();
+            let (d_out, held) = enqueue_mul_mm_grouped(
+                &dev, kind, &refs, &x16, &group_off, &gather, n_rows, n_cols, row_bytes,
+            )
+            .expect("grouped launch");
+            let got = dev.dtoh_sync_copy(&d_out).unwrap();
+            drop(held);
+            assert_eq!(got.len(), gather.len() * n_rows);
+            for (g, rows) in groups.iter().enumerate() {
+                if rows.is_empty() {
+                    continue;
+                }
+                let xg: Vec<f32> = rows
+                    .iter()
+                    .flat_map(|&t| {
+                        x[t as usize * n_cols..(t as usize + 1) * n_cols]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                let want = launch_with_body(
+                    MulMmBody::TensorCore,
+                    kind,
+                    &weights[g],
+                    &xg,
+                    n_rows,
+                    n_cols,
+                    rows.len(),
+                    row_bytes,
+                );
+                let lo = group_off[g] as usize * n_rows;
+                let have = &got[lo..lo + rows.len() * n_rows];
+                for (i, (a, b)) in have.iter().zip(&want).enumerate() {
+                    assert!(
+                        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                        "{} group {g} element {i}: grouped={a} plain={b}",
+                        kind.name
+                    );
                 }
             }
         }
