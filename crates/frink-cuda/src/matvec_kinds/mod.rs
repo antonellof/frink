@@ -26,6 +26,7 @@
 pub mod coalesced;
 pub mod codebook;
 pub mod generic;
+pub mod helpers;
 pub mod kquant;
 pub mod legacy;
 
