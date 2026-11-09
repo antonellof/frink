@@ -15,6 +15,16 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The CUDA device probe no longer swaps the process's panic hook.**
+  It installed a silent hook around its cudarc call, so a panic on any
+  other thread in that window lost its message and its server journal
+  record (seen as the journal's panic-hook test failing under
+  `cargo test --workspace`). The probe now opens the driver library
+  itself first, under cudarc's names, and returns no device when it
+  will not open. A test fails if any frink-cuda source swaps the hook.
+
 ### Changed
 
 - **CUDA prefill multiplies Q8_0 and Q4_K weights on the int8 tensor

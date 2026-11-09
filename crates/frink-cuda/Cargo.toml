@@ -40,13 +40,17 @@ cudarc = { version = "=0.11.9", optional = true, default-features = false, featu
     "nvrtc",
     "cuda-11080",
 ] }
+# The device probe opens the driver library itself before cudarc does,
+# under cudarc's own names, so a host without one is a `None` rather
+# than a panic cudarc raises (already in the tree through cudarc).
+libloading = { version = "0.8", optional = true }
 
 [dev-dependencies]
 half = { workspace = true }
 
 [features]
 default = []
-cuda = ["dep:cudarc"]
+cuda = ["dep:cudarc", "dep:libloading"]
 
 # Times the batched GEMM on a real device; needs the `cuda` feature.
 [[example]]
