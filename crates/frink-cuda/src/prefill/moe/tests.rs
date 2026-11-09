@@ -4,7 +4,7 @@
 
 use super::super::tests::{
     assert_close, host_causal_gqa_sinks, host_rms_norm_rows, host_swiglu_oai, q8_0_proj,
-    small_q8_0, wave,
+    q8_1_round, small_q8_0, wave, BATCH_GEMM_TOL,
 };
 use super::super::*;
 use crate::mul_mm::Q8_0;
@@ -55,9 +55,10 @@ fn a_gpt_oss_batch_matches_its_host_twin_through_the_grouped_gemms() {
 const ROUTE_MARGIN: f32 = 0.05;
 
 /// How far a batch's device logits may sit from the host's, relative to
-/// the larger of the logit and the token's RMS (`assert_close`): the
-/// attention projections run on the tensor-core GEMM's f16 operands,
-/// which moved token 0's logits by 0.17% of their RMS on an A10G.
+/// the larger of the logit and the token's RMS (`assert_close`). The
+/// twin rounds the batch GEMMs' inputs through q8_1 as the device does,
+/// so this is f32 accumulation order and an occasional run rounded the
+/// other way.
 const BATCH_LOGIT_TOL: f32 = 5e-3;
 
 /// The routed fixture's per-token logits and top-2 softmax picks, on the
@@ -219,8 +220,23 @@ impl RoutedFixture {
         let keep = |p: OaiPart| left_out != Some(p);
         let q_w = self.n_heads * self.head_dim;
         let kv_w = self.n_kv_heads * self.head_dim;
+        // A batch's attention projections are the int8 GEMM's, which takes
+        // its input through q8_1, and so are its experts' when the grouped
+        // GEMM is the int8 one; a decode token's are f32 matvecs.
+        let quantized = |x: &[f32], cols: usize, on: bool| {
+            if batch > 1 && on {
+                q8_1_round(x, cols)
+            } else {
+                x.to_vec()
+            }
+        };
         let mm = |data: &[u8], rows, cols, x: &[f32], n: usize| {
-            mul_mm_reference(&Q8_0, data, x, rows, cols, n, cols / 32 * 34).unwrap()
+            let x = quantized(x, cols, true);
+            mul_mm_reference(&Q8_0, data, &x, rows, cols, n, cols / 32 * 34).unwrap()
+        };
+        let mm_expert = |data: &[u8], rows, cols, x: &[f32], n: usize| {
+            let x = quantized(x, cols, crate::prefill::moe_device::moe_mmq_enabled());
+            mul_mm_reference(&Q8_0, data, &x, rows, cols, n, cols / 32 * 34).unwrap()
         };
         let [qd, kd, vd, od] = self.attn;
         let normed = host_rms_norm_rows(&self.hidden_in, &self.attn_norm_w, hidden, self.eps);
@@ -258,8 +274,8 @@ impl RoutedFixture {
                 let bias = oai
                     .filter(|_| keep(OaiPart::ExpertBias))
                     .map(|o| o.expert_bias[eid]);
-                let mut g = mm(gd, ffn, hidden, x, 1);
-                let mut u = mm(ud, ffn, hidden, x, 1);
+                let mut g = mm_expert(gd, ffn, hidden, x, 1);
+                let mut u = mm_expert(ud, ffn, hidden, x, 1);
                 if let Some(b) = bias {
                     add(&mut g, b.gate);
                     add(&mut u, b.up);
@@ -272,7 +288,7 @@ impl RoutedFixture {
                         None => g / (1.0 + (-g).exp()) * u,
                     })
                     .collect();
-                let mut d = mm(dd, hidden, ffn, &act, 1);
+                let mut d = mm_expert(dd, hidden, ffn, &act, 1);
                 if let Some(b) = bias {
                     add(&mut d, b.down);
                 }
@@ -449,7 +465,8 @@ fn routed_layer_matches_its_host_twin(batch: usize, oai: bool) {
     )
     .unwrap();
     assert_eq!(asked, batch, "the routing is asked once per token");
-    assert_close(&out.hidden, &twin.hidden, 1e-2, "routed layer hidden");
+    let tol = if batch == 1 { 1e-2 } else { BATCH_GEMM_TOL };
+    assert_close(&out.hidden, &twin.hidden, tol, "routed layer hidden");
 
     // Without a routing the same run is refused before the device.
     let err = launch_prefill_dense_stack(
@@ -728,11 +745,7 @@ fn device_routed_matches_its_host_twin(batch: usize) {
             vec![Some(want_ids)],
             "batch={batch} oai={oai}"
         );
-        assert_close(
-            &out.hidden,
-            &twin.hidden,
-            1e-2,
-            "device-routed layer hidden",
-        );
+        let tol = if batch == 1 { 1e-2 } else { BATCH_GEMM_TOL };
+        assert_close(&out.hidden, &twin.hidden, tol, "device-routed layer hidden");
     }
 }

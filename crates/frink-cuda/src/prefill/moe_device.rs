@@ -368,39 +368,28 @@ pub(super) fn run_device_routed_batch(
     let groups = enqueue_moe_group(dev, &ids.slice(..pairs), pairs, k, n)?;
     let tab = |t: usize| tables.tabs.slice(t * n..(t + 1) * n);
     // An expert takes a token at most once, so no group exceeds `batch`.
-    let x16 = crate::mul_mm_launch::f32_to_f16(dev, normed2, batch * hidden_dim)?;
-    // SAFETY (all three): the tables hold every expert's live weights of
-    // the checked shape, kept alive by the tables the stack holds below;
-    // the offsets end at `pairs` and no group passes `batch`; the gather
-    // names token rows of `x16`, and the down projection reads the pairs'
-    // own activation rows.
-    let mut g = unsafe {
-        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
-            dev,
-            &gs,
-            &tab(0),
-            n,
-            &groups.group_off,
-            Some(&groups.gather),
-            &x16,
-            pairs,
-            batch,
-        )
-    }?;
-    let mut u = unsafe {
-        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
-            dev,
-            &us,
-            &tab(1),
-            n,
-            &groups.group_off,
-            Some(&groups.gather),
-            &x16,
-            pairs,
-            batch,
-        )
-    }?;
-    drop(x16);
+    let mut g = grouped_proj(
+        dev,
+        &gs,
+        &tab(0),
+        n,
+        &groups.group_off,
+        Some(&groups.gather),
+        normed2,
+        batch,
+        pairs,
+    )?;
+    let mut u = grouped_proj(
+        dev,
+        &us,
+        &tab(1),
+        n,
+        &groups.group_off,
+        Some(&groups.gather),
+        normed2,
+        batch,
+        pairs,
+    )?;
     if tables.biased {
         enqueue_add_bias_tab_rows(
             dev,
@@ -421,22 +410,18 @@ pub(super) fn run_device_routed_batch(
     }
     let act = glu_mul_device(dev, glu, &g, &u, pairs * ffn_dim)?;
     drop((g, u));
-    let act16 = crate::mul_mm_launch::f32_to_f16(dev, &act, pairs * ffn_dim)?;
+    let mut d = grouped_proj(
+        dev,
+        &ds,
+        &tab(2),
+        n,
+        &groups.group_off,
+        None,
+        &act,
+        batch,
+        pairs,
+    )?;
     drop(act);
-    let mut d = unsafe {
-        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
-            dev,
-            &ds,
-            &tab(2),
-            n,
-            &groups.group_off,
-            None,
-            &act16,
-            pairs,
-            batch,
-        )
-    }?;
-    drop(act16);
     if tables.biased {
         enqueue_add_bias_tab_rows(
             dev,
@@ -450,4 +435,85 @@ pub(super) fn run_device_routed_batch(
     let out = enqueue_moe_combine_rows(dev, &d, &groups.pair_of, &w, k, hidden_dim, batch)?;
     held.keep.push(tables);
     Ok(Some(out))
+}
+
+/// `FRINK_CUDA_MOE_MMQ=1` runs a routed batch's expert projections on the
+/// int8 grouped GEMM where the kind has one. Off by default: on an A100
+/// it measured slower than the f16 grouped GEMM (Qwen3-30B-A3B `pp512`
+/// 2035 against 2172, gpt-oss-20b 1871 against 2025), the many small
+/// expert groups leaving its 64-token tiles part empty. Read once.
+pub(crate) fn moe_mmq_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("FRINK_CUDA_MOE_MMQ").as_deref(),
+            Ok("1" | "on" | "true")
+        )
+    })
+}
+
+/// One projection of every chosen expert over the grouped pairs: the
+/// int8 grouped GEMM when [`moe_mmq_enabled`] and the kind has one, the
+/// f16 tensor-core one otherwise. `x` holds
+/// the rows `gather` names (a token's, for gate and up) or, without a
+/// gather, the pairs' own rows (the activations, for down); `rows` rows
+/// of it. An expert takes a token at most once, so no group passes
+/// `batch` pairs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn grouped_proj(
+    dev: &Arc<CudaDevice>,
+    shape: &GroupedShape<'static>,
+    table: &cudarc::driver::CudaView<'_, u64>,
+    n: usize,
+    group_off: &CudaSlice<i32>,
+    gather: Option<&CudaSlice<i32>>,
+    x: &CudaSlice<f32>,
+    batch: usize,
+    pairs: usize,
+) -> Result<CudaSlice<f32>, CudaError> {
+    let cols = shape.n_cols;
+    if let Some(kind) =
+        crate::mul_mm_launch::mmq_kind(dev, shape.kind).filter(|_| moe_mmq_enabled())
+    {
+        let ncols_pad = (pairs + crate::mmq::kernel::COLS - 1).div_ceil(crate::mmq::kernel::COLS)
+            * crate::mmq::kernel::COLS;
+        let y = crate::mmq::quantize::enqueue_quantize(
+            dev,
+            kind.layout(),
+            x,
+            gather,
+            cols,
+            pairs,
+            ncols_pad,
+        )?;
+        // SAFETY: the table holds every expert's live weights of this
+        // shape (the layer's tables, held by the stack until its wait); the
+        // offsets end at `pairs` and no group passes `batch`; `y` was
+        // quantized at `ncols_pad >= pairs + 63` columns of `cols`.
+        return unsafe {
+            crate::mmq::enqueue_mmq_grouped(
+                dev,
+                kind,
+                table,
+                n,
+                group_off,
+                &y,
+                ncols_pad,
+                pairs,
+                batch,
+                shape.n_rows,
+                cols,
+                shape.row_bytes,
+            )
+        };
+    }
+    let rows = if gather.is_some() { batch } else { pairs };
+    let x16 = crate::mul_mm_launch::f32_to_f16(dev, x, rows * cols)?;
+    // SAFETY: as above for the table and the offsets; the gather names
+    // token rows of `x16`, or without it each pair reads its own row.
+    unsafe {
+        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
+            dev, shape, table, n, group_off, gather, &x16, pairs, batch,
+        )
+    }
 }
