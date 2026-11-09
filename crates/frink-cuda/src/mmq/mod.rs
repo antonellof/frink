@@ -342,6 +342,56 @@ pub(crate) fn mmq_q6_k_twin(
     out
 }
 
+/// [`mmq_q8_0_twin`] for MXFP4: each block's codes as ggml's doubled
+/// E2M1 integers under `e8m0_to_fp32(e) * 0.5`, Q8_0's order otherwise.
+#[cfg(test)]
+pub(crate) fn mmq_mxfp4_twin(
+    w: &[u8],
+    y: &[u8],
+    n_rows: usize,
+    n_cols: usize,
+    batch: usize,
+    ncols_pad: usize,
+) -> Vec<f32> {
+    const KV_X2: [i32; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+    let n_blocks = n_cols / 32;
+    let row_bytes = n_blocks * 17;
+    let mut out = vec![0f32; batch * n_rows];
+    for col in 0..batch {
+        for row in 0..n_rows {
+            let mut acc = 0f32;
+            for blk in 0..n_blocks.div_ceil(4) * 4 {
+                let (dw, wq): (f32, Vec<i32>) = if blk < n_blocks {
+                    let b = &w[row * row_bytes + blk * 17..row * row_bytes + blk * 17 + 17];
+                    let e = u32::from(b[0]);
+                    let scale = if e == 0 {
+                        f32::from_bits(0x0040_0000)
+                    } else {
+                        f32::from_bits(e << 23)
+                    };
+                    (
+                        scale * 0.5,
+                        (0..32)
+                            .map(|v| KV_X2[((b[1 + v % 16] >> (4 * (v / 16))) & 15) as usize])
+                            .collect(),
+                    )
+                } else {
+                    (0.0, vec![0; 32])
+                };
+                let yb = &y[((blk / 4) * ncols_pad + col) * quantize::BLOCK_BYTES..];
+                let sub = blk % 4;
+                let dy = f32::from_le_bytes(yb[4 * sub..4 * sub + 4].try_into().unwrap());
+                let c: i32 = (0..32)
+                    .map(|e| wq[e] * i32::from(yb[16 + sub * 32 + e] as i8))
+                    .sum();
+                acc = (c as f32 * dw).mul_add(dy, acc);
+            }
+            out[col * n_rows + row] = acc;
+        }
+    }
+    out
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod hw_tests;
 
@@ -353,6 +403,46 @@ mod tests {
     /// int8 GEMM over q8_1 activations lands within the activations'
     /// rounding of the f32 reference, over a K with a partial step and a
     /// batch with padding columns.
+    /// The MXFP4 twin, held to the f32 reference the same way, over a K
+    /// that is not a whole step.
+    #[test]
+    fn the_mxfp4_twin_is_the_gemm_within_the_q8_1_rounding() {
+        let (n_rows, n_cols, batch) = (7usize, 2880usize, 3usize);
+        let w = crate::mul_mm_ref::fixtures::weights(&crate::mul_mm::MXFP4, n_rows, n_cols, 23);
+        let x: Vec<f32> = (0..batch * n_cols)
+            .map(|i| ((i as f32) * 0.31).sin() * (1u32 << ((i / 32) % 5)) as f32)
+            .collect();
+        let ncols_pad = kernel::ncols_pad(batch);
+        let y = quantize::quantize_twin(&x, None, n_cols, batch, ncols_pad, quantize::Layout::D4);
+        let got = mmq_mxfp4_twin(&w, &y, n_rows, n_cols, batch, ncols_pad);
+        let want = crate::mul_mm_ref::mul_mm_reference(
+            &crate::mul_mm::MXFP4,
+            &w,
+            &x,
+            n_rows,
+            n_cols,
+            batch,
+            n_cols / 32 * 17,
+        )
+        .unwrap();
+        let l1 = crate::mul_mm_ref::product_l1(
+            &crate::mul_mm::MXFP4,
+            &w,
+            &x,
+            n_rows,
+            n_cols,
+            batch,
+            n_cols / 32 * 17,
+        )
+        .unwrap();
+        for (i, ((g, r), l)) in got.iter().zip(&want).zip(&l1).enumerate() {
+            assert!(
+                (g - r).abs() <= 5e-3 * l,
+                "[{i}]: twin {g} reference {r} (l1 {l})"
+            );
+        }
+    }
+
     /// The Q6_K twin, held to the f32 reference the same way.
     #[test]
     fn the_q6_k_twin_is_the_gemm_within_the_q8_1_rounding() {

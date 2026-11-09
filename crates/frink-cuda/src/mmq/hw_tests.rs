@@ -89,6 +89,11 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
             &crate::mul_mm::Q6_K,
             &[(135, 256, 37), (256, 4096, 130), (33, 512, 1)][..],
         ),
+        (
+            MmqKind::MXFP4,
+            &crate::mul_mm::MXFP4,
+            &[(135, 96, 37), (256, 2880, 130), (33, 128, 1)][..],
+        ),
     ] {
         for &(n_rows, n_cols, batch) in shapes {
             let (be, bb) = kind.block();
@@ -106,6 +111,7 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
                 MmqKind::Q8_0 => super::mmq_q8_0_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
                 MmqKind::Q4_K => super::mmq_q4_k_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
                 MmqKind::Q6_K => super::mmq_q6_k_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
+                MmqKind::MXFP4 => super::mmq_mxfp4_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
             };
             let reference =
                 crate::mul_mm_ref::mul_mm_reference(mm, &w, &x, n_rows, n_cols, batch, row_bytes)
@@ -152,6 +158,7 @@ fn the_grouped_int8_gemm_equals_one_gemm_per_group() {
     for (kind, mm, n_cols) in [
         (MmqKind::Q8_0, &crate::mul_mm::Q8_0, 2880usize),
         (MmqKind::Q4_K, &crate::mul_mm::Q4_K, 512),
+        (MmqKind::MXFP4, &crate::mul_mm::MXFP4, 2880),
     ] {
         let n_rows = 135usize;
         let (be, bb) = kind.block();

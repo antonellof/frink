@@ -367,6 +367,62 @@ __device__ __forceinline__ unsigned int frink_mmq_u32_a2(const unsigned char* p)
     }
 "#;
 
+/// MXFP4's weight tile for one step (four 17-byte blocks a row): each
+/// int of a row holds four values of one block, the low nibbles of its
+/// code bytes for the block's first 16 values and the high nibbles for
+/// the next 16, each E2M1 code as ggml's doubled `kvalues_mxfp4` integer;
+/// the block's scale is `e8m0_to_fp32(e) * 0.5`, halving the doubling
+/// back (`load_tiles_mxfp4`). D4 activations and Q8_0's dot
+/// (`vec_dot_q8_0_q8_1_mma`). The block is only byte-aligned.
+const MXFP4_LOAD_X: &str = r#"
+#define FX_N_STEPS ((n_blocks + 3) / 4)
+#define FX_XD 1
+#define FX_Y_SCALE(col, d, s) { d = ((const float*)&y_s[(col) * FX_YS])[kk]; s = 0.0f; }
+#define FX_DOT(c, c2, af, b) frink_mma_s8(c, af, b);
+#define FX_ACC(a, t, c, c2, row, d, s) a += (float)(c) * x_d[(row) * 4 + kk] * (d);
+#define FX_STEP_END(a, t, row)
+// E2M1 doubled: 0, 1, 2, 3, 4, 6, 8, 12 and their negatives.
+__device__ __forceinline__ int frink_mmq_e2m1x2(unsigned int v) {
+    const int m = (int)(v & 7u);
+    const int a = m < 4 ? m : ((2 | (m & 1)) << ((m >> 1) - 1));
+    return (v & 8u) ? -a : a;
+}
+#define FX_LOAD_X \
+    { \
+        const int kb0 = ks * 4; \
+        const int ii = tid & 31; \
+        const int blk = kb0 + (ii >> 3); \
+        const int j = ii & 7; \
+        const int shift = j < 4 ? 0 : 4; \
+        for (int pass = 0; pass < FX_I / 8; pass++) { \
+            const int i = pass * 8 + (tid >> 5); \
+            const int row = min(r0 + i, n_rows - 1); \
+            int v = 0; \
+            if (blk < n_blocks) { \
+                const unsigned char* q = w + (size_t)row * row_bytes + (size_t)blk * 17 + 1 \
+                    + 4 * (j & 3); \
+                v = (frink_mmq_e2m1x2(q[0] >> shift) & 0xff) \
+                    | ((frink_mmq_e2m1x2(q[1] >> shift) & 0xff) << 8) \
+                    | ((frink_mmq_e2m1x2(q[2] >> shift) & 0xff) << 16) \
+                    | ((frink_mmq_e2m1x2(q[3] >> shift) & 0xff) << 24); \
+            } \
+            x_qs[i * FX_XS + ii] = v; \
+        } \
+        for (int e = tid; e < FX_I * 4; e += FX_NT) { \
+            const int i = e >> 2; \
+            const int b = kb0 + (e & 3); \
+            const int row = min(r0 + i, n_rows - 1); \
+            float d = 0.0f; \
+            if (b < n_blocks) { \
+                const unsigned int eb = w[(size_t)row * row_bytes + (size_t)b * 17]; \
+                d = (eb == 0u ? __int_as_float(0x00400000) : __int_as_float((int)(eb << 23))) \
+                    * 0.5f; \
+            } \
+            x_d[e] = d; \
+        } \
+    }
+"#;
+
 /// The kinds the int8 GEMM has a weight loader for, named as GGUF names
 /// them.
 #[allow(non_camel_case_types)]
@@ -375,6 +431,7 @@ pub enum MmqKind {
     Q8_0,
     Q4_K,
     Q6_K,
+    MXFP4,
 }
 
 impl MmqKind {
@@ -384,6 +441,7 @@ impl MmqKind {
             "Q8_0" => Some(Self::Q8_0),
             "Q4_K" => Some(Self::Q4_K),
             "Q6_K" => Some(Self::Q6_K),
+            "MXFP4" => Some(Self::MXFP4),
             _ => None,
         }
     }
@@ -394,6 +452,7 @@ impl MmqKind {
             Self::Q8_0 => (32, 34),
             Self::Q4_K => (256, 144),
             Self::Q6_K => (256, 210),
+            Self::MXFP4 => (32, 17),
         }
     }
 
@@ -403,6 +462,7 @@ impl MmqKind {
             Self::Q8_0 => super::quantize::Layout::D4,
             Self::Q4_K => super::quantize::Layout::Ds4,
             Self::Q6_K => super::quantize::Layout::D4,
+            Self::MXFP4 => super::quantize::Layout::D4,
         }
     }
 
@@ -414,6 +474,7 @@ impl MmqKind {
             Self::Q8_0 => ("frink_mmq_q8_0_grouped", "frink_mmq_q8_0_grouped"),
             Self::Q4_K => ("frink_mmq_q4_k_grouped", "frink_mmq_q4_k_grouped"),
             Self::Q6_K => ("frink_mmq_q6_k_grouped", "frink_mmq_q6_k_grouped"),
+            Self::MXFP4 => ("frink_mmq_mxfp4_grouped", "frink_mmq_mxfp4_grouped"),
         };
         let (_, plain) = self.names();
         (
@@ -429,6 +490,7 @@ impl MmqKind {
             Self::Q8_0 => ("frink_mmq_q8_0", "frink_mmq_q8_0"),
             Self::Q4_K => ("frink_mmq_q4_k", "frink_mmq_q4_k"),
             Self::Q6_K => ("frink_mmq_q6_k", "frink_mmq_q6_k"),
+            Self::MXFP4 => ("frink_mmq_mxfp4", "frink_mmq_mxfp4"),
         }
     }
 
@@ -439,6 +501,7 @@ impl MmqKind {
             Self::Q8_0 => Q8_0_LOAD_X,
             Self::Q4_K => Q4_K_LOAD_X,
             Self::Q6_K => Q6_K_LOAD_X,
+            Self::MXFP4 => MXFP4_LOAD_X,
         };
         (
             format!("#define FX_FN_NAME {name}\n{PRELUDE_SRC}{load}{BODY_SRC}"),
@@ -485,8 +548,9 @@ mod tests {
         assert_eq!(MmqKind::by_name("Q8_0"), Some(MmqKind::Q8_0));
         assert_eq!(MmqKind::by_name("Q4_K"), Some(MmqKind::Q4_K));
         assert_eq!(MmqKind::by_name("Q6_K"), Some(MmqKind::Q6_K));
+        assert_eq!(MmqKind::by_name("MXFP4"), Some(MmqKind::MXFP4));
         assert_eq!(MmqKind::by_name("Q5_K"), None);
-        for k in [MmqKind::Q8_0, MmqKind::Q4_K, MmqKind::Q6_K] {
+        for k in [MmqKind::Q8_0, MmqKind::Q4_K, MmqKind::Q6_K, MmqKind::MXFP4] {
             let (src, _, _) = k.source();
             for m in [
                 "FX_N_STEPS",
@@ -502,7 +566,12 @@ mod tests {
             // NVRTC compiles one pass: every helper is defined before
             // anything calls it (the Q4_K snippet once called the f16
             // helper ahead of its definition, which only a device saw).
-            for helper in ["frink_mmq_f16", "frink_mmq_round_h", "frink_mmq_u32_a2"] {
+            for helper in [
+                "frink_mmq_f16",
+                "frink_mmq_round_h",
+                "frink_mmq_u32_a2",
+                "frink_mmq_e2m1x2",
+            ] {
                 let Some(first) = src.find(&format!("{helper}(")) else {
                     continue;
                 };
