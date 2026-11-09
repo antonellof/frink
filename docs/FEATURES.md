@@ -104,8 +104,8 @@ page-locked memory in parallel (208 of a Llama-3.1-8B pp512 step's 383
 ms had been host copies), the GEMM stages its weight rows before
 dequantizing (63 to 107 TFLOPS on the Q4_K gate projection), the
 attention is tiled over the keys, and the decode matvecs give a row
-several warps. On an RTX PRO 6000 Llama-3.1-8B is still 4.2x behind on
-prefill and 1.55x on decode. What is left on prefill is the GEMM's
+several warps. At 0.59.0 on an L40S Llama-3.1-8B Q4_K_M is still 3.4x
+behind on prefill and 1.2x on decode. What is left on prefill is the GEMM's
 distance to int8 `mmq`, and on decode the matvecs' bandwidth and the
 launches a token makes (#133, #259). A Windows or
 Linux install runs and answers correctly, but is not yet the choice for

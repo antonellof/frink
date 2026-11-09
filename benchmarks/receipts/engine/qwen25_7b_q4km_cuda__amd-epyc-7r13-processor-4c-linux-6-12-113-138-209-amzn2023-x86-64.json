@@ -3,9 +3,9 @@
   "backend_active": "CUDA",
   "threads": 4,
   "warmup_reps": 1,
-  "load_s": 0.037942141,
-  "host_load_1min_start": 1.3,
-  "host_load_1min_end": 1.25,
+  "load_s": 0.037287774,
+  "host_load_1min_start": 1.31,
+  "host_load_1min_end": 1.26,
   "host_thermal_start": {
     "measured": false,
     "pressure": null,
@@ -34,7 +34,7 @@
   "engine_env": {
     "FRINK_CPU_INT_DOT": "1"
   },
-  "frink_version": "0.58.0",
+  "frink_version": "0.59.0",
   "schema": 3,
   "kind": "engine",
   "id": "qwen25_7b_q4km",
@@ -47,28 +47,28 @@
   "tests": [
     {
       "test": "pp512",
-      "frink_tps": 2222.183874118561,
-      "frink_stddev": 3.0064751932861875,
+      "frink_tps": 3590.4673400676993,
+      "frink_stddev": 32.036095300516976,
       "frink_samples": [
-        2223.2673315608163,
-        2222.183874118561,
-        2216.41730601143
+        3526.199018204264,
+        3597.3279020239643,
+        3590.4673400676993
       ],
-      "llama_tps": 11263.733582,
-      "gap": 5.068767581831098,
+      "llama_tps": 11228.471792,
+      "gap": 3.1273009133647443,
       "workload_digest": "b8d417040110e751"
     },
     {
       "test": "tg128",
-      "frink_tps": 97.6287237678436,
-      "frink_stddev": 0.05110263932671252,
+      "frink_tps": 112.54169908442763,
+      "frink_stddev": 0.04507173609722156,
       "frink_samples": [
-        97.66688894887568,
-        97.6287237678436,
-        97.54456284488158
+        112.51247923812934,
+        112.61929125839893,
+        112.54169908442763
       ],
-      "llama_tps": 144.028286,
-      "gap": 1.475265479680881,
+      "llama_tps": 144.021528,
+      "gap": 1.2797170219720648,
       "workload_digest": "044655d19aa3baa5"
     }
   ],
