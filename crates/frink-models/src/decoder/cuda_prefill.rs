@@ -25,9 +25,9 @@
 use frink_core::cache::KvCache;
 use frink_core::kv_store::KvBuf;
 use frink_cuda::prefill::{
-    launch_prefill_dense_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror, GluCuda,
+    launch_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror, ExpertProjCuda, GluCuda,
     LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams, ProjWeights, RopeLayoutCuda,
-    StackInput, StackKv,
+    RouterCuda, StackFfn, StackInput, StackKv,
 };
 
 use rayon::prelude::*;
@@ -161,7 +161,49 @@ impl Decoder {
         // does not upload the prompt's whole history again, and a
         // chunked prefill does not upload its prefix per chunk.
         let kv = StackKv::Mirrors(&mut slots);
-        let out = match launch_prefill_dense_stack(input, &launch, batch_size, kv) {
+        // A routed layer's logits come back mid-stack; the host routes
+        // them as it routes everywhere (`route_for_layer`) and lends the
+        // chosen experts' views.
+        let mut route =
+            |i: usize,
+             logits: &[f32]|
+             -> Result<Vec<(ExpertProjCuda<'_>, f32)>, frink_cuda::gpu::CudaError> {
+                let layer = self.layer_for(l + i);
+                let decision = Self::route_for_layer(layer, logits, &self.config);
+                layer.moe.record_activations(&decision.expert_ids);
+                let ExpertBacking::Resident(experts) = &layer.moe.experts else {
+                    return Err(frink_cuda::gpu::CudaError::Unsupported(
+                        "routed layer without resident experts".to_string(),
+                    ));
+                };
+                decision
+                    .expert_ids
+                    .iter()
+                    .zip(&decision.weights)
+                    .map(|(&eid, &w)| {
+                        let ex = experts.get(eid).ok_or_else(|| {
+                            frink_cuda::gpu::CudaError::Unsupported(format!(
+                                "expert {eid} of {}",
+                                experts.len()
+                            ))
+                        })?;
+                        let view = |m| {
+                            proj_view(m, 1).ok_or_else(|| {
+                                frink_cuda::gpu::CudaError::Unsupported("expert view".to_string())
+                            })
+                        };
+                        Ok((
+                            ExpertProjCuda {
+                                gate: view(&ex.gate)?,
+                                up: view(&ex.up)?,
+                                down: view(&ex.down)?,
+                            },
+                            w,
+                        ))
+                    })
+                    .collect()
+            };
+        let out = match launch_stack(input, &launch, batch_size, kv, Some(&mut route)) {
             Ok(out) => out,
             Err(e) => {
                 let what = if decode { "decode" } else { "prefill" };
@@ -188,7 +230,10 @@ impl Decoder {
             .enumerate()
             .for_each(|(i, (cache, &(k_rows, v_rows)))| {
                 let li = l + i;
-                self.layer_for(li).moe.record_activations(&[0]);
+                // A routed layer recorded its experts as it routed.
+                if Self::is_dense_layer(self.layer_for(li)) {
+                    self.layer_for(li).moe.record_activations(&[0]);
+                }
                 for b in 0..batch_size {
                     cache
                         .push(
@@ -208,6 +253,66 @@ impl Decoder {
         Some((out.hidden, run_len))
     }
 
+    /// A routed layer the stack serves, with its router's view and its
+    /// experts' activation, or `None` for one the host body keeps.
+    ///
+    /// The routing itself is the host's (`route_for_layer`, called from
+    /// the stack on the logits the device computed), so every gating
+    /// function routes as it does everywhere else. What the stack does
+    /// not reproduce is refused: shared experts and their gate, a weight
+    /// applied before the experts, the gpt-oss FFN (biases, its clamped
+    /// SwiGLU), a sub-norm, scales on the branch, a router that reads
+    /// anything but the normed FFN input, and an expert whose kinds have
+    /// no matvec.
+    fn cuda_moe_layer_eligible<'a>(
+        &'a self,
+        l: usize,
+        layer: &'a LayerWeights,
+    ) -> Option<(RouterCuda<'a>, GluCuda)> {
+        let moe = &layer.moe;
+        if self.gpt_oss.is_some()
+            || !moe.shared_experts.is_empty()
+            || moe.shared_expert_gate.is_some()
+            || moe.ffn_sub_norm.is_some()
+            || moe.down_scale.is_some()
+            || moe.dense_bias.is_some()
+            || moe.parallel_sum_scale.is_some()
+            || self.config.moe.routed_weight_before_ffn
+            || self.config.router_input != crate::router_input::RouterInput::NormedFfnInput
+            || !Self::metal_can_serve_model(&self.config, self.lora_attached())
+        {
+            return None;
+        }
+        let glu = cuda_glu(
+            self.config
+                .layer_ffn_acts(l)
+                .routed
+                .fused_kernel_gelu_flag(),
+        )?;
+        let ExpertBacking::Resident(experts) = &moe.experts else {
+            return None;
+        };
+        // Every expert, once: a kind with no matvec is refused here, at
+        // description, rather than at the first token that routes to it.
+        if !experts.iter().all(|ex| {
+            [&ex.gate, &ex.up, &ex.down]
+                .iter()
+                .all(|m| proj_view(m, 1).is_some())
+        }) {
+            return None;
+        }
+        let router = match &moe.router {
+            frink_core::WeightMatrix::F32(t) if t.cols() == self.config.hidden_dim => {
+                RouterCuda::F32 {
+                    data: &t.data,
+                    rows: t.rows(),
+                }
+            }
+            m => RouterCuda::Quant(proj_view(m, 1)?),
+        };
+        Some((router, glu))
+    }
+
     /// One layer as the launch takes it, or `None` for a layer or a
     /// cache state the launch does not serve at this batch.
     fn cuda_stack_layer<'a>(
@@ -219,9 +324,15 @@ impl Decoder {
         batch_size: usize,
         glu: GluCuda,
     ) -> Option<(PrefillDenseLayerCuda<'a>, PrefillParams<'a>)> {
-        if !Self::fused_prefill_dense_layer_eligible(layer, &self.config, self.lora_attached())
-            || !self.layer_supports_fused_attn(layer)
-        {
+        // A routed layer rides the stack one token at a time
+        // (`cuda_moe_layer_eligible`); every other is the dense body's.
+        let routed = !Self::is_dense_layer(layer);
+        let eligible = if routed {
+            batch_size == 1 && self.cuda_moe_layer_eligible(l, layer).is_some()
+        } else {
+            Self::fused_prefill_dense_layer_eligible(layer, &self.config, self.lora_attached())
+        };
+        if !eligible || !self.layer_supports_fused_attn(layer) {
             return None;
         }
         // POSITIONS and ROWS both: the prefix the kernel attends over
@@ -259,23 +370,26 @@ impl Decoder {
             // of Q and K, on a layer that rotates.
             mscale: self.config.rope_attn_factor,
         });
-        // A dense layer's one expert is resident (`ExpertBacking::
-        // Stored` is the out-of-core MoE); anything else takes the host.
+        // A layer's experts are resident (`ExpertBacking::Stored` is the
+        // out-of-core MoE); anything else takes the host.
         let ExpertBacking::Resident(experts) = &layer.moe.experts else {
             return None;
         };
-        let ex = experts.first()?;
-        // Both views of each projection; the stack checks they describe
-        // the same bytes and refuses a one-row step whose kind has no
-        // matvec, so a kind added to one CUDA table and not the other
-        // takes the host body rather than the wrong kernel.
-        let view = |m: &'a frink_core::WeightMatrix| -> Option<ProjWeights<'a>> {
-            let gemm = m.cuda_mul_mm_view()?;
-            let matvec = m.cuda_matvec_launch();
-            if ProjWeights::uses_matvec(batch_size) && matvec.is_none() {
-                return None;
-            }
-            Some(ProjWeights { gemm, matvec })
+        let view = |m: &'a frink_core::WeightMatrix| proj_view(m, batch_size);
+        let (ffn, glu) = if routed {
+            let (router, glu) = self.cuda_moe_layer_eligible(l, layer)?;
+            let ffn_dim = experts.first()?.gate.rows();
+            (StackFfn::Moe { router, ffn_dim }, glu)
+        } else {
+            let ex = experts.first()?;
+            (
+                StackFfn::Dense(ExpertProjCuda {
+                    gate: view(&ex.gate)?,
+                    up: view(&ex.up)?,
+                    down: view(&ex.down)?,
+                }),
+                glu,
+            )
         };
         let desc = PrefillDenseLayerCuda {
             attn_norm_w: layer.attn.norm_weight.rms_weights()?,
@@ -284,9 +398,7 @@ impl Decoder {
             k: view(&layer.attn.k_proj)?,
             v: view(&layer.attn.v_proj)?,
             o: view(&layer.attn.o_proj)?,
-            gate: view(&ex.gate)?,
-            up: view(&ex.up)?,
-            down: view(&ex.down)?,
+            ffn,
             glu,
             post_attn_norm: layer.attn.post_attn_norm.as_deref(),
             post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
@@ -320,6 +432,19 @@ impl Decoder {
         };
         Some((desc, params))
     }
+}
+
+/// Both views of a projection; the stack checks they describe the same
+/// bytes and refuses a one-row step whose kind has no matvec, so a kind
+/// added to one CUDA table and not the other takes the host body rather
+/// than the wrong kernel.
+fn proj_view(m: &frink_core::WeightMatrix, batch_size: usize) -> Option<ProjWeights<'_>> {
+    let gemm = m.cuda_mul_mm_view()?;
+    let matvec = m.cuda_matvec_launch();
+    if ProjWeights::uses_matvec(batch_size) && matvec.is_none() {
+        return None;
+    }
+    Some(ProjWeights { gemm, matvec })
 }
 
 /// The launch's activation for `GluAct::fused_kernel_gelu_flag`'s
