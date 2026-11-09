@@ -190,18 +190,55 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
     assert!(matches!(err, CudaError::Unsupported(_)), "{err:?}");
 }
 
+/// The row RMSNorm's block is a whole number of warps the kernel's 32
+/// reduction slots hold, wide for one long row and 256 for a batch.
+#[test]
+fn the_rmsnorm_block_is_whole_warps_within_the_reduction() {
+    use super::enqueue::rmsnorm_threads;
+    for (n_rows, n) in [
+        (1usize, 4096usize),
+        (1, 3072),
+        (1, 128),
+        (32, 128),
+        (512, 4096),
+        (8, 64),
+    ] {
+        let t = rmsnorm_threads(n_rows, n);
+        assert!(
+            t.is_multiple_of(32) && (32..=1024).contains(&t),
+            "{n_rows}x{n}: {t}"
+        );
+    }
+    assert_eq!(rmsnorm_threads(1, 4096), 1024);
+    assert_eq!(rmsnorm_threads(512, 4096), 256);
+}
+
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
 fn rmsnorm_rows_matches_the_host() {
     let dev = shared_device().unwrap();
-    let (rows, n) = (37, 96);
-    let x = wave(rows * n, 0.1);
-    let w = wave(n, 0.7);
-    let d_x = dev.htod_copy(x.clone()).unwrap();
-    let d_w = dev.htod_copy(w.clone()).unwrap();
-    let out = enqueue_rmsnorm_rows(&dev, &d_x, &d_w, rows, n, 1e-5).unwrap();
-    let got = dev.dtoh_sync_copy(&out).unwrap();
-    assert_close(&got, &host_rms_norm_rows(&x, &w, n, 1e-5), 1e-5, "rmsnorm");
+    // A batch at 256 threads a row, and one long row at 1024: the two
+    // geometries `rmsnorm_threads` picks between.
+    for (rows, n) in [
+        (37usize, 96usize),
+        (64, 4096),
+        (1, 4096),
+        (1, 3072),
+        (2, 128),
+    ] {
+        let x = wave(rows * n, 0.1);
+        let w = wave(n, 0.7);
+        let d_x = dev.htod_copy(x.clone()).unwrap();
+        let d_w = dev.htod_copy(w.clone()).unwrap();
+        let out = enqueue_rmsnorm_rows(&dev, &d_x, &d_w, rows, n, 1e-5).unwrap();
+        let got = dev.dtoh_sync_copy(&out).unwrap();
+        assert_close(
+            &got,
+            &host_rms_norm_rows(&x, &w, n, 1e-5),
+            1e-5,
+            &format!("rmsnorm {rows}x{n}"),
+        );
+    }
 }
 
 #[test]
