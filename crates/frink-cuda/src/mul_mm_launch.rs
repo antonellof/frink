@@ -299,6 +299,9 @@ pub(crate) fn enqueue_mul_mm_with_body(
 /// `group_off.last()` rows of `n_rows` in all. Every group's weights are
 /// one kind and shape. `Unsupported` below `sm_80`, where there is no
 /// tensor-core body, so the caller keeps the host path.
+/// Only the hardware test drives it now: both routed paths group on the
+/// device and take [`enqueue_mul_mm_grouped_dev`] directly.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enqueue_mul_mm_grouped(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,

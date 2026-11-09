@@ -206,27 +206,29 @@ fn run_routed_batch(
             "resident stack: a layer's experts in more than one kind".to_string(),
         ));
     }
-    let grouped = |held: &mut Held,
-                   which: Proj,
-                   x16: &CudaSlice<u16>,
-                   gather: &[i32],
-                   cols: usize|
-     -> Result<CudaSlice<f32>, CudaError> {
+    // Each projection of the chosen experts: their weights through a
+    // table, on the int8 grouped GEMM where the kind has one
+    // (`moe_device::grouped_proj`, the device-routed path's choice too).
+    let table_of = |held: &mut Held,
+                    which: Proj|
+     -> Result<
+        (CudaSlice<u64>, crate::mul_mm_launch::GroupedShape<'static>),
+        CudaError,
+    > {
         let p0 = which.of(&experts[0]);
-        let data: Vec<&[u8]> = experts.iter().map(|e| which.of(e).gemm.data).collect();
-        let (out, w) = crate::mul_mm_launch::enqueue_mul_mm_grouped(
-            dev,
-            p0.kind(),
-            &data,
-            x16,
-            &group_off,
-            gather,
-            p0.rows(),
-            cols,
-            p0.gemm.row_bytes,
-        )?;
-        held.weights.extend(w);
-        Ok(out)
+        let mut ptrs = Vec::with_capacity(experts.len());
+        for e in &experts {
+            let w = crate::gpu::resident_cuda_weights(dev, which.of(e).gemm.data)?;
+            ptrs.push(*cudarc::driver::DevicePtr::device_ptr(&w.slice));
+            held.weights.push(w);
+        }
+        let shape = crate::mul_mm_launch::GroupedShape {
+            kind: p0.kind(),
+            n_rows: p0.rows(),
+            n_cols: p0.cols(),
+            row_bytes: p0.gemm.row_bytes,
+        };
+        Ok((xfer::htod(dev, "grouped table", &ptrs)?, shape))
     };
     let pairs = gather.len();
     // Each pair's bias rows are its expert's, through the tables.
@@ -246,21 +248,53 @@ fn run_routed_batch(
         }
         None => None,
     };
-    let x16 = crate::mul_mm_launch::f32_to_f16(dev, normed2, batch * hidden_dim)?;
-    let mut g = grouped(held, Proj::Gate, &x16, &gather, hidden_dim)?;
-    let mut u = grouped(held, Proj::Up, &x16, &gather, hidden_dim)?;
-    drop(x16);
+    let n_groups = experts.len();
+    let d_off = xfer::htod(dev, "routed offsets", &group_off)?;
+    let d_gather = xfer::htod(dev, "routed gather", &gather)?;
+    let (gt, gs) = table_of(held, Proj::Gate)?;
+    let (ut, us) = table_of(held, Proj::Up)?;
+    let (dt, ds) = table_of(held, Proj::Down)?;
+    let gp = super::moe_device::grouped_proj;
+    let mut g = gp(
+        dev,
+        &gs,
+        &gt.slice(..),
+        n_groups,
+        &d_off,
+        Some(&d_gather),
+        normed2,
+        batch,
+        pairs,
+    )?;
+    let mut u = gp(
+        dev,
+        &us,
+        &ut.slice(..),
+        n_groups,
+        &d_off,
+        Some(&d_gather),
+        normed2,
+        batch,
+        pairs,
+    )?;
     if let Some(((gb, ub, _), pg)) = &biases {
         enqueue_add_bias_tab_rows(dev, &mut g, &gb.slice(..), Some(pg), pairs, ffn_dim)?;
         enqueue_add_bias_tab_rows(dev, &mut u, &ub.slice(..), Some(pg), pairs, ffn_dim)?;
     }
     let act = glu_mul_device(dev, glu, &g, &u, pairs * ffn_dim)?;
     drop((g, u));
-    let act16 = crate::mul_mm_launch::f32_to_f16(dev, &act, pairs * ffn_dim)?;
+    let mut d = gp(
+        dev,
+        &ds,
+        &dt.slice(..),
+        n_groups,
+        &d_off,
+        None,
+        &act,
+        batch,
+        pairs,
+    )?;
     drop(act);
-    let identity: Vec<i32> = (0..pairs as i32).collect();
-    let mut d = grouped(held, Proj::Down, &act16, &identity, ffn_dim)?;
-    drop(act16);
     if let Some(((_, _, db), pg)) = &biases {
         enqueue_add_bias_tab_rows(dev, &mut d, &db.slice(..), Some(pg), pairs, hidden_dim)?;
     }

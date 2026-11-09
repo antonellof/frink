@@ -371,7 +371,7 @@ pub(super) fn run_device_routed_batch(
         &gs,
         &tab(0),
         n,
-        &groups,
+        &groups.group_off,
         Some(&groups.gather),
         normed2,
         batch,
@@ -382,7 +382,7 @@ pub(super) fn run_device_routed_batch(
         &us,
         &tab(1),
         n,
-        &groups,
+        &groups.group_off,
         Some(&groups.gather),
         normed2,
         batch,
@@ -408,7 +408,17 @@ pub(super) fn run_device_routed_batch(
     }
     let act = glu_mul_device(dev, glu, &g, &u, pairs * ffn_dim)?;
     drop((g, u));
-    let mut d = grouped_proj(dev, &ds, &tab(2), n, &groups, None, &act, batch, pairs)?;
+    let mut d = grouped_proj(
+        dev,
+        &ds,
+        &tab(2),
+        n,
+        &groups.group_off,
+        None,
+        &act,
+        batch,
+        pairs,
+    )?;
     drop(act);
     if tables.biased {
         enqueue_add_bias_tab_rows(
@@ -433,12 +443,12 @@ pub(super) fn run_device_routed_batch(
 /// of it. An expert takes a token at most once, so no group passes
 /// `batch` pairs.
 #[allow(clippy::too_many_arguments)]
-fn grouped_proj(
+pub(super) fn grouped_proj(
     dev: &Arc<CudaDevice>,
     shape: &GroupedShape<'static>,
     table: &cudarc::driver::CudaView<'_, u64>,
     n: usize,
-    groups: &super::enqueue::MoeGroups,
+    group_off: &CudaSlice<i32>,
     gather: Option<&CudaSlice<i32>>,
     x: &CudaSlice<f32>,
     batch: usize,
@@ -467,7 +477,7 @@ fn grouped_proj(
                 kind,
                 table,
                 n,
-                &groups.group_off,
+                group_off,
                 &y,
                 ncols_pad,
                 pairs,
@@ -484,15 +494,7 @@ fn grouped_proj(
     // token rows of `x16`, or without it each pair reads its own row.
     unsafe {
         crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
-            dev,
-            shape,
-            table,
-            n,
-            &groups.group_off,
-            gather,
-            &x16,
-            pairs,
-            batch,
+            dev, shape, table, n, group_off, gather, &x16, pairs, batch,
         )
     }
 }
