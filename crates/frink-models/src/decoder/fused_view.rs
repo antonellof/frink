@@ -26,6 +26,37 @@ pub(crate) struct FusedAttnExtras<'a> {
     pub v_bias: Option<&'a [f32]>,
     pub q_norm: Option<&'a [f32]>,
     pub k_norm: Option<&'a [f32]>,
+    /// Only under caps that apply them ([`FusedAttnCaps`]); `None`
+    /// otherwise, because a layer carrying one was refused. Read by the
+    /// CUDA stack alone.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    pub sinks: Option<&'a [f32]>,
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    pub o_bias: Option<&'a [f32]>,
+}
+
+/// What a backend's fused attention applies beyond the extras every
+/// backend takes: gpt-oss's attention sinks (one logit per head in the
+/// softmax, with no value) and a bias on `wo`. CUDA's resident stack
+/// applies both. Metal applies neither, so a layer carrying either
+/// takes the host body there.
+#[derive(Clone, Copy)]
+pub(crate) struct FusedAttnCaps {
+    pub sinks: bool,
+    pub o_bias: bool,
+}
+
+impl FusedAttnCaps {
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
+    pub(crate) const METAL: Self = Self {
+        sinks: false,
+        o_bias: false,
+    };
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    pub(crate) const CUDA: Self = Self {
+        sinks: true,
+        o_bias: true,
+    };
 }
 
 impl Decoder {
@@ -39,14 +70,23 @@ impl Decoder {
     /// four projections, the pre-norm, the post-norms), or the reason
     /// for the `None`. A field added to `AttnWeights` therefore fails
     /// to compile until this function says which of the three it is.
-    /// The output gate and the attention sinks are the two the launches
-    /// cannot serve: both sit between the softmax and `wo`, which the
-    /// kernels fuse with no host round-trip, so a launch that ignored
-    /// them would answer differently from the host bodies for the same
-    /// weights -- the fifth and sixth things found written into the
-    /// Metal stacks unconditionally, after the final norm, the
-    /// rotation, the residual scale and the activation.
-    pub(crate) fn fused_attn_extras<'a>(layer: &'a LayerWeights) -> Option<FusedAttnExtras<'a>> {
+    /// The output gate is one no launch serves, and the attention sinks
+    /// and `wo`'s bias are served only where `caps` says so: all three
+    /// sit between the softmax and the residual, which the kernels fuse
+    /// with no host round-trip, so a launch that ignored one would
+    /// answer differently from the host bodies for the same weights --
+    /// the fifth and sixth things found written into the Metal stacks
+    /// unconditionally, after the final norm, the rotation, the
+    /// residual scale and the activation.
+    pub(crate) fn fused_attn_extras<'a>(
+        layer: &'a LayerWeights,
+        caps: FusedAttnCaps,
+    ) -> Option<FusedAttnExtras<'a>> {
+        Self::attn_extras(&layer.attn, caps)
+    }
+
+    /// [`Self::fused_attn_extras`] over the attention weights alone.
+    fn attn_extras(attn: &AttnWeights, caps: FusedAttnCaps) -> Option<FusedAttnExtras<'_>> {
         let AttnWeights {
             q_proj: _,
             k_proj: _,
@@ -68,16 +108,17 @@ impl Decoder {
             shortconv,
             ssm,
             q_gate_interleaved,
-        } = &layer.attn;
-        // No fused attention kernel gates, sinks, norms between the V
-        // sum and `wo`, scales after it, adds a bias to it, or runs a
-        // convolution or a state space in its place; a layer with any
-        // of the seven runs on the host.
+        } = attn;
+        // No fused attention kernel gates, norms between the V sum and
+        // `wo`, scales after it, or runs a convolution or a state space
+        // in its place, and only the backends whose caps say so apply
+        // sinks or a bias on `wo`; a layer with any other runs on the
+        // host.
         if output_gate.is_some()
-            || sinks.is_some()
+            || (sinks.is_some() && !caps.sinks)
             || attn_sub_norm.is_some()
             || o_scale.is_some()
-            || o_bias.is_some()
+            || (o_bias.is_some() && !caps.o_bias)
             || shortconv.is_some()
             || ssm.is_some()
             || *q_gate_interleaved
@@ -90,6 +131,8 @@ impl Decoder {
             v_bias: v_bias.as_deref(),
             q_norm: q_norm.as_deref(),
             k_norm: k_norm.as_deref(),
+            sinks: sinks.as_deref(),
+            o_bias: o_bias.as_deref(),
         })
     }
 
@@ -99,21 +142,27 @@ impl Decoder {
     /// shape and order, `attention_scale`, the head width. Each backend
     /// adds the one question only it can answer -- whether its GEMM
     /// serves every projection -- on top of this.
-    pub(crate) fn layer_supports_fused_attn(&self, layer: &LayerWeights) -> bool {
+    pub(crate) fn layer_supports_fused_attn(
+        &self,
+        layer: &LayerWeights,
+        caps: FusedAttnCaps,
+    ) -> bool {
         use crate::config::RopeLayout;
         if !Self::metal_can_serve_model(&self.config, self.lora_attached()) {
             return false;
         }
-        // gpt-oss: no fused kernel adds the `o_bias` or runs the biased
-        // router, so the fused stacks would compute a *different* graph
-        // than the CPU path for the same weights. Keep this family on
-        // CPU rather than letting the two backends disagree. See
-        // `Decoder::gpt_oss`. Its attention sinks are refused one line
-        // down, by the tensor rather than by the name.
-        if self.gpt_oss.is_some() {
+        // gpt-oss: a backend without the sinks and `wo`'s bias would
+        // compute a *different* attention than the CPU path for the same
+        // weights, so the family stays off it (Metal) rather than letting
+        // the two disagree. The tensors are refused one line down too;
+        // the name is the fence for whatever else the family carries.
+        // Its FFN (the biased router, expert biases, the clamped SwiGLU)
+        // is the FFN eligibility's question, not this one. See
+        // `Decoder::gpt_oss`.
+        if self.gpt_oss.is_some() && !(caps.sinks && caps.o_bias) {
             return false;
         }
-        if Self::fused_attn_extras(layer).is_none() {
+        if Self::fused_attn_extras(layer, caps).is_none() {
             return false;
         }
         if !matches!(self.config.rope_layout, RopeLayout::Norm | RopeLayout::Neox) {
@@ -197,5 +246,58 @@ impl Decoder {
             && layer.moe.down_scale.is_none()
             && layer.moe.dense_bias.is_none()
             && Self::metal_can_serve_model(config, lora_attached)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::norm::NormOp;
+    use frink_core::{Tensor, WeightMatrix};
+
+    fn attn(sinks: bool, o_bias: bool) -> AttnWeights {
+        let m = |r: usize, c: usize| WeightMatrix::F32(Tensor::new(vec![0.0; r * c], vec![r, c]));
+        AttnWeights {
+            q_proj: m(8, 8),
+            k_proj: m(8, 8),
+            v_proj: m(8, 8),
+            o_proj: m(8, 8),
+            norm_weight: NormOp::None,
+            q_norm: None,
+            k_norm: None,
+            q_bias: None,
+            k_bias: None,
+            v_bias: None,
+            post_attn_norm: None,
+            post_ffn_norm: None,
+            output_gate: None,
+            sinks: sinks.then(|| vec![0.5; 2]),
+            attn_sub_norm: None,
+            o_scale: None,
+            o_bias: o_bias.then(|| vec![0.25; 8]),
+            shortconv: None,
+            ssm: None,
+            q_gate_interleaved: false,
+        }
+    }
+
+    /// gpt-oss's sinks and `wo` bias reach a backend whose caps apply
+    /// them (CUDA), and refuse the layer on one whose caps do not
+    /// (Metal), each of the two on its own.
+    #[test]
+    fn sinks_and_the_o_bias_reach_only_a_backend_that_applies_them() {
+        let gpt_oss = attn(true, true);
+        assert!(Decoder::attn_extras(&gpt_oss, FusedAttnCaps::METAL).is_none());
+        let cuda = Decoder::attn_extras(&gpt_oss, FusedAttnCaps::CUDA).expect("CUDA applies both");
+        assert_eq!(cuda.sinks, Some(&[0.5f32; 2][..]));
+        assert_eq!(cuda.o_bias, Some(&[0.25f32; 8][..]));
+        for (sinks, o_bias) in [(true, false), (false, true)] {
+            let one = attn(sinks, o_bias);
+            assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL).is_none());
+            assert!(Decoder::attn_extras(&one, FusedAttnCaps::CUDA).is_some());
+        }
+        let plain = attn(false, false);
+        let extras = Decoder::attn_extras(&plain, FusedAttnCaps::METAL).unwrap();
+        assert!(extras.sinks.is_none() && extras.o_bias.is_none());
     }
 }

@@ -15,6 +15,19 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **gpt-oss runs in the resident CUDA stack.** Every gpt-oss layer took
+  the host path, 2017 host waits a prefill step and 385 a decode token.
+  The stack now applies its attention sinks (one logit per head in both
+  attention kernels' softmax, folded in as the host folds it), the bias
+  on `wo`, each routed expert's three biases (through a pointer table
+  over a prefill batch) and the clamped SwiGLU, and routes its biased
+  router logits by the host's own rule. On an A10G gpt-oss-20b MXFP4
+  takes 27 host waits a step or a token, `pp512` went from 24 to 1485
+  tokens/s and `tg128` from 19.5 to 31.0, token-identical to the CPU.
+  Metal keeps the host path (#133, #259).
+
 ## [0.59.0] - 2026-11-09
 
 ### Added

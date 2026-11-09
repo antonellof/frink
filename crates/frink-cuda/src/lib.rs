@@ -54,6 +54,9 @@ pub mod attn;
 mod gen_launch;
 #[cfg(feature = "cuda")]
 pub mod get_rows_launch;
+/// The gated activations of a fused FFN (SwiGLU, GeGLU, gpt-oss's).
+#[cfg(feature = "cuda")]
+mod glu;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "cuda")]

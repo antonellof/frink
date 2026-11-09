@@ -83,6 +83,8 @@ int main(int argc, char** argv) {
     auto k = readf(base + ".k");
     auto v = readf(base + ".v");
     auto want = readf(base + ".want");
+    auto sinks = readf(base + ".sinks");
+    const float* sinks_p = sinks.empty() ? nullptr : sinks.data();
     std::vector<float> part((size_t)n_heads * n_chunks * (hd + 2), 0.0f);
     std::vector<float> out((size_t)n_heads * hd, 0.0f);
 
@@ -91,7 +93,7 @@ int main(int argc, char** argv) {
                                 hi, n_chunks, scale, softcap);
     });
     run_grid((unsigned)n_heads, 1, (unsigned)hd, [&]() {
-        decode_attn_combine_f32(part.data(), out.data(), n_heads, hd, n_chunks);
+        decode_attn_combine_f32(part.data(), out.data(), n_heads, hd, n_chunks, sinks_p);
     });
 
     if (want.size() != out.size()) {
@@ -109,7 +111,7 @@ int main(int argc, char** argv) {
                         want[i]);
         }
     }
-    printf("%-8s heads=%d hd=%3d keys=%d..%d chunks=%d mismatches=%zu\n", base.c_str(), n_heads,
-           hd, lo, hi, n_chunks, mismatch);
+    printf("%-8s heads=%d hd=%3d keys=%d..%d chunks=%d sinks=%s mismatches=%zu\n", base.c_str(),
+           n_heads, hd, lo, hi, n_chunks, sinks_p ? "yes" : "no", mismatch);
     return mismatch == 0 ? 0 : 1;
 }

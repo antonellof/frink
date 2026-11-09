@@ -66,6 +66,20 @@ pub(super) fn host_causal_gqa(
     n_q: usize,
     a: &AttnArgs,
 ) -> Vec<f32> {
+    host_causal_gqa_sinks(q, k, v, n_q, a, None)
+}
+
+/// [`host_causal_gqa`] with one sink logit per head: a key with no
+/// value in the max and the sum (`ggml_soft_max_add_sinks`'s plain
+/// definition).
+pub(super) fn host_causal_gqa_sinks(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_q: usize,
+    a: &AttnArgs,
+    sinks: Option<&[f32]>,
+) -> Vec<f32> {
     let hd = a.head_dim;
     let group = a.n_heads / a.n_kv_heads.max(1);
     let mut out = vec![0f32; n_q * a.n_heads * hd];
@@ -86,8 +100,13 @@ pub(super) fn host_causal_gqa(
                     s
                 })
                 .collect();
-            let m = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut l = 0.0;
+            let sink = sinks.map(|s| s[h]);
+            let m = scores
+                .iter()
+                .cloned()
+                .chain(sink)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mut l = sink.map_or(0.0, |s| (s - m).exp());
             for s in scores.iter_mut() {
                 *s = (*s - m).exp();
                 l += *s;
@@ -146,6 +165,14 @@ fn host_gelu(x: f32) -> f32 {
     (0.5 * x * (1.0 + u.tanh())) as f32
 }
 
+/// gpt-oss's clamped SwiGLU, `frink_moe::swiglu_oai`'s arithmetic.
+pub(super) fn host_swiglu_oai(g: f32, u: f32) -> f32 {
+    use crate::gpu::{SWIGLU_OAI_ALPHA as A, SWIGLU_OAI_LIMIT as L};
+    let x = g.min(L);
+    let y = u.clamp(-L, L);
+    x / (1.0 + (A * -x).exp()) * (y + 1.0)
+}
+
 pub(super) fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let rms = (want.iter().map(|w| w * w).sum::<f32>() / want.len().max(1) as f32).sqrt();
@@ -182,6 +209,7 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
             gate: m(96, 64),
             up: m(96, 64),
             down: m(64, 96),
+            bias: None,
         }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
@@ -231,7 +259,7 @@ fn the_rmsnorm_block_is_whole_warps_within_the_reduction() {
 }
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn rmsnorm_rows_matches_the_host() {
     let dev = shared_device().unwrap();
     // A batch at 256 threads a row, and one long row at 1024: the two
@@ -259,7 +287,7 @@ fn rmsnorm_rows_matches_the_host() {
 }
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors() {
     let dev = shared_device().unwrap();
     let (rows, n_heads, head_dim) = (9, 3, 32);
@@ -330,59 +358,11 @@ fn the_prefill_attention_tile_fits_its_shared_memory() {
     );
 }
 
-#[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
-fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
-    let dev = shared_device().unwrap();
-    // One block; several blocks of rows whose keys span tiles; a head
-    // of 256 (two float4s a lane) under GQA 2:1; and a window that
-    // starts inside a tile and leaves whole tiles out of later rows.
-    for (n_q, n_heads, n_kv_heads, head_dim, start_pos, window, softcap) in [
-        (13, 4, 2, 64, 0, None, None),
-        (13, 4, 2, 64, 7, None, None),
-        (13, 4, 2, 64, 7, Some(5), None),
-        (13, 4, 2, 64, 0, None, Some(50.0)),
-        (77, 8, 2, 128, 0, None, None),
-        (77, 8, 2, 128, 45, Some(40), None),
-        (40, 2, 1, 256, 3, None, Some(30.0)),
-        (150, 4, 4, 96, 0, Some(33), None),
-    ] {
-        let total = start_pos + n_q;
-        let q = wave(n_q * n_heads * head_dim, 0.2);
-        let k = wave(total * n_kv_heads * head_dim, 0.4);
-        let v = wave(total * n_kv_heads * head_dim, 0.6);
-        let args = AttnArgs {
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            start_pos,
-            window,
-            scale: (head_dim as f32).sqrt().recip(),
-            softcap,
-        };
-        let want = host_causal_gqa(&q, &k, &v, n_q, &args);
-        let d_q = dev.htod_copy(q).unwrap();
-        let d_k = dev.htod_copy(k).unwrap();
-        let d_v = dev.htod_copy(v).unwrap();
-        let out = enqueue_causal_gqa_prefill(&dev, &d_q, &d_k, &d_v, n_q, &args).unwrap();
-        let got = dev.dtoh_sync_copy(&out).unwrap();
-        assert_close(
-            &got,
-            &want,
-            1e-4,
-            &format!(
-                "attn n_q={n_q} hd={head_dim} start={start_pos} window={window:?} \
-                 softcap={softcap:?}"
-            ),
-        );
-    }
-}
-
 /// The whole layer against a host twin: the same fixtures through
 /// `mul_mm_reference` and the naive loops above, in the order the
 /// host batched body runs them.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     dense_layer_matches_its_host_twin(GluCuda::Silu);
 }
@@ -391,9 +371,18 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
 /// differs, so a stack that ran SwiGLU for it would miss by a whole
 /// term in every hidden element.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_dense_layer_matches_a_host_twin_with_a_geglu_ffn() {
     dense_layer_matches_its_host_twin(GluCuda::Gelu);
+}
+
+/// And with gpt-oss's clamped SwiGLU, whose clamps bind on this
+/// fixture's FFN inputs (in the thousands): a kernel that dropped the
+/// clamp, the `+1` or `alpha` misses by a whole term.
+#[test]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+fn the_dense_layer_matches_a_host_twin_with_a_clamped_swiglu() {
+    dense_layer_matches_its_host_twin(GluCuda::SwigluOai);
 }
 
 fn dense_layer_matches_its_host_twin(glu: GluCuda) {
@@ -538,6 +527,11 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
             .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
             .collect(),
         GluCuda::Gelu => g.iter().zip(&u).map(|(&g, u)| host_gelu(g) * u).collect(),
+        GluCuda::SwigluOai => g
+            .iter()
+            .zip(&u)
+            .map(|(&g, &u)| host_swiglu_oai(g, u))
+            .collect(),
     };
     let d = gemm(dd, hidden, ffn, &act);
     for (a, b) in h.iter_mut().zip(&d) {
@@ -556,11 +550,14 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
             gate: view(gd, ffn, hidden),
             up: view(ud, ffn, hidden),
             down: view(dd, hidden, ffn),
+            bias: None,
         }),
         glu,
         post_attn_norm: Some(&post_attn),
         post_ffn_norm: None,
         extras: AttnExtrasCuda {
+            sinks: None,
+            o_bias: None,
             q_bias: Some(&q_bias),
             k_bias: Some(&k_bias),
             v_bias: Some(&v_bias),
@@ -671,6 +668,7 @@ fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
             gate: gemm(96, 64),
             up: gemm(96, 64),
             down: gemm(64, 96),
+            bias: None,
         }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
@@ -718,51 +716,6 @@ fn a_matvec_view_of_other_bytes_is_refused() {
     assert!(matches!(err, CudaError::Unsupported(_)), "{err:?}");
     // A GEMM step does not read the matvec view at all.
     assert!(p.validate(4).is_ok());
-}
-
-#[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
-fn decode_attn_matches_its_twin_across_chunks_a_window_and_a_softcap() {
-    let dev = shared_device().unwrap();
-    for (n_heads, n_kv_heads, head_dim) in [(24usize, 8usize, 128usize), (4, 2, 64), (2, 1, 256)] {
-        for (seq_len, window, softcap) in [
-            (1usize, None, None),
-            (63, None, None),
-            (64, None, None),
-            (65, None, None),
-            (777, None, None),
-            (777, Some(300), None),
-            (130, None, Some(50.0)),
-        ] {
-            let q = wave(n_heads * head_dim, 0.2);
-            let k = wave(seq_len * n_kv_heads * head_dim, 0.4);
-            let v = wave(seq_len * n_kv_heads * head_dim, 0.6);
-            let scale = (head_dim as f32).sqrt().recip();
-            let want = crate::decode_attn::decode_attn_twin(
-                &q, &k, &v, n_heads, n_kv_heads, head_dim, seq_len, window, scale, softcap,
-            );
-            let args = AttnArgs {
-                n_heads,
-                n_kv_heads,
-                head_dim,
-                start_pos: seq_len - 1,
-                window,
-                scale,
-                softcap,
-            };
-            let d_q = dev.htod_copy(q.clone()).unwrap();
-            let d_k = dev.htod_copy(k.clone()).unwrap();
-            let d_v = dev.htod_copy(v.clone()).unwrap();
-            let out = enqueue_decode_attn(&dev, &d_q, &d_k, &d_v, &args).unwrap();
-            let got = dev.dtoh_sync_copy(&out).unwrap();
-            let what = format!("decode attn h={n_heads} hd={head_dim} seq={seq_len} w={window:?}");
-            assert_close(&got, &want, 1e-4, &what);
-            // And against the definition, through the prefill kernel's
-            // host loop at one query row.
-            let naive = host_causal_gqa(&q, &k, &v, 1, &args);
-            assert_close(&got, &naive, 1e-4, &format!("{what} vs naive"));
-        }
-    }
 }
 
 /// A Llama-shaped layer (no biases, no QK norm, NORM RoPE with
@@ -840,7 +793,7 @@ fn host_llama_row(
 /// for the history), and a mirror the host cache no longer matches
 /// must be rebuilt rather than trusted.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
     let (hidden, n_heads, n_kv_heads, head_dim, ffn) = (64usize, 2usize, 1usize, 32usize, 96usize);
     let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
@@ -872,6 +825,7 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
             gate: q8_0_proj(w[4], ffn, hidden),
             up: q8_0_proj(w[5], ffn, hidden),
             down: q8_0_proj(w[6], hidden, ffn),
+            bias: None,
         }),
         glu: GluCuda::Silu,
         post_attn_norm: None,

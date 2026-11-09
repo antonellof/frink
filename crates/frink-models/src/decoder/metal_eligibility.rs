@@ -167,7 +167,7 @@ impl Decoder {
     pub(super) fn layer_supports_metal_attn(&self, layer: &LayerWeights) -> bool {
         // The backend-neutral questions are `fused_view`'s; what is
         // left is whether Metal has a launch for every projection.
-        self.layer_supports_fused_attn(layer)
+        self.layer_supports_fused_attn(layer, fused_view::FusedAttnCaps::METAL)
             && Self::metal_matvec_launch(&layer.attn.q_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.k_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.v_proj).is_some()
@@ -237,13 +237,17 @@ impl Decoder {
         &self,
         layer: &'a LayerWeights,
     ) -> Option<frink_metal::attn::AttnExtras<'a>> {
+        // Metal's caps refuse a layer with sinks or `wo`'s bias, so both
+        // are `None` here.
         let fused_view::FusedAttnExtras {
             q_bias,
             k_bias,
             v_bias,
             q_norm,
             k_norm,
-        } = Self::fused_attn_extras(layer)?;
+            sinks: _,
+            o_bias: _,
+        } = Self::fused_attn_extras(layer, fused_view::FusedAttnCaps::METAL)?;
         Some(frink_metal::attn::AttnExtras {
             q_bias,
             k_bias,

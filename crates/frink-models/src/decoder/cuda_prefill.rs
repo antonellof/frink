@@ -25,14 +25,14 @@
 use frink_core::cache::KvCache;
 use frink_core::kv_store::KvBuf;
 use frink_cuda::prefill::{
-    launch_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror, ExpertProjCuda, GluCuda,
-    LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams, ProjWeights, RopeLayoutCuda,
-    RouterCuda, StackFfn, StackInput, StackKv,
+    launch_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror, ExpertBiasCuda,
+    ExpertProjCuda, GluCuda, LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams,
+    ProjWeights, RopeLayoutCuda, RouterCuda, StackFfn, StackInput, StackKv,
 };
 
 use rayon::prelude::*;
 
-use super::fused_view::FusedAttnExtras;
+use super::fused_view::{FusedAttnCaps, FusedAttnExtras};
 use super::{Decoder, ExpertBacking, LayerWeights};
 
 /// What the launch needs to know about one layer's cache, borrowed
@@ -169,7 +169,16 @@ impl Decoder {
              logits: &[f32]|
              -> Result<Vec<(ExpertProjCuda<'_>, f32)>, frink_cuda::gpu::CudaError> {
                 let layer = self.layer_for(l + i);
-                let decision = Self::route_for_layer(layer, logits, &self.config);
+                // gpt-oss routes its biased logits by its own rule, the
+                // one its host FFN routes by.
+                let oai = self
+                    .gpt_oss
+                    .as_ref()
+                    .map(|g| &g.layers[self.physical_index(l + i)]);
+                let decision = match oai {
+                    Some(oai) => Self::gpt_oss_route(oai, logits.to_vec(), &self.config),
+                    None => Self::route_for_layer(layer, logits, &self.config),
+                };
                 layer.moe.record_activations(&decision.expert_ids);
                 let ExpertBacking::Resident(experts) = &layer.moe.experts else {
                     return Err(frink_cuda::gpu::CudaError::Unsupported(
@@ -192,11 +201,27 @@ impl Decoder {
                                 frink_cuda::gpu::CudaError::Unsupported("expert view".to_string())
                             })
                         };
+                        let bias = match oai {
+                            Some(oai) => {
+                                let b = oai.expert_bias.get(eid).ok_or_else(|| {
+                                    frink_cuda::gpu::CudaError::Unsupported(format!(
+                                        "expert {eid} has no bias row"
+                                    ))
+                                })?;
+                                Some(ExpertBiasCuda {
+                                    gate: &b.gate,
+                                    up: &b.up,
+                                    down: &b.down,
+                                })
+                            }
+                            None => None,
+                        };
                         Ok((
                             ExpertProjCuda {
                                 gate: view(&ex.gate)?,
                                 up: view(&ex.up)?,
                                 down: view(&ex.down)?,
+                                bias,
                             },
                             w,
                         ))
@@ -256,14 +281,15 @@ impl Decoder {
     /// A routed layer the stack serves, with its router's view and its
     /// experts' activation, or `None` for one the host body keeps.
     ///
-    /// The routing itself is the host's (`route_for_layer`, called from
-    /// the stack on the logits the device computed), so every gating
-    /// function routes as it does everywhere else. What the stack does
-    /// not reproduce is refused: shared experts and their gate, a weight
-    /// applied before the experts, the gpt-oss FFN (biases, its clamped
-    /// SwiGLU), a sub-norm, scales on the branch, a router that reads
-    /// anything but the normed FFN input, and an expert whose kinds have
-    /// no matvec. A prefill batch also needs the tensor-core GEMM, which
+    /// The routing itself is the host's (`route_for_layer`, or
+    /// `gpt_oss_route` for gpt-oss's biased router, called from the stack
+    /// on the logits the device computed), so every gating function
+    /// routes as it does everywhere else, and gpt-oss's expert biases
+    /// and clamped SwiGLU run on the device. What the stack does not
+    /// reproduce is refused: shared experts and their gate, a weight
+    /// applied before the experts, a sub-norm, scales on the branch, a
+    /// router that reads anything but the normed FFN input, and an
+    /// expert whose kinds have no matvec. A prefill batch also needs the tensor-core GEMM, which
     /// the stack checks before it touches the device.
     fn cuda_moe_layer_eligible<'a>(
         &'a self,
@@ -271,8 +297,7 @@ impl Decoder {
         layer: &'a LayerWeights,
     ) -> Option<(RouterCuda<'a>, GluCuda)> {
         let moe = &layer.moe;
-        if self.gpt_oss.is_some()
-            || !moe.shared_experts.is_empty()
+        if !moe.shared_experts.is_empty()
             || moe.shared_expert_gate.is_some()
             || moe.ffn_sub_norm.is_some()
             || moe.down_scale.is_some()
@@ -284,12 +309,27 @@ impl Decoder {
         {
             return None;
         }
-        let glu = cuda_glu(
-            self.config
-                .layer_ffn_acts(l)
-                .routed
-                .fused_kernel_gelu_flag(),
-        )?;
+        let glu = match &self.gpt_oss {
+            // Every expert of the layer has its bias row, or the layer
+            // stays on the host.
+            Some(g) => {
+                let oai = g.layers.get(self.physical_index(l))?;
+                let n = match &moe.experts {
+                    ExpertBacking::Resident(e) => e.len(),
+                    _ => return None,
+                };
+                if oai.expert_bias.len() != n || oai.router_bias.is_empty() {
+                    return None;
+                }
+                GluCuda::SwigluOai
+            }
+            None => cuda_glu(
+                self.config
+                    .layer_ffn_acts(l)
+                    .routed
+                    .fused_kernel_gelu_flag(),
+            )?,
+        };
         let ExpertBacking::Resident(experts) = &moe.experts else {
             return None;
         };
@@ -335,7 +375,7 @@ impl Decoder {
         } else {
             Self::fused_prefill_dense_layer_eligible(layer, &self.config, self.lora_attached())
         };
-        if !eligible || !self.layer_supports_fused_attn(layer) {
+        if !eligible || !self.layer_supports_fused_attn(layer, FusedAttnCaps::CUDA) {
             return None;
         }
         // POSITIONS and ROWS both: the prefix the kernel attends over
@@ -360,7 +400,9 @@ impl Decoder {
             v_bias,
             q_norm,
             k_norm,
-        } = Self::fused_attn_extras(layer)?;
+            sinks,
+            o_bias,
+        } = Self::fused_attn_extras(layer, FusedAttnCaps::CUDA)?;
         let rope = self.config.layer_rope(l).map(|r| LayerRopeCuda {
             theta: r.theta,
             freq_factors: r.freq_factors,
@@ -390,6 +432,7 @@ impl Decoder {
                     gate: view(&ex.gate)?,
                     up: view(&ex.up)?,
                     down: view(&ex.down)?,
+                    bias: None,
                 }),
                 glu,
             )
@@ -411,6 +454,8 @@ impl Decoder {
                 v_bias,
                 q_norm,
                 k_norm,
+                sinks,
+                o_bias,
             },
             rope,
         };
@@ -495,5 +540,19 @@ mod tests {
         );
         assert_eq!(cuda_glu(GluAct::Reglu.fused_kernel_gelu_flag()), None);
         assert_eq!(cuda_glu(GluAct::ReluSqr.fused_kernel_gelu_flag()), None);
+    }
+
+    /// The device's clamped SwiGLU computes with the constants the host
+    /// FFN computes with: gpt-oss on CUDA and on the CPU is one function.
+    #[test]
+    fn the_device_clamped_swiglu_has_the_host_s_constants() {
+        assert_eq!(
+            frink_cuda::gpu::SWIGLU_OAI_ALPHA.to_bits(),
+            frink_moe::SWIGLU_OAI_ALPHA.to_bits()
+        );
+        assert_eq!(
+            frink_cuda::gpu::SWIGLU_OAI_LIMIT.to_bits(),
+            frink_moe::SWIGLU_OAI_LIMIT.to_bits()
+        );
     }
 }
