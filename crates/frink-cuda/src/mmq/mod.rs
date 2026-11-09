@@ -23,8 +23,9 @@ mod launch {
     use std::sync::Arc;
 
     /// `out[t][r] = w[r] . x[t]` for `batch` rows `x` of `n_cols`: the
-    /// activations quantized, then the int8 GEMM. The caller holds the
-    /// returned weights until it synchronises.
+    /// activations quantized, then the int8 GEMM on the dense token tile
+    /// ([`kernel::dense_cols`]). The caller holds the returned weights
+    /// until it synchronises.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_mmq(
         dev: &Arc<CudaDevice>,
@@ -36,7 +37,32 @@ mod launch {
         batch: usize,
         row_bytes: usize,
     ) -> Result<(CudaSlice<f32>, Arc<crate::gpu::ResidentCudaWeights>), CudaError> {
+        let cols = kernel::dense_cols();
+        enqueue_mmq_cols(
+            dev, kind, weights, x, n_rows, n_cols, batch, row_bytes, cols,
+        )
+    }
+
+    /// [`enqueue_mmq`] on a token tile of `cols`, [`kernel::COLS`] or
+    /// [`kernel::WIDE_COLS`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_mmq_cols(
+        dev: &Arc<CudaDevice>,
+        kind: MmqKind,
+        weights: &[u8],
+        x: &CudaSlice<f32>,
+        n_rows: usize,
+        n_cols: usize,
+        batch: usize,
+        row_bytes: usize,
+        cols: usize,
+    ) -> Result<(CudaSlice<f32>, Arc<crate::gpu::ResidentCudaWeights>), CudaError> {
         let block = kind.block();
+        if cols != kernel::COLS && cols != kernel::WIDE_COLS {
+            return Err(CudaError::Unsupported(format!(
+                "mmq {kind:?}: a {cols}-token tile"
+            )));
+        }
         if n_rows == 0
             || batch == 0
             || !n_cols.is_multiple_of(block.0)
@@ -47,10 +73,14 @@ mod launch {
                 "mmq {kind:?}: {n_rows} x {n_cols} (row {row_bytes} B) over {batch}"
             )));
         }
-        let ncols_pad = kernel::ncols_pad(batch);
+        let ncols_pad = kernel::ncols_pad_for(batch, cols);
         let y = quantize::enqueue_quantize(dev, kind.layout(), x, None, n_cols, batch, ncols_pad)?;
         let held = crate::gpu::resident_cuda_weights(dev, weights)?;
-        let (src, module, name) = kind.source();
+        let (src, module, name) = if cols == kernel::WIDE_COLS {
+            kind.wide_source()
+        } else {
+            kind.source()
+        };
         crate::gpu::ensure_module_loaded_lazy_for_arch(
             dev,
             module,
@@ -64,7 +94,7 @@ mod launch {
         // SAFETY: uninitialised; every `(token < batch, row < n_rows)`
         // output is written by the one thread whose fragment holds it.
         let mut out = unsafe { crate::gpu::alloc_out(dev, batch * n_rows, "mmq output") }?;
-        let (grid, blk) = kernel::geometry(n_rows, ncols_pad);
+        let (grid, blk) = kernel::geometry(n_rows, ncols_pad, cols);
         let cfg = LaunchConfig {
             grid_dim: grid,
             block_dim: blk,
@@ -75,7 +105,7 @@ mod launch {
         // every row the tile reads is clamped below `n_rows` and every
         // block past `n_blocks` is skipped; the activations hold
         // `kpad / 128 * ncols_pad` blocks, every one a tile of `ncols_pad /
-        // 64` reads; the output stores are guarded by `batch` and `n_rows`.
+        // cols` reads; the output stores are guarded by `batch` and `n_rows`.
         unsafe {
             func.launch(
                 cfg,
@@ -182,6 +212,8 @@ mod launch {
     }
 }
 
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) use launch::enqueue_mmq_cols;
 #[cfg(feature = "cuda")]
 pub(crate) use launch::{enqueue_mmq, enqueue_mmq_grouped};
 

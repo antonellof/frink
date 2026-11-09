@@ -95,14 +95,19 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
             &[(135, 96, 37), (256, 2880, 130), (33, 128, 1)][..],
         ),
     ] {
-        for &(n_rows, n_cols, batch) in shapes {
+        for (&(n_rows, n_cols, batch), cols) in shapes
+            .iter()
+            .flat_map(|s| [(s, kernel::COLS), (s, kernel::WIDE_COLS)])
+        {
             let (be, bb) = kind.block();
             let row_bytes = n_cols / be * bb;
             let w = crate::mul_mm_ref::fixtures::weights(mm, n_rows, n_cols, 91);
             let x = wave(batch * n_cols, 0.4);
             let d_x = xfer::htod(&dev, "mmq x", &x).unwrap();
-            let (out, held) =
-                super::enqueue_mmq(&dev, kind, &w, &d_x, n_rows, n_cols, batch, row_bytes).unwrap();
+            let (out, held) = super::enqueue_mmq_cols(
+                &dev, kind, &w, &d_x, n_rows, n_cols, batch, row_bytes, cols,
+            )
+            .unwrap();
             let got = xfer::dtoh(&dev, "mmq out", &out).unwrap();
             drop(held);
             let ncols_pad = kernel::ncols_pad(batch);
@@ -122,7 +127,7 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
                 .unwrap();
             for (i, (((g, t), r), l)) in got.iter().zip(&twin).zip(&reference).zip(&l1).enumerate()
             {
-                let what = format!("{kind:?} {n_rows}x{n_cols}x{batch} [{i}]");
+                let what = format!("{kind:?} {n_rows}x{n_cols}x{batch} tile {cols} [{i}]");
                 assert!(
                     (g - t).abs() <= 1e-5 * t.abs().max(rms),
                     "{what}: GPU {g} twin {t}"
