@@ -39,7 +39,24 @@ __device__ __forceinline__ float frink_mmq_f16(unsigned short bits) {
     asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(bits));
     return f;
 }
+// (float)c for |c| <= 2^22, exactly: c added to the bits of 1.5 * 2^23,
+// whose ulp is 1, then 1.5 * 2^23 taken away. An integer add and an f32
+// add, where cvt.rn.f32.s32 runs at a quarter of the f32 rate on sm_80
+// to sm_90 and bounds the GEMM: it converts every mma result. Every
+// kind's run dot is far inside the range (`I2F_LIMIT`).
+__device__ __forceinline__ float frink_mmq_i2f(int c) {
+    return __int_as_float(c + 0x4B400000) - 12582912.0f;
+}
 "#;
+
+/// The largest `|c|` [`PRELUDE_SRC`]'s `frink_mmq_i2f` converts exactly.
+pub const I2F_LIMIT: i64 = 1 << 22;
+
+/// `frink_mmq_i2f`, on the host.
+#[cfg(test)]
+pub(crate) fn i2f_twin(c: i32) -> f32 {
+    f32::from_bits(c.wrapping_add(0x4B40_0000) as u32) - 12_582_912.0
+}
 
 /// The skeleton every kind shares. The kind supplies `FX_N_STEPS` (steps
 /// of 128 values a row takes), `FX_XD` (scale floats per 32-value run),
@@ -239,7 +256,7 @@ const Q8_0_LOAD_X: &str = r#"
 // (`vec_dot_q8_0_q8_1_mma`).
 #define FX_Y_SCALE(col, d, s) { d = ((const float*)&y_s[(col) * FX_YS])[kk]; s = 0.0f; }
 #define FX_DOT(c, c2, af, b) frink_mma_s8(c, af, b);
-#define FX_ACC(a, t, c, c2, row, d, s) a += (float)(c) * x_d[(row) * 4 + kk] * (d);
+#define FX_ACC(a, t, c, c2, row, d, s) a += frink_mmq_i2f(c) * x_d[(row) * 4 + kk] * (d);
 #define FX_STEP_END(a, t, row)
 #define FX_LOAD_X \
     { \
@@ -292,7 +309,7 @@ __device__ __forceinline__ float frink_mmq_round_h(float x) {
 #define FX_DOT(c, c2, af, b) frink_mma_s8(c, af, b);
 #define FX_ACC(a, t, c, c2, row, d, s) \
     { \
-        a += x_d[((row) * 4 + kk) * 2] * (d) * (float)(c); \
+        a += x_d[((row) * 4 + kk) * 2] * (d) * frink_mmq_i2f(c); \
         a += x_d[((row) * 4 + kk) * 2 + 1] * (s); \
     }
 #define FX_STEP_END(a, t, row)
@@ -350,7 +367,8 @@ const Q6_K_LOAD_X: &str = r#"
         frink_mma_s8_k16(c2, af + 2, b[1]); \
     }
 #define FX_ACC(a, t, c, c2, row, d, s) \
-    t += ((float)(c) * x_d[((row) * 4 + kk) * 2] + (float)(c2) * x_d[((row) * 4 + kk) * 2 + 1]) * (d);
+    t += (frink_mmq_i2f(c) * x_d[((row) * 4 + kk) * 2] \
+        + frink_mmq_i2f(c2) * x_d[((row) * 4 + kk) * 2 + 1]) * (d);
 #define FX_STEP_END(a, t, row) a += (t) * x_e[row];
 __device__ __forceinline__ unsigned int frink_mmq_u32_a2(const unsigned char* p) {
     const unsigned short* h = (const unsigned short*)p;
@@ -399,7 +417,7 @@ const MXFP4_LOAD_X: &str = r#"
 #define FX_XD 1
 #define FX_Y_SCALE(col, d, s) { d = ((const float*)&y_s[(col) * FX_YS])[kk]; s = 0.0f; }
 #define FX_DOT(c, c2, af, b) frink_mma_s8(c, af, b);
-#define FX_ACC(a, t, c, c2, row, d, s) a += (float)(c) * x_d[(row) * 4 + kk] * (d);
+#define FX_ACC(a, t, c, c2, row, d, s) a += frink_mmq_i2f(c) * x_d[(row) * 4 + kk] * (d);
 #define FX_STEP_END(a, t, row)
 // E2M1 doubled: 0, 1, 2, 3, 4, 6, 8, 12 and their negatives.
 __device__ __forceinline__ int frink_mmq_e2m1x2(unsigned int v) {
@@ -455,6 +473,20 @@ pub enum MmqKind {
 }
 
 impl MmqKind {
+    /// The largest `|c|` one `mma` result can hold for this kind: its
+    /// run's length times its largest weight code times q8_1's 127.
+    /// Q8_0's codes reach -128, Q4_K's nibbles 15, Q6_K's centred codes
+    /// -32 over 16-value runs (`m16n8k16`), MXFP4's doubled E2M1 12.
+    pub fn max_run_dot(self) -> i64 {
+        let (run, code) = match self {
+            Self::Q8_0 => (32, 128),
+            Self::Q4_K => (32, 15),
+            Self::Q6_K => (16, 32),
+            Self::MXFP4 => (32, 12),
+        };
+        run * code * 127
+    }
+
     /// The kind for a GGUF quant name, `None` for one without a loader.
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
@@ -573,6 +605,26 @@ pub fn ncols_pad_for(batch: usize, cols: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fast conversion is `(float)c` bit for bit over its whole range
+    /// and wrong one past each end, so the range is the real one; every
+    /// kind's dots fit in it; and the kernel spells the twin's constants.
+    #[test]
+    fn the_fast_int_to_float_is_exact_for_every_run_dot() {
+        for c in -I2F_LIMIT..=I2F_LIMIT {
+            let c = c as i32;
+            assert_eq!(i2f_twin(c).to_bits(), (c as f32).to_bits(), "{c}");
+        }
+        let past = I2F_LIMIT as i32 + 1;
+        assert_ne!(i2f_twin(past), past as f32);
+        assert_ne!(i2f_twin(-past), -past as f32);
+        for k in [MmqKind::Q8_0, MmqKind::Q4_K, MmqKind::Q6_K, MmqKind::MXFP4] {
+            assert!(k.max_run_dot() <= I2F_LIMIT, "{k:?}: {}", k.max_run_dot());
+            let (src, _, _) = k.source();
+            assert!(!src.contains("(float)(c"), "{k:?} converts with cvt");
+        }
+        assert!(PRELUDE_SRC.contains("__int_as_float(c + 0x4B400000) - 12582912.0f"));
+    }
 
     /// The tile constants the Rust side launches with are the ones the
     /// kernel text spells: a mismatch indexes shared memory wrongly and
