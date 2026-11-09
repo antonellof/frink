@@ -18,6 +18,11 @@
 /// head_dim`, which is how the loader's length rule reads them
 /// (`frink_models::capability::QkNormStyle`).
 pub const RMSNORM_ROWS_KERNEL_SRC: &str = r#"
+// One block per row, any multiple of 32 threads up to 1024: each warp
+// reduces its sum of squares by shuffles, warp 0 reduces the warps'
+// sums, and the block scales its row. Two barriers, where the old tree
+// over 256 shared slots took nine; a decode token's one row of 4096
+// took 6.5 us on an L40S.
 extern "C" __global__ void rmsnorm_rows_f32(
     const float* x,
     const float* w,
@@ -26,27 +31,32 @@ extern "C" __global__ void rmsnorm_rows_f32(
     int n,
     float eps
 ) {
-    __shared__ float partial[256];
-    int row = blockIdx.x;
+    __shared__ float partial[32];
+    const int row = blockIdx.x;
     if (row >= n_rows) return;
     const float* xr = x + (size_t)row * n;
     float* orow = out + (size_t)row * n;
-    int tid = threadIdx.x;
-    int tg = blockDim.x;
+    const int tid = threadIdx.x;
+    const int tg = blockDim.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
     float acc = 0.0f;
     for (int i = tid; i < n; i += tg) {
-        float v = xr[i];
+        const float v = xr[i];
         acc += v * v;
     }
-    partial[tid] = acc;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) partial[warp] = acc;
     __syncthreads();
-    for (int stride = tg / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            partial[tid] += partial[tid + stride];
-        }
-        __syncthreads();
+    if (warp == 0) {
+        float total = lane < (tg >> 5) ? partial[lane] : 0.0f;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) total += __shfl_xor_sync(0xffffffffu, total, off);
+        if (lane == 0) partial[0] = total;
     }
-    float inv_rms = rsqrtf(partial[0] / (float)n + eps);
+    __syncthreads();
+    const float inv_rms = rsqrtf(partial[0] / (float)n + eps);
     for (int i = tid; i < n; i += tg) {
         orow[i] = xr[i] * inv_rms * w[i];
     }
@@ -173,89 +183,175 @@ __device__ __forceinline__ float frink_inf_pf() {
 
 #define FX_ATTN_WARPS 4
 
+// Causal GQA for a block of query rows of one head, tiled over the keys.
+//
+// Grid (ceil(n_q / (4 * rpw)), n_heads), 128 threads. Warp w owns rows
+// w, w + 4, w + 8, ... of the block's 4 * rpw. Per tile of bc <= 32
+// keys the block stages K and V once in shared memory, and every row
+// of the block reads them there: lane j scores key j of the tile
+// against the row (K rows padded to head_dim + 4 floats so the lanes'
+// float4 reads land on distinct banks), the row's running max and sum
+// update once per tile, and lane l accumulates the row's float4
+// channels 4l.. (and 4l + 128.. for a head of 256) over the tile's
+// probabilities. Before this a warp walked one row's keys alone and
+// read each key from global memory, about 4 GB of L2 traffic per
+// Llama-3.1-8B layer at pp512.
+//
+// Dynamic shared memory: Q [4 * rpw][head_dim], K [bc][head_dim + 4],
+// V [bc][head_dim] floats. A row's probabilities stay in its lanes and
+// reach the accumulation by shuffle, so nothing needs a warp barrier
+// (which `hiprtc` does not have).
 extern "C" __global__ void causal_gqa_prefill_f32(
     const float* __restrict__ q,
     const float* __restrict__ k_all,
     const float* __restrict__ v_all,
     float* __restrict__ out,
     int n_q,
-    int n_heads,
-    int n_kv_heads,
+    int heads,      // n_heads | n_kv_heads << 16
     int head_dim,
     int start_pos,
     int window,
     float scale,
-    float softcap
+    float softcap,
+    int tile        // rows per warp | keys per tile << 8
 ) {
+    extern __shared__ __align__(16) float fx_smem[];
+    const int n_heads = heads & 0xffff;
+    const int n_kv_heads = heads >> 16;
+    const int rpw = tile & 0xff;
+    const int bc = tile >> 8;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
-    const int r = blockIdx.x * FX_ATTN_WARPS + warp;
     const int h = blockIdx.y;
-    if (r >= n_q || h >= n_heads) return;
+    const int rows_per_block = FX_ATTN_WARPS * rpw;
+    const int r0 = blockIdx.x * rows_per_block;
     const int group_size = n_heads / max(n_kv_heads, 1);
     const int kv_h = h / max(group_size, 1);
-    const int seq_len = start_pos + r + 1;
-    int lo = 0;
-    if (window > 0 && seq_len > window) lo = seq_len - window;
-    const int d4 = head_dim >> 2;          // float4s per row, <= 64
+    const int d4 = head_dim >> 2;
     const int n_slices = (d4 + 31) >> 5;   // float4s per lane, 1 or 2
-    const float4* q_h = (const float4*)(q + ((size_t)r * n_heads + h) * head_dim);
+    const int ks = head_dim + 4;           // padded K row, in floats
 
-    float4 qv[2];
-    float4 acc[2];
-#pragma unroll
-    for (int s = 0; s < 2; s++) {
-        const int i = lane + 32 * s;
-        qv[s] = (s < n_slices && i < d4) ? q_h[i] : make_float4(0.f, 0.f, 0.f, 0.f);
-        acc[s] = make_float4(0.f, 0.f, 0.f, 0.f);
+    float* q_s = fx_smem;
+    float* k_s = q_s + rows_per_block * head_dim;
+    float* v_s = k_s + bc * ks;
+
+    // The block's rows into shared memory; a row past n_q is zeros and
+    // is never stored.
+    for (int i = threadIdx.x; i < rows_per_block * d4; i += blockDim.x) {
+        const int rr = i / d4;
+        const int c = i - rr * d4;
+        const int r = r0 + rr;
+        float4 v4 = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (r < n_q) v4 = ((const float4*)(q + ((size_t)r * n_heads + h) * head_dim))[c];
+        ((float4*)(q_s + rr * head_dim))[c] = v4;
     }
 
-    float m = -frink_inf_pf();
-    float l = 0.f;
+    float m[8];
+    float l[8];
+    float4 acc[8][2];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        m[i] = -frink_inf_pf();
+        l[i] = 0.f;
+        acc[i][0] = make_float4(0.f, 0.f, 0.f, 0.f);
+        acc[i][1] = make_float4(0.f, 0.f, 0.f, 0.f);
+    }
+
+    // Keys any row of the block can see: from the first row's window
+    // start to the last row's own position.
+    const int r_last = min(r0 + rows_per_block, n_q) - 1;
+    const int seq_first = start_pos + r0 + 1;
+    int t_lo = 0;
+    if (window > 0 && seq_first > window) t_lo = seq_first - window;
+    const int t_hi = start_pos + r_last + 1;
     const unsigned mask = 0xffffffffu;
 
-    for (int t = lo; t < seq_len; t++) {
-        const float4* k_t = (const float4*)(k_all + ((size_t)t * n_kv_heads + kv_h) * head_dim);
-        float pdot = 0.f;
+    for (int t0 = t_lo; t0 < t_hi; t0 += bc) {
+        const int n_t = min(bc, t_hi - t0);
+        __syncthreads();
+        for (int i = threadIdx.x; i < n_t * d4; i += blockDim.x) {
+            const int j = i / d4;
+            const int c = i - j * d4;
+            const size_t at = ((size_t)(t0 + j) * n_kv_heads + kv_h) * head_dim;
+            ((float4*)(k_s + j * ks))[c] = ((const float4*)(k_all + at))[c];
+            ((float4*)(v_s + j * head_dim))[c] = ((const float4*)(v_all + at))[c];
+        }
+        __syncthreads();
+
 #pragma unroll
-        for (int s = 0; s < 2; s++) {
-            const int i = lane + 32 * s;
-            if (s < n_slices && i < d4) {
-                const float4 kv = k_t[i];
-                pdot += qv[s].x * kv.x + qv[s].y * kv.y + qv[s].z * kv.z + qv[s].w * kv.w;
+        for (int i = 0; i < 8; i++) {
+            if (i >= rpw) break;
+            const int rr = warp + FX_ATTN_WARPS * i;
+            const int r = r0 + rr;
+            if (r >= n_q) break;
+            const int seq_len = start_pos + r + 1;
+            int lo = 0;
+            if (window > 0 && seq_len > window) lo = seq_len - window;
+
+            // Lane j scores key t0 + j.
+            const int t = t0 + lane;
+            float score = -frink_inf_pf();
+            if (lane < n_t && t >= lo && t < seq_len) {
+                const float4* qr = (const float4*)(q_s + rr * head_dim);
+                const float4* kr = (const float4*)(k_s + lane * ks);
+                float dot = 0.f;
+                for (int c = 0; c < d4; c++) {
+                    const float4 a = qr[c];
+                    const float4 b = kr[c];
+                    dot += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+                }
+                score = dot * scale;
+                if (softcap > 0.f) score = softcap * tanhf(score / softcap);
+            }
+            float tmax = score;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(mask, tmax, off));
+            if (tmax == -frink_inf_pf()) continue;   // no key of this tile is the row's
+
+            const float m2 = fmaxf(m[i], tmax);
+            const float alpha = (m[i] == -frink_inf_pf()) ? 0.f : expf(m[i] - m2);
+            const float p = (score == -frink_inf_pf()) ? 0.f : expf(score - m2);
+            float psum = p;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) psum += __shfl_xor_sync(mask, psum, off);
+            l[i] = l[i] * alpha + psum;
+            m[i] = m2;
+#pragma unroll
+            for (int s = 0; s < 2; s++) {
+                acc[i][s].x *= alpha; acc[i][s].y *= alpha;
+                acc[i][s].z *= alpha; acc[i][s].w *= alpha;
+            }
+            // Key j's probability from lane j, every lane taking part:
+            // the shuffle is outside the lanes' channel condition.
+            for (int j = 0; j < n_t; j++) {
+                const float pj = __shfl_sync(mask, p, j);
+#pragma unroll
+                for (int s = 0; s < 2; s++) {
+                    const int c = lane + 32 * s;
+                    if (s < n_slices && c < d4) {
+                        const float4 vv = ((const float4*)(v_s + j * head_dim))[c];
+                        acc[i][s].x += pj * vv.x; acc[i][s].y += pj * vv.y;
+                        acc[i][s].z += pj * vv.z; acc[i][s].w += pj * vv.w;
+                    }
+                }
             }
         }
-#pragma unroll
-        for (int off = 16; off > 0; off >>= 1) {
-            pdot += __shfl_xor_sync(mask, pdot, off);
-        }
-        float score = pdot * scale;
-        if (softcap > 0.f) score = softcap * tanhf(score / softcap);
-        const float m2 = fmaxf(m, score);
-        const float a = (m == -frink_inf_pf()) ? 0.f : expf(m - m2);
-        const float b = expf(score - m2);
-        l = l * a + b;
-        const float4* v_t = (const float4*)(v_all + ((size_t)t * n_kv_heads + kv_h) * head_dim);
-#pragma unroll
-        for (int s = 0; s < 2; s++) {
-            const int i = lane + 32 * s;
-            if (s < n_slices && i < d4) {
-                const float4 vv = v_t[i];
-                acc[s].x = acc[s].x * a + b * vv.x;
-                acc[s].y = acc[s].y * a + b * vv.y;
-                acc[s].z = acc[s].z * a + b * vv.z;
-                acc[s].w = acc[s].w * a + b * vv.w;
-            }
-        }
-        m = m2;
     }
-    const float inv = (l > 0.f) ? (1.f / l) : 0.f;
-    float4* out_h = (float4*)(out + ((size_t)r * n_heads + h) * head_dim);
+
 #pragma unroll
-    for (int s = 0; s < 2; s++) {
-        const int i = lane + 32 * s;
-        if (s < n_slices && i < d4) {
-            out_h[i] = make_float4(acc[s].x * inv, acc[s].y * inv, acc[s].z * inv, acc[s].w * inv);
+    for (int i = 0; i < 8; i++) {
+        if (i >= rpw) break;
+        const int r = r0 + warp + FX_ATTN_WARPS * i;
+        if (r >= n_q) break;
+        const float inv = (l[i] > 0.f) ? (1.f / l[i]) : 0.f;
+        float4* out_h = (float4*)(out + ((size_t)r * n_heads + h) * head_dim);
+#pragma unroll
+        for (int s = 0; s < 2; s++) {
+            const int c = lane + 32 * s;
+            if (s < n_slices && c < d4) {
+                const float4 a4 = acc[i][s];
+                out_h[c] = make_float4(a4.x * inv, a4.y * inv, a4.z * inv, a4.w * inv);
+            }
         }
     }
 }

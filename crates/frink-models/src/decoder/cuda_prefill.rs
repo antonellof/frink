@@ -30,6 +30,8 @@ use frink_cuda::prefill::{
     StackInput, StackKv,
 };
 
+use rayon::prelude::*;
+
 use super::fused_view::FusedAttnExtras;
 use super::{Decoder, ExpertBacking, LayerWeights};
 
@@ -154,11 +156,11 @@ impl Decoder {
         let run_len = described.len();
         let launch: Vec<(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)> =
             described.iter().map(|(d, p)| (d, p)).collect();
-        let kv = if decode {
-            StackKv::Mirrors(&mut slots)
-        } else {
-            StackKv::UploadPrefix
-        };
+        // A prefill step writes its rows into the same device mirrors a
+        // decode token attends over, so the first token after a prompt
+        // does not upload the prompt's whole history again, and a
+        // chunked prefill does not upload its prefix per chunk.
+        let kv = StackKv::Mirrors(&mut slots);
         let out = match launch_prefill_dense_stack(input, &launch, batch_size, kv) {
             Ok(out) => out,
             Err(e) => {
@@ -172,25 +174,37 @@ impl Decoder {
         drop(launch);
         drop(described);
         drop(slots);
-        debug_assert_eq!(out.kv_rows.len(), run_len);
-        for (li, (k_rows, v_rows)) in (l..l + run_len).zip(&out.kv_rows) {
-            self.layer_for(li).moe.record_activations(&[0]);
-            let cache = &mut kv_caches[li];
-            for b in 0..batch_size {
-                cache
-                    .push(
-                        &k_rows[b * kv_width..(b + 1) * kv_width],
-                        &v_rows[b * kv_width..(b + 1) * kv_width],
-                    )
-                    .expect("unbounded/planned KvCache growth is infallible");
-            }
-            // After the push, as both host bodies do (`attn_block.rs`,
-            // `batch.rs`): a no-op unless `FRINK_KV_WINDOW` is on and
-            // the layer is windowed. Once it drops rows the cache's rows
-            // stop being its positions and the next call declines this
-            // layer, so the host body reads the window it kept.
-            self.evict_layer_kv(li, cache);
-        }
+        debug_assert_eq!(out.layers(), run_len);
+        // Each layer's rows into its own cache, the layers in parallel:
+        // a Llama-3.1-8B pp512 step pushes 134 MB of K/V into freshly
+        // grown cache memory, and one thread doing it took 68 ms on an
+        // L40S host, half again the GPU's whole step. The caches are
+        // disjoint, and what else a push touches is an atomic counter
+        // and the config.
+        let rows: Vec<(&[f32], &[f32])> = (0..run_len).map(|i| out.kv(i)).collect();
+        kv_caches[l..l + run_len]
+            .par_iter_mut()
+            .zip(rows.par_iter())
+            .enumerate()
+            .for_each(|(i, (cache, &(k_rows, v_rows)))| {
+                let li = l + i;
+                self.layer_for(li).moe.record_activations(&[0]);
+                for b in 0..batch_size {
+                    cache
+                        .push(
+                            &k_rows[b * kv_width..(b + 1) * kv_width],
+                            &v_rows[b * kv_width..(b + 1) * kv_width],
+                        )
+                        .expect("unbounded/planned KvCache growth is infallible");
+                }
+                // After the push, as both host bodies do (`attn_block.rs`,
+                // `batch.rs`): a no-op unless `FRINK_KV_WINDOW` is on and
+                // the layer is windowed. Once it drops rows the cache's
+                // rows stop being its positions and the next call declines
+                // this layer, so the host body reads the window it kept.
+                self.evict_layer_kv(li, cache);
+            });
+        drop(rows);
         Some((out.hidden, run_len))
     }
 

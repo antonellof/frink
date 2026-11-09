@@ -199,18 +199,55 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
     assert!(matches!(err, CudaError::Unsupported(_)), "{err:?}");
 }
 
+/// The row RMSNorm's block is a whole number of warps the kernel's 32
+/// reduction slots hold, wide for one long row and 256 for a batch.
+#[test]
+fn the_rmsnorm_block_is_whole_warps_within_the_reduction() {
+    use super::enqueue::rmsnorm_threads;
+    for (n_rows, n) in [
+        (1usize, 4096usize),
+        (1, 3072),
+        (1, 128),
+        (32, 128),
+        (512, 4096),
+        (8, 64),
+    ] {
+        let t = rmsnorm_threads(n_rows, n);
+        assert!(
+            t.is_multiple_of(32) && (32..=1024).contains(&t),
+            "{n_rows}x{n}: {t}"
+        );
+    }
+    assert_eq!(rmsnorm_threads(1, 4096), 1024);
+    assert_eq!(rmsnorm_threads(512, 4096), 256);
+}
+
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
 fn rmsnorm_rows_matches_the_host() {
     let dev = shared_device().unwrap();
-    let (rows, n) = (37, 96);
-    let x = wave(rows * n, 0.1);
-    let w = wave(n, 0.7);
-    let d_x = dev.htod_copy(x.clone()).unwrap();
-    let d_w = dev.htod_copy(w.clone()).unwrap();
-    let out = enqueue_rmsnorm_rows(&dev, &d_x, &d_w, rows, n, 1e-5).unwrap();
-    let got = dev.dtoh_sync_copy(&out).unwrap();
-    assert_close(&got, &host_rms_norm_rows(&x, &w, n, 1e-5), 1e-5, "rmsnorm");
+    // A batch at 256 threads a row, and one long row at 1024: the two
+    // geometries `rmsnorm_threads` picks between.
+    for (rows, n) in [
+        (37usize, 96usize),
+        (64, 4096),
+        (1, 4096),
+        (1, 3072),
+        (2, 128),
+    ] {
+        let x = wave(rows * n, 0.1);
+        let w = wave(n, 0.7);
+        let d_x = dev.htod_copy(x.clone()).unwrap();
+        let d_w = dev.htod_copy(w.clone()).unwrap();
+        let out = enqueue_rmsnorm_rows(&dev, &d_x, &d_w, rows, n, 1e-5).unwrap();
+        let got = dev.dtoh_sync_copy(&out).unwrap();
+        assert_close(
+            &got,
+            &host_rms_norm_rows(&x, &w, n, 1e-5),
+            1e-5,
+            &format!("rmsnorm {rows}x{n}"),
+        );
+    }
 }
 
 #[test]
@@ -266,16 +303,41 @@ fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors(
     }
 }
 
+/// The tile the prefill attention takes fits the limit it is handed,
+/// the widest one where it can, and a head of 256 still finds one in
+/// the 48 KiB every device gives without opting in.
+#[test]
+fn the_prefill_attention_tile_fits_its_shared_memory() {
+    use super::enqueue::{prefill_attn_smem, prefill_attn_tile};
+    for head_dim in [64usize, 96, 128, 256] {
+        for limit in [48 * 1024usize, 64 * 1024, 99 * 1024, 163 * 1024] {
+            let (rpw, bc, bytes) = prefill_attn_tile(head_dim, limit).expect("a tile fits");
+            assert_eq!(bytes, prefill_attn_smem(head_dim, rpw, bc));
+            assert!(bytes <= limit && rpw <= 8 && bc <= 32, "{head_dim} {limit}");
+        }
+    }
+    assert_eq!(
+        prefill_attn_tile(128, 99 * 1024).map(|t| (t.0, t.1)),
+        Some((8, 32))
+    );
+}
+
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
 fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
     let dev = shared_device().unwrap();
-    let (n_q, n_heads, n_kv_heads, head_dim) = (13, 4, 2, 64);
-    for (start_pos, window, softcap) in [
-        (0, None, None),
-        (7, None, None),
-        (7, Some(5), None),
-        (0, None, Some(50.0)),
+    // One block; several blocks of rows whose keys span tiles; a head
+    // of 256 (two float4s a lane) under GQA 2:1; and a window that
+    // starts inside a tile and leaves whole tiles out of later rows.
+    for (n_q, n_heads, n_kv_heads, head_dim, start_pos, window, softcap) in [
+        (13, 4, 2, 64, 0, None, None),
+        (13, 4, 2, 64, 7, None, None),
+        (13, 4, 2, 64, 7, Some(5), None),
+        (13, 4, 2, 64, 0, None, Some(50.0)),
+        (77, 8, 2, 128, 0, None, None),
+        (77, 8, 2, 128, 45, Some(40), None),
+        (40, 2, 1, 256, 3, None, Some(30.0)),
+        (150, 4, 4, 96, 0, Some(33), None),
     ] {
         let total = start_pos + n_q;
         let q = wave(n_q * n_heads * head_dim, 0.2);
@@ -300,7 +362,10 @@ fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
             &got,
             &want,
             1e-4,
-            &format!("attn start={start_pos} window={window:?} softcap={softcap:?}"),
+            &format!(
+                "attn n_q={n_q} hd={head_dim} start={start_pos} window={window:?} \
+                 softcap={softcap:?}"
+            ),
         );
     }
 }
@@ -534,16 +599,21 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
         StackKv::UploadPrefix,
     )
     .unwrap();
-    assert_eq!(stacked.kv_rows.len(), 2);
-    assert_close(&stacked.kv_rows[0].0, &out.k_rows, 1e-5, "stack layer 0 K");
+    assert_eq!(stacked.kv_rows_owned().len(), 2);
     assert_close(
-        &stacked.kv_rows[1].0,
+        &stacked.kv_rows_owned()[0].0,
+        &out.k_rows,
+        1e-5,
+        "stack layer 0 K",
+    );
+    assert_close(
+        &stacked.kv_rows_owned()[1].0,
         &second.k_rows,
         1e-5,
         "stack layer 1 K",
     );
     assert_close(
-        &stacked.kv_rows[1].1,
+        &stacked.kv_rows_owned()[1].1,
         &second.v_rows,
         1e-5,
         "stack layer 1 V",
@@ -853,7 +923,8 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
             "pos {pos}: mirror vs upload"
         );
         assert_eq!(
-            via_mirror.kv_rows, via_upload.kv_rows,
+            via_mirror.kv_rows_owned(),
+            via_upload.kv_rows_owned(),
             "pos {pos}: K/V rows"
         );
         // And the host twin, layer by layer.
@@ -870,13 +941,13 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
                 pos,
             );
             assert_close(
-                &via_mirror.kv_rows[l].0,
+                &via_mirror.kv_rows_owned()[l].0,
                 &k,
                 1e-3,
                 &format!("pos {pos} layer {l} K"),
             );
             assert_close(
-                &via_mirror.kv_rows[l].1,
+                &via_mirror.kv_rows_owned()[l].1,
                 &v,
                 1e-3,
                 &format!("pos {pos} layer {l} V"),
@@ -885,8 +956,8 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         }
         assert_close(&via_mirror.hidden, &h, 1e-3, &format!("pos {pos} hidden"));
         for l in 0..2 {
-            host_k[l].extend_from_slice(&via_mirror.kv_rows[l].0);
-            host_v[l].extend_from_slice(&via_mirror.kv_rows[l].1);
+            host_k[l].extend_from_slice(&via_mirror.kv_rows_owned()[l].0);
+            host_v[l].extend_from_slice(&via_mirror.kv_rows_owned()[l].1);
             assert_eq!(mirrors[l].as_ref().unwrap().rows(), pos + 1);
         }
         row = via_mirror.hidden;
