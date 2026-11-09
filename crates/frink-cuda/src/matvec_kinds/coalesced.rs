@@ -169,24 +169,43 @@ impl CoalescedKind {
         )
     }
 
+    /// [`Self::source`] for the routed-expert form: one expert per
+    /// `blockIdx.y`, its weights from a device pointer table
+    /// (`FX_MULTI`).
+    pub fn multi_source(&self, width: MatvecWidth, wpr: usize) -> String {
+        format!("#define FX_MULTI 1\n{}", self.source(width, wpr))
+    }
+
     /// The NVRTC module key for `width` at `wpr` warps per row: the
     /// width's key at one warp per row, a suffixed one otherwise, leaked
     /// once so the load-once cache keys on `&'static str`.
     pub fn module_for(&self, width: MatvecWidth, wpr: usize) -> &'static str {
-        if wpr == 1 {
+        self.module_key(width, wpr, false)
+    }
+
+    /// The NVRTC module key of [`Self::multi_source`].
+    pub fn multi_module_for(&self, width: MatvecWidth, wpr: usize) -> &'static str {
+        self.module_key(width, wpr, true)
+    }
+
+    fn module_key(&self, width: MatvecWidth, wpr: usize, multi: bool) -> &'static str {
+        if wpr == 1 && !multi {
             return self.module(width);
         }
         use std::collections::HashMap;
         use std::sync::{Mutex, OnceLock};
-        static NAMES: OnceLock<Mutex<HashMap<(&'static str, usize), &'static str>>> =
-            OnceLock::new();
+        type Key = (&'static str, usize, bool);
+        static NAMES: OnceLock<Mutex<HashMap<Key, &'static str>>> = OnceLock::new();
         let base = self.module(width);
         NAMES
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .entry((base, wpr))
-            .or_insert_with(|| Box::leak(format!("{base}_wpr{wpr}").into_boxed_str()))
+            .entry((base, wpr, multi))
+            .or_insert_with(|| {
+                let m = if multi { "_multi" } else { "" };
+                Box::leak(format!("{base}_wpr{wpr}{m}").into_boxed_str())
+            })
     }
 }
 
@@ -268,6 +287,23 @@ pub const COALESCED_PRELUDE: &str = r#"
 #define FX_BLOCKS_PER_TRIP (32 / FX_LANES)
 #ifndef FX_WPR
 #error "FX_WPR (warps per row) must be defined by the launcher"
+#endif
+#ifndef FX_MULTI
+#define FX_MULTI 0
+#endif
+#if FX_MULTI
+// One routed expert per blockIdx.y: its weights from a table of device
+// pointers, its input `x_stride` floats along, its output its own rows.
+#define FX_SLOT_SETUP \
+    const unsigned char* weights = \
+        (const unsigned char*)((const unsigned long long*)wsrc)[blockIdx.y]; \
+    const float* x = x_in + (size_t)blockIdx.y * (size_t)x_stride; \
+    float* out = out_in + (size_t)blockIdx.y * (size_t)rows;
+#else
+#define FX_SLOT_SETUP \
+    const unsigned char* weights = (const unsigned char*)wsrc; \
+    const float* x = x_in; \
+    float* out = out_in;
 #endif
 #if FX_WPR != 1 && FX_WPR != 2 && FX_WPR != 4 && FX_WPR != 8
 #error "FX_WPR must be 1, 2, 4 or 8"
@@ -412,13 +448,17 @@ pub const Q5_K_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
 #define FX_RUN (32 / FX_LANES)
 
 extern "C" __global__ void q5_k_matvec_coalesced(
-    const unsigned char* __restrict__ weights,
-    const float* __restrict__ x,
-    float* out,
+    const void* __restrict__ wsrc,
+    const float* __restrict__ x_in,
+    float* out_in,
     int rows,
     int row_bytes,
     int n_blocks_per_row
+#if FX_MULTI
+    , int x_stride
+#endif
 ) {
+    FX_SLOT_SETUP
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
     const int row = fx_row_of_warp(warp);
@@ -484,13 +524,17 @@ pub const Q8_0_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
 #define FX_RUN (32 / FX_LANES)
 
 extern "C" __global__ void q8_0_matvec_coalesced(
-    const unsigned char* __restrict__ weights,
-    const float* __restrict__ x,
-    float* out,
+    const void* __restrict__ wsrc,
+    const float* __restrict__ x_in,
+    float* out_in,
     int rows,
     int row_bytes,
     int n_blocks_per_row
+#if FX_MULTI
+    , int x_stride
+#endif
 ) {
+    FX_SLOT_SETUP
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
     const int row = fx_row_of_warp(warp);
@@ -541,13 +585,17 @@ pub const Q6_K_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
 #endif
 
 extern "C" __global__ void q6_k_matvec_coalesced(
-    const unsigned char* __restrict__ weights,
-    const float* __restrict__ x,
-    float* out,
+    const void* __restrict__ wsrc,
+    const float* __restrict__ x_in,
+    float* out_in,
     int rows,
     int row_bytes,
     int n_blocks_per_row
+#if FX_MULTI
+    , int x_stride
+#endif
 ) {
+    FX_SLOT_SETUP
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
     const int row = fx_row_of_warp(warp);
@@ -633,13 +681,17 @@ pub const Q4_K_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
 #endif
 
 extern "C" __global__ void q4_k_matvec_coalesced(
-    const unsigned char* __restrict__ weights,
-    const float* __restrict__ x,
-    float* out,
+    const void* __restrict__ wsrc,
+    const float* __restrict__ x_in,
+    float* out_in,
     int rows,
     int row_bytes,
     int n_blocks_per_row
+#if FX_MULTI
+    , int x_stride
+#endif
 ) {
+    FX_SLOT_SETUP
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
     const int row = fx_row_of_warp(warp);

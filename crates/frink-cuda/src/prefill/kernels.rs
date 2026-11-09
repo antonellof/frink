@@ -97,6 +97,66 @@ extern "C" __global__ void add_rows_f32(
 }
 "#;
 
+/// `y[i] += a * x[i]`: one routed expert's output, weighted, into the
+/// layer's MoE sum, in the order `frink_moe::combine_expert_outputs`
+/// adds them (`out += expert * weight`).
+pub const AXPY_KERNEL_SRC: &str = r#"
+extern "C" __global__ void axpy_f32(
+    float* y,
+    const float* x,
+    float a,
+    int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] += x[i] * a;
+    }
+}
+"#;
+
+/// `out[i] = sum_j w[j] * y[j][i]` over a layer's `k` routed experts,
+/// from zero in the routing's order, the order and the expression
+/// `frink_moe::combine_expert_outputs` adds them in.
+pub const MOE_COMBINE_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_combine_f32(
+    const float* y,
+    const float* w,
+    float* out,
+    int k,
+    int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float acc = 0.0f;
+        for (int j = 0; j < k; j++) acc += y[(size_t)j * n + i] * w[j];
+        out[i] = acc;
+    }
+}
+"#;
+
+/// `out[r] = w[r] . x` for an f32 matrix, one warp per row: an MoE
+/// router, which a GGUF keeps in f32 (`llama-quantize` leaves
+/// `ffn_gate_inp` alone).
+pub const ROUTER_F32_KERNEL_SRC: &str = r#"
+extern "C" __global__ void router_f32_matvec(
+    const float* w,
+    const float* x,
+    float* out,
+    int rows,
+    int cols
+) {
+    const int warp = (int)((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (warp >= rows) return;
+    const float* wr = w + (size_t)warp * cols;
+    float acc = 0.0f;
+    for (int i = lane; i < cols; i += 32) acc += wr[i] * x[i];
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) out[warp] = acc;
+}
+"#;
+
 /// RoPE over a `[n_rows, n_heads, head_dim]` batch, one thread per
 /// (row, head, band). The CUDA spelling of `Decoder::apply_rope_head_
 /// theta` plus `apply_rope_attn_factor`:
@@ -362,5 +422,8 @@ extern "C" __global__ void causal_gqa_prefill_f32(
 pub const RMSNORM_ROWS: (&str, &str) = ("frink_prefill_rmsnorm_rows", "rmsnorm_rows_f32");
 pub const ADD_BIAS_ROWS: (&str, &str) = ("frink_prefill_add_bias_rows", "add_bias_rows_f32");
 pub const ADD_ROWS: (&str, &str) = ("frink_prefill_add_rows", "add_rows_f32");
+pub const AXPY: (&str, &str) = ("frink_prefill_axpy", "axpy_f32");
+pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine_f32");
+pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
 pub const ROPE_ROWS: (&str, &str) = ("frink_prefill_rope_rows", "rope_rows_f32");
 pub const CAUSAL_GQA_PREFILL: (&str, &str) = ("frink_prefill_causal_gqa", "causal_gqa_prefill_f32");

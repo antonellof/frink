@@ -4,9 +4,10 @@
 //! hardware tests call them one at a time against a host twin.
 
 use super::kernels::{
-    ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_ROWS, ADD_ROWS_KERNEL_SRC, CAUSAL_GQA_PREFILL,
-    CAUSAL_GQA_PREFILL_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS,
-    ROPE_ROWS_KERNEL_SRC,
+    ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC,
+    CAUSAL_GQA_PREFILL, CAUSAL_GQA_PREFILL_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC,
+    RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32,
+    ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
@@ -126,6 +127,76 @@ pub(crate) fn enqueue_add_rows(
             .map_err(|e| launch_err("add_rows", e))?;
     }
     Ok(())
+}
+
+/// `y[..n] += a * x[..n]`, in place.
+pub(crate) fn enqueue_axpy(
+    dev: &Arc<CudaDevice>,
+    y: &mut CudaSlice<f32>,
+    x: &CudaSlice<f32>,
+    a: f32,
+    n: usize,
+) -> Result<(), CudaError> {
+    debug_assert!(y.len() >= n && x.len() >= n);
+    let func = func_for(dev, AXPY_KERNEL_SRC, AXPY)?;
+    let cfg = elementwise_cfg(n);
+    // SAFETY: (float*, const float*, float, int) matched positionally;
+    // the kernel bounds-checks against `n`, which both buffers cover.
+    unsafe {
+        func.launch(cfg, (y, x, a, n as i32))
+            .map_err(|e| launch_err("axpy", e))?;
+    }
+    Ok(())
+}
+
+/// `sum_j w[j] * y[j * n ..]`, the layer's routed experts combined.
+pub(crate) fn enqueue_moe_combine(
+    dev: &Arc<CudaDevice>,
+    y: &CudaSlice<f32>,
+    w: &CudaSlice<f32>,
+    k: usize,
+    n: usize,
+) -> Result<CudaSlice<f32>, CudaError> {
+    debug_assert!(y.len() >= k * n && w.len() >= k);
+    let func = func_for(dev, MOE_COMBINE_KERNEL_SRC, MOE_COMBINE)?;
+    // SAFETY: thread `i < n` writes `out[i]`, and the grid covers `n`.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, n, "moe combine") }?;
+    let cfg = elementwise_cfg(n);
+    // SAFETY: (const float*, const float*, float*, int, int) matched
+    // positionally; `y` holds `k * n`, `w` `k`, `out` `n`.
+    unsafe {
+        func.launch(cfg, (y, w, &mut out, k as i32, n as i32))
+            .map_err(|e| launch_err("moe_combine", e))?;
+    }
+    Ok(out)
+}
+
+/// `w[rows][cols] . x`, f32, the router's logits.
+pub(crate) fn enqueue_router_f32(
+    dev: &Arc<CudaDevice>,
+    w: &CudaSlice<f32>,
+    x: &CudaSlice<f32>,
+    rows: usize,
+    cols: usize,
+) -> Result<CudaSlice<f32>, CudaError> {
+    debug_assert!(w.len() >= rows * cols && x.len() >= cols);
+    let func = func_for(dev, ROUTER_F32_KERNEL_SRC, ROUTER_F32)?;
+    // SAFETY: one warp per row over a grid of `ceil(rows / 8)` blocks of
+    // eight warps, and every warp below `rows` writes `out[row]`.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, rows, "router logits") }?;
+    let cfg = LaunchConfig {
+        grid_dim: ((rows as u32).div_ceil(8).max(1), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float*, const float*, float*, int, int) matched
+    // positionally; `w` holds `rows * cols` and `x` `cols` (the debug
+    // assert, and the stack's shape check), `out` exactly `rows`.
+    unsafe {
+        func.launch(cfg, (w, x, &mut out, rows as i32, cols as i32))
+            .map_err(|e| launch_err("router_f32_matvec", e))?;
+    }
+    Ok(out)
 }
 
 /// The rotation's per-layer inputs, as one value so a rotation site

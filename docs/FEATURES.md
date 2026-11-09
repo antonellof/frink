@@ -56,7 +56,7 @@ recurrent state cannot be rolled back to a middle position.
 |---|---|
 | **CPU** | Dense and MoE. int8×int8 matvec on by default (`FRINK_CPU_INT_DOT=0` opts out), interleaved Q4_Kx8 / Q8_0x4 GEMV, Q8_0x4 batch GEMM for prefill, Q5/Q6 int-dot, pool sized to performance cores |
 | **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, MoE Concurrent with fused groups, `MemRanges`, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K) |
-| **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15); `Q4_1`, `Q5_1`, `TQ1_0`, `PTQ1_0` and the seven IQ1/IQ2/IQ3 kinds matvec and GEMM built from one dequant per kind, the IQ grids generated from the CPU's tables (not yet run on hardware), and a resident dense prefill stack (norms, QKV bias, QK norm, RoPE, causal GQA, SwiGLU, residuals on the device; K/V rows back to the host cache). A decode token whose embedding row is its first hidden state is gathered on the device (`get_rows`, built from each kind's GEMM dequant; not yet run on hardware) |
+| **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15); `Q4_1`, `Q5_1`, `TQ1_0`, `PTQ1_0` and the seven IQ1/IQ2/IQ3 kinds matvec and GEMM built from one dequant per kind, the IQ grids generated from the CPU's tables (not yet run on hardware), and a resident stack for prefill and decode (norms, QKV bias, QK norm, RoPE, attention tiled over the keys, SwiGLU or GeGLU, residuals on the device; K/V rows back to the host cache through page-locked memory, and kept on the device for the decode that follows). Routed MoE layers ride the decode stack: the router on the device, the host's own routing on its logits, and the chosen experts in one launch per projection. A decode token whose embedding row is its first hidden state is gathered on the device (`get_rows`, built from each kind's GEMM dequant; not yet run on hardware) |
 | **Vulkan** | Decode matvecs for `Q8_0`, `Q4_0`, `Q4_K`, `Q5_K` and `Q6_K` with resident weights, no GEMM (`--features vulkan`, opt-in with `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
 
 Which quant kinds each backend runs, per op (matvec for decode, GEMM
@@ -96,18 +96,18 @@ CUDA C against a barrier shim
 mismatches across 11 kinds, 33 shapes and 75,042 compared positions. Below
 the width threshold a single token stays on the matvec kernels.
 
-CUDA prefill is resident and runs on the tensor cores, and is still
-4x behind. A dense layer used to be seven synchronous round trips with
-everything else on the host: 3.1 GB over PCIe per Llama-3.2-3B pp512
-step, two thirds of the step by `nsys`. `frink_cuda::prefill` runs a
-run of dense layers on the device with one upload and one download of
-the hidden batch (#259), and `mul_mm_tc` puts the GEMM on `mma.sync`
-with f16 operands on `sm_80` and up (#261): pp512 on that model went
-305 to 1932 tok/s on an RTX 3090 against llama.cpp's ~8,200. What is
-left is a host third of the step between launches, the GEMM's
-remaining distance to int8 `mmq`, and a K/V-tiled attention kernel.
-Decode is behind on the same cards (#133). The resident decode stack
-that should close most of it has landed and not yet run on a GPU. A Windows or
+CUDA was measured against llama.cpp for the first time on 2026-11-09,
+on rented L40S, A10G and RTX PRO 6000 cards: every dense model checked
+was token-identical to the CPU and at parity MATCH with llama.cpp, and
+behind it on speed. Since then a prefill step's K/V comes back through
+page-locked memory in parallel (208 of a Llama-3.1-8B pp512 step's 383
+ms had been host copies), the GEMM stages its weight rows before
+dequantizing (63 to 107 TFLOPS on the Q4_K gate projection), the
+attention is tiled over the keys, and the decode matvecs give a row
+several warps. On an RTX PRO 6000 Llama-3.1-8B is still 4.2x behind on
+prefill and 1.55x on decode. What is left on prefill is the GEMM's
+distance to int8 `mmq`, and on decode the matvecs' bandwidth and the
+launches a token makes (#133, #259). A Windows or
 Linux install runs and answers correctly, but is not yet the choice for
 speed. `/health` reports the same per capability, with a reason string,
 instead of greying out a control without explanation.

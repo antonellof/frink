@@ -77,6 +77,11 @@ pub fn kernels() -> Vec<Kernel> {
                     k.source(w, wpr),
                 ));
             }
+            // The routed-expert form reads its weights through a table.
+            out.push(Kernel::new(
+                format!("coalesced {} {tag} routed", k.entry),
+                k.multi_source(w, 4),
+            ));
         }
     }
     for k in frink_cuda::mul_mm::KINDS {
@@ -106,7 +111,7 @@ mod tests {
         let n_mm = frink_cuda::mul_mm::KINDS.len();
         assert_eq!(
             ks.len(),
-            frink_cuda::matvec_kinds::KINDS.len() + 4 * COALESCED.len() + 2 * n_mm + 1
+            frink_cuda::matvec_kinds::KINDS.len() + 6 * COALESCED.len() + 2 * n_mm + 1
         );
         let mut names: Vec<&str> = ks.iter().map(|k| k.name.as_str()).collect();
         names.sort_unstable();

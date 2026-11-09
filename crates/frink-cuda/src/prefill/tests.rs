@@ -172,9 +172,11 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
         k: m(32, 64),
         v: m(32, 64),
         o: m(64, 96),
-        gate: m(96, 64),
-        up: m(96, 64),
-        down: m(64, 96),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: m(96, 64),
+            up: m(96, 64),
+            down: m(64, 96),
+        }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
@@ -544,9 +546,11 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
         k: view(kd, kv_w, hidden),
         v: view(vd, kv_w, hidden),
         o: view(od, hidden, q_w),
-        gate: view(gd, ffn, hidden),
-        up: view(ud, ffn, hidden),
-        down: view(dd, hidden, ffn),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: view(gd, ffn, hidden),
+            up: view(ud, ffn, hidden),
+            down: view(dd, hidden, ffn),
+        }),
         glu,
         post_attn_norm: Some(&post_attn),
         post_ffn_norm: None,
@@ -657,9 +661,11 @@ fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
         k: gemm(32, 64),
         v: gemm(32, 64),
         o: gemm(64, 64),
-        gate: gemm(96, 64),
-        up: gemm(96, 64),
-        down: gemm(64, 96),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: gemm(96, 64),
+            up: gemm(96, 64),
+            down: gemm(64, 96),
+        }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
@@ -856,9 +862,11 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         k: q8_0_proj(w[1], kv_w, hidden),
         v: q8_0_proj(w[2], kv_w, hidden),
         o: q8_0_proj(w[3], hidden, q_w),
-        gate: q8_0_proj(w[4], ffn, hidden),
-        up: q8_0_proj(w[5], ffn, hidden),
-        down: q8_0_proj(w[6], hidden, ffn),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: q8_0_proj(w[4], ffn, hidden),
+            up: q8_0_proj(w[5], ffn, hidden),
+            down: q8_0_proj(w[6], hidden, ffn),
+        }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
@@ -974,4 +982,212 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         via_mirror.hidden, via_upload.hidden,
         "a stale mirror was trusted"
     );
+}
+
+/// A routed layer through the stack at one token: the router's logits
+/// come back to the caller's routing, which picks two of four experts,
+/// and the layer's output is the host twin's, the experts summed from
+/// zero in the routing's order and then added to the residual.
+#[test]
+#[ignore = "requires real CUDA hardware; not yet run"]
+fn a_routed_layer_matches_its_host_twin_routing_on_the_device_logits() {
+    let (hidden, n_heads, n_kv_heads, head_dim, ffn, n_experts) =
+        (64usize, 2usize, 1usize, 32usize, 96usize, 4usize);
+    let q_w = n_heads * head_dim;
+    let kv_w = n_kv_heads * head_dim;
+    let (qd, kd, vd, od) = (
+        small_q8_0(q_w, hidden, 1),
+        small_q8_0(kv_w, hidden, 2),
+        small_q8_0(kv_w, hidden, 3),
+        small_q8_0(hidden, q_w, 4),
+    );
+    let experts: Vec<(&'static [u8], &'static [u8], &'static [u8])> = (0..n_experts as u32)
+        .map(|e| {
+            (
+                small_q8_0(ffn, hidden, 10 + 3 * e),
+                small_q8_0(ffn, hidden, 11 + 3 * e),
+                small_q8_0(hidden, ffn, 12 + 3 * e),
+            )
+        })
+        .collect();
+    // Router rows far apart, so the device's logits and the host's pick
+    // the same two experts.
+    let router: Vec<f32> = (0..n_experts * hidden)
+        .map(|i| ((i / hidden) as f32 - 1.5) * 0.3 + 0.05 * ((i as f32) * 0.11).sin())
+        .collect();
+    let attn_norm_w = wave(hidden, 1.1)
+        .iter()
+        .map(|v| 1.0 + 0.1 * v)
+        .collect::<Vec<_>>();
+    let ffn_norm_w = wave(hidden, 1.3)
+        .iter()
+        .map(|v| 1.0 + 0.1 * v)
+        .collect::<Vec<_>>();
+    let hidden_in = wave(hidden, 0.05);
+    let eps = 1e-5;
+
+    // --- host twin ---
+    let mv = |data: &[u8], rows, cols, x: &[f32]| {
+        mul_mm_reference(&Q8_0, data, x, rows, cols, 1, cols / 32 * 34).unwrap()
+    };
+    let normed = host_rms_norm_rows(&hidden_in, &attn_norm_w, hidden, eps);
+    let v = mv(vd, kv_w, hidden, &normed);
+    // One token attends over itself: the output is its V row per head.
+    let attn: Vec<f32> = (0..n_heads).flat_map(|_| v.iter().copied()).collect();
+    let o = mv(od, hidden, q_w, &attn);
+    let mut h: Vec<f32> = hidden_in.iter().zip(&o).map(|(a, b)| a + b).collect();
+    let normed2 = host_rms_norm_rows(&h, &ffn_norm_w, hidden, eps);
+    let logits: Vec<f32> = router
+        .chunks(hidden)
+        .map(|r| r.iter().zip(&normed2).map(|(w, x)| w * x).sum())
+        .collect();
+    let route = |logits: &[f32]| -> Vec<(usize, f32)> {
+        let mut ids: Vec<usize> = (0..logits.len()).collect();
+        ids.sort_by(|a, b| logits[*b].total_cmp(&logits[*a]));
+        let top = &ids[..2];
+        let m = logits[top[0]];
+        let e: Vec<f32> = top.iter().map(|&i| (logits[i] - m).exp()).collect();
+        let s: f32 = e.iter().sum();
+        top.iter().zip(&e).map(|(&i, &x)| (i, x / s)).collect()
+    };
+    let picks = route(&logits);
+    let mut sum = vec![0f32; hidden];
+    for &(eid, w) in &picks {
+        let (gd, ud, dd) = experts[eid];
+        let g = mv(gd, ffn, hidden, &normed2);
+        let u = mv(ud, ffn, hidden, &normed2);
+        let act: Vec<f32> = g
+            .iter()
+            .zip(&u)
+            .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+            .collect();
+        let d = mv(dd, hidden, ffn, &act);
+        for (s, y) in sum.iter_mut().zip(&d) {
+            *s += y * w;
+        }
+    }
+    for (a, b) in h.iter_mut().zip(&sum) {
+        *a += b;
+    }
+
+    // --- device ---
+    let layer = PrefillDenseLayerCuda {
+        attn_norm_w: &attn_norm_w,
+        ffn_norm_w: &ffn_norm_w,
+        q: q8_0_proj(qd, q_w, hidden),
+        k: q8_0_proj(kd, kv_w, hidden),
+        v: q8_0_proj(vd, kv_w, hidden),
+        o: q8_0_proj(od, hidden, q_w),
+        ffn: StackFfn::Moe {
+            router: RouterCuda::F32 {
+                data: &router,
+                rows: n_experts,
+            },
+            ffn_dim: ffn,
+        },
+        glu: GluCuda::Silu,
+        post_attn_norm: None,
+        post_ffn_norm: None,
+        extras: AttnExtrasCuda::default(),
+        rope: None,
+    };
+    let params = PrefillParams {
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        rms_eps: eps,
+        attn_scale: (head_dim as f32).sqrt().recip(),
+        attn_softcap: None,
+        window: None,
+        prefix_k: &[],
+        prefix_v: &[],
+        start_pos: 0,
+    };
+    let mut asked = 0usize;
+    let mut device_route =
+        |i: usize, got: &[f32]| -> Result<Vec<(ExpertProjCuda<'static>, f32)>, CudaError> {
+            assert_eq!(i, 0);
+            asked += 1;
+            assert_close(got, &logits, 1e-3, "router logits");
+            Ok(route(got)
+                .into_iter()
+                .map(|(eid, w)| {
+                    let (gd, ud, dd) = experts[eid];
+                    (
+                        ExpertProjCuda {
+                            gate: q8_0_proj(gd, ffn, hidden),
+                            up: q8_0_proj(ud, ffn, hidden),
+                            down: q8_0_proj(dd, hidden, ffn),
+                        },
+                        w,
+                    )
+                })
+                .collect())
+        };
+    let out = launch_stack(
+        StackInput::Hidden(&hidden_in),
+        &[(&layer, &params)],
+        1,
+        StackKv::UploadPrefix,
+        Some(&mut device_route),
+    )
+    .unwrap();
+    assert_eq!(asked, 1, "the routing is asked once per routed layer");
+    assert_close(&out.hidden, &h, 1e-2, "routed layer hidden");
+
+    // Without a routing the same run is refused before the device.
+    let err = launch_prefill_dense_stack(
+        StackInput::Hidden(&hidden_in),
+        &[(&layer, &params)],
+        1,
+        StackKv::UploadPrefix,
+    )
+    .err()
+    .expect("refused");
+    assert!(format!("{err:?}").contains("no routing"), "{err:?}");
+}
+
+/// A routed layer in a batch is refused before the device: the stack
+/// routes one token at a time.
+#[test]
+fn a_routed_layer_in_a_batch_is_refused_before_the_device() {
+    let hidden = 64usize;
+    let router = vec![0f32; 4 * hidden];
+    let norm = vec![1f32; hidden];
+    let w = small_q8_0(hidden, hidden, 1);
+    let layer = PrefillDenseLayerCuda {
+        attn_norm_w: &norm,
+        ffn_norm_w: &norm,
+        q: q8_0_proj(w, hidden, hidden),
+        k: q8_0_proj(w, hidden, hidden),
+        v: q8_0_proj(w, hidden, hidden),
+        o: q8_0_proj(w, hidden, hidden),
+        ffn: StackFfn::Moe {
+            router: RouterCuda::F32 {
+                data: &router,
+                rows: 4,
+            },
+            ffn_dim: 96,
+        },
+        glu: GluCuda::Silu,
+        post_attn_norm: None,
+        post_ffn_norm: None,
+        extras: AttnExtrasCuda::default(),
+        rope: None,
+    };
+    let params = PrefillParams {
+        n_heads: 2,
+        n_kv_heads: 2,
+        head_dim: 32,
+        rms_eps: 1e-5,
+        attn_scale: 0.17,
+        attn_softcap: None,
+        window: None,
+        prefix_k: &[],
+        prefix_v: &[],
+        start_pos: 0,
+    };
+    let err = check_layer_shapes(&layer, &params, 4, hidden).unwrap_err();
+    assert!(format!("{err:?}").contains("decode only"), "{err:?}");
+    assert!(check_layer_shapes(&layer, &params, 1, hidden).is_ok());
 }
