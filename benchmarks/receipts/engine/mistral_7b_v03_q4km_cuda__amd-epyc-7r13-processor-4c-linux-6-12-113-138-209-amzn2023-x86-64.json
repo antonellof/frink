@@ -1,0 +1,99 @@
+{
+  "backend": "cuda",
+  "backend_active": "CUDA",
+  "threads": 4,
+  "warmup_reps": 1,
+  "load_s": 0.006263401,
+  "host_load_1min_start": 1.4,
+  "host_load_1min_end": 1.42,
+  "host_thermal_start": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "host_thermal_end": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "quiet_host": true,
+  "host_spec": {
+    "label": "AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "arch": "x86_64",
+    "cores": 4,
+    "perf_cores": null,
+    "ram_gb": 61.9,
+    "os": "Linux 6.12.113-138.209.amzn2023.x86_64"
+  },
+  "accelerator": "NVIDIA L40S",
+  "engine_env": {
+    "FRINK_CPU_INT_DOT": "1"
+  },
+  "frink_version": "0.58.0",
+  "schema": 3,
+  "kind": "engine",
+  "id": "mistral_7b_v03_q4km",
+  "model_path": "/work/models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+  "arch": "llama",
+  "quant": "quantized",
+  "size_bytes": 4372812000,
+  "approx_params": 8053063680,
+  "reps": 3,
+  "tests": [
+    {
+      "test": "pp512",
+      "frink_tps": 1334.7359496432907,
+      "frink_stddev": 3.9173142840277864,
+      "frink_samples": [
+        1327.322859399269,
+        1336.305638990559,
+        1334.7359496432907
+      ],
+      "llama_tps": 10689.394993,
+      "gap": 8.00862147742162,
+      "workload_digest": "b8d417040110e751"
+    },
+    {
+      "test": "tg128",
+      "frink_tps": 97.89591439309434,
+      "frink_stddev": 0.15482119900836,
+      "frink_samples": [
+        98.1361193163534,
+        97.89591439309434,
+        97.76187238279438
+      ],
+      "llama_tps": 145.702355,
+      "gap": 1.48833948692631,
+      "workload_digest": "044655d19aa3baa5"
+    }
+  ],
+  "llama_cpp": {
+    "build_commit": "604cc43",
+    "build_number": 1,
+    "backends": "CUDA",
+    "cpu_info": "AMD EPYC 7R13 Processor",
+    "gpu_info": "NVIDIA L40S",
+    "command": [
+      "llama-bench",
+      "-m",
+      "/work/models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "-p",
+      "512",
+      "-n",
+      "128",
+      "-d",
+      "0",
+      "-r",
+      "3",
+      "-ngl",
+      "99",
+      "-o",
+      "json"
+    ]
+  }
+}
