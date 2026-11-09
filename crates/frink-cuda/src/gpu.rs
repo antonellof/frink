@@ -1379,7 +1379,14 @@ mod tests {
                 for (n_blocks_per_row, seed) in [(3usize, 7u32), (12, 23)] {
                     let row_bytes = n_blocks_per_row * mm.block_bytes;
                     let cols = n_blocks_per_row * mm.block_elems;
-                    let weights = pseudo_bytes(seed, rows * row_bytes);
+                    let mut weights = pseudo_bytes(seed, rows * row_bytes);
+                    // MXFP4's E8M0 scale near 2^0: a random byte reaches
+                    // 2^128, an infinity no relative tolerance can hold.
+                    if mv.name == "MXFP4" {
+                        for b in weights.chunks_mut(mm.block_bytes) {
+                            b[0] = 120 + b[0] % 16;
+                        }
+                    }
                     let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
                     // Enter through the ordinary kernel identity, not the
                     // coalesced one, so this exercises the ROUTING too.

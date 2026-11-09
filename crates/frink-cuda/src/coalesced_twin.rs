@@ -203,6 +203,51 @@ pub fn q8_0_matvec_coalesced_row(row: &[u8], x: &[f32], n_blocks: usize, lanes: 
     warp_sum(acc)
 }
 
+/// E2M1 to f32, `fx_e2m1`: ggml's `kvalues_mxfp4` halved.
+pub fn e2m1(v: u8) -> f32 {
+    const MAG: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    let m = MAG[(v & 7) as usize];
+    if v & 8 != 0 {
+        -m
+    } else {
+        m
+    }
+}
+
+/// `ggml_e8m0_to_fp32`: the byte as an f32 exponent field, 2^-127 for 0.
+pub fn e8m0(e: u8) -> f32 {
+    if e == 0 {
+        f32::from_bits(0x0040_0000)
+    } else {
+        f32::from_bits(u32::from(e) << 23)
+    }
+}
+
+/// Twin of `mxfp4_matvec_coalesced`. Lane `sub` takes elements
+/// `[sub*R, sub*R + R)`, `R = 32 / lanes`: the low nibbles of code bytes
+/// `l0 ..` for a run in the block's first half, the high nibbles of
+/// bytes `l0 - 16 ..` for one in its second. A lane sums its run, then
+/// scales the sum by the block's E8M0 scale.
+pub fn mxfp4_matvec_coalesced_row(row: &[u8], x: &[f32], n_blocks: usize, lanes: usize) -> f32 {
+    let run = 32 / lanes;
+    assert!(run <= 16, "a run of {run} straddles the nibble halves");
+    let mut acc = [0f32; 32];
+    for (lane, a) in acc.iter_mut().enumerate() {
+        let (first, step, l0) = lane_mapping(lane, lanes, run);
+        let (b0, shift) = (l0 % 16, if l0 >= 16 { 4 } else { 0 });
+        for blk in (first..n_blocks).step_by(step) {
+            let block = &row[blk * 17..(blk + 1) * 17];
+            let d = e8m0(block[0]);
+            let mut sum = 0f32;
+            for i in 0..run {
+                sum += e2m1((block[1 + b0 + i] >> shift) & 15) * x[blk * 32 + l0 + i];
+            }
+            *a += sum * d;
+        }
+    }
+    warp_sum(acc)
+}
+
 /// A twin's signature: one row, its activations, its block count, and
 /// the `FX_LANES` the kernel was compiled with.
 pub type CoalescedTwin = fn(&[u8], &[f32], usize, usize) -> f32;
@@ -217,6 +262,7 @@ pub fn twin_for(entry: &str) -> Option<CoalescedTwin> {
         "q5_k_matvec_coalesced" => Some(q5_k_matvec_coalesced_row),
         "q6_k_matvec_coalesced" => Some(q6_k_matvec_coalesced_row),
         "q8_0_matvec_coalesced" => Some(q8_0_matvec_coalesced_row),
+        "mxfp4_matvec_coalesced" => Some(mxfp4_matvec_coalesced_row),
         _ => None,
     }
 }
@@ -245,9 +291,16 @@ mod tests {
             "Q5_K" => (176, &[0, 2]),
             "Q6_K" => (210, &[208]),
             "Q8_0" => (34, &[0]),
+            // An E8M0 byte, not an f16: kept near 2^0 below.
+            "MXFP4" => (17, &[]),
             _ => unreachable!("{kind}"),
         };
         let mut r = pseudo(n_blocks * bytes, seed);
+        if kind == "MXFP4" {
+            for blk in 0..n_blocks {
+                r[blk * 17] = 120 + r[blk * 17] % 16;
+            }
+        }
         for blk in 0..n_blocks {
             for (i, at) in finite_at.iter().enumerate() {
                 r[blk * bytes + at] = 0x00;
@@ -263,24 +316,43 @@ mod tests {
             "Q5_K" => frink_quant::dequant_q5_k(r),
             "Q6_K" => frink_quant::dequant_q6_k(r),
             "Q8_0" => frink_quant::dequant_q8_0(r),
+            // The GGUF block's definition, apart from the twin's own
+            // helpers: ggml's `kvalues_mxfp4` (E2M1 doubled) times
+            // `ggml_e8m0_to_fp32_half`, `2^(e - 128)`. Element `i < 16`
+            // is code byte `i`'s low nibble and `i + 16` its high one.
+            "MXFP4" => {
+                const KV_X2: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+                Ok(r.as_chunks::<17>()
+                    .0
+                    .iter()
+                    .flat_map(|b| {
+                        let half = 2f64.powi(i32::from(b[0]) - 128) as f32;
+                        (0..32).map(move |i| {
+                            f32::from(KV_X2[((b[1 + i % 16] >> (4 * (i / 16))) & 15) as usize])
+                                * half
+                        })
+                    })
+                    .collect())
+            }
             _ => unreachable!("{kind}"),
         }
         .expect("dequant")
     }
 
     fn block_elems(kind: &str) -> usize {
-        if kind == "Q8_0" {
+        if kind == "Q8_0" || kind == "MXFP4" {
             32
         } else {
             256
         }
     }
 
-    const KINDS: [(&str, &str); 4] = [
+    const KINDS: [(&str, &str); 5] = [
         ("Q4_K", "q4_k_matvec_coalesced"),
         ("Q5_K", "q5_k_matvec_coalesced"),
         ("Q6_K", "q6_k_matvec_coalesced"),
         ("Q8_0", "q8_0_matvec_coalesced"),
+        ("MXFP4", "mxfp4_matvec_coalesced"),
     ];
 
     /// Every `FX_LANES` the table can compile, per entry point.

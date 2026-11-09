@@ -257,6 +257,17 @@ pub const COALESCED: &[CoalescedKind] = &[
         wide_lanes: 4,
         min_lanes: 1,
     },
+    CoalescedKind {
+        base_fn: "mxfp4_matvec",
+        entry: "mxfp4_matvec_coalesced",
+        src: MXFP4_MATVEC_COALESCED_KERNEL_SRC,
+        narrow_module: "frink_mxfp4_coalesced",
+        wide_module: "frink_mxfp4_coalesced_wide",
+        // Eight E2M1 codes per lane, eight blocks per warp per trip. The
+        // block is 17 bytes, so the codes are read a byte at a time.
+        wide_lanes: 4,
+        min_lanes: 2,
+    },
 ];
 
 /// The coalesced kernel replacing the block-per-row kernel `fn_name`,
@@ -557,6 +568,81 @@ extern "C" __global__ void q8_0_matvec_coalesced(
         for (int e = 0; e < FX_RUN; ++e) {
             acc += d * (float)(signed char)q[e] * xv[e];
         }
+    }
+
+    fx_store_row(acc, out, row, rows);
+}
+"#;
+
+/// MXFP4 matvec with a coalesced access pattern (gpt-oss's experts).
+///
+/// The block-per-row kernel gave each thread a whole 17-byte block and
+/// looked each E2M1 code up in a `__constant__` table, whose reads
+/// serialise when a warp's lanes ask for different entries. Here lane
+/// `sub` of a block takes elements `[sub*R, sub*R + R)`, `R = 32 /
+/// FX_LANES`, as Q8_0's does. A block's elements `0..16` are the low
+/// nibbles of its sixteen code bytes and `16..32` the high nibbles of
+/// the same bytes, so a run (at most 16 long) is one nibble of bytes
+/// `l0 % 16 ..`. Each code's value is assembled from its bits:
+/// `fx_e2m1` is exactly ggml's `kvalues_mxfp4` (halved, with the scale
+/// `ggml_e8m0_to_fp32` rather than its half).
+///
+/// Alignment: 17 bytes per block, so byte loads only.
+pub const MXFP4_MATVEC_COALESCED_KERNEL_SRC: &str = r#"
+#define FX_RUN (32 / FX_LANES)
+#if FX_RUN > 16
+#error "MXFP4: a lane's run must stay inside one nibble half of its block"
+#endif
+
+// E2M1 (sign, two exponent bits, one mantissa bit) to f32: 0, 0.5, 1,
+// 1.5, 2, 3, 4, 6 and their negatives, the negative zero included.
+__device__ __forceinline__ float fx_e2m1(unsigned int v) {
+    const unsigned int m = v & 7u;
+    unsigned int bits = (m >= 2u) ? ((((m >> 1) + 126u) << 23) | ((m & 1u) << 22))
+                                  : (m == 1u ? (126u << 23) : 0u);
+    bits |= (v & 8u) << 28;
+    return __int_as_float((int)bits);
+}
+
+extern "C" __global__ void mxfp4_matvec_coalesced(
+    const void* __restrict__ wsrc,
+    const float* __restrict__ x_in,
+    float* out_in,
+    int rows,
+    int row_bytes,
+    int n_blocks_per_row
+#if FX_MULTI
+    , int x_stride
+#endif
+) {
+    FX_SLOT_SETUP
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int row = fx_row_of_warp(warp);
+    // A warp past the last row still reaches the block's reduction.
+    const int n_live = row < rows ? n_blocks_per_row : 0;
+
+    const unsigned char* row_ptr = weights + (size_t)(row < rows ? row : 0) * row_bytes;
+    const int l0 = (lane % FX_LANES) * FX_RUN;
+    const int b0 = l0 & 15;
+    const int shift = l0 >= 16 ? 4 : 0;
+    float acc = 0.0f;
+
+    for (int blk = (warp % FX_WPR) * FX_BLOCKS_PER_TRIP + lane / FX_LANES; blk < n_live;
+         blk += FX_BLOCKS_PER_TRIP * FX_WPR) {
+        const unsigned char* block = row_ptr + (size_t)blk * 17;
+        // `ggml_e8m0_to_fp32`: the byte IS an f32 exponent field, with
+        // 2^-127 for zero.
+        const unsigned int e = block[0];
+        const float d = (e == 0u) ? __int_as_float(0x00400000) : __int_as_float((int)(e << 23));
+        float xv[FX_RUN];
+        fx_load_floats<FX_RUN>(x + blk * 32 + l0, xv);
+        float s = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < FX_RUN; ++i) {
+            s += fx_e2m1((block[1 + b0 + i] >> shift) & 15u) * xv[i];
+        }
+        acc += s * d;
     }
 
     fx_store_row(acc, out, row, rows);
