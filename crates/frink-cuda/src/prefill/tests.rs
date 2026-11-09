@@ -173,6 +173,57 @@ pub(super) fn host_swiglu_oai(g: f32, u: f32) -> f32 {
     x / (1.0 + (A * -x).exp()) * (y + 1.0)
 }
 
+/// How far a prefill batch's outputs may sit from the host twins,
+/// relative to the larger of the value and its vector's RMS. The twins
+/// round every batch GEMM's input through q8_1 as the device's int8 GEMM
+/// does ([`q8_1_round`]), so what is left is the accumulation order and
+/// the rare run whose rounding the device's own f32 input tips the other
+/// way: the bound the f16 body was held to.
+pub(super) const BATCH_GEMM_TOL: f32 = 1e-2;
+
+/// `x` (rows of `cols`) rounded through q8_1 the way the batch GEMM's
+/// quantizer rounds it (`crate::mmq::quantize`): each 32-value run to
+/// `round(v * 127 / amax)` steps of `1 / (127 / amax)`. The int8 GEMM's
+/// result is the dot of the weights with these values up to f32
+/// rounding, so a twin that multiplies them models the device.
+pub(super) fn q8_1_round(x: &[f32], cols: usize) -> Vec<f32> {
+    assert!(cols.is_multiple_of(32), "{cols} values a row");
+    x.chunks(32)
+        .flat_map(|run| {
+            let amax = run.iter().map(|v| v.abs()).fold(0f32, f32::max);
+            let d_inv = if amax > 0.0 { 127.0 / amax } else { 0.0 };
+            let d = if amax > 0.0 { 1.0 / d_inv } else { 0.0 };
+            run.iter().map(move |v| (v * d_inv).round() * d)
+        })
+        .collect()
+}
+
+/// `q8_1_round` is the quantizer's rounding, value for value: the twins
+/// that use it and the int8 GEMM's quantizer cannot drift apart.
+#[test]
+fn the_twins_q8_1_rounding_is_the_quantizer_s() {
+    use crate::mmq::quantize::{quantize_twin, Layout, BLOCK_BYTES, QK};
+    let (rows, cols) = (3usize, 96usize);
+    let x: Vec<f32> = (0..rows * cols)
+        .map(|i| ((i as f32) * 0.41).sin() * (1u32 << ((i / 32) % 4)) as f32)
+        .collect();
+    let y = quantize_twin(&x, None, cols, rows, rows, Layout::D4);
+    let got = q8_1_round(&x, cols);
+    for r in 0..rows {
+        for i in 0..cols {
+            let blk = ((i / QK) * rows + r) * BLOCK_BYTES;
+            let sub = (i % QK) / 32;
+            let d = f32::from_le_bytes(y[blk + 4 * sub..blk + 4 * sub + 4].try_into().unwrap());
+            let want = f32::from(y[blk + 16 + i % QK] as i8) * d;
+            assert_eq!(
+                got[r * cols + i].to_bits(),
+                want.to_bits(),
+                "row {r} value {i}"
+            );
+        }
+    }
+}
+
 pub(super) fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let rms = (want.iter().map(|w| w * w).sum::<f32>() / want.len().max(1) as f32).sqrt();
@@ -458,8 +509,18 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
     let window = Some(20);
 
     // --- host twin ---
+    // The device's batch GEMM is the int8 one: its input is q8_1.
     let gemm = |data: &[u8], rows, cols, x: &[f32]| {
-        mul_mm_reference(&Q8_0, data, x, rows, cols, batch, cols / 32 * 34).unwrap()
+        mul_mm_reference(
+            &Q8_0,
+            data,
+            &q8_1_round(x, cols),
+            rows,
+            cols,
+            batch,
+            cols / 32 * 34,
+        )
+        .unwrap()
     };
     let normed = host_rms_norm_rows(&hidden_in, &attn_norm_w, hidden, eps);
     let mut q = gemm(qd, q_w, hidden, &normed);
@@ -592,9 +653,9 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
     // off by 6e-3 in a vector of RMS about 1 after two residual adds.
     // A wrong kernel is off by a whole term. The GEMM's own exactness
     // is `mul_mm_launch`'s test.
-    assert_close(&out.k_rows, &k, 1e-2, "K rows");
-    assert_close(&out.v_rows, &v, 1e-2, "V rows");
-    assert_close(&out.hidden, &h, 1e-2, "hidden");
+    assert_close(&out.k_rows, &k, BATCH_GEMM_TOL, "K rows");
+    assert_close(&out.v_rows, &v, BATCH_GEMM_TOL, "V rows");
+    assert_close(&out.hidden, &h, BATCH_GEMM_TOL, "hidden");
 
     // The stack: the same layer twice with the hidden batch resident
     // between them must equal two single launches, K/V rows per layer.

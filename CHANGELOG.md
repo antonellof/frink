@@ -15,7 +15,38 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The CUDA device probe no longer swaps the process's panic hook.**
+  It installed a silent hook around its cudarc call, so a panic on any
+  other thread in that window lost its message and its server journal
+  record (seen as the journal's panic-hook test failing under
+  `cargo test --workspace`). The probe now opens the driver library
+  itself first, under cudarc's names, and returns no device when it
+  will not open. A test fails if any frink-cuda source swaps the hook.
+
 ### Changed
+
+- **CUDA prefill multiplies Q8_0 and Q4_K weights on the int8 tensor
+  cores.** The prefill GEMM converted its activations to f16 and ran
+  `mma.m16n8k16` in f16. llama.cpp's CUDA prefill quantizes them to q8_1
+  instead and multiplies on the int8 tensor cores (MMQ), which Ada and
+  Ampere run at twice the f16 rate, so frink was both slower and off the
+  oracle's arithmetic. The activations are now quantized once per GEMM
+  input exactly as `quantize_mmq_q8_1` quantizes them, and a new int8
+  GEMM (`mmq`) scales each 32-value run's exact int32 dot in ggml's
+  order, Q4_K's half-rounded scales and min term included. On an A10G a
+  Q4_K 14336 x 4096 x 512 GEMM went from 1.65 to 0.89 ms, and
+  `pp512` from 2748 to 4080 tokens/s on Llama-3.2-3B Q4_K_M, 1614 to
+  2232 on Llama-3.1-8B Q4_K_M and 1449 to 1889 on its Q8_0, each
+  token-identical to the CPU. On an A100, whose f16 tensor cores
+  accumulate in f32 at full rate, the gain is smaller: Llama-3.1-8B
+  Q4_K_M `pp512` from 2058 to 2168. Q6_K has a loader but measured
+  slower, so it keeps the f16 body. `FRINK_CUDA_MUL_MM=tc` keeps every
+  kind there. A routed batch's experts have the int8 grouped form too,
+  MXFP4 included, behind `FRINK_CUDA_MOE_MMQ=1`: on an A100 it measured
+  6 to 8% slower than the f16 grouped GEMM on Qwen3-30B-A3B and
+  gpt-oss-20b, so it is off by default (#259).
 
 - **A CUDA decode token routes its MoE layers on the device.** Each
   routed layer downloaded its router's logits and waited for the host
@@ -52,9 +83,14 @@ are the ones worth reading twice.
   attention rounds them, and the hardware test holds the output to the
   error that rounding can cause. The kernel text matches a host twin
   bit for bit on a CPU
-  (`crates/frink-cuda/tools/prefill_attn_tc_host_check`). Hardware
-  numbers are pending. `FRINK_CUDA_PREFILL_ATTN=simt` keeps the SIMT
-  kernel (#259).
+  (`crates/frink-cuda/tools/prefill_attn_tc_host_check`). On an A100,
+  `frink verify` over a 512-token prompt is token-identical to the CPU
+  on Llama-3.1-8B, Qwen2.5-7B (GQA 7), gpt-oss-20b (sinks, head width
+  64), Gemma-3-12B (head width 256, windows) and Gemma-2-9B (softcap),
+  and `pp512` went from 2056 to 2297 tokens/s on Llama-3.1-8B Q4_K_M,
+  2394 to 2624 on Qwen2.5-7B, 2021 to 2161 on gpt-oss-20b, 1221 to 1344
+  on Gemma-3-12B and 1386 to 1597 on Gemma-2-9B.
+  `FRINK_CUDA_PREFILL_ATTN=simt` keeps the SIMT kernel (#259).
 
 ## [0.60.0] - 2026-11-09
 
