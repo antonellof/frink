@@ -51,6 +51,25 @@ pub(crate) const BATCH_PATH_KEY: usize = 1;
 /// (`frink_core::argv::effective_ubatch`).
 pub(crate) use frink_core::argv::effective_ubatch as effective_chunk;
 
+/// What `-b` ALONE lowers to, for the one reader that needs llama.cpp's
+/// logical batch rather than the chunk above: `/infill`, whose
+/// `format_prompt_infill` takes three quarters of `n_batch` for the
+/// prefix and one for the suffix. `-ub` does not move it upstream
+/// either.
+pub(crate) const LOGICAL_BATCH_ENV: &str = "FRINK_LOGICAL_BATCH";
+
+/// llama.cpp's `n_batch` when no `-b` is given (`common/common.h`).
+pub(crate) const LLAMA_DEFAULT_N_BATCH: usize = 2048;
+
+/// `-b`, or llama.cpp's default without it.
+pub(crate) fn logical_batch() -> usize {
+    std::env::var(LOGICAL_BATCH_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(LLAMA_DEFAULT_N_BATCH)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -58,6 +58,7 @@ mod journal;
 mod json_mode;
 mod limits;
 pub mod llama_env;
+mod llama_error;
 #[cfg(test)]
 mod llama_renders;
 mod loaded;
@@ -71,6 +72,8 @@ mod openai_extra;
 mod output;
 mod policy;
 mod prefill_batch;
+mod prompt_input;
+mod props;
 mod reasoning_budget;
 mod reasoning_tokens;
 mod request_tail;
@@ -157,6 +160,7 @@ pub(crate) struct GgufModel {
     tokenizer: Arc<ServerTokenizer>,
     stop_tokens: StopTokens,
     bos_id: Option<usize>,
+    facts: model::GgufFacts,
     is_synthetic: bool,
     chat_template: chat_template::PromptTemplate,
     /// `--model-draft`, checked against this model when it was
@@ -331,6 +335,16 @@ impl Model {
                 let mut caches: Vec<_> = m.decoder.config.new_kv_caches();
                 Some(m.decoder.forward_hidden_batch(tokens, 0, &mut caches))
             }
+            Model::Kimi(_) | Model::Mla(_) | Model::Gemma4(_) | Model::Glm52(_) => None,
+        }
+    }
+
+    /// What the generic GGUF's header said beside the weights
+    /// ([`model::GgufFacts`]): its FIM tokens and file type. `None` for
+    /// the dedicated engines, whose loaders do not read them.
+    pub(crate) fn gguf_facts(&self) -> Option<&model::GgufFacts> {
+        match self {
+            Model::Gguf(m) => Some(&m.facts),
             Model::Kimi(_) | Model::Mla(_) | Model::Gemma4(_) | Model::Glm52(_) => None,
         }
     }
@@ -558,6 +572,10 @@ pub(crate) struct AppState {
     /// generation's receipt id would have its own receipt silently
     /// skipped as already written.
     pub(crate) started_unix: u64,
+    /// The prompt each slot id last saved or restored, so
+    /// `action=erase` can empty that slot and no other
+    /// ([`slots::SlotRecords`]).
+    pub(crate) slot_records: slots::SlotRecords,
 }
 
 /// How long a memory reading is served before it is taken again.
@@ -589,6 +607,16 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .is_some()
+    }
+
+    /// What `GET /props` answers while asleep: the snapshot `POST /sleep`
+    /// took of the model it dropped ([`props::snapshot`]).
+    pub(crate) fn slept_props(&self) -> Option<serde_json::Value> {
+        self.slept
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|slept| slept.props.clone())
     }
 
     pub(crate) fn require_active(&self) -> Result<Arc<ActiveModel>, ApiError> {
@@ -2144,7 +2172,7 @@ pub(crate) fn join_error_response(e: tokio::task::JoinError) -> ApiError {
                                      // same list behind a struct at two call sites.
 fn run_generation_emit(
     model: &Model,
-    prompt: &str,
+    prompt: prompt_input::Prompt<'_>,
     params: &GenerationParams,
     kv_pool: Option<&generate::KvPoolConfig>,
     paged_kv: Option<&generate::PagedKvConfig>,
@@ -2159,6 +2187,24 @@ fn run_generation_emit(
     mut emit: impl FnMut(usize, &str),
 ) -> Result<generate::Generated, generate::DecodeError> {
     let synthetic = model.is_synthetic();
+    // The two readers of the prompt's TEXT are the reasoning budget and
+    // the reasoning-token count, and an id prompt has no text to give
+    // them (`prompt_input::Prompt::text`). The one route that sends ids,
+    // `/infill`, sets neither, so this is the guard that keeps it that
+    // way rather than a refusal any caller meets.
+    if prompt.is_ids()
+        && (params.reasoning.is_some()
+            || !matches!(
+                params.reasoning_budget,
+                reasoning_budget::ReasoningBudget::Unrestricted
+            ))
+    {
+        return Err(generate::DecodeError::Unsupported(
+            "a prompt of token ids carries no text to find a reasoning block in, so a \
+             reasoning format or budget cannot apply to it"
+                .to_string(),
+        ));
+    }
     // Held for the whole generation: a `POST /lora-adapters`, or a
     // request whose `lora` field overrides the scales, waits for this
     // one to finish rather than changing the weights under it. See
@@ -2189,7 +2235,7 @@ fn run_generation_emit(
         // hold beside the tokenizer.
         resolved.reasoning_budget = resolved
             .reasoning_budget
-            .armed(resolved.reasoning, prompt, |text| {
+            .armed(resolved.reasoning, prompt.text(), |text| {
                 model.encode(text, SpecialTokens::Parse)
             })
             .map_err(|detail| generate::DecodeError::ReasoningBudget { detail })?;
@@ -2201,8 +2247,7 @@ fn run_generation_emit(
     let (finishes, prompt_rows, prompt_ids, truncated_prompt, usage) = match model {
         Model::Gguf(m) => {
             if let Some(batcher) = continuous_batcher {
-                let mut tokens = m.tokenizer.encode(prompt, SpecialTokens::Parse);
-                frink_models::tokenizer::prepend_bos(&mut tokens, m.bos_id);
+                let tokens = prompt.tokens(m.tokenizer.as_ref(), m.bos_id);
                 let (finish, _generated_ids, text, usage) = if synthetic {
                     batcher.generate(tokens, params.clone(), m.stop_tokens.clone())?
                 } else {
@@ -2375,9 +2420,9 @@ fn run_generation_emit(
 /// paths and tests.
 #[allow(clippy::too_many_arguments)] // mirrors `run_generation_emit`
                                      // exactly, minus the sink; see its note.
-pub(crate) fn run_generation(
+pub(crate) fn run_generation<'p>(
     model: &Model,
-    prompt: &str,
+    prompt: impl Into<prompt_input::Prompt<'p>>,
     params: &GenerationParams,
     kv_pool: Option<&generate::KvPoolConfig>,
     paged_kv: Option<&generate::PagedKvConfig>,
@@ -2390,7 +2435,7 @@ pub(crate) fn run_generation(
 ) -> Result<generate::Generated, generate::DecodeError> {
     run_generation_emit(
         model,
-        prompt,
+        prompt.into(),
         params,
         kv_pool,
         paged_kv,
@@ -3064,7 +3109,7 @@ async fn chat_completions_stream(
         let emit_choices = Rc::clone(&emitters);
         let result = run_generation_emit(
             &model,
-            &prompt,
+            prompt_input::Prompt::Text(&prompt),
             &params,
             kv_pool.as_ref(),
             paged_kv.as_ref(),
@@ -3424,6 +3469,11 @@ fn protected_routes() -> Router<Arc<AppState>> {
             post(responses::responses_cancel),
         )
         .route(&axum_path(routes::SLOTS_ID), post(slots::post_slot))
+        // llama-server's live listing and global properties. Behind the
+        // key, as upstream puts every route but `/health` behind its
+        // `--api-key`.
+        .route(routes::SLOTS, get(slots::listing::get_slots))
+        .route(routes::PROPS, get(props::get_props).post(props::post_props))
         .route(routes::V1_STATS, get(serving_stats))
         .route(routes::V1_REQUESTS, get(recent_requests))
         .route(routes::V1_CACHE_STATUS, get(cache_admin::cache_status))
@@ -3456,6 +3506,9 @@ fn protected_routes() -> Router<Arc<AppState>> {
         // without `[DONE]`. See `crate::completion`.
         .route(routes::COMPLETION, post(completion::completion))
         .route(routes::COMPLETIONS, post(completion::completion))
+        // llama.cpp's fill-in-the-middle, on the same serving path as
+        // `/completion` once its prompt is assembled.
+        .route(routes::INFILL, post(completion::infill::infill))
         .route(routes::V1_TOKENIZE, post(openai_extra::tokenize))
         .route(routes::V1_DETOKENIZE, post(openai_extra::detokenize))
         // llama.cpp's unprefixed spelling of the same two, on the SAME
@@ -3692,6 +3745,7 @@ pub(crate) fn activate_loaded_model(
                     tokenizer,
                     stop_tokens: g.stop_tokens,
                     bos_id: g.bos_id,
+                    facts: g.facts,
                     is_synthetic: g.is_synthetic,
                     chat_template: g.chat_template,
                     draft: draft.cloned(),
@@ -3904,6 +3958,7 @@ fn build_app_state(
         maintenance: Mutex::new(crate::policy::maintenance::MaintenanceGate::serving()),
         footprint: Mutex::new(crate::policy::footprint::ProbeCache::new(FOOTPRINT_TTL_MS)),
         started_unix: unix_now(),
+        slot_records: slots::SlotRecords::default(),
     }
 }
 
@@ -4854,6 +4909,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
             draft: None,
@@ -4917,10 +4973,23 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::from_eos(eos),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: synthetic,
             chat_template: chat_template::PromptTemplate::plain(),
             draft: None,
         })
+    }
+
+    /// The synthetic byte-vocabulary fixture with these header facts,
+    /// for the routes that read them (`/infill`'s FIM tokens, `/props`'
+    /// file type). One builder, so those tests share this fixture
+    /// rather than each writing a `GgufModel` literal.
+    pub(crate) fn test_byte_model_with_facts(facts: model::GgufFacts) -> Model {
+        let mut model = test_byte_model(None, true);
+        if let Model::Gguf(m) = &mut model {
+            m.facts = facts;
+        }
+        model
     }
 
     /// One `AppState` for the HTTP-level tests, so a new field on the
@@ -4974,6 +5043,7 @@ pub(crate) mod tests {
             maintenance: Mutex::new(crate::policy::maintenance::MaintenanceGate::serving()),
             footprint: Mutex::new(crate::policy::footprint::ProbeCache::new(FOOTPRINT_TTL_MS)),
             started_unix: unix_now(),
+            slot_records: slots::SlotRecords::default(),
         }
     }
 
@@ -5019,6 +5089,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
             draft: None,
@@ -5037,6 +5108,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::from_gguf_metadata(
                 Some(source),
@@ -5496,6 +5568,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: false,
             chat_template: chat_template::PromptTemplate::plain(),
             draft: None,
@@ -6976,6 +7049,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: Some(7),
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
             draft: None,
@@ -8170,6 +8244,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: false,
             chat_template: chat_template::PromptTemplate::plain(),
             draft: None,

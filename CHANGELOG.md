@@ -26,6 +26,35 @@ are the ones worth reading twice.
   the mean and the sample stddev, and `--render` takes the mean of every
   receipt's samples, so the published rows moved by under 2% (#481).
 
+### Added
+
+- **llama-server's `/props`, `GET /slots` and `/infill`, and slot
+  erase.** A client written for llama-server no longer gets a 404 on
+  them (#534).
+  - `GET /props` answers in llama.cpp's shape with every field frink can
+    state: `/completion`'s defaults, the context ceiling, the `-np`
+    slots, the served name, path and file type, the template and its
+    BOS and EOS, and the endpoint switches. Asleep it answers from the
+    snapshot the sleep took. A field frink has no value for (`seed`,
+    the knobs of samplers it does not have, llama.cpp's template caps)
+    is left out, and `docs/API.md` lists each. `POST /props` is
+    llama.cpp's 501 without `--props`.
+  - `GET /slots` lists the continuous batcher's `-np` seats, the busy
+    ones first, with llama.cpp's four always-present fields, and
+    honours `?fail_on_no_slot`. `--slots` / `--no-slots` and
+    `LLAMA_ARG_ENDPOINT_SLOTS` gate it as upstream. A deployment
+    without seats says so by name.
+  - `POST /infill` reads the vocabulary's FIM tokens as llama.cpp does
+    (the GGUF keys, then the token texts), refuses a model without them
+    in llama.cpp's words, validates the body with its messages,
+    assembles the prompt as `format_prompt_infill` does (the repo-level
+    `input_extra` pattern, the `-b` budgets, `--spm-infill`) and serves
+    it through `/completion`'s path, prefilling the assembled ids as
+    they are.
+  - `POST /slots/{id}?action=erase` empties one slot and answers
+    `n_erased`, dropping the prefix cache entry the slot's save or
+    restore stored unless another slot holds the same prompt.
+
 ### Changed
 
 - **The CUDA decode matvecs run as llama.cpp's do, by default.** The

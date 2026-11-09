@@ -121,6 +121,20 @@ impl PrefixCache {
         self.entries.clear();
     }
 
+    /// Drops every entry stored for exactly `tokens` in the shared
+    /// namespace, and says whether there was one.
+    ///
+    /// For llama.cpp's slot erase, which empties ONE slot: an entry
+    /// stored for a longer or a shorter sequence is another request's
+    /// state and stays, and so does one under a `cache_salt`, which no
+    /// slot can have written.
+    pub fn remove(&mut self, tokens: &[usize]) -> bool {
+        let before = self.entries.len();
+        self.entries
+            .retain(|e| !(e.salt.is_none() && e.tokens == tokens));
+        self.entries.len() != before
+    }
+
     /// Finds the stored prefix with the longest common leading
     /// subsequence with `tokens`, and returns a ready-to-use clone of
     /// its KV state truncated to exactly that common length (a stored
@@ -338,6 +352,32 @@ mod tests {
             cache.push(&[i as f32], &[i as f32 * 10.0]).unwrap();
         }
         cache
+    }
+
+    /// An erase is of ONE sequence: a longer entry that starts with it,
+    /// and the same sequence under a salt, are other requests' state.
+    #[test]
+    fn remove_drops_exactly_the_sequence_named_and_nothing_else() {
+        let slot: Vec<usize> = vec![1, 2, 3];
+        let longer: Vec<usize> = vec![1, 2, 3, 4];
+        let mut cache = PrefixCache::new(8);
+        cache.store(slot.clone(), vec![dummy_cache(3)], vec![0.5]);
+        cache.store(longer.clone(), vec![dummy_cache(4)], vec![0.5]);
+        cache.store_salted(slot.clone(), vec![dummy_cache(3)], vec![0.5], Some(7));
+
+        assert!(cache.remove(&slot));
+        assert_eq!(cache.stats().entries, 2);
+        assert!(!cache.remove(&slot), "nothing left to remove");
+        assert_eq!(
+            cache.find_longest_prefix(&longer).matched_len,
+            4,
+            "the longer entry survives"
+        );
+        assert_eq!(
+            cache.find_longest_prefix_salted(&slot, Some(7)).matched_len,
+            3,
+            "the salted entry survives"
+        );
     }
 
     /// The bug this type was named after and did not have.

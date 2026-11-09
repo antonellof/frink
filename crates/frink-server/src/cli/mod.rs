@@ -242,6 +242,22 @@ pub struct ServerArgs {
     #[arg(long = "metrics", default_value_t = false)]
     metrics: bool,
 
+    /// Serve `GET /slots`, llama.cpp's `--slots` and its default. Sets
+    /// `FRINK_ENDPOINT_SLOTS`.
+    #[arg(long = "slots", overrides_with = "no_slots")]
+    slots: bool,
+
+    /// Refuse `GET /slots` as llama.cpp does without it. The later of the
+    /// pair wins.
+    #[arg(long = "no-slots", overrides_with = "slots")]
+    no_slots: bool,
+
+    /// Assemble `/infill` prompts Suffix/Prefix/Middle rather than
+    /// Prefix/Suffix/Middle, llama.cpp's `--spm-infill`. Sets
+    /// `FRINK_SPM_INFILL`.
+    #[arg(long = "spm-infill", default_value_t = false)]
+    spm_infill: bool,
+
     /// IP address to listen on.
     #[arg(long, value_name = "HOST")]
     host: Option<IpAddr>,
@@ -878,6 +894,15 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_SLOT_SAVE_PATH", dir) };
     }
+    if let Some(on) = frink_core::argv::flag_pair(args.slots, args.no_slots) {
+        let value = if on { "1" } else { "0" };
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::slots::listing::ENDPOINT_SLOTS_ENV, value) };
+    }
+    if args.spm_infill {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::completion::infill::SPM_INFILL_ENV, "1") };
+    }
 
     // Lowered to the variables `server_draft::from_env` reads, which
     // also refuses, at load, a deployment that would not draft.
@@ -921,6 +946,11 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
             // SAFETY: called before the runtime starts worker threads.
             unsafe { std::env::set_var(key, chunk.to_string()) };
         }
+    }
+    if let Some(n_batch) = args.batch_size {
+        // `-b` alone, for `/infill`'s prompt budget (`prefill_batch`).
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::prefill_batch::LOGICAL_BATCH_ENV, n_batch.to_string()) };
     }
 
     if let Some(budget) = args.reasoning_budget {

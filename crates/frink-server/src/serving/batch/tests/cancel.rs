@@ -1,5 +1,50 @@
 use super::*;
 
+/// The seated-sequence gauge `GET /slots` reads: one while a request
+/// decodes, and back to zero once it has left, which is what a slot
+/// listing reports as `is_processing`.
+///
+/// Sabotage: drop the worker's `running.store`; the gauge never reads
+/// one and this goes red.
+#[test]
+fn the_running_gauge_counts_a_seated_request_and_returns_to_zero() {
+    let decoder = tiny_decoder();
+    let batcher = ContinuousBatcher::spawn_with_config(
+        Arc::clone(&decoder),
+        identity_decode(),
+        BatcherConfig {
+            prefill_chunk: 1,
+            ..BatcherConfig::default()
+        },
+    );
+    assert_eq!(batcher.stats().running, 0, "idle before any request");
+    let (params, token) = cancellable_params(4000, 3);
+    let worker = {
+        let batcher = batcher.clone();
+        thread::spawn(move || batcher.generate(vec![1, 2, 3], params, StopTokens::from_eos(None)))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while batcher.stats().decode_steps < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never started decoding"
+        );
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(batcher.stats().running, 1, "one request is seated");
+    token.cancel();
+    worker.join().expect("no panic").expect("generate");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while batcher.stats().running != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the gauge never returned to zero: {}",
+            batcher.stats().running
+        );
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 // ----------------------------------------------------------------
 // Deferred abort (`sched-deferred-abort`)
 // ----------------------------------------------------------------
