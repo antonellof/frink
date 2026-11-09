@@ -57,6 +57,14 @@ const _: () = assert!(
 );
 const _: () = assert!(TBK == 32, "the B loader converts sixteen floats per thread");
 const _: () = assert!(
+    MIN_STAGE_ELEMS.is_multiple_of(TBK),
+    "a stage is whole tiles"
+);
+const _: () = assert!(
+    (TBN / WN / 8).is_multiple_of(2),
+    "B fragments load two n8 tiles per ldmatrix.x4"
+);
+const _: () = assert!(
     (LDS * 2).is_multiple_of(16),
     "shared rows stay 16-byte aligned"
 );
@@ -86,6 +94,16 @@ __device__ __forceinline__ void frink_mma16816(float* c, const unsigned int* a, 
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+// One 8x8 b16 matrix load per group of eight lanes, four matrices, out of
+// shared memory: the fragment layout `mma.m16n8k16` reads for A, and for
+// two n8 fragments of B.
+__device__ __forceinline__ void frink_ldsm_x4(unsigned int* r, const unsigned short* p) {
+    unsigned int a;
+    asm("{ .reg .u64 t; cvta.to.shared.u64 t, %1; cvt.u32.u64 %0, t; }" : "=r"(a) : "l"(p));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+
 extern "C" __global__ void FX_FN_NAME(
     const unsigned char* __restrict__ src0,
     const float* __restrict__ src1,
@@ -95,6 +113,11 @@ extern "C" __global__ void FX_FN_NAME(
     int batch,
     int row_bytes
 ) {
+    // The weight rows' raw bytes for one stage of FX_SE columns, staged
+    // by coalesced word loads, then dequantized out of shared memory: a
+    // lane of the dequant reads its own row, and reading that row from
+    // global memory a byte at a time is what bounded the body before.
+    __shared__ __align__(16) unsigned int sraw[FX_TBM * FX_RAW_W];
     __shared__ __align__(16) unsigned short sa[FX_TBM * FX_LDS];
     __shared__ __align__(16) unsigned short sb[FX_TBN * FX_LDS];
 
@@ -105,8 +128,7 @@ extern "C" __global__ void FX_FN_NAME(
     const int warp = tid >> 5;
     const int wm = warp % FX_WM;
     const int wn = warp / FX_WM;
-    const int g = lane >> 2;
-    const int tg = lane & 3;
+    const size_t total_bytes = (size_t)n_rows * (size_t)row_bytes;
 
     float acc[FX_MF][FX_NF][4];
 #pragma unroll
@@ -118,86 +140,123 @@ extern "C" __global__ void FX_FN_NAME(
         }
     }
 
-    for (int k0 = 0; k0 < n_cols; k0 += FX_TBK) {
-        __syncthreads();
+    for (int s0 = 0; s0 < n_cols; s0 += FX_SE) {
+        const int se = min(FX_SE, n_cols - s0);
+        const int sbytes = (se / FX_BLOCK_ELEMS) * FX_BLOCK_BYTES;
+        const size_t stage_off = (size_t)(s0 / FX_BLOCK_ELEMS) * (size_t)FX_BLOCK_BYTES;
 
-        // A tile: one FX_SUB-element sub-block per thread, dequantized
-        // to f32 by the kind's own function and packed to f16 pairs.
+        // Every lane is past the previous stage's last read of sraw.
+        __syncthreads();
         // Out-of-range rows re-read the last valid row (llama's clamp)
-        // and are dropped at the store.
-        {
-            const int lr = tid >> 1;
-            const int ils = tid & 1;
+        // and are dropped at the store. A word is loaded whole when it
+        // lies inside the matrix and byte by byte at its very end.
+        for (int idx = tid; idx < FX_TBM * FX_RAW_W; idx += FX_TTHREADS) {
+            const int lr = idx / FX_RAW_W;
+            const int w = idx - lr * FX_RAW_W;
             int row = r0 + lr;
             if (row >= n_rows) row = n_rows - 1;
-            const unsigned char* rp = src0 + (size_t)row * (size_t)row_bytes;
-            const int sub = (k0 / FX_SUB) + ils;
-            float reg[FX_SUB];
-            frink_dequant_sub(
-                rp + (size_t)(sub / FX_NL) * (size_t)FX_BLOCK_BYTES,
-                sub % FX_NL,
-                reg);
-            unsigned int* dp = (unsigned int*)&sa[lr * FX_LDS + ils * FX_SUB];
-#pragma unroll
-            for (int i = 0; i < FX_SUB; i += 2) {
-                dp[i / 2] = frink_pack2h(reg[i], reg[i + 1]);
-            }
-        }
-
-        // B tile: two threads per token, sixteen k each, read as
-        // float4 (n_cols is a multiple of 32 and the activation buffer
-        // is a whole allocation, so the offset is 16-byte aligned) and
-        // packed to f16 pairs. Tokens past the batch are zero.
-        {
-            const int j = tid >> 1;
-            const int kh = (tid & 1) * 16;
-            const int col = c0 + j;
-            unsigned int* dp = (unsigned int*)&sb[j * FX_LDS + kh];
-            if (col < batch) {
-                const float* sp = src1 + (size_t)col * (size_t)n_cols + (size_t)(k0 + kh);
-#pragma unroll
-                for (int i = 0; i < 16; i += 4) {
-                    const float4 v = *(const float4*)(sp + i);
-                    dp[i / 2] = frink_pack2h(v.x, v.y);
-                    dp[i / 2 + 1] = frink_pack2h(v.z, v.w);
+            const size_t a = (size_t)row * (size_t)row_bytes + stage_off;
+            const size_t wa = (a & ~(size_t)3) + (size_t)w * 4;
+            unsigned int v = 0u;
+            if (wa < a + (size_t)sbytes) {
+                if (wa + 4 <= total_bytes) {
+                    v = __ldg((const unsigned int*)(src0 + wa));
+                } else {
+                    for (int b = 0; b < 4; b++) {
+                        if (wa + b < total_bytes) v |= (unsigned int)src0[wa + b] << (8 * b);
+                    }
                 }
-            } else {
-#pragma unroll
-                for (int i = 0; i < 8; i++) dp[i] = 0u;
             }
+            sraw[lr * FX_RAW_W + w] = v;
         }
 
-        __syncthreads();
+        for (int t0 = 0; t0 < se; t0 += FX_TBK) {
+            const int k0 = s0 + t0;
+            // The raw stage is complete (first tile), and every lane is
+            // past the previous tile's fragment loads.
+            __syncthreads();
 
+            // A tile: one FX_SUB-element sub-block per thread, dequantized
+            // to f32 by the kind's own function out of the staged bytes
+            // and packed to f16 pairs.
+            {
+                const int lr = tid >> 1;
+                const int ils = tid & 1;
+                int row = r0 + lr;
+                if (row >= n_rows) row = n_rows - 1;
+                const int o = (int)(((size_t)row * (size_t)row_bytes + stage_off) & 3);
+                const unsigned char* rp = (const unsigned char*)&sraw[lr * FX_RAW_W] + o;
+                const int sub = (t0 / FX_SUB) + ils;
+                float reg[FX_SUB];
+                frink_dequant_sub(
+                    rp + (size_t)(sub / FX_NL) * (size_t)FX_BLOCK_BYTES,
+                    sub % FX_NL,
+                    reg);
+                unsigned int* dp = (unsigned int*)&sa[lr * FX_LDS + ils * FX_SUB];
 #pragma unroll
-        for (int ks = 0; ks < FX_TBK; ks += 16) {
-            unsigned int af[FX_MF][4];
-#pragma unroll
-            for (int mf = 0; mf < FX_MF; mf++) {
-                const int rbase = wm * FX_WARP_M + mf * 16;
-                const unsigned short* p0 = &sa[(rbase + g) * FX_LDS + ks + tg * 2];
-                const unsigned short* p1 = &sa[(rbase + g + 8) * FX_LDS + ks + tg * 2];
-                af[mf][0] = *(const unsigned int*)p0;
-                af[mf][1] = *(const unsigned int*)p1;
-                af[mf][2] = *(const unsigned int*)(p0 + 8);
-                af[mf][3] = *(const unsigned int*)(p1 + 8);
+                for (int i = 0; i < FX_SUB; i += 2) {
+                    dp[i / 2] = frink_pack2h(reg[i], reg[i + 1]);
+                }
             }
+
+            // B tile: two threads per token, sixteen k each, read as
+            // float4 (n_cols is a multiple of 32 and the activation buffer
+            // is a whole allocation, so the offset is 16-byte aligned) and
+            // packed to f16 pairs. Tokens past the batch are zero.
+            {
+                const int j = tid >> 1;
+                const int kh = (tid & 1) * 16;
+                const int col = c0 + j;
+                unsigned int* dp = (unsigned int*)&sb[j * FX_LDS + kh];
+                if (col < batch) {
+                    const float* sp = src1 + (size_t)col * (size_t)n_cols + (size_t)(k0 + kh);
 #pragma unroll
-            for (int nf = 0; nf < FX_NF; nf++) {
-                const int nbase = wn * FX_WARP_N + nf * 8;
-                const unsigned short* p = &sb[(nbase + g) * FX_LDS + ks + tg * 2];
-                unsigned int bf[2];
-                bf[0] = *(const unsigned int*)p;
-                bf[1] = *(const unsigned int*)(p + 8);
+                    for (int i = 0; i < 16; i += 4) {
+                        const float4 v = *(const float4*)(sp + i);
+                        dp[i / 2] = frink_pack2h(v.x, v.y);
+                        dp[i / 2 + 1] = frink_pack2h(v.z, v.w);
+                    }
+                } else {
+#pragma unroll
+                    for (int i = 0; i < 8; i++) dp[i] = 0u;
+                }
+            }
+
+            __syncthreads();
+
+            // Fragments by ldmatrix: lane l addresses row (l & 7) of
+            // matrix (l >> 3). For A the four matrices are rows 0-7 and
+            // 8-15 at k 0-7, then the same rows at k 8-15 (a0..a3); for
+            // B they are tokens 0-7 at k 0-7 and 8-15 (b0, b1 of one n8
+            // fragment), then tokens 8-15 (the next fragment).
+            const int lm = lane >> 3;
+            const int lr8 = lane & 7;
+#pragma unroll
+            for (int ks = 0; ks < FX_TBK; ks += 16) {
+                unsigned int af[FX_MF][4];
 #pragma unroll
                 for (int mf = 0; mf < FX_MF; mf++) {
-                    frink_mma16816(acc[mf][nf], af[mf], bf);
+                    const int row = wm * FX_WARP_M + mf * 16 + (lm & 1) * 8 + lr8;
+                    frink_ldsm_x4(af[mf], &sa[row * FX_LDS + ks + (lm >> 1) * 8]);
+                }
+#pragma unroll
+                for (int nf = 0; nf < FX_NF; nf += 2) {
+                    const int tok = wn * FX_WARP_N + nf * 8 + (lm >> 1) * 8 + lr8;
+                    unsigned int bf[4];
+                    frink_ldsm_x4(bf, &sb[tok * FX_LDS + ks + (lm & 1) * 8]);
+#pragma unroll
+                    for (int mf = 0; mf < FX_MF; mf++) {
+                        frink_mma16816(acc[mf][nf], af[mf], &bf[0]);
+                        frink_mma16816(acc[mf][nf + 1], af[mf], &bf[2]);
+                    }
                 }
             }
         }
     }
 
     // C fragments: rows g and g + 8, tokens 2t and 2t + 1.
+    const int g = lane >> 2;
+    const int tg = lane & 3;
 #pragma unroll
     for (int mf = 0; mf < FX_MF; mf++) {
         const int row0 = r0 + wm * FX_WARP_M + mf * 16 + g;
@@ -219,6 +278,37 @@ extern "C" __global__ void FX_FN_NAME(
 }
 "#;
 
+/// Columns whose raw bytes one stage holds: one block for the kinds
+/// whose block is at least [`MIN_STAGE_ELEMS`] wide, enough whole
+/// blocks to reach it for the narrow ones. A whole number of `TBK`
+/// tiles either way, and a whole number of blocks, so a sub-block's
+/// header is always in the stage beside its quants.
+pub const fn stage_elems(kind: &MulMmKind) -> usize {
+    if kind.block_elems >= MIN_STAGE_ELEMS {
+        kind.block_elems
+    } else {
+        MIN_STAGE_ELEMS
+    }
+}
+
+/// The narrowest raw stage: four 32-column blocks.
+pub const MIN_STAGE_ELEMS: usize = 128;
+
+/// Shared words per staged row: the stage's bytes, plus three for a
+/// row that does not start on a word, rounded up to an odd count so
+/// the dequant's lanes, one row each, land on distinct banks.
+pub const fn raw_words(kind: &MulMmKind) -> usize {
+    let bytes = stage_elems(kind) / kind.block_elems * kind.block_bytes;
+    ((bytes + 3).div_ceil(4)) | 1
+}
+
+/// Static shared bytes the body declares for `kind`: the raw stage and
+/// the two f16 tiles. Kept under the 48 KiB a launch gets without
+/// opting in, for every kind (`every_kind_fits_static_shared_memory`).
+pub const fn shared_bytes(kind: &MulMmKind) -> usize {
+    TBM * raw_words(kind) * 4 + (TBM + TBN) * LDS * 2
+}
+
 /// The complete translation unit for one kind's tensor-core GEMM: the
 /// SIMT unit's preamble (f16 decode, K-scale unpack, codebook, the
 /// kind's `frink_dequant_sub`) with this body in place of the SIMT
@@ -234,11 +324,18 @@ pub fn tc_kernel_src(kind: &MulMmKind) -> String {
          #define FX_WARP_N {}\n\
          #define FX_MF {}\n\
          #define FX_NF {}\n\
-         #define FX_LDS {LDS}\n",
+         #define FX_LDS {LDS}\n\
+         #define FX_TTHREADS {TTHREADS}\n\
+         #define FX_BLOCK_ELEMS {}\n\
+         #define FX_SE {se}\n\
+         #define FX_RAW_W {}\n",
         TBM / WM,
         TBN / WN,
         TBM / WM / 16,
         TBN / WN / 8,
+        kind.block_elems,
+        raw_words(kind),
+        se = stage_elems(kind),
     );
     let (_, fn_name) = tc_names(kind);
     let body = TC_BODY_SRC.replace("FX_FN_NAME", fn_name);
@@ -296,6 +393,26 @@ mod tests {
             );
             // No stale SIMT geometry name survives into this unit's body.
             assert!(!src.contains("FX_TM"), "{}", kind.name);
+        }
+    }
+
+    /// The body declares its tiles statically, and a static
+    /// declaration past 48 KiB fails to load. Q6_K's 210-byte block is
+    /// the widest stage.
+    #[test]
+    fn every_kind_fits_static_shared_memory() {
+        for kind in KINDS {
+            assert!(
+                shared_bytes(kind) <= 48 * 1024,
+                "{}: {} bytes",
+                kind.name,
+                shared_bytes(kind)
+            );
+            let stage = stage_elems(kind);
+            assert!(stage.is_multiple_of(kind.block_elems) && stage.is_multiple_of(TBK));
+            let bytes = stage / kind.block_elems * kind.block_bytes;
+            assert!(raw_words(kind) * 4 >= bytes + 3, "{}", kind.name);
+            assert_eq!(raw_words(kind) % 2, 1, "{}", kind.name);
         }
     }
 

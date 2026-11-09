@@ -66,6 +66,47 @@ pub fn launch_mul_mm(
     Ok(out)
 }
 
+/// Seconds per launch of the GEMM body this device takes, over
+/// `iters` launches on operands already on the device, after one
+/// warm-up launch that also compiles the kernel. The output of each
+/// launch is discarded. For the `mul_mm_bench` example, which times
+/// the kernel without the uploads and downloads [`launch_mul_mm`]
+/// adds; nothing on a serving path calls it.
+#[allow(clippy::too_many_arguments)]
+pub fn time_mul_mm(
+    kind: &MulMmKind,
+    weights: &[u8],
+    x_batch: &[f32],
+    n_rows: usize,
+    n_cols: usize,
+    batch: usize,
+    row_bytes: usize,
+    iters: usize,
+) -> Result<f64, CudaError> {
+    validate_shape(
+        kind,
+        weights.len(),
+        x_batch.len(),
+        n_rows,
+        n_cols,
+        batch,
+        row_bytes,
+    )
+    .map_err(|e| CudaError::Unsupported(e.to_string()))?;
+    let dev = shared_device()?;
+    let d_x = crate::xfer::htod(&dev, "mul_mm bench activation", &x_batch[..batch * n_cols])?;
+    let warm = enqueue_mul_mm(&dev, kind, weights, &d_x, n_rows, n_cols, batch, row_bytes)?;
+    crate::xfer::sync(&dev, "mul_mm bench warm-up")?;
+    drop(warm);
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters.max(1) {
+        let run = enqueue_mul_mm(&dev, kind, weights, &d_x, n_rows, n_cols, batch, row_bytes)?;
+        drop(run);
+    }
+    crate::xfer::sync(&dev, "mul_mm bench")?;
+    Ok(t0.elapsed().as_secs_f64() / iters.max(1) as f64)
+}
+
 /// The launch alone: `d_x` is already on the device and the output
 /// stays there. This is what [`launch_mul_mm`] wraps in an upload and
 /// a download, and what the resident prefill layer
@@ -385,7 +426,7 @@ mod tests {
     /// admit it: `2^-10` of the L1 norm of the products, which the test
     /// computes from the twin's own dequantization, plus the SIMT floor.
     #[test]
-    #[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+    #[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an L40S (sm_89, driver 580) before the staged body"]
     fn the_tensor_core_body_matches_the_scalar_twin() {
         use crate::mul_mm::{KINDS, Q4_0, Q5_0, Q8_0};
 
@@ -448,6 +489,9 @@ mod tests {
                 (BM + 7, 96, 37),
                 (33, 64, 3),
                 (300, 256, 150),
+                // Several raw stages (`mul_mm_tc::stage_elems`) and,
+                // for the 32-column kinds, a partial one at the end.
+                (130, 672, 140),
             ] {
                 let n_cols = cols.next_multiple_of(kind.block_elems);
                 let row_bytes = (n_cols / kind.block_elems) * kind.block_bytes;
