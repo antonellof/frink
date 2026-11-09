@@ -151,11 +151,50 @@ impl TrunkLayers {
 /// not create the trailing blocks (module doc), and a count that is not
 /// below `block_count`: `llama-model.cpp:1412` asserts only `<=`, and a
 /// file that is all MTP blocks has no trunk for this decoder to run.
+/// llama.cpp's `LLAMA_MAX_LAYERS` (`llama-hparams.h:11`): the size of
+/// every per-layer hparam array, so its loader refuses a `block_count`
+/// above it for every architecture (`get_key_or_arr`,
+/// `llama-model-loader.cpp:472`, reached from `llama-model.cpp:1477`).
+pub const LLAMA_MAX_LAYERS: usize = 512;
+
+/// `block_count` as llama.cpp can back it: at least one and at most
+/// [`LLAMA_MAX_LAYERS`], as upstream refuses. Every loader
+/// reads its layer count through here (or [`trunk_layers`], which calls
+/// it) before the count sizes a per-layer array: a crafted `block_count`
+/// of 2^31 used to make the generic loader allocate tens of GB.
+pub fn checked_block_count(
+    file: &impl TensorSource,
+    key: &str,
+    block_count: usize,
+) -> Result<usize, LoadError> {
+    if block_count == 0 {
+        return Err(LoadError::ImplausibleHparam(
+            key.to_string(),
+            0,
+            "a decoder needs at least one layer: every per-layer hparam is read from layer 0"
+                .to_string(),
+        ));
+    }
+    if block_count > LLAMA_MAX_LAYERS {
+        return Err(LoadError::ImplausibleHparam(
+            key.to_string(),
+            block_count as u64,
+            format!(
+                "llama.cpp refuses more than LLAMA_MAX_LAYERS ({LLAMA_MAX_LAYERS}) layers \
+                 (llama-model-loader.cpp:472)"
+            ),
+        ));
+    }
+    let _ = file;
+    Ok(block_count)
+}
+
 pub fn trunk_layers(
     file: &impl TensorSource,
     arch: &str,
     block_count: usize,
 ) -> Result<TrunkLayers, LoadError> {
+    let block_count = checked_block_count(file, &format!("{arch}.block_count"), block_count)?;
     let key = format!("{arch}.nextn_predict_layers");
     let n_mtp_blocks = match file.metadata(&key) {
         None => 0,
