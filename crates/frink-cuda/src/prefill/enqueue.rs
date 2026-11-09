@@ -41,6 +41,18 @@ fn launch_err(what: &str, e: impl std::fmt::Debug) -> CudaError {
     CudaError::Launch(format!("{what}: {e:?}"))
 }
 
+/// Threads per row for the row RMSNorm: a few rows (a decode token's
+/// one) get up to a quarter as many threads as the row has elements, so
+/// a row of 4096 is not walked sixteen deep by 256 threads; many rows
+/// (a prefill batch) keep 256 and fill the GPU with blocks instead.
+/// Always a multiple of 32 between 32 and 1024.
+pub(crate) fn rmsnorm_threads(n_rows: usize, n: usize) -> u32 {
+    if n_rows >= 64 {
+        return BLOCK;
+    }
+    (n / 4).next_power_of_two().clamp(32, 1024) as u32
+}
+
 /// `out[r] = rms_norm(x[r], w, eps)` for `n_rows` rows of `n`.
 pub(crate) fn enqueue_rmsnorm_rows(
     dev: &Arc<CudaDevice>,
@@ -58,11 +70,13 @@ pub(crate) fn enqueue_rmsnorm_rows(
     let mut out = unsafe { crate::gpu::alloc_out(dev, n_rows * n, "rmsnorm_rows") }?;
     let cfg = LaunchConfig {
         grid_dim: (n_rows as u32, 1, 1),
-        block_dim: (BLOCK, 1, 1),
+        block_dim: (rmsnorm_threads(n_rows, n), 1, 1),
         shared_mem_bytes: 0,
     };
     // SAFETY: the kernel's parameter list is (const float*, const
-    // float*, float*, int, int, float), matched positionally; `x` holds
+    // float*, float*, int, int, float), matched positionally; the block
+    // is a multiple of 32 threads up to 1024 (`rmsnorm_threads`), the
+    // 32 warp slots the kernel reduces through; `x` holds
     // `n_rows * n` values and `w` holds `n` (the debug asserts above,
     // and the caller's shape checks), `out` is allocated at exactly
     // `n_rows * n`, and the kernel returns for a block past `n_rows`.
