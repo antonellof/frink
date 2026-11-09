@@ -556,7 +556,7 @@ mod tests {
     /// empty group, a group of one, and one wider than a block's tokens,
     /// and tokens shared between groups as top-k routing shares them.
     #[test]
-    #[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+    #[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
     fn the_grouped_gemm_equals_one_gemm_per_group() {
         use crate::mul_mm::KINDS;
         let dev = shared_device().expect("a CUDA device");

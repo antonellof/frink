@@ -14,7 +14,7 @@ use crate::mul_mm_ref::mul_mm_reference;
 /// and the layer's output is the host twin's, the experts summed from
 /// zero in the routing's order and then added to the residual.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn a_routed_layer_matches_its_host_twin_routing_on_the_device_logits() {
     routed_layer_matches_its_host_twin(1);
 }
@@ -23,7 +23,7 @@ fn a_routed_layer_matches_its_host_twin_routing_on_the_device_logits() {
 /// in one download and are routed in token order, and the experts run
 /// as grouped GEMMs over the tokens each one was given.
 #[test]
-#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+#[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn a_routed_batch_matches_its_host_twin_through_the_grouped_gemms() {
     routed_layer_matches_its_host_twin(6);
 }
