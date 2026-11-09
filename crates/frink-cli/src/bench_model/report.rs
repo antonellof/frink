@@ -91,11 +91,12 @@ pub(super) fn write_receipt(
         let l = llama.and_then(|m| m.tps.get(&row.test)).copied();
         tests.push(serde_json::json!({
             "test": row.test,
-            "frink_tps": row.median(),
+            "frink_tps": row.mean(),
             "frink_stddev": row.stddev(),
+            "frink_stat": "mean",
             "frink_samples": row.samples,
             "llama_tps": l,
-            "gap": l.map(|l| l / row.median()),
+            "gap": l.map(|l| l / row.mean()),
             // Same workload, same digest -- across models, sessions and
             // machines. Two rows that claim to measure `pp512` on the
             // same checkpoint and disagree here did not measure the
@@ -114,8 +115,11 @@ pub(super) fn write_receipt(
         bench_contract::receipt_common(&args.backend, backend, threads, load_s, host, engine_env)?;
     let serde_json::Value::Object(own) = serde_json::json!({
         // 3: adds `llama_cpp`. Schema-2 receipts render with an
-        // unknown llama.cpp reference.
-        "schema": 3,
+        // unknown llama.cpp reference. 4: `frink_tps` is the mean of
+        // `frink_samples` and `frink_stddev` their sample stddev, as
+        // llama-bench reports (`frink_stat`); schema 3 and earlier hold
+        // the median and the population stddev (#481).
+        "schema": 4,
         "kind": "engine",
         "id": args.id,
         "model_path": model,
