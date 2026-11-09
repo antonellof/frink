@@ -57,7 +57,7 @@ impl Kernel {
 }
 
 /// The always-compiled part of the census: every decode matvec (both
-/// widths of the coalesced ones), every GEMM, every embedding gather and
+/// widths of the coalesced ones, at one and four warps per row), every GEMM, every embedding gather and
 /// the split-K decode attention.
 pub fn kernels() -> Vec<Kernel> {
     let mut out = Vec::new();
@@ -67,12 +67,16 @@ pub fn kernels() -> Vec<Kernel> {
             k.source().to_string(),
         ));
     }
+    // One warp per row, and several: the shared-memory reduction a row
+    // of more than one warp takes is its own code path.
     for k in COALESCED {
         for (w, tag) in [(MatvecWidth::Narrow, "narrow"), (MatvecWidth::Wide, "wide")] {
-            out.push(Kernel::new(
-                format!("coalesced {} {tag}", k.entry),
-                k.source(w),
-            ));
+            for wpr in [1usize, 4] {
+                out.push(Kernel::new(
+                    format!("coalesced {} {tag} x{wpr}", k.entry),
+                    k.source(w, wpr),
+                ));
+            }
         }
     }
     for k in frink_cuda::mul_mm::KINDS {
@@ -102,7 +106,7 @@ mod tests {
         let n_mm = frink_cuda::mul_mm::KINDS.len();
         assert_eq!(
             ks.len(),
-            frink_cuda::matvec_kinds::KINDS.len() + 2 * COALESCED.len() + 2 * n_mm + 1
+            frink_cuda::matvec_kinds::KINDS.len() + 4 * COALESCED.len() + 2 * n_mm + 1
         );
         let mut names: Vec<&str> = ks.iter().map(|k| k.name.as_str()).collect();
         names.sort_unstable();
