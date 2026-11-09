@@ -75,10 +75,14 @@ pub const MIN_CC_MAJOR: i32 = 8;
 /// The NVRTC target for the body.
 pub const ARCH: &str = "compute_80";
 
-/// The kernel body. `FX_*` geometry names are `#define`d by
-/// [`tc_kernel_src`]; the dequant helpers come from the kind's row
-/// exactly as for the SIMT body.
-pub const TC_BODY_SRC: &str = r#"
+/// The PTX the tensor-core bodies share, as `__device__` helpers: f16
+/// packing, the `m16n8k16` MMA and the two `ldmatrix` forms. One text,
+/// prepended to every unit that issues them (this GEMM and the prefill
+/// attention, [`crate::prefill_attn_tc`]), so each fragment layout is
+/// spelled once. The prefill attention's host check replaces exactly
+/// these helpers with CPU twins
+/// (`tools/prefill_attn_tc_host_check/tc_shim.h`).
+pub const TC_PTX_SRC: &str = r#"
 __device__ __forceinline__ unsigned int frink_pack2h(float lo, float hi) {
     unsigned int r;
     asm("{ .reg .f16 l, h; cvt.rn.f16.f32 l, %1; cvt.rn.f16.f32 h, %2; mov.b32 %0, {l, h}; }"
@@ -104,6 +108,24 @@ __device__ __forceinline__ void frink_ldsm_x4(unsigned int* r, const unsigned sh
         : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
 }
 
+// The same four loads, transposed: of matrix i, lane l receives the
+// elements at rows 2 * (l % 4) and 2 * (l % 4) + 1 of column l / 4. A
+// tile stored [k][n] (n contiguous) arrives as the k-major B fragment
+// `mma.m16n8k16` reads, which is how the prefill attention takes V,
+// stored [key][channel], as the B operand of P * V.
+__device__ __forceinline__ void frink_ldsm_x4_trans(unsigned int* r, const unsigned short* p) {
+    unsigned int a;
+    asm("{ .reg .u64 t; cvta.to.shared.u64 t, %1; cvt.u32.u64 %0, t; }" : "=r"(a) : "l"(p));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
+        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+"#;
+
+/// The kernel body. `FX_*` geometry names are `#define`d by
+/// [`tc_kernel_src`]; the dequant helpers come from the kind's row
+/// exactly as for the SIMT body, and the PTX helpers from
+/// [`TC_PTX_SRC`].
+pub const TC_BODY_SRC: &str = r#"
 #ifndef FX_GROUPED
 #define FX_GROUPED 0
 #endif
@@ -381,7 +403,7 @@ pub fn tc_kernel_src(kind: &MulMmKind) -> String {
         se = stage_elems(kind),
     );
     let (_, fn_name) = tc_names(kind);
-    let body = TC_BODY_SRC.replace("FX_FN_NAME", fn_name);
+    let body = format!("{TC_PTX_SRC}{}", TC_BODY_SRC.replace("FX_FN_NAME", fn_name));
     format!("{defines}{}", kernel_src_with_body(kind, &body))
 }
 

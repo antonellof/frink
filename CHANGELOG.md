@@ -70,6 +70,27 @@ are the ones worth reading twice.
   the gather from the device. On an A10G a Qwen3-30B-A3B `pp512` step
   went from about 532 to 330 ms and a gpt-oss-20b one from about 345 to
   293 ms, token-identical to the CPU (#259).
+- **A CUDA prefill batch's attention runs on the tensor cores.** The
+  SIMT kernel did every product as an f32 FMA, about 4.6 TFLOPS on an
+  L40S and 15 ms of a 165 ms Llama-3.1-8B pp512 step. On `sm_80` and
+  up, at head widths 64, 128 and 256, a new kernel computes Q K^T and
+  P V with `mma.sync.m16n8k16` (f16 operands, f32 accumulation) and
+  the online softmax between them in f32. The query heads of one KV
+  head share a block, and so its K/V tiles. The causal and window
+  bounds are computed, so a block reads only the keys its rows can
+  see. Windows, the logit softcap and gpt-oss's sinks are all served.
+  Q, K, V and the probabilities round to f16 as llama.cpp's flash
+  attention rounds them, and the hardware test holds the output to the
+  error that rounding can cause. The kernel text matches a host twin
+  bit for bit on a CPU
+  (`crates/frink-cuda/tools/prefill_attn_tc_host_check`). On an A100,
+  `frink verify` over a 512-token prompt is token-identical to the CPU
+  on Llama-3.1-8B, Qwen2.5-7B (GQA 7), gpt-oss-20b (sinks, head width
+  64), Gemma-3-12B (head width 256, windows) and Gemma-2-9B (softcap),
+  and `pp512` went from 2056 to 2297 tokens/s on Llama-3.1-8B Q4_K_M,
+  2394 to 2624 on Qwen2.5-7B, 2021 to 2161 on gpt-oss-20b, 1221 to 1344
+  on Gemma-3-12B and 1386 to 1597 on Gemma-2-9B.
+  `FRINK_CUDA_PREFILL_ATTN=simt` keeps the SIMT kernel (#259).
 
 ## [0.60.0] - 2026-11-09
 

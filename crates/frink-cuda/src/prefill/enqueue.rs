@@ -13,6 +13,7 @@ use super::kernels::{
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
+use crate::prefill_attn_tc::launch::{enqueue_prefill_attn_tc, PrefillAttnBody};
 use cudarc::driver::{
     CudaDevice, CudaFunction, CudaSlice, CudaView, CudaViewMut, DevicePtr, DeviceSlice,
     LaunchAsync, LaunchConfig,
@@ -481,18 +482,10 @@ pub(crate) fn enqueue_rope_rows(
     Ok(())
 }
 
-/// The attention geometry the kernel takes, as one value.
-pub struct AttnArgs {
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub head_dim: usize,
-    pub start_pos: usize,
-    /// `None` for full causal attention.
-    pub window: Option<usize>,
-    pub scale: f32,
-    /// `None` for no logit softcap.
-    pub softcap: Option<f32>,
-}
+// The attention geometry every attention launch here takes. It lives
+// beside the tensor-core kernel's host twin, which is always compiled
+// and takes it too.
+pub use crate::prefill_attn_tc::AttnArgs;
 
 /// Dynamic shared bytes the tiled prefill attention needs at `rpw`
 /// rows per warp and `bc` keys per tile, for a head of `head_dim`: the
@@ -535,7 +528,33 @@ fn prefill_attn_smem_limit(dev: &Arc<CudaDevice>, func: &CudaFunction) -> Result
 
 /// Causal GQA for `n_q` query rows over `k_all` / `v_all` holding
 /// `start_pos + n_q` positions. Returns `[n_q, n_heads, head_dim]`.
+///
+/// The one door every batched layer's attention goes through: the
+/// tensor-core kernel (`crate::prefill_attn_tc`) where
+/// [`PrefillAttnBody::select`] says the shape and the device take it,
+/// the SIMT kernel otherwise.
 pub(crate) fn enqueue_causal_gqa_prefill(
+    dev: &Arc<CudaDevice>,
+    q: &CudaSlice<f32>,
+    k_all: &CudaSlice<f32>,
+    v_all: &CudaSlice<f32>,
+    n_q: usize,
+    args: &AttnArgs,
+    sinks: Option<&CudaSlice<f32>>,
+) -> Result<CudaSlice<f32>, CudaError> {
+    match PrefillAttnBody::select(dev, args) {
+        PrefillAttnBody::TensorCore => {
+            enqueue_prefill_attn_tc(dev, q, k_all, v_all, n_q, args, sinks)
+        }
+        PrefillAttnBody::Simt => {
+            enqueue_causal_gqa_prefill_simt(dev, q, k_all, v_all, n_q, args, sinks)
+        }
+    }
+}
+
+/// [`enqueue_causal_gqa_prefill`] on the SIMT kernel, whatever the
+/// device.
+pub(crate) fn enqueue_causal_gqa_prefill_simt(
     dev: &Arc<CudaDevice>,
     q: &CudaSlice<f32>,
     k_all: &CudaSlice<f32>,
