@@ -13,8 +13,9 @@
 //!
 //! The statistics are llama-bench's too: `avg_ts` is the MEAN of the
 //! per-repetition rates and `stddev_ts` the SAMPLE stddev (n - 1), as
-//! `llama-bench.cpp:102-118` computes them, whatever the markdown table
-//! prints (#481).
+//! `llama-bench.cpp:102-118` computes them. The table, the `--compare`
+//! gap and the receipt take the same two numbers through [`mean`] and
+//! [`sample_stddev`] (#481).
 
 use std::fmt::Write as _;
 
@@ -87,7 +88,7 @@ pub struct TestRecord {
 }
 
 /// llama-bench's `avg` over `u64` or `f64`.
-fn mean(v: &[f64]) -> f64 {
+pub(super) fn mean(v: &[f64]) -> f64 {
     if v.is_empty() {
         0.0
     } else {
@@ -96,7 +97,7 @@ fn mean(v: &[f64]) -> f64 {
 }
 
 /// llama-bench's `stdev`: the sample form, `n - 1`, and 0 below two.
-fn sample_stddev(v: &[f64]) -> f64 {
+pub(super) fn sample_stddev(v: &[f64]) -> f64 {
     let n = v.len();
     if n <= 1 {
         return 0.0;

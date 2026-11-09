@@ -1516,8 +1516,10 @@ The web UI is a separate app. See [`ui/`](../ui) and
 
 With `-m`, `bench` works like [`llama-bench`](https://github.com/ggerganov/llama.cpp/tree/master/tools/llama-bench).
 Same workload names (`pp<N>` batched prefill, `tg<N>` decode), same
-reporting (median ± population stddev over `-r` reps, one warmup
-discarded), same flag names. Put the two outputs side by side and they
+reporting (mean ± sample stddev over `-r` reps, as llama-bench's
+`avg_ts` and `stdev_ts`, one warmup discarded), same flag names. Receipts
+before schema 4 hold the median and the population stddev instead; each
+keeps its raw `frink_samples`. Put the two outputs side by side and they
 line up.
 
 ```bash

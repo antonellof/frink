@@ -140,6 +140,25 @@ fn tps(v: Option<f64>) -> String {
     .unwrap_or_else(|| "—".into())
 }
 
+/// A test's frink rate as llama-bench states its own: the mean of the
+/// receipt's `frink_samples`, which every receipt keeps. Schema-3 and
+/// older receipts wrote the median as `frink_tps`; taking the mean of
+/// their samples puts every row of the ledger on llama-bench's statistic,
+/// the one the llama.cpp column holds (`avg_ts`), without re-measuring
+/// (#481). A receipt with no samples falls back to `frink_tps`.
+fn frink_rate(t: &serde_json::Value) -> Option<f64> {
+    let samples: Option<Vec<f64>> = t
+        .get("frink_samples")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_f64()).collect());
+    match samples {
+        Some(s) if !s.is_empty() && s.iter().all(|v| v.is_finite()) => {
+            Some(s.iter().sum::<f64>() / s.len() as f64)
+        }
+        _ => t.get("frink_tps").and_then(|v| v.as_f64()),
+    }
+}
+
 pub fn render(bench_dir: &Path) -> anyhow::Result<()> {
     let dir = engine_receipt_dir(bench_dir);
     let mut receipts: Vec<serde_json::Value> = Vec::new();
@@ -219,9 +238,12 @@ pub fn render(bench_dir: &Path) -> anyhow::Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?")
                     .to_string(),
-                frink: t.get("frink_tps").and_then(|v| v.as_f64()),
+                frink: frink_rate(t),
                 llama: t.get("llama_tps").and_then(|v| v.as_f64()),
-                gap: t.get("gap").and_then(|v| v.as_f64()),
+                gap: match (t.get("llama_tps").and_then(|v| v.as_f64()), frink_rate(t)) {
+                    (Some(l), Some(f)) if f > 0.0 => Some(l / f),
+                    _ => t.get("gap").and_then(|v| v.as_f64()),
+                },
                 version: r
                     .get("frink_version")
                     .and_then(|v| v.as_str())
