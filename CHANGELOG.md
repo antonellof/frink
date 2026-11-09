@@ -17,15 +17,12 @@ are the ones worth reading twice.
 
 ### Changed
 
-- **A CUDA prefill step's K/V comes back through page-locked memory,
-  in parallel, and stays on the GPU.** The stack's one download (143 MB
-  for Llama-3.1-8B `pp512`) went to pageable memory at 1.9 GB/s, then
-  was copied twice more on one host thread: 208 of the step's 383 ms
-  on an L40S. It now lands in a reused page-locked buffer (11 ms), is
-  pushed into the layers' caches in parallel straight from there, and
-  the prompt's rows are written into the device mirrors a decode token
-  attends over, so the first token does not upload the prompt again
-  (#259).
+- **Gemma's layers stay on the GPU under CUDA.** The resident CUDA stack
+  refused a GeGLU feed-forward, so Gemma 2 and 3 ran every decode token
+  and prefill step on the per-op path, 337 host waits a Gemma-3-12B
+  token. The stack now runs GeGLU in ggml-cuda's tanh form beside
+  SwiGLU. On an L40S, Gemma-3-12B Q4_K_M `pp512` went from 82 to 727
+  tokens/s and `tg128` from 33 to 55 (#133, #259).
 
 ## [0.58.0] - 2026-11-08
 
