@@ -19,7 +19,7 @@ fn wave(n: usize, seed: f32) -> Vec<f32> {
 /// The quantizer's blocks are its twin's, bit for bit: both layouts, a
 /// gather, a K that is not a whole number of blocks, padding columns.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_quantizer_writes_its_twin_s_blocks() {
     let dev = shared_device().unwrap();
     for (k, rows, ncols, ncols_pad, gathered) in [

@@ -7,8 +7,9 @@
 //! twice its f16 one. And llama.cpp's CUDA prefill quantizes every
 //! quantized weight type's activations to q8_1, so an f16-activation
 //! GEMM was a numerics deviation from the oracle (ADR 0009) as well as
-//! the slower path. Selected by `FRINK_CUDA_MUL_MM=mmq` for the kinds it
-//! has a loader for, while it is measured.
+//! the slower path. The default for Q8_0 and Q4_K on `sm_80` and up
+//! (`FRINK_CUDA_MUL_MM=tc` keeps the f16 body); Q6_K has a loader but
+//! measured slower than the f16 body, so it keeps that.
 
 pub mod kernel;
 pub mod quantize;

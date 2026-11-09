@@ -133,8 +133,8 @@ pub(crate) fn enqueue_mul_mm(
     ),
     CudaError,
 > {
-    // `FRINK_CUDA_MUL_MM=mmq`: the int8 GEMM for the kinds it has a
-    // loader for, on `sm_80` and up, while it is measured.
+    // The int8 GEMM for the kinds it is faster on, on `sm_80` and up;
+    // `FRINK_CUDA_MUL_MM=tc` or `simt` keeps the f16 bodies for an A/B.
     if let Some(mmq) = mmq_kind(dev, kind) {
         return crate::mmq::enqueue_mmq(dev, mmq, weights, d_x, n_rows, n_cols, batch, row_bytes);
     }
@@ -146,16 +146,17 @@ pub(crate) fn enqueue_mul_mm(
     )
 }
 
-/// The int8 GEMM's kind for `kind` when `FRINK_CUDA_MUL_MM=mmq` asks for
-/// it and the device has the int8 tensor cores it needs (`sm_80`); the
-/// switch is read once.
+/// The int8 GEMM's kind for `kind` unless `FRINK_CUDA_MUL_MM` names an
+/// f16 body (`tc` or `simt`), on a device with the int8 tensor cores it
+/// needs (`sm_80`); the switch is read once.
 fn mmq_kind(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     kind: &MulMmKind,
 ) -> Option<crate::mmq::kernel::MmqKind> {
     static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let asked = *ASKED.get_or_init(|| {
-        std::env::var("FRINK_CUDA_MUL_MM").is_ok_and(|v| v.eq_ignore_ascii_case("mmq"))
+        !std::env::var("FRINK_CUDA_MUL_MM")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("tc") || v.eq_ignore_ascii_case("simt"))
     });
     if !asked || crate::gpu::compute_capability_major(dev) < crate::mul_mm_tc::MIN_CC_MAJOR {
         return None;
