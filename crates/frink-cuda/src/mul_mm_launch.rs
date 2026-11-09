@@ -291,7 +291,7 @@ pub(crate) fn enqueue_mul_mm_grouped(
     ),
     CudaError,
 > {
-    use cudarc::driver::{DevicePtr, LaunchAsync};
+    use cudarc::driver::DevicePtr;
     if MulMmBody::select(dev) != MulMmBody::TensorCore {
         return Err(CudaError::Unsupported(
             "grouped mul_mm: the tensor-core body needs sm_80".to_string(),
@@ -311,6 +311,89 @@ pub(crate) fn enqueue_mul_mm_grouped(
             "grouped mul_mm: groups, gather or weights do not agree with the shape".to_string(),
         ));
     }
+    let held: Vec<_> = weights
+        .iter()
+        .map(|w| resident_cuda_weights(dev, w))
+        .collect::<Result<_, _>>()?;
+    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
+    let d_table = crate::xfer::htod(dev, "grouped mul_mm table", &table)?;
+    let d_off = crate::xfer::htod(dev, "grouped mul_mm offsets", group_off)?;
+    let d_gather = crate::xfer::htod(dev, "grouped mul_mm gather", gather)?;
+    let max_group = group_off
+        .windows(2)
+        .map(|w| (w[1] - w[0]) as usize)
+        .max()
+        .unwrap_or(0);
+    let shape = GroupedShape {
+        kind,
+        n_rows,
+        n_cols,
+        row_bytes,
+    };
+    // SAFETY: the table holds `n_groups` live pointers to weights of this
+    // shape (checked above, held by the caller until its wait), the
+    // offsets are non-decreasing and end at `pairs`, the largest group is
+    // `max_group`, and every gather entry is a row of `x16`.
+    let d_out = unsafe {
+        enqueue_mul_mm_grouped_dev(
+            dev,
+            &shape,
+            &d_table.slice(..),
+            n_groups,
+            &d_off,
+            Some(&d_gather),
+            x16,
+            pairs,
+            max_group,
+        )
+    }?;
+    Ok((d_out, held))
+}
+
+/// The shape every group of a grouped GEMM shares.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GroupedShape<'k> {
+    pub kind: &'k MulMmKind,
+    pub n_rows: usize,
+    pub n_cols: usize,
+    pub row_bytes: usize,
+}
+
+/// The launch half of [`enqueue_mul_mm_grouped`], every input already on
+/// the device: the routed prefill groups its tokens by expert there, so
+/// no host round trip builds the offsets or the gather. A null `gather`
+/// reads pair `p`'s activations from row `p`.
+///
+/// # Safety
+/// `table` holds `n_groups` device pointers to `n_rows * row_bytes` live
+/// bytes of `shape.kind` each, alive until the stream has run the
+/// launch; `group_off` holds `n_groups + 1` non-decreasing pair indices
+/// from 0 to `pairs`, no group larger than `max_group`; every gather
+/// entry (or every pair, without one) is a row of `x16`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn enqueue_mul_mm_grouped_dev(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    shape: &GroupedShape<'_>,
+    table: &cudarc::driver::CudaView<'_, u64>,
+    n_groups: usize,
+    group_off: &cudarc::driver::CudaSlice<i32>,
+    gather: Option<&cudarc::driver::CudaSlice<i32>>,
+    x16: &cudarc::driver::CudaSlice<u16>,
+    pairs: usize,
+    max_group: usize,
+) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
+    use cudarc::driver::{DevicePtr, LaunchAsync};
+    let GroupedShape {
+        kind,
+        n_rows,
+        n_cols,
+        row_bytes,
+    } = *shape;
+    if MulMmBody::select(dev) != MulMmBody::TensorCore {
+        return Err(CudaError::Unsupported(
+            "grouped mul_mm: the tensor-core body needs sm_80".to_string(),
+        ));
+    }
     let (module, fn_name) = crate::mul_mm_tc::tc_grouped_names(kind);
     crate::gpu::ensure_module_loaded_lazy_for_arch(
         dev,
@@ -322,43 +405,27 @@ pub(crate) fn enqueue_mul_mm_grouped(
     let func = dev.get_func(module, fn_name).ok_or_else(|| {
         CudaError::KernelCompile(format!("function '{fn_name}' not found after load_ptx"))
     })?;
-    let held: Vec<_> = weights
-        .iter()
-        .map(|w| resident_cuda_weights(dev, w))
-        .collect::<Result<_, _>>()?;
-    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
-    let d_table = crate::xfer::htod(dev, "grouped mul_mm table", &table)?;
-    let d_off = crate::xfer::htod(dev, "grouped mul_mm offsets", group_off)?;
-    let d_gather = crate::xfer::htod(dev, "grouped mul_mm gather", gather)?;
     // SAFETY: every group's blocks write every one of its pairs' rows
     // below `n_rows` (the grid covers the largest group and all rows), and
     // the groups' pairs are `0 .. pairs`.
     let mut d_out = unsafe { crate::gpu::alloc_out(dev, pairs * n_rows, "grouped mul_mm output") }?;
-    let max_group = group_off
-        .windows(2)
-        .map(|w| (w[1] - w[0]) as usize)
-        .max()
-        .unwrap_or(0);
     let (gx, gy) = crate::mul_mm_tc::tc_grid_dims(n_rows, max_group.max(1));
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (gx as u32, gy as u32, n_groups as u32),
         block_dim: (crate::mul_mm_tc::TTHREADS as u32, 1, 1),
         shared_mem_bytes: 0,
     };
-    // SAFETY: (const u64*, const int*, const int*, const u16*, float*,
-    // int x4) matched positionally by the FX_GROUPED parameter list; the
-    // table holds `n_groups` live device pointers to `n_rows * row_bytes`
-    // bytes each (checked above, held by the caller until its wait), the
-    // offsets are `n_groups + 1` non-decreasing pair indices, every gather
-    // entry is a row of `x16` (the caller's), and `d_out` is
-    // `pairs * n_rows`.
+    let gather = gather.map_or(0u64, |g| *g.device_ptr());
+    // SAFETY: (const u64*, const int*, const int* or null, const u16*,
+    // float*, int x4) matched positionally by the FX_GROUPED parameter
+    // list, under the caller's contract above; `d_out` is `pairs * n_rows`.
     unsafe {
         func.launch(
             cfg,
             (
-                &d_table,
-                &d_off,
-                &d_gather,
+                table,
+                group_off,
+                gather,
                 x16,
                 &mut d_out,
                 n_rows as i32,
@@ -369,7 +436,7 @@ pub(crate) fn enqueue_mul_mm_grouped(
         )
         .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
     }
-    Ok((d_out, held))
+    Ok(d_out)
 }
 
 /// `x[..n]` as f16 (round to nearest even), on the device.

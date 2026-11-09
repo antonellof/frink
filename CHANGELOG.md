@@ -29,6 +29,14 @@ are the ones worth reading twice.
   `FRINK_CUDA_DEVICE_ROUTE=0` keeps every token there. On an L40S a
   Qwen3-30B-A3B token went from 9.0 to 7.8 ms and a gpt-oss-20b token
   from 7.3 to 6.3 ms, token-identical to the CPU (#133).
+- **A CUDA prefill batch routes and groups its MoE tokens on the
+  device.** A routed layer in a prompt downloaded its router's logits,
+  routed every token on the host, built the expert groups there and
+  uploaded them, about 6 ms a layer with the GPU idle. The routing
+  kernel now takes the whole batch, three small kernels group the pairs
+  by expert (counts, offsets, a scatter), and each projection is one
+  grouped GEMM over every expert of the layer, reading the offsets and
+  the gather from the device (#259).
 
 ## [0.60.0] - 2026-11-09
 

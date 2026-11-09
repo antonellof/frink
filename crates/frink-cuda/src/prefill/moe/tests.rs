@@ -622,9 +622,22 @@ impl ExpertSource for FixtureExperts<'_> {
 #[test]
 #[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs)"]
 fn a_device_routed_token_matches_its_host_twin_without_the_host_routing() {
+    device_routed_matches_its_host_twin(1);
+}
+
+/// The same over a prefill batch: the tokens grouped by expert on the
+/// device and every projection one grouped GEMM, with no host routing
+/// either, every token's experts back in order.
+#[test]
+#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+fn a_device_routed_batch_matches_its_host_twin_grouped_on_the_device() {
+    device_routed_matches_its_host_twin(6);
+}
+
+fn device_routed_matches_its_host_twin(batch: usize) {
     for oai in [false, true] {
-        let fx = RoutedFixture::new(1, oai);
-        let twin = fx.twin(1);
+        let fx = RoutedFixture::new(batch, oai);
+        let twin = fx.twin(batch);
         let (hidden, ffn) = (fx.hidden, fx.ffn);
         let q_w = fx.n_heads * fx.head_dim;
         let kv_w = fx.n_kv_heads * fx.head_dim;
@@ -696,14 +709,25 @@ fn a_device_routed_token_matches_its_host_twin_without_the_host_routing() {
         let out = launch_stack(
             StackInput::Hidden(&fx.hidden_in),
             &[(&layer, &params)],
-            1,
+            batch,
             StackKv::UploadPrefix,
             Some(&mut host_route),
         )
         .unwrap();
-        assert_eq!(asked, 0, "oai={oai}: the host routing was asked");
-        let want_ids: Vec<usize> = twin.picks[0].iter().map(|&(e, _)| e).collect();
-        assert_eq!(out.device_routed, vec![Some(want_ids)], "oai={oai}");
+        assert_eq!(
+            asked, 0,
+            "batch={batch} oai={oai}: the host routing was asked"
+        );
+        let want_ids: Vec<usize> = twin
+            .picks
+            .iter()
+            .flat_map(|p| p.iter().map(|&(e, _)| e))
+            .collect();
+        assert_eq!(
+            out.device_routed,
+            vec![Some(want_ids)],
+            "batch={batch} oai={oai}"
+        );
         assert_close(
             &out.hidden,
             &twin.hidden,
