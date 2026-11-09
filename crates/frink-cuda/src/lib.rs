@@ -20,6 +20,8 @@ pub mod counters;
 /// One-row (decode) attention split across the keys: kernel text and
 /// its host twin, always compiled so the host check can run it.
 pub mod decode_attn;
+/// Scalar twins of the q8_1 quantizer and the dp4a matvecs.
+pub mod dp4a_twin;
 /// The embedding gather (`get_rows`): kernel text built from each
 /// kind's `mul_mm` dequant, and its scalar twin. Always compiled, so
 /// `frink-core`'s kernel matrix reads the set on a CPU-only build.
@@ -58,6 +60,9 @@ pub mod prefill_attn_tc;
 
 #[cfg(feature = "cuda")]
 pub mod attn;
+/// The dp4a decode matvecs on the device (`FRINK_CUDA_MATVEC=dp4a`).
+#[cfg(feature = "cuda")]
+mod dp4a_launch;
 #[cfg(feature = "cuda")]
 mod gen_launch;
 #[cfg(feature = "cuda")]
@@ -69,6 +74,9 @@ mod glu;
 pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod graph;
+/// The decode matvec launch path: plan, enqueue, multi and fused FFN.
+#[cfg(feature = "cuda")]
+mod matvec_launch;
 #[cfg(feature = "cuda")]
 pub mod mul_mm_launch;
 /// One dense prefill layer resident on the device (#259).

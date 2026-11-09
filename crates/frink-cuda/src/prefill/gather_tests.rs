@@ -124,7 +124,7 @@ fn a_gather_the_table_cannot_serve_is_refused_before_the_device() {
 /// runs are the same launches on the same bytes. One row (the decode
 /// path, matvecs) and four (a prefill batch, the GEMM).
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn a_gathered_stack_input_is_the_uploaded_host_row() {
     let (layer, p) = (layer(norm()), params());
     let t = table();

@@ -7,7 +7,9 @@
 //!
 //! The geometry is the environment's (`FRINK_CUDA_MATVEC`,
 //! `FRINK_CUDA_MATVEC_WPR`), read once per process, so a sweep runs
-//! the example once per setting. The weights are pseudo-random bytes:
+//! the example once per setting. Under `FRINK_CUDA_MATVEC=dp4a` each
+//! timed launch quantizes its activation too, which a lone projection
+//! pays and a shared one (Q/K/V, gate/up) pays once. The weights are pseudo-random bytes:
 //! the timing does not depend on their values, and correctness is the
 //! hardware tests' (`gpu.rs`), not this.
 

@@ -35,6 +35,7 @@
 //! something else.
 
 pub mod enqueue;
+mod held;
 pub mod kernels;
 pub mod kv_mirror;
 pub mod moe;
@@ -42,7 +43,7 @@ pub mod moe_device;
 pub mod proj;
 
 pub use crate::gpu::GluCuda;
-use crate::gpu::{glu_mul_device, resident_cuda_f32, shared_device, CudaError};
+use crate::gpu::{glu_mul_device, shared_device, CudaError, MatvecInput};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
 use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut};
@@ -50,6 +51,7 @@ use enqueue::{
     enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
     enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
 };
+use held::Held;
 pub use kv_mirror::CudaKvMirror;
 use moe::check_expert_shapes;
 pub use moe::routed_batch_supported;
@@ -735,45 +737,6 @@ fn norm_rows(w: Option<&[f32]>, width: usize) -> Result<Option<(usize, usize)>, 
     }
 }
 
-/// Every resident buffer a launch reads, held until the stack's one
-/// download has synchronised the stream: the kernels read them
-/// asynchronously, and a buffer must not be released under a kernel
-/// that is still reading it.
-#[derive(Default)]
-struct Held {
-    weights: Vec<Arc<crate::gpu::ResidentCudaWeights>>,
-    vectors: Vec<Arc<crate::resident::ResidentCuda<f32>>>,
-    /// Anything else a kernel reads: a layer's expert tables.
-    keep: Vec<Arc<dyn std::any::Any + Send + Sync>>,
-}
-
-impl Held {
-    /// A long-lived f32 vector (norm weight, bias, RoPE divisors) on
-    /// the device, held: uploaded on first use, never per call.
-    fn vector(
-        &mut self,
-        dev: &Arc<CudaDevice>,
-        v: &[f32],
-    ) -> Result<Arc<crate::resident::ResidentCuda<f32>>, CudaError> {
-        let r = resident_cuda_f32(dev, v)?;
-        self.vectors.push(r.clone());
-        Ok(r)
-    }
-
-    /// One projection on the device, its weights held.
-    fn proj(
-        &mut self,
-        dev: &Arc<CudaDevice>,
-        m: &ProjWeights<'_>,
-        x: &CudaSlice<f32>,
-        batch: usize,
-    ) -> Result<CudaSlice<f32>, CudaError> {
-        let (out, w) = m.enqueue(dev, x, batch)?;
-        self.weights.push(w);
-        Ok(out)
-    }
-}
-
 /// What one layer of a run varies by beside its weights: the batch,
 /// where its history lives, and where its K/V rows are staged.
 struct LayerStep<'m, 'r, 'e> {
@@ -837,9 +800,12 @@ fn run_layer_resident<'e>(
 
     // --- attention ---
     let normed = enqueue_rmsnorm_rows(dev, h, &attn_norm_w.slice, batch, hidden_dim, rms_eps)?;
-    let mut q = held.proj(dev, &layer.q, &normed, batch)?;
-    let mut k = held.proj(dev, &layer.k, &normed, batch)?;
-    let mut v = held.proj(dev, &layer.v, &normed, batch)?;
+    // Q, K and V read one input: under dp4a, one q8_1 copy for all three.
+    let attn_x = MatvecInput::new(&normed);
+    let mut q = held.proj(dev, &layer.q, &attn_x, batch)?;
+    let mut k = held.proj(dev, &layer.k, &attn_x, batch)?;
+    let mut v = held.proj(dev, &layer.v, &attn_x, batch)?;
+    drop(attn_x);
     drop(normed);
 
     for (x, bias, width) in [
@@ -973,7 +939,7 @@ fn run_layer_resident<'e>(
         enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args, sinks)?
     };
     drop(q);
-    let mut o = held.proj(dev, &layer.o, &attn, batch)?;
+    let mut o = held.proj(dev, &layer.o, &MatvecInput::new(&attn), batch)?;
     drop(attn);
     // `wo`'s bias, on the projection before any norm of it, where
     // `build_attn` adds `wo_b`.
@@ -990,10 +956,12 @@ fn run_layer_resident<'e>(
 
     // --- FFN ---
     let normed2 = enqueue_rmsnorm_rows(dev, h, &ffn_norm_w.slice, batch, hidden_dim, rms_eps)?;
+    // Gate and up (an MoE layer's router and experts too) read one input.
+    let ffn_x = MatvecInput::new(&normed2);
     let mut down = match layer.ffn {
         StackFfn::Dense(ex) => {
             let ffn_dim = ex.gate.rows();
-            run_expert(dev, held, &ex, layer.glu, &normed2, batch, ffn_dim)?
+            run_expert(dev, held, &ex, layer.glu, &ffn_x, batch, ffn_dim)?
         }
         StackFfn::Moe {
             router,
@@ -1005,13 +973,14 @@ fn run_layer_resident<'e>(
             })?;
             let device = device.zip(ids);
             let (out, on_device) = moe::run_routed(
-                dev, held, router, layer.glu, &normed2, batch, hidden_dim, ffn_dim, index, route,
+                dev, held, router, layer.glu, &ffn_x, batch, hidden_dim, ffn_dim, index, route,
                 device,
             )?;
             routed_on_device = on_device;
             out
         }
     };
+    drop(ffn_x);
     drop(normed2);
     if let Some(post) = layer.post_ffn_norm {
         let d_w = held.vector(dev, post)?;
@@ -1029,7 +998,7 @@ fn run_expert(
     held: &mut Held,
     ex: &ExpertProjCuda<'_>,
     glu: GluCuda,
-    x: &CudaSlice<f32>,
+    x: &MatvecInput<'_>,
     batch: usize,
     ffn_dim: usize,
 ) -> Result<CudaSlice<f32>, CudaError> {
@@ -1043,7 +1012,7 @@ fn run_expert(
     }
     let act = glu_mul_device(dev, glu, &gate, &up, batch * ffn_dim)?;
     drop((gate, up));
-    let mut down = held.proj(dev, &ex.down, &act, batch)?;
+    let mut down = held.proj(dev, &ex.down, &MatvecInput::new(&act), batch)?;
     if let Some(b) = ex.bias {
         let d_d = held.vector(dev, b.down)?;
         enqueue_add_bias_rows(dev, &mut down, &d_d.slice, batch, ex.down.rows())?;

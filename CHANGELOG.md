@@ -102,6 +102,29 @@ are the ones worth reading twice.
   on Gemma-3-12B and 1386 to 1597 on Gemma-2-9B.
   `FRINK_CUDA_PREFILL_ATTN=simt` keeps the SIMT kernel (#259).
 
+- **`FRINK_CUDA_MATVEC=dp4a` runs the CUDA decode matvecs as llama.cpp
+  does.** frink's decode matvecs read the activation as f32 and
+  multiply each weight in float, which on an L40S left a
+  Llama-3.1-8B token GPU-bound at 8.9 ms against llama.cpp's 7.35. The
+  switch quantizes the activation once to q8_1 on the device
+  (`quantize.cu`'s arithmetic: `d = amax / 127`, `roundf`, the f16 of
+  the f32 block sum) and dots Q4_K, Q6_K, Q8_0 and MXFP4 rows against it
+  with `dp4a`, following `vecdotq.cuh`'s `vec_dot_*_q8_1` and `mmvq`'s
+  launch geometry (four warps a row, two for the K-quants on
+  Volta/Turing, several rows a threadblock for a short row), in the
+  routed-expert form too. One quantization serves every matvec that
+  reads the vector: Q, K and V, gate and up, a routed layer's router
+  and its experts. That is 3.6x fewer activation bytes per row and
+  three to four times fewer instructions per weight, and it moves
+  decode's rounding to llama.cpp CUDA's (ADR 0009). On an A100,
+  `frink verify` is token-identical to the CPU under it on
+  Llama-3.1-8B Q4_K_M and Q8_0, gpt-oss-20b and Qwen3-30B-A3B, and
+  `tg128` went from 83.2 to 128.4 tokens/s on Llama-3.1-8B Q4_K_M, 83.7
+  to 100.7 on its Q8_0, 104.1 to 146.5 on gpt-oss-20b and 83.7 to 90.1
+  on Qwen3-30B-A3B. Off by default for now: the older decode tests hold
+  the matvec to an f32 reference at bounds q8_1 activations cannot
+  meet (#133).
+
 ## [0.60.0] - 2026-11-09
 
 ### Added

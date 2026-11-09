@@ -24,7 +24,9 @@ fn f16_at(b: &[u8]) -> f32 {
     f16_to_f32(u16::from(b[0]) | (u16::from(b[1]) << 8))
 }
 
-fn q4_k_scale_min(j: usize, scales: &[u8]) -> (u8, u8) {
+/// The six-bit scale and min of Q4_K (and Q5_K) sub-block `j`, ggml's
+/// `get_scale_min_k4`.
+pub fn q4_k_scale_min(j: usize, scales: &[u8]) -> (u8, u8) {
     if j < 4 {
         (scales[j] & 63, scales[j + 4] & 63)
     } else {

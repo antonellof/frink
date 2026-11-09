@@ -159,11 +159,13 @@ impl CoalescedKind {
     }
 
     /// The complete translation unit for `width`: `FX_LANES`, the
-    /// shared prelude, then the kernel.
+    /// block helpers every matvec family shares, the coalesced prelude,
+    /// then the kernel.
     pub fn source(&self, width: MatvecWidth, wpr: usize) -> String {
         format!(
-            "#define FX_LANES {}\n#define FX_WPR {wpr}\n{}{}",
+            "#define FX_LANES {}\n#define FX_WPR {wpr}\n{}{}{}",
             self.lanes(width),
+            super::helpers::BLOCK_HELPERS,
             COALESCED_PRELUDE,
             self.src
         )
@@ -277,9 +279,9 @@ pub fn coalesced_kind(fn_name: &str) -> Option<&'static CoalescedKind> {
 }
 
 /// Helpers every coalesced kernel shares, prepended to each one by
-/// [`CoalescedKind::source`]. One copy, where the four kernels used to
-/// carry four suffixed copies of the f16 decode and two of the Q4_K
-/// scale unpack.
+/// [`CoalescedKind::source`] after [`super::helpers::BLOCK_HELPERS`]
+/// (the f16 decode and the Q4_K scale unpack, one copy for every matvec
+/// family, where the four kernels used to carry four suffixed copies).
 ///
 /// The loaders take the run length as a template argument so that the
 /// branch on it folds at compile time: a 16-byte run becomes one
@@ -319,37 +321,6 @@ pub const COALESCED_PRELUDE: &str = r#"
 #if FX_WPR != 1 && FX_WPR != 2 && FX_WPR != 4 && FX_WPR != 8
 #error "FX_WPR must be 1, 2, 4 or 8"
 #endif
-
-__device__ __forceinline__ float fx_f16_to_f32(unsigned short bits) {
-    unsigned int sign = (bits >> 15) & 0x1u;
-    unsigned int exp = (bits >> 10) & 0x1Fu;
-    unsigned int mant = bits & 0x3FFu;
-    float scale;
-    if (exp == 0) {
-        scale = ldexpf((float)mant, -24);
-    } else if (exp == 31) {
-        scale = mant ? __int_as_float(0x7fc00000) : __int_as_float(0x7f800000);
-    } else {
-        scale = ldexpf((float)(mant | 0x400), (int)exp - 25);
-    }
-    return sign ? -scale : scale;
-}
-
-__device__ __forceinline__ float fx_f16_at(const unsigned char* p) {
-    return fx_f16_to_f32((unsigned short)p[0] | ((unsigned short)p[1] << 8));
-}
-
-__device__ __forceinline__ void fx_q4_k_scale_min(
-    int j, const unsigned char* scales, unsigned char* sc, unsigned char* m
-) {
-    if (j < 4) {
-        *sc = scales[j] & 63;
-        *m = scales[j + 4] & 63;
-    } else {
-        *sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
-        *m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
-    }
-}
 
 template <int N>
 __device__ __forceinline__ void fx_load_bytes_a4(const unsigned char* p, unsigned char* b) {
@@ -742,9 +713,12 @@ extern "C" __global__ void q6_k_matvec_coalesced(
 /// traffic, **5.3%** of the card's 360 GB/s, where llama.cpp reaches
 /// 60.4% (#133).
 ///
-/// The activation stays f32 on purpose. Quantizing it to int8 is what
-/// llama.cpp does, and on a real checkpoint it diverges from the CPU
-/// reference at token 4, which `frink verify` refuses.
+/// The activation stays f32 here. Quantizing it to int8 is what
+/// llama.cpp does, and an earlier int8 attempt diverged from the CPU
+/// reference at token 4 on a real checkpoint, which `frink verify`
+/// refuses. The q8_1 path that follows llama.cpp's CUDA decode exactly
+/// is [`super::dp4a`], behind `FRINK_CUDA_MATVEC=dp4a` until a hardware
+/// run says how it verifies and measures.
 ///
 /// Lane to data mapping, which is the part to get right. With
 /// `B = 128 / FX_LANES` bytes per lane and `sub = lane % FX_LANES`:

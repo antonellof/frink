@@ -21,6 +21,10 @@ twin. The decode matvec kernels for Q4_K, Q5_K, Q6_K and Q8_0
 (`matvec_kinds/coalesced.rs`) have the same pair: twins in
 `coalesced_twin.rs` and `tools/matvec_host_check/run.sh`, which runs
 both widths (`FRINK_CUDA_MATVEC`, see `docs/CONFIG.md`) against them.
+The integer-dot decode matvecs behind `FRINK_CUDA_MATVEC=dp4a` (the q8_1
+quantizer and Q4_K, Q6_K, Q8_0 and MXFP4 against it, llama.cpp's
+`mmvq`; `matvec_kinds/dp4a.rs`) have twins in `dp4a_twin.rs`, and the
+same host check runs them at every launch geometry.
 Neither of those is a measurement. A kernel change merges only
 after `cargo test -p frink-cuda --features cuda -- --ignored` has run
 on a real device.
