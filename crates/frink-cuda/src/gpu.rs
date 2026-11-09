@@ -668,7 +668,9 @@ mod tests {
     /// zero weights, which would pass trivially even with a broken
     /// kernel) using `frink_quant::quantize_q8_0`, so the ignored GPU
     /// tests below check actual numerical agreement with the CPU
-    /// reference, not just "the launch didn't error."
+    /// reference, not just "the launch didn't error." The reference dots
+    /// the activation the matvec reads ([`reads`]): its q8_1 rounding on
+    /// the dp4a kernel, the f32 values on the coalesced one.
     fn real_q8_0_test_matrix(rows: usize, cols: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
         let mut weights = Vec::new();
         let mut all_rows_f32 = Vec::new();
@@ -680,15 +682,24 @@ mod tests {
             all_rows_f32.push(row);
         }
         let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.019).cos()).collect();
+        let xr = reads("q8_0_matvec", cols / frink_quant::Q8_0_BLOCK_ELEMS, &x);
         let expected: Vec<f32> = all_rows_f32
             .iter()
-            .map(|row| frink_quant::dot_q8_0_f32_scalar(&frink_quant::quantize_q8_0(row), &x))
+            .map(|row| frink_quant::dot_q8_0_f32_scalar(&frink_quant::quantize_q8_0(row), &xr))
             .collect();
         (weights, x, expected)
     }
 
+    /// What the decode matvec `fn_name` reads of `x` in this process:
+    /// the q8_1 rounding under the dp4a kernels (the default for Q4_K,
+    /// Q6_K, Q8_0 and MXFP4), `x` itself under the f32 kernels, by the
+    /// same once-per-process switch the launch reads.
+    fn reads(fn_name: &str, n_blocks: usize, x: &[f32]) -> Vec<f32> {
+        crate::matvec_kinds::dp4a::matvec_reads(fn_name, n_blocks, x)
+    }
+
     #[test]
-    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai); run with --ignored on a CUDA-capable machine to re-verify"]
+    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai); run with --ignored on a CUDA-capable machine to re-verify; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_q8_0_matvec_matches_cpu_reference() {
         // Run manually on a machine with an actual CUDA device:
         //   cargo test -p frink-cuda --features cuda -- --ignored
@@ -951,10 +962,14 @@ mod tests {
     /// independently verified elsewhere in this workspace), so the
     /// ignored GPU tests below check real numerical agreement with that
     /// trusted CPU reference, not just "the launch didn't error."
+    ///
+    /// `fn_name` is the kind's matvec, so the reference dots what that
+    /// matvec reads ([`reads`]).
     fn real_k_quant_test_matrix(
         rows: usize,
         cols: usize,
         block_bytes: usize,
+        fn_name: &str,
         scalar_dot: impl Fn(&[u8], &[f32]) -> f32,
     ) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
         let n_blocks_per_row = cols / 256;
@@ -964,8 +979,9 @@ mod tests {
             weights.extend(pseudo_bytes(r as u32 + 1, row_bytes));
         }
         let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
+        let xr = reads(fn_name, n_blocks_per_row, &x);
         let expected: Vec<f32> = (0..rows)
-            .map(|r| scalar_dot(&weights[r * row_bytes..(r + 1) * row_bytes], &x))
+            .map(|r| scalar_dot(&weights[r * row_bytes..(r + 1) * row_bytes], &xr))
             .collect();
         (weights, x, expected)
     }
@@ -1199,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai, 2026-07-31) with the relative-tolerance fix; run with --ignored on a CUDA-capable machine to re-verify"]
+    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai, 2026-07-31) with the relative-tolerance fix; run with --ignored on a CUDA-capable machine to re-verify; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_q4_k_matvec_matches_cpu_reference() {
         let rows = 3;
         let cols = 256; // 1 Q4_K super-block per row
@@ -1207,6 +1223,7 @@ mod tests {
             rows,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
 
@@ -1227,6 +1244,7 @@ mod tests {
             rows,
             cols,
             frink_quant::Q5_K_BLOCK_BYTES,
+            "q5_k_matvec",
             frink_quant::dot_q5_k_f32_scalar,
         );
 
@@ -1239,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires real CUDA hardware -- 2026-07-31 real RTX 3060 run failed on row 1 with GPU=NaN CPU reference=NaN (assert_close_relative didn't treat NaN==NaN as agreement; fixed, but not yet re-verified on hardware); run with --ignored on a CUDA-capable machine to re-verify"]
+    #[ignore = "requires real CUDA hardware -- 2026-07-31 real RTX 3060 run failed on row 1 with GPU=NaN CPU reference=NaN (assert_close_relative didn't treat NaN==NaN as agreement; fixed, but not yet re-verified on hardware); run with --ignored on a CUDA-capable machine to re-verify; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_q6_k_matvec_matches_cpu_reference() {
         let rows = 3;
         let cols = 512; // 2 Q6_K super-blocks per row
@@ -1247,6 +1265,7 @@ mod tests {
             rows,
             cols,
             frink_quant::Q6_K_BLOCK_BYTES,
+            "q6_k_matvec",
             frink_quant::dot_q6_k_f32_scalar,
         );
 
@@ -1259,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires real CUDA hardware -- verifies that launch_matvec_multi (shared x upload) matches N sequential single-matvec launches; run with --ignored on a CUDA-capable machine"]
+    #[ignore = "requires real CUDA hardware -- verifies that launch_matvec_multi (shared x upload) matches N sequential single-matvec launches; run with --ignored on a CUDA-capable machine; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_matvec_multi_matches_sequential() {
         // Build three Q4_K matrices (different shapes) that share the same
         // activation dimension.
@@ -1271,18 +1290,21 @@ mod tests {
             rows_a,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
         let (weights_b, _, expected_b) = real_k_quant_test_matrix(
             rows_b,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
         let (weights_c, _, expected_c) = real_k_quant_test_matrix(
             rows_c,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
 
@@ -1350,7 +1372,7 @@ mod tests {
     /// `frink_quant::quantize_q8_0` gives an exact producer/consumer
     /// pair, keeping this a real numerical-agreement check.
     #[test]
-    #[ignore = "requires real CUDA hardware -- run with --ignored on a CUDA-capable machine to verify the fused dense-FFN activation-residency path"]
+    #[ignore = "requires real CUDA hardware -- run with --ignored on a CUDA-capable machine to verify the fused dense-FFN activation-residency path; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_dense_ffn_swiglu_matches_sequential_cpu() {
         let hidden_dim = 64; // 2 Q8_0 blocks per row
         let ffn_dim = 96; // 3 Q8_0 blocks per row; gate/up output length
@@ -1416,14 +1438,22 @@ mod tests {
                 })
                 .collect::<Vec<f32>>()
         };
-        let g = cpu_matvec(&gate_w, gate_rb, ffn_dim, &x);
-        let u = cpu_matvec(&up_w, up_rb, ffn_dim, &x);
+        // Each matvec dots what it reads: `x` for gate and up, the
+        // device's SwiGLU output for down.
+        let xr = reads("q8_0_matvec", blk(hidden_dim), &x);
+        let g = cpu_matvec(&gate_w, gate_rb, ffn_dim, &xr);
+        let u = cpu_matvec(&up_w, up_rb, ffn_dim, &xr);
         let act: Vec<f32> = g
             .iter()
             .zip(u.iter())
             .map(|(gv, uv)| (gv / (1.0 + (-gv).exp())) * uv)
             .collect();
-        let expected = cpu_matvec(&down_w, down_rb, hidden_dim, &act);
+        let expected = cpu_matvec(
+            &down_w,
+            down_rb,
+            hidden_dim,
+            &reads("q8_0_matvec", blk(ffn_dim), &act),
+        );
 
         assert_eq!(gpu.len(), expected.len());
         for (i, (got, want)) in gpu.iter().zip(expected.iter()).enumerate() {

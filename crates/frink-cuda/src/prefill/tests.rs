@@ -198,6 +198,38 @@ pub(super) fn q8_1_round(x: &[f32], cols: usize) -> Vec<f32> {
         .collect()
 }
 
+/// One row of `cols` Q8_0 inputs as a decode token's matvec reads it in
+/// this process: through the dp4a kernel's q8_1 (its quantizer divides
+/// by `d = amax / 127`, unlike the batch GEMM's [`q8_1_round`]) unless
+/// `FRINK_CUDA_MATVEC` keeps the f32 kernels. The switch is the one the
+/// launch reads, so a twin built on this passes under each value.
+pub(super) fn decode_reads(x: &[f32], cols: usize) -> Vec<f32> {
+    crate::matvec_kinds::dp4a::matvec_reads("q8_0_matvec", cols / 32, x)
+}
+
+/// The decode twins round as the decode matvec does: by default the
+/// dp4a quantizer's `x / (amax / 127)`, not the batch GEMM's
+/// `x * (127 / amax)` (on this fixture the two round some values
+/// differently), and under `wide` or `narrow` not at all.
+///
+/// Sabotage: `decode_reads` returning `q8_1_round(x, cols)` fails here.
+#[test]
+fn the_decode_twins_round_as_the_decode_matvec_does() {
+    let cols = 4096;
+    let x = wave(cols, 0.3);
+    let got = decode_reads(&x, cols);
+    if crate::matvec_kinds::dp4a::dp4a_enabled() {
+        assert_eq!(got, crate::dp4a_twin::q8_1_round(&x));
+        assert_ne!(
+            got,
+            q8_1_round(&x, cols),
+            "the fixture cannot tell the quantizers apart"
+        );
+    } else {
+        assert_eq!(got, x);
+    }
+}
+
 /// `q8_1_round` is the quantizer's rounding, value for value: the twins
 /// that use it and the int8 GEMM's quantizer cannot drift apart.
 #[test]
@@ -781,7 +813,9 @@ fn a_matvec_view_of_other_bytes_is_refused() {
 
 /// A Llama-shaped layer (no biases, no QK norm, NORM RoPE with
 /// divisors) on the host at one row: the arithmetic the stack's
-/// one-row step must reproduce. Returns the new hidden row, K, V.
+/// one-row step must reproduce. Returns the new hidden row, K, V. Each
+/// projection dots what the one-row step's matvec reads
+/// ([`decode_reads`]).
 #[allow(clippy::too_many_arguments)]
 fn host_llama_row(
     w: &[&[u8]; 7],
@@ -796,7 +830,16 @@ fn host_llama_row(
     let (hidden, n_heads, n_kv_heads, head_dim, ffn) = dims;
     let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
     let mv = |data: &[u8], rows, cols, x: &[f32]| {
-        mul_mm_reference(&Q8_0, data, x, rows, cols, 1, cols / 32 * 34).unwrap()
+        mul_mm_reference(
+            &Q8_0,
+            data,
+            &decode_reads(x, cols),
+            rows,
+            cols,
+            1,
+            cols / 32 * 34,
+        )
+        .unwrap()
     };
     let eps = 1e-5;
     let normed = host_rms_norm_rows(hidden_in, norms.0, hidden, eps);
@@ -854,7 +897,7 @@ fn host_llama_row(
 /// for the history), and a mirror the host cache no longer matches
 /// must be rebuilt rather than trusted.
 #[test]
-#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs); reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
 fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
     let (hidden, n_heads, n_kv_heads, head_dim, ffn) = (64usize, 2usize, 1usize, 32usize, 96usize);
     let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);

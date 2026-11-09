@@ -51,8 +51,10 @@ rental, asked for before it is booked (#542).
 
 ### The parity floor
 
-1. **CUDA to parity.** Decode (#133: the resident dense stack and the
-   coalesced matvec have landed and wait for a hardware run), prefill
+1. **CUDA to parity.** Decode (#133: the resident dense stack and
+   llama.cpp's dp4a matvecs, now the default, have landed; on an A100
+   Llama-3.1-8B Q4_K_M `tg128` is 128.4 tokens/s against llama.cpp's
+   161.3), prefill
    (#259), and the kinds that have never run on a GPU (#405). The
    largest gap, on the hardware most people own. Next step: the batched
    rental.

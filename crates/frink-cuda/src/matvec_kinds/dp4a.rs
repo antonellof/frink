@@ -7,10 +7,12 @@
 //! block (`vecdotq.cuh`'s `vec_dot_*_q8_1`). Against the coalesced f32
 //! kernels in [`super::coalesced`] that cuts the activation bytes a row
 //! reads by 32 * 4 / 36 = 3.6x and the instructions per weight by three
-//! to four. It is also what llama.cpp's CUDA decode computes, so it
-//! moves frink toward the CUDA oracle (ADR 0009); the f32 kernels stay
-//! the default until a hardware receipt says otherwise
-//! (`FRINK_CUDA_MATVEC=dp4a`, read once, selects these).
+//! to four. It is also what llama.cpp's CUDA decode computes (ADR 0009),
+//! and it is the default for the kinds it covers: on an A100, `frink
+//! verify` is token-identical to the CPU through it on Llama-3.1-8B
+//! Q4_K_M and Q8_0, gpt-oss-20b and Qwen3-30B-A3B (#133).
+//! `FRINK_CUDA_MATVEC=wide` or `narrow`, read once, keeps every kind on
+//! the f32 kernels for an A/B.
 //!
 //! # Geometry, llama.cpp's for one column on NVIDIA
 //!
@@ -44,14 +46,17 @@ pub const QUANTIZE_THREADS: usize = 256;
 pub const QUANTIZE_ENTRY: &str = "quantize_q8_1";
 pub const QUANTIZE_MODULE: &str = "frink_quantize_q8_1";
 
-/// The value of [`MATVEC_WIDTH_ENV`] that selects these kernels.
-pub const DP4A_VALUE: &str = "dp4a";
+/// The values of [`MATVEC_WIDTH_ENV`] that keep every kind on the f32
+/// coalesced kernels, at the width each names.
+pub const F32_VALUES: [&str; 2] = ["wide", "narrow"];
 
-/// Whether `FRINK_CUDA_MATVEC`'s value selects the dp4a matvecs:
-/// `dp4a`, any case. Everything else keeps the f32 coalesced kernels,
-/// whose own reading of the variable (`narrow` or not) is unchanged.
+/// Whether `FRINK_CUDA_MATVEC`'s value runs the dp4a matvecs: yes
+/// unless it is `wide` or `narrow` (any case), the A/B values that keep
+/// every kind on the f32 kernels. `dp4a` and unset are the default. The
+/// coalesced kernels' own reading of the variable (`narrow` or not) is
+/// unchanged, and serves the kinds with no dp4a kernel either way.
 pub fn parse_dp4a(value: Option<&str>) -> bool {
-    matches!(value, Some(v) if v.trim().eq_ignore_ascii_case(DP4A_VALUE))
+    !matches!(value, Some(v) if F32_VALUES.iter().any(|f| v.trim().eq_ignore_ascii_case(f)))
 }
 
 /// [`parse_dp4a`] of this process's environment, read once: a matvec
@@ -247,6 +252,56 @@ pub fn dp4a_kind(fn_name: &str) -> Option<&'static Dp4aKind> {
     DP4A.iter().find(|k| k.base_fn == fn_name)
 }
 
+/// The dp4a kernel a decode matvec of `fn_name` over `n_blocks` blocks
+/// a row runs on an input of `x_len` floats, with `slots` inputs
+/// `x_stride` floats apart: `None` under `FRINK_CUDA_MATVEC=wide` or
+/// `narrow`, for a kind with no dp4a kernel, or for inputs that are not
+/// whole q8_1 blocks covering every row, all of which take the f32
+/// kernels. THE routing rule: the one-matrix and the routed launch both
+/// ask it, and so does [`matvec_reads`].
+pub fn route(
+    fn_name: &str,
+    n_blocks: usize,
+    x_len: usize,
+    x_stride: usize,
+    slots: usize,
+) -> Option<&'static Dp4aKind> {
+    if !dp4a_enabled() {
+        return None;
+    }
+    route_shape(dp4a_kind(fn_name)?, n_blocks, x_len, x_stride, slots)
+}
+
+/// [`route`]'s shape rule, without the switch.
+pub fn route_shape(
+    kind: &'static Dp4aKind,
+    n_blocks: usize,
+    x_len: usize,
+    x_stride: usize,
+    slots: usize,
+) -> Option<&'static Dp4aKind> {
+    let cols = n_blocks.checked_mul(kind.qk)?;
+    let last = x_stride
+        .checked_mul(slots.checked_sub(1)?)?
+        .checked_add(cols)?;
+    let whole = x_len.is_multiple_of(Q8_1_BLOCK_ELEMS) && x_stride.is_multiple_of(Q8_1_BLOCK_ELEMS);
+    (whole && cols > 0 && last <= x_len).then_some(kind)
+}
+
+/// What a CUDA decode matvec of `fn_name` over `n_blocks` blocks a row
+/// reads of `x` in this process: its q8_1 rounding
+/// ([`crate::dp4a_twin::q8_1_round`]) where [`route`] sends it to a dp4a
+/// kernel, the default for the kinds that have one, and `x` itself on
+/// the f32 kernels. For references that hold a decode matvec to a host
+/// dot: asking the switch the launch asks, they pass under each of its
+/// values. A buffer of several slots rounds per 32 values, so per slot.
+pub fn matvec_reads(fn_name: &str, n_blocks: usize, x: &[f32]) -> Vec<f32> {
+    match route(fn_name, n_blocks, x.len(), 0, 1) {
+        Some(_) => crate::dp4a_twin::q8_1_round(x),
+        None => x.to_vec(),
+    }
+}
+
 /// The quantizer's complete translation unit.
 pub fn quantize_source() -> String {
     format!("{BLOCK_HELPERS}{Q8_1_COMMON}{QUANTIZE_Q8_1_KERNEL_SRC}")
@@ -386,6 +441,85 @@ mod tests {
         assert!(quantize_source().contains(QUANTIZE_Q8_1_KERNEL_SRC));
     }
 
+    /// The routing rule's shape half: whole q8_1 blocks, every slot's row
+    /// inside the input. A short input would have the kernel read past the
+    /// quantized buffer; a ragged stride would start a slot mid-block.
+    ///
+    /// Sabotage: `last <= x_len` to `last <= x_len + 32` routes the short input.
+    #[test]
+    fn dp4a_routes_only_whole_q8_1_inputs_that_cover_every_row() {
+        let q4k = dp4a_kind("q4_k_matvec").expect("Q4_K");
+        let q80 = dp4a_kind("q8_0_matvec").expect("Q8_0");
+        assert!(
+            route_shape(q4k, 16, 4096, 0, 1).is_some(),
+            "one row of 16 blocks"
+        );
+        assert!(
+            route_shape(q4k, 16, 4064, 0, 1).is_none(),
+            "input shorter than the row"
+        );
+        assert!(
+            route_shape(q80, 3, 100, 0, 1).is_none(),
+            "not whole q8_1 blocks"
+        );
+        assert!(
+            route_shape(q80, 3, 96, 0, 4).is_some(),
+            "four slots, one input"
+        );
+        assert!(
+            route_shape(q80, 3, 4 * 96, 96, 4).is_some(),
+            "four slots, four inputs"
+        );
+        assert!(
+            route_shape(q80, 3, 4 * 96 - 32, 96, 4).is_none(),
+            "the last slot overruns"
+        );
+        assert!(
+            route_shape(q80, 3, 4 * 112, 112, 4).is_none(),
+            "a stride of 3.5 blocks"
+        );
+        assert!(route_shape(q80, 0, 96, 0, 1).is_none(), "no blocks");
+        assert!(route_shape(q80, 3, 96, 0, 0).is_none(), "no slots");
+    }
+
+    /// A decode reference reads what the launch reads: the q8_1 rounding
+    /// where the route takes a dp4a kernel, the f32 values where it does
+    /// not, so the references follow the switch the kernels follow. Under
+    /// the default the dp4a kinds round and the rest do not.
+    ///
+    /// Sabotage: `matvec_reads` returning `x` unrounded fails here.
+    #[test]
+    fn a_decode_reference_reads_what_the_route_reads() {
+        let x: Vec<f32> = (0..512)
+            .map(|i| ((i as f32) * 0.021).sin() * (1.0 + (i % 7) as f32))
+            .collect();
+        for mv in crate::matvec_kinds::KINDS {
+            let Some(mm) = crate::mul_mm::kind_by_name(mv.name) else {
+                continue;
+            };
+            let n_blocks = 512 / mm.block_elems;
+            let reads = matvec_reads(mv.fn_name, n_blocks, &x);
+            let routed = route(mv.fn_name, n_blocks, x.len(), 0, 1).is_some();
+            if routed {
+                assert_eq!(
+                    reads,
+                    crate::dp4a_twin::q8_1_dequant(&crate::dp4a_twin::quantize_q8_1(&x)),
+                    "{}",
+                    mv.name
+                );
+                assert_ne!(reads, x, "{}: the fixture does not round", mv.name);
+            } else {
+                assert_eq!(reads, x, "{}", mv.name);
+            }
+            assert_eq!(
+                routed,
+                dp4a_enabled() && dp4a_kind(mv.fn_name).is_some(),
+                "{}",
+                mv.name
+            );
+        }
+    }
+
     /// Every dp4a kind has a coalesced kernel too. The routed-expert
     /// paths admit a layer by `coalesced_kind(..).is_some()` and the
     /// f32 kernel is a dp4a kind's fallback for an input the quantizer
@@ -399,17 +533,34 @@ mod tests {
         }
     }
 
-    /// Opt-in: only `dp4a` selects these kernels, and it does not read
-    /// as `narrow`, so the f32 fallback for the other kinds stays wide.
+    /// Opt-out: the integer matvecs run unless the switch names one of
+    /// the f32 widths, so a typo cannot turn the default off, and `dp4a`
+    /// does not read as `narrow`, so the other kinds' f32 kernels stay
+    /// wide under it.
+    ///
+    /// Sabotage: drop `"wide"` from `F32_VALUES` and this fails.
     #[test]
-    fn only_dp4a_selects_the_integer_matvecs() {
+    fn the_integer_matvecs_are_the_default_and_wide_or_narrow_turn_them_off() {
         use crate::matvec_kinds::coalesced::MatvecWidth;
-        assert!(!parse_dp4a(None));
-        assert!(parse_dp4a(Some("dp4a")) && parse_dp4a(Some(" DP4A ")));
-        for other in ["", "narrow", "wide", "dp4", "1"] {
-            assert!(!parse_dp4a(Some(other)), "{other}");
+        for on in [
+            None,
+            Some("dp4a"),
+            Some(" DP4A "),
+            Some(""),
+            Some("1"),
+            Some("wid"),
+        ] {
+            assert!(parse_dp4a(on), "{on:?}");
         }
+        for off in ["wide", "narrow", " WIDE ", "Narrow"] {
+            assert!(!parse_dp4a(Some(off)), "{off}");
+        }
+        // The f32 kernels a kind without a dp4a kernel runs: wide unless
+        // `narrow`, whatever selects the integer ones.
         assert_eq!(MatvecWidth::parse(Some("dp4a")), MatvecWidth::Wide);
+        assert_eq!(MatvecWidth::parse(None), MatvecWidth::Wide);
+        assert_eq!(MatvecWidth::parse(Some("wide")), MatvecWidth::Wide);
+        assert_eq!(MatvecWidth::parse(Some("narrow")), MatvecWidth::Narrow);
         assert_eq!(nvrtc_arch((8, 9)), Some("compute_89"));
         assert_eq!(nvrtc_arch((12, 0)), Some("compute_120"));
         assert_eq!(nvrtc_arch((6, 0)), None, "sm_60 has no dp4a");

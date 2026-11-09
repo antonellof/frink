@@ -60,7 +60,7 @@ pub mod prefill_attn_tc;
 
 #[cfg(feature = "cuda")]
 pub mod attn;
-/// The dp4a decode matvecs on the device (`FRINK_CUDA_MATVEC=dp4a`).
+/// The dp4a decode matvecs on the device, the default decode path.
 #[cfg(feature = "cuda")]
 mod dp4a_launch;
 #[cfg(feature = "cuda")]

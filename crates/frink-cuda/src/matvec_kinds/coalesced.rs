@@ -33,6 +33,10 @@
 //! `FRINK_CUDA_MATVEC=narrow` selects the narrow width for an A/B;
 //! anything else (or unset) is wide. Both widths are the same source,
 //! so they cannot drift apart: the A/B varies exactly one number.
+//!
+//! These kernels decode the kinds with no integer-dot matvec. Q4_K,
+//! Q6_K, Q8_0 and MXFP4 decode on [`super::dp4a`] by default and come
+//! here only under `FRINK_CUDA_MATVEC=wide` or `narrow`.
 
 /// How many warps (so rows) one coalesced matvec threadblock carries.
 /// Eight keeps enough rows in flight per SM to hold loads outstanding.
@@ -716,9 +720,9 @@ extern "C" __global__ void q6_k_matvec_coalesced(
 /// The activation stays f32 here. Quantizing it to int8 is what
 /// llama.cpp does, and an earlier int8 attempt diverged from the CPU
 /// reference at token 4 on a real checkpoint, which `frink verify`
-/// refuses. The q8_1 path that follows llama.cpp's CUDA decode exactly
-/// is [`super::dp4a`], behind `FRINK_CUDA_MATVEC=dp4a` until a hardware
-/// run says how it verifies and measures.
+/// refuses. The q8_1 path that follows llama.cpp's CUDA decode exactly,
+/// [`super::dp4a`], verifies token-identical and is the default; this
+/// kernel serves `FRINK_CUDA_MATVEC=wide` and `narrow`.
 ///
 /// Lane to data mapping, which is the part to get right. With
 /// `B = 128 / FX_LANES` bytes per lane and `sub = lane % FX_LANES`:

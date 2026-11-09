@@ -107,6 +107,28 @@ pub fn quantize_q8_1(x: &[f32]) -> Vec<u8> {
     out
 }
 
+/// The values `block_q8_1` bytes stand for: `q * d`, `d` the stored
+/// f16 widened. Exact in f32 (a 7-bit integer times an 11-bit mantissa).
+pub fn q8_1_dequant(y: &[u8]) -> Vec<f32> {
+    y.as_chunks::<Q8_1_BLOCK_BYTES>()
+        .0
+        .iter()
+        .flat_map(|b| {
+            let d = f16_at(b);
+            b[4..].iter().map(move |q| f32::from(*q as i8) * d)
+        })
+        .collect()
+}
+
+/// `x` as a dp4a matvec reads it: through [`quantize_q8_1`] and back.
+/// The integer dot is exact, so a dp4a matvec's result is the dot of
+/// its weights with these values up to f32 rounding, and a reference
+/// that multiplies them models the device. The batch GEMM's quantizer
+/// rounds differently (`v * (127 / amax)`), so its twins have their own.
+pub fn q8_1_round(x: &[f32]) -> Vec<f32> {
+    q8_1_dequant(&quantize_q8_1(x))
+}
+
 /// `dp4a.s32.s32`: `c` plus the four signed byte products of `a` and `b`.
 pub fn dp4a(a: i32, b: i32, c: i32) -> i32 {
     let (a, b) = (a.to_le_bytes(), b.to_le_bytes());
@@ -328,14 +350,7 @@ pub(crate) mod fixtures {
 
     /// The q8_1 values back as f32: `q * d`, `d` the stored f16.
     pub(crate) fn dequant_q8_1(y: &[u8]) -> Vec<f32> {
-        y.as_chunks::<Q8_1_BLOCK_BYTES>()
-            .0
-            .iter()
-            .flat_map(|b| {
-                let d = f16_at(b);
-                b[4..].iter().map(move |q| f32::from(*q as i8) * d)
-            })
-            .collect()
+        q8_1_dequant(y)
     }
 
     /// Activations whose blocks differ in scale, so `amax` varies.

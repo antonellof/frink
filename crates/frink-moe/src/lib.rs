@@ -1857,7 +1857,7 @@ mod tests {
 
     #[cfg(any(feature = "cuda", feature = "metal"))]
     #[test]
-    #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored"]
+    #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn run_expert_placed_on_gpu_matches_cpu_for_a_real_quantized_expert() {
         let hidden_dim = 32;
         let ffn_dim = 32; // must be a multiple of Q8_0 block elems (32)
@@ -1885,7 +1885,22 @@ mod tests {
         };
         let hidden = make_row(hidden_dim, 0.5);
 
-        let cpu = run_expert_placed(&hidden, &expert, ExpertPlacement::Cpu, GluAct::Swiglu);
+        // The CPU twin of the device's expert: each matvec dots what the
+        // device's reads, which on CUDA is the activation's q8_1 rounding
+        // under the dp4a default (gate and up read `hidden`, down the
+        // gated activation), by the switch the launch reads.
+        let reads = |x: &[f32]| -> Vec<f32> {
+            #[cfg(feature = "cuda")]
+            let r = frink_cuda::matvec_kinds::dp4a::matvec_reads("q8_0_matvec", x.len() / 32, x);
+            #[cfg(not(feature = "cuda"))]
+            let r = x.to_vec();
+            r
+        };
+        let gate = expert.gate.apply_cpu(&reads(&hidden));
+        let up = expert.up.apply_cpu(&reads(&hidden));
+        let cpu = expert
+            .down
+            .apply_cpu(&reads(&GluAct::Swiglu.apply(&gate, &up)));
         let gpu = run_expert_placed(
             &hidden,
             &expert,
