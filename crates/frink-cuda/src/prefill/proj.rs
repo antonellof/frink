@@ -81,7 +81,7 @@ impl<'a> ProjWeights<'a> {
     /// Multiplies `x` (`batch` rows of `cols`) on the device. Returns
     /// the output and the resident weight buffer, which the caller
     /// holds until the stream has finished. A one-row step's matvec
-    /// reads `x`'s q8_1 copy under `FRINK_CUDA_MATVEC=dp4a`, made once
+    /// reads `x`'s q8_1 copy (dp4a, the default), made once
     /// for every projection handed the same input.
     pub(super) fn enqueue(
         &self,

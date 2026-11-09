@@ -587,6 +587,7 @@ version = "0.61.0"
 dependencies = [
  "anyhow",
  "frink-core",
+ "frink-cuda",
  "frink-quant",
  "rayon",
 ]

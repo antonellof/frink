@@ -8,48 +8,7 @@
 use super::*;
 use crate::dp4a_twin::fixtures::{activations, dequant, dequant_q8_1, q8_1_bound, weights};
 use crate::dp4a_twin::{dp4a_matvec_row, quantize_q8_1};
-use crate::matvec_kinds::dp4a::DP4A;
-
-/// The routing rule's shape half: whole q8_1 blocks, every slot's row
-/// inside the input. A short input would have the kernel read past the
-/// quantized buffer; a ragged stride would start a slot mid-block.
-///
-/// Sabotage: `last <= x_len` to `last <= x_len + 32` routes the short input.
-#[test]
-fn dp4a_routes_only_whole_q8_1_inputs_that_cover_every_row() {
-    let q4k = dp4a_kind("q4_k_matvec").expect("Q4_K");
-    let q80 = dp4a_kind("q8_0_matvec").expect("Q8_0");
-    assert!(
-        dp4a_route_for(q4k, 16, 4096, 0, 1).is_some(),
-        "one row of 16 blocks"
-    );
-    assert!(
-        dp4a_route_for(q4k, 16, 4064, 0, 1).is_none(),
-        "input shorter than the row"
-    );
-    assert!(
-        dp4a_route_for(q80, 3, 100, 0, 1).is_none(),
-        "not whole q8_1 blocks"
-    );
-    assert!(
-        dp4a_route_for(q80, 3, 96, 0, 4).is_some(),
-        "four slots, one input"
-    );
-    assert!(
-        dp4a_route_for(q80, 3, 4 * 96, 96, 4).is_some(),
-        "four slots, four inputs"
-    );
-    assert!(
-        dp4a_route_for(q80, 3, 4 * 96 - 32, 96, 4).is_none(),
-        "the last slot overruns"
-    );
-    assert!(
-        dp4a_route_for(q80, 3, 4 * 112, 112, 4).is_none(),
-        "a stride of 3.5 blocks"
-    );
-    assert!(dp4a_route_for(q80, 0, 96, 0, 1).is_none(), "no blocks");
-    assert!(dp4a_route_for(q80, 3, 96, 0, 0).is_none(), "no slots");
-}
+use crate::matvec_kinds::dp4a::{dp4a_enabled, DP4A};
 
 fn launch_of<'a>(kind: &Dp4aKind, w: &'a [u8], rows: usize, n_blocks: usize) -> MatvecLaunch<'a> {
     let mv = crate::matvec_kinds::KINDS
@@ -271,20 +230,22 @@ fn several_experts_in_one_dp4a_launch_equal_one_launch_each() {
     }
 }
 
-/// Under `FRINK_CUDA_MATVEC=dp4a` the ordinary matvec entry routes each
-/// dp4a kind to its dp4a kernel (bit-equal to calling it directly) and
-/// every other kind to its f32 kernel, and one input serves several
-/// matvecs. Without the switch it says so and checks nothing, since the
-/// switch is read once per process:
+/// The ordinary matvec entry routes each dp4a kind by the process's
+/// switch: by default to its dp4a kernel (bit-equal to calling it
+/// directly), one quantized input serving several matvecs; under
+/// `FRINK_CUDA_MATVEC=wide` or `narrow` to the f32 kernel at that width
+/// (bit-equal to it), without quantizing. The switch is read once per
+/// process, so each value is its own run:
 ///
-///   FRINK_CUDA_MATVEC=dp4a cargo test -p frink-cuda --features cuda -- --ignored the_switch
+///   cargo test -p frink-cuda --features cuda -- --ignored the_switch
+///   FRINK_CUDA_MATVEC=wide cargo test -p frink-cuda --features cuda -- --ignored the_switch
+///   FRINK_CUDA_MATVEC=narrow cargo test -p frink-cuda --features cuda -- --ignored the_switch
 #[test]
-#[ignore = "requires real CUDA hardware and FRINK_CUDA_MATVEC=dp4a. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
+#[ignore = "requires real CUDA hardware. Passed under FRINK_CUDA_MATVEC=dp4a 2026-11-09 on an A100 (sm_80, Hugging Face Jobs); the default and wide/narrow forms not yet run"]
 fn the_switch_routes_the_dp4a_kinds_through_one_quantized_input() {
-    if !dp4a_enabled() {
-        eprintln!("FRINK_CUDA_MATVEC is not dp4a in this process: nothing to check");
-        return;
-    }
+    use crate::matvec_kinds::coalesced::{
+        coalesced_kind, matvec_wpr_override, wpr_for, MatvecWidth,
+    };
     let dev = crate::gpu::shared_device().expect("device");
     let rows = 37usize;
     for kind in DP4A {
@@ -295,17 +256,27 @@ fn the_switch_routes_the_dp4a_kinds_through_one_quantized_input() {
         let input = MatvecInput::new(&d_x);
         let (a, _wa) =
             crate::matvec_launch::enqueue_matvec_in(&dev, &launch, &input).expect("routed");
-        assert!(
+        assert_eq!(
             input.quantized(),
-            "{}: the switch did not route to dp4a",
+            dp4a_enabled(),
+            "{}: routed against the switch",
             kind.entry
         );
-        let first = *cudarc::driver::DevicePtr::device_ptr(input.q8(&dev).unwrap());
-        let (b, _wb) = enqueue_dp4a(&dev, kind, &launch, &input).expect("direct");
-        assert_eq!(
-            first,
-            *cudarc::driver::DevicePtr::device_ptr(input.q8(&dev).unwrap())
-        );
+        let (b, _wb) = if dp4a_enabled() {
+            let first = *cudarc::driver::DevicePtr::device_ptr(input.q8(&dev).unwrap());
+            let direct = enqueue_dp4a(&dev, kind, &launch, &input).expect("direct");
+            assert_eq!(
+                first,
+                *cudarc::driver::DevicePtr::device_ptr(input.q8(&dev).unwrap())
+            );
+            direct
+        } else {
+            let width = MatvecWidth::from_env();
+            let ck = coalesced_kind(kind.base_fn).expect("a coalesced kernel");
+            let wpr = matvec_wpr_override()
+                .unwrap_or_else(|| wpr_for(rows, n_blocks, 32 / ck.lanes(width)));
+            crate::matvec_launch::enqueue_matvec_at(&dev, &launch, &d_x, width, wpr).expect("f32")
+        };
         let (a, b) = (
             dev.dtoh_sync_copy(&a).unwrap(),
             dev.dtoh_sync_copy(&b).unwrap(),

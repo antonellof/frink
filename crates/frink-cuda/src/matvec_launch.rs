@@ -157,7 +157,7 @@ impl MatvecPlan {
 /// [`launch_matvec`], [`launch_matvec_multi`] and
 /// [`launch_dense_ffn_swiglu`].
 ///
-/// Under `FRINK_CUDA_MATVEC=dp4a` a kind with a dp4a kernel quantizes
+/// A kind with a dp4a kernel (the default) quantizes
 /// `d_x` here, for this launch alone; a caller with several matvecs on
 /// one vector calls [`enqueue_matvec_in`] with one [`MatvecInput`].
 pub(crate) fn enqueue_matvec(
@@ -192,7 +192,7 @@ pub(crate) fn enqueue_matvec_in(
         return crate::dp4a_launch::enqueue_dp4a(dev, kind, launch, input);
     }
     let d_x = input.x();
-    // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
+    // `FRINK_CUDA_MATVEC=wide|narrow` is the A/B lever (docs/CONFIG.md).
     let width = MatvecWidth::from_env();
     let wpr = crate::matvec_kinds::coalesced::matvec_wpr_override().unwrap_or_else(|| {
         coalesced_kind(launch.fn_name).map_or(1, |k| {
@@ -231,7 +231,7 @@ pub fn time_matvec(launch: &MatvecLaunch<'_>, x: &[f32], iters: usize) -> Result
 /// experts do not share one coalesced kind and shape, and the caller
 /// launches them one at a time instead. Every dp4a kind is also a
 /// coalesced one (`every_dp4a_kind_has_a_coalesced_kernel`), so the
-/// gate is the same under `FRINK_CUDA_MATVEC=dp4a`.
+/// gate is the same whichever kernels the switch picks.
 pub(crate) fn enqueue_matvec_multi(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launches: &[MatvecLaunch<'_>],

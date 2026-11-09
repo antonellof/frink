@@ -3,8 +3,8 @@
 //! the caller on the device's logits. The device tests are `#[ignore]`d.
 
 use super::super::tests::{
-    assert_close, host_causal_gqa_sinks, host_rms_norm_rows, host_swiglu_oai, q8_0_proj,
-    q8_1_round, small_q8_0, wave, BATCH_GEMM_TOL,
+    assert_close, decode_reads, host_causal_gqa_sinks, host_rms_norm_rows, host_swiglu_oai,
+    q8_0_proj, q8_1_round, small_q8_0, wave, BATCH_GEMM_TOL,
 };
 use super::super::*;
 use crate::mul_mm::Q8_0;
@@ -16,7 +16,7 @@ use crate::prefill::moe_device::{DeviceGating, DeviceRouting, ExpertSource};
 /// and the layer's output is the host twin's, the experts summed from
 /// zero in the routing's order and then added to the residual.
 #[test]
-#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs); reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
 fn a_routed_layer_matches_its_host_twin_routing_on_the_device_logits() {
     routed_layer_matches_its_host_twin(1, false);
 }
@@ -35,7 +35,7 @@ fn a_routed_batch_matches_its_host_twin_through_the_grouped_gemms() {
 /// routing, each expert's three biases and the clamped SwiGLU on the
 /// per-expert path.
 #[test]
-#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs); reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
 fn a_gpt_oss_layer_matches_its_host_twin_at_one_token() {
     routed_layer_matches_its_host_twin(1, true);
 }
@@ -222,13 +222,13 @@ impl RoutedFixture {
         let kv_w = self.n_kv_heads * self.head_dim;
         // A batch's attention projections are the int8 GEMM's, which takes
         // its input through q8_1, and so are its experts' when the grouped
-        // GEMM is the int8 one; a decode token's are f32 matvecs.
-        let quantized = |x: &[f32], cols: usize, on: bool| {
-            if batch > 1 && on {
-                q8_1_round(x, cols)
-            } else {
-                x.to_vec()
-            }
+        // GEMM is the int8 one; a decode token's are matvecs, which read
+        // it through the dp4a kernel's own q8_1 unless the switch keeps
+        // the f32 kernels.
+        let quantized = |x: &[f32], cols: usize, on: bool| match (batch > 1, on) {
+            (true, true) => q8_1_round(x, cols),
+            (true, false) => x.to_vec(),
+            (false, _) => decode_reads(x, cols),
         };
         let mm = |data: &[u8], rows, cols, x: &[f32], n: usize| {
             let x = quantized(x, cols, true);
@@ -637,7 +637,7 @@ impl ExpertSource for FixtureExperts<'_> {
 /// gpt-oss alike, without asking the caller's routing, and the experts
 /// it chose come back in the host routing's order.
 #[test]
-#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs)"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an L40S (sm_89, Hugging Face Jobs); reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
 fn a_device_routed_token_matches_its_host_twin_without_the_host_routing() {
     device_routed_matches_its_host_twin(1);
 }

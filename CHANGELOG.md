@@ -15,6 +15,24 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **The CUDA decode matvecs run as llama.cpp's do, by default.** The
+  dp4a matvecs of 0.61.0 (the activation quantized once to q8_1, Q4_K,
+  Q6_K, Q8_0 and MXFP4 rows dotted against it with `dp4a`, llama.cpp's
+  `mmvq`) are now what CUDA decode runs, which moves the decode default
+  to llama.cpp CUDA's rounding (ADR 0009). On an A100 they are
+  token-identical to the CPU under `frink verify` on Llama-3.1-8B
+  Q4_K_M and Q8_0, gpt-oss-20b and Qwen3-30B-A3B, and `tg128` goes from
+  83.2 to 128.4 tokens/s on Llama-3.1-8B Q4_K_M (llama.cpp at the pin:
+  161.3), 83.7 to 100.7 on its Q8_0, 104.1 to 146.5 on gpt-oss-20b and
+  83.7 to 90.1 on Qwen3-30B-A3B. `FRINK_CUDA_MATVEC=wide` (or `narrow`)
+  keeps every kind on the f32 kernels for an A/B; the other kinds stay
+  on them either way. The decode tests' references now dot what the
+  matvec reads, the activation's q8_1 rounding by default and its f32
+  values under `wide` and `narrow`, by the same once-read switch
+  (#133).
+
 ## [0.61.0] - 2026-11-09
 
 ### Fixed

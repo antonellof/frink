@@ -5372,7 +5372,7 @@ pub(crate) mod tests {
         }
 
         #[test]
-        #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored"]
+        #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
         fn apply_gpu_matches_apply_for_q8_0_on_real_hardware() {
             let weights: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 0.05).collect();
             let x: Vec<f32> = (0..64).map(|i| (i as f32) * 0.01 - 0.3).collect();
@@ -5384,7 +5384,14 @@ pub(crate) mod tests {
                 kind: QuantKind::Q8_0,
             };
 
-            let cpu = matrix.apply_cpu(&x);
+            // The CPU dots what the device's matvec reads: on CUDA its
+            // q8_1 rounding under the dp4a default, by the switch the
+            // launch reads (`frink_cuda::matvec_kinds::dp4a::matvec_reads`).
+            #[cfg(feature = "cuda")]
+            let reads = frink_cuda::matvec_kinds::dp4a::matvec_reads("q8_0_matvec", 2, &x);
+            #[cfg(not(feature = "cuda"))]
+            let reads = x.clone();
+            let cpu = matrix.apply_cpu(&reads);
             let gpu = matrix
                 .apply_gpu(&x)
                 .expect("Q8_0 must dispatch to a real GPU kernel");

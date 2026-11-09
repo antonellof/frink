@@ -1,5 +1,4 @@
-//! The dp4a decode matvecs on the device (`FRINK_CUDA_MATVEC=dp4a`,
-//! #133): the q8_1 quantizer, the one-matrix launch, the routed-expert
+//! The dp4a decode matvecs on the device (the default; #133): the q8_1 quantizer, the one-matrix launch, the routed-expert
 //! launch, and [`MatvecInput`], the activation every matvec of a step
 //! is handed so that one quantization serves every matvec that reads
 //! the same vector.
@@ -11,9 +10,10 @@ use crate::gpu::{
     alloc_out, ensure_module_loaded_lazy_for_arch, resident_cuda_weights, CudaError, MatvecLaunch,
     MultiShape, ResidentCudaWeights,
 };
+pub(crate) use crate::matvec_kinds::dp4a::route as dp4a_route;
 use crate::matvec_kinds::dp4a::{
-    dp4a_enabled, dp4a_kind, nvrtc_arch, quantize_source, Dp4aGeometry, Dp4aKind, Q8_1_BLOCK_BYTES,
-    Q8_1_BLOCK_ELEMS, QUANTIZE_ENTRY, QUANTIZE_MODULE, QUANTIZE_THREADS,
+    nvrtc_arch, quantize_source, Dp4aGeometry, Dp4aKind, Q8_1_BLOCK_BYTES, Q8_1_BLOCK_ELEMS,
+    QUANTIZE_ENTRY, QUANTIZE_MODULE, QUANTIZE_THREADS,
 };
 use cudarc::driver::{CudaDevice, CudaFunction, CudaSlice, CudaView, LaunchAsync, LaunchConfig};
 use std::cell::OnceCell;
@@ -67,40 +67,6 @@ impl<'x> MatvecInput<'x> {
     pub(crate) fn quantized(&self) -> bool {
         self.q8.get().is_some()
     }
-}
-
-/// The dp4a kernel a matvec of `fn_name` over `n_blocks` blocks a row
-/// runs on an input of `x_len` floats, with `slots` inputs `x_stride`
-/// floats apart: `None` when the switch is off, the kind has no dp4a
-/// kernel, or the inputs are not whole q8_1 blocks covering every row.
-/// THE routing rule; the one-matrix and the routed launch both ask it.
-pub(crate) fn dp4a_route(
-    fn_name: &str,
-    n_blocks: usize,
-    x_len: usize,
-    x_stride: usize,
-    slots: usize,
-) -> Option<&'static Dp4aKind> {
-    if !dp4a_enabled() {
-        return None;
-    }
-    dp4a_route_for(dp4a_kind(fn_name)?, n_blocks, x_len, x_stride, slots)
-}
-
-/// [`dp4a_route`]'s shape rule, without the switch, for the host test.
-fn dp4a_route_for(
-    kind: &'static Dp4aKind,
-    n_blocks: usize,
-    x_len: usize,
-    x_stride: usize,
-    slots: usize,
-) -> Option<&'static Dp4aKind> {
-    let cols = n_blocks.checked_mul(kind.qk)?;
-    let last = x_stride
-        .checked_mul(slots.checked_sub(1)?)?
-        .checked_add(cols)?;
-    let whole = x_len.is_multiple_of(Q8_1_BLOCK_ELEMS) && x_stride.is_multiple_of(Q8_1_BLOCK_ELEMS);
-    (whole && cols > 0 && last <= x_len).then_some(kind)
 }
 
 /// The device's compute capability, asked once.
