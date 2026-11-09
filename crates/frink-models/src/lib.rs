@@ -130,6 +130,7 @@ pub mod swa_geometry;
 pub mod swa_layers;
 pub mod t5_engine;
 pub mod template_flags;
+pub mod tensor_dump;
 pub mod tensor_role;
 #[cfg(test)]
 pub(crate) mod test_source;

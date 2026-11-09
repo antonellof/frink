@@ -360,8 +360,7 @@ impl Mamba2 {
                 let gw = d_inner / n_group;
                 for g in 0..n_group {
                     let seg = &mut y[g * gw..(g + 1) * gw];
-                    let mean_sq = seg.iter().map(|v| v * v).sum::<f32>() / gw as f32;
-                    let scale = 1.0 / (mean_sq + rms_eps).sqrt();
+                    let scale = frink_core::matmul::rms_scale(seg, rms_eps);
                     for (v, wv) in seg.iter_mut().zip(&nw[g * gw..(g + 1) * gw]) {
                         *v = *v * scale * wv;
                     }

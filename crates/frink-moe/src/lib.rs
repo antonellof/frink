@@ -1993,8 +1993,7 @@ pub fn gemma4_router_logits(
     debug_assert_eq!(hidden.len(), router_scale.len());
     let n = hidden.len() as f32;
     // Weightless RMSNorm: no learned per-channel term.
-    let mean_sq = hidden.iter().map(|v| v * v).sum::<f32>() / n;
-    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+    let inv_rms = frink_core::matmul::rms_scale(hidden, eps);
     let width_scale = n.powf(-0.5);
     let scaled: Vec<f32> = hidden
         .iter()

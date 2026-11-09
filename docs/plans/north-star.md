@@ -62,8 +62,9 @@ rental, asked for before it is booked (#542).
    The `llama-server` endpoints frink does not serve: `/infill`,
    `/props`, `GET /slots`, slot erase (#534), and
    `stream` on `/v1/completions`, which is refused by name today.
-3. **Numerics.** The activation quantizers' last bit (#476), and the
-   statistic `frink bench` prints (#481).
+3. **Numerics.** The deviations ADR 0009 still lists, the largest the
+   CPU attention's arithmetic under 64 query rows and in decode, and
+   the statistic `frink bench` prints (#481).
 
 ### A server that holds up under load
 
