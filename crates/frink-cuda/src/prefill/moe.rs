@@ -40,6 +40,13 @@ pub(super) fn run_routed(
     device: Option<(DeviceRouting<'_>, CudaViewMut<'_, i32>)>,
 ) -> Result<(CudaSlice<f32>, bool), CudaError> {
     if batch > 1 {
+        if let Some((spec, mut ids)) = device {
+            if let Some(out) = super::moe_device::run_device_routed_batch(
+                dev, held, router, glu, normed2, batch, hidden_dim, ffn_dim, &spec, &mut ids,
+            )? {
+                return Ok((out, true));
+            }
+        }
         let out = run_routed_batch(
             dev, held, router, glu, normed2, batch, hidden_dim, ffn_dim, index, route,
         )?;
