@@ -23,6 +23,14 @@ are the ones worth reading twice.
   token. The stack now runs GeGLU in ggml-cuda's tanh form beside
   SwiGLU. On an L40S, Gemma-3-12B Q4_K_M `pp512` went from 82 to 727
   tokens/s and `tg128` from 33 to 55 (#133, #259).
+- **The CUDA prefill GEMM stages its weight rows before dequantizing.**
+  The tensor-core GEMM dequantized each weight sub-block straight from
+  global memory a byte at a time, the warp's lanes on 32 different
+  rows. It now stages each row's raw blocks with coalesced word loads
+  and loads its fragments with `ldmatrix`: 1.5x on the Q4_K 14336 x
+  4096 projection on an L40S (63 to 107 TFLOPS), and Llama-3.1-8B
+  Q4_K_M `pp512` from 1346 to 1648 tokens/s. `mul_mm_bench` times
+  the GEMM alone (#259).
 
 ## [0.58.0] - 2026-11-08
 

@@ -47,3 +47,8 @@ half = { workspace = true }
 [features]
 default = []
 cuda = ["dep:cudarc"]
+
+# Times the batched GEMM on a real device; needs the `cuda` feature.
+[[example]]
+name = "mul_mm_bench"
+required-features = ["cuda"]
