@@ -134,3 +134,118 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
         }
     }
 }
+
+/// The grouped form equals the plain form run once per group on that
+/// group's gathered rows, bit for bit: an empty group, a group of one,
+/// one wider than a tile of tokens, tokens shared between groups.
+#[test]
+#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+fn the_grouped_int8_gemm_equals_one_gemm_per_group() {
+    let dev = shared_device().unwrap();
+    let tokens = 90usize;
+    let groups: [Vec<i32>; 4] = [
+        vec![],
+        vec![17],
+        (0..70).map(|i| (i * 7 % tokens) as i32).collect(),
+        (0..19).map(|i| 89 - i * 3).collect(),
+    ];
+    for (kind, mm, n_cols) in [
+        (MmqKind::Q8_0, &crate::mul_mm::Q8_0, 2880usize),
+        (MmqKind::Q4_K, &crate::mul_mm::Q4_K, 512),
+    ] {
+        let n_rows = 135usize;
+        let (be, bb) = kind.block();
+        let row_bytes = n_cols / be * bb;
+        let weights: Vec<Vec<u8>> = (0..groups.len() as u32)
+            .map(|g| crate::mul_mm_ref::fixtures::weights(mm, n_rows, n_cols, 600 + g))
+            .collect();
+        let x = wave(tokens * n_cols, 0.7);
+        let mut group_off = vec![0i32];
+        let mut gather = Vec::new();
+        for g in &groups {
+            gather.extend_from_slice(g);
+            group_off.push(gather.len() as i32);
+        }
+        let pairs = gather.len();
+        let ncols_pad = (pairs + kernel::COLS - 1).div_ceil(kernel::COLS) * kernel::COLS;
+        let d_x = xfer::htod(&dev, "g x", &x).unwrap();
+        let d_gather = xfer::htod(&dev, "g gather", &gather).unwrap();
+        let d_off = xfer::htod(&dev, "g off", &group_off).unwrap();
+        let y = quantize::enqueue_quantize(
+            &dev,
+            kind.layout(),
+            &d_x,
+            Some(&d_gather),
+            n_cols,
+            pairs,
+            ncols_pad,
+        )
+        .unwrap();
+        let held: Vec<_> = weights
+            .iter()
+            .map(|w| crate::gpu::resident_cuda_weights(&dev, w).unwrap())
+            .collect();
+        let ptrs: Vec<u64> = held
+            .iter()
+            .map(|w| *cudarc::driver::DevicePtr::device_ptr(&w.slice))
+            .collect();
+        let d_tab = xfer::htod(&dev, "g tab", &ptrs).unwrap();
+        // SAFETY: the table points at `held`, alive past the download; the
+        // offsets end at `pairs` with no group past 70; `y` was quantized
+        // at `ncols_pad >= pairs + 63`.
+        let out = unsafe {
+            super::enqueue_mmq_grouped(
+                &dev,
+                kind,
+                &d_tab.slice(..),
+                groups.len(),
+                &d_off,
+                &y,
+                ncols_pad,
+                pairs,
+                70,
+                n_rows,
+                n_cols,
+                row_bytes,
+            )
+        }
+        .unwrap();
+        let got = xfer::dtoh(&dev, "g out", &out).unwrap();
+        for (g, rows) in groups.iter().enumerate() {
+            if rows.is_empty() {
+                continue;
+            }
+            let xg: Vec<f32> = rows
+                .iter()
+                .flat_map(|&t| {
+                    x[t as usize * n_cols..(t as usize + 1) * n_cols]
+                        .iter()
+                        .copied()
+                })
+                .collect();
+            let d_xg = xfer::htod(&dev, "g xg", &xg).unwrap();
+            let (want, w) = super::enqueue_mmq(
+                &dev,
+                kind,
+                &weights[g],
+                &d_xg,
+                n_rows,
+                n_cols,
+                rows.len(),
+                row_bytes,
+            )
+            .unwrap();
+            let want = xfer::dtoh(&dev, "g want", &want).unwrap();
+            drop(w);
+            let lo = group_off[g] as usize * n_rows;
+            let have = &got[lo..lo + rows.len() * n_rows];
+            for (i, (a, b)) in have.iter().zip(&want).enumerate() {
+                assert!(
+                    a.to_bits() == b.to_bits(),
+                    "{kind:?} group {g} [{i}]: grouped {a} plain {b}"
+                );
+            }
+        }
+        drop(held);
+    }
+}

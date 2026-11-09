@@ -67,8 +67,21 @@ __device__ __forceinline__ void frink_mmq_ldsm_x4(unsigned int* r, const int* p)
         : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
 }
 
+#ifndef FX_GROUPED
+#define FX_GROUPED 0
+#endif
+
 extern "C" __global__ void FX_FN_NAME(
+#if FX_GROUPED
+    // One routed expert per blockIdx.z: its weights through `wtab`, its
+    // pairs the activation columns `group_off[z] .. group_off[z + 1]`
+    // (the quantizer wrote them in grouped order) and the output rows of
+    // the same indices.
+    const unsigned long long* __restrict__ wtab,
+    const int* __restrict__ group_off,
+#else
     const unsigned char* __restrict__ w,
+#endif
     const unsigned char* __restrict__ y,
     float* __restrict__ dst,
     int n_rows,
@@ -91,6 +104,16 @@ extern "C" __global__ void FX_FN_NAME(
     const int t = lane & 3;
     const int r0 = blockIdx.y * FX_I;
     const int c0 = blockIdx.x * FX_J;
+#if FX_GROUPED
+    const int y_col0 = group_off[blockIdx.z];
+    // A whole block past its group's pairs has nothing to do; the test is
+    // the block's, so no barrier below is reached by part of it.
+    if (c0 >= group_off[blockIdx.z + 1] - y_col0) return;
+    const unsigned char* w = (const unsigned char*)wtab[blockIdx.z];
+    batch = group_off[blockIdx.z + 1] - y_col0;
+#else
+    const int y_col0 = 0;
+#endif
 
     float acc[2][4][4];
 #pragma unroll
@@ -112,7 +135,7 @@ extern "C" __global__ void FX_FN_NAME(
         FX_LOAD_X
         // The step's activation blocks for this tile's tokens are
         // contiguous (K-block-major): one copy of 64 x 144 bytes.
-        const uint4* ysrc = (const uint4*)(y + ((size_t)ks * ncols_pad + c0) * 144);
+        const uint4* ysrc = (const uint4*)(y + ((size_t)ks * ncols_pad + y_col0 + c0) * 144);
         for (int e = tid; e < FX_J * FX_YS / 4; e += FX_NT) ((uint4*)y_s)[e] = ysrc[e];
         __syncthreads();
 
@@ -169,13 +192,15 @@ extern "C" __global__ void FX_FN_NAME(
         for (int nf = 0; nf < 4; nf++) {
             const int col0 = c0 + wn * 32 + nf * 8 + 2 * t;
             const int col1 = col0 + 1;
+            const size_t o0 = (size_t)(y_col0 + col0) * n_rows;
+            const size_t o1 = (size_t)(y_col0 + col1) * n_rows;
             if (col0 < batch) {
-                if (row0 < n_rows) dst[(size_t)col0 * n_rows + row0] = acc[mf][nf][0];
-                if (row1 < n_rows) dst[(size_t)col0 * n_rows + row1] = acc[mf][nf][2];
+                if (row0 < n_rows) dst[o0 + row0] = acc[mf][nf][0];
+                if (row1 < n_rows) dst[o0 + row1] = acc[mf][nf][2];
             }
             if (col1 < batch) {
-                if (row0 < n_rows) dst[(size_t)col1 * n_rows + row0] = acc[mf][nf][1];
-                if (row1 < n_rows) dst[(size_t)col1 * n_rows + row1] = acc[mf][nf][3];
+                if (row0 < n_rows) dst[o1 + row0] = acc[mf][nf][1];
+                if (row1 < n_rows) dst[o1 + row1] = acc[mf][nf][3];
             }
         }
     }
@@ -381,12 +406,39 @@ impl MmqKind {
         }
     }
 
+    /// [`Self::source`] for the grouped form: a routed layer's experts in
+    /// one launch, one per `blockIdx.z` (`FX_GROUPED`).
+    pub fn grouped_source(self) -> (String, &'static str, &'static str) {
+        let (src, _, _) = self.source();
+        let (module, name) = match self {
+            Self::Q8_0 => ("frink_mmq_q8_0_grouped", "frink_mmq_q8_0_grouped"),
+            Self::Q4_K => ("frink_mmq_q4_k_grouped", "frink_mmq_q4_k_grouped"),
+            Self::Q6_K => ("frink_mmq_q6_k_grouped", "frink_mmq_q6_k_grouped"),
+        };
+        let (_, plain) = self.names();
+        (
+            format!("#define FX_GROUPED 1\n{}", src.replace(plain, name)),
+            module,
+            name,
+        )
+    }
+
+    /// The plain form's NVRTC module and function names.
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Q8_0 => ("frink_mmq_q8_0", "frink_mmq_q8_0"),
+            Self::Q4_K => ("frink_mmq_q4_k", "frink_mmq_q4_k"),
+            Self::Q6_K => ("frink_mmq_q6_k", "frink_mmq_q6_k"),
+        }
+    }
+
     /// The translation unit and its NVRTC module and function names.
     pub fn source(self) -> (String, &'static str, &'static str) {
-        let (module, name, load) = match self {
-            Self::Q8_0 => ("frink_mmq_q8_0", "frink_mmq_q8_0", Q8_0_LOAD_X),
-            Self::Q4_K => ("frink_mmq_q4_k", "frink_mmq_q4_k", Q4_K_LOAD_X),
-            Self::Q6_K => ("frink_mmq_q6_k", "frink_mmq_q6_k", Q6_K_LOAD_X),
+        let (module, name) = self.names();
+        let load = match self {
+            Self::Q8_0 => Q8_0_LOAD_X,
+            Self::Q4_K => Q4_K_LOAD_X,
+            Self::Q6_K => Q6_K_LOAD_X,
         };
         (
             format!("#define FX_FN_NAME {name}\n{PRELUDE_SRC}{load}{BODY_SRC}"),

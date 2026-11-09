@@ -94,10 +94,96 @@ mod launch {
         }
         Ok((out, held))
     }
+
+    /// A routed layer's experts' projection in ONE int8 launch: group `g`
+    /// multiplies the weights `table[g]` by the activation columns
+    /// `group_off[g] .. group_off[g + 1]` of `y` (q8_1 blocks the
+    /// quantizer wrote in grouped order, `ncols_pad` columns) into output
+    /// rows of the same indices, `pairs` rows of `n_rows` in all.
+    ///
+    /// # Safety
+    /// `table` holds `n_groups` device pointers to `n_rows * row_bytes`
+    /// live bytes of `kind` each, alive until the stream has run the
+    /// launch; `group_off` holds `n_groups + 1` non-decreasing pair
+    /// indices from 0 to `pairs`, no group larger than `max_group`; `y`
+    /// holds `ncols_pad >= pairs + 63` columns of `n_cols` values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn enqueue_mmq_grouped(
+        dev: &Arc<CudaDevice>,
+        kind: MmqKind,
+        table: &cudarc::driver::CudaView<'_, u64>,
+        n_groups: usize,
+        group_off: &CudaSlice<i32>,
+        y: &CudaSlice<u8>,
+        ncols_pad: usize,
+        pairs: usize,
+        max_group: usize,
+        n_rows: usize,
+        n_cols: usize,
+        row_bytes: usize,
+    ) -> Result<CudaSlice<f32>, CudaError> {
+        let block = kind.block();
+        if n_groups == 0
+            || pairs == 0
+            || !n_cols.is_multiple_of(block.0)
+            || row_bytes != n_cols / block.0 * block.1
+            || ncols_pad < pairs + kernel::COLS - 1
+        {
+            return Err(CudaError::Unsupported(format!(
+                "mmq grouped {kind:?}: {n_groups} groups of {n_rows} x {n_cols} over {pairs}"
+            )));
+        }
+        let (src, module, name) = kind.grouped_source();
+        crate::gpu::ensure_module_loaded_lazy_for_arch(
+            dev,
+            module,
+            name,
+            Some(kernel::ARCH),
+            || src,
+        )?;
+        let func = dev.get_func(module, name).ok_or_else(|| {
+            CudaError::KernelCompile(format!("function '{name}' not found after load_ptx"))
+        })?;
+        // SAFETY: every group's blocks write every one of its pairs' rows
+        // below `n_rows`, and the groups' pairs are `0 .. pairs`.
+        let mut out = unsafe { crate::gpu::alloc_out(dev, pairs * n_rows, "mmq grouped output") }?;
+        let cfg = LaunchConfig {
+            grid_dim: (
+                max_group.max(1).div_ceil(kernel::COLS) as u32,
+                n_rows.div_ceil(kernel::ROWS) as u32,
+                n_groups as u32,
+            ),
+            block_dim: (kernel::THREADS as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        // SAFETY: (const u64*, const int*, const u8*, float*, int x5)
+        // matched positionally by the FX_GROUPED parameter list, under the
+        // caller's contract above: a block's tile of columns starts at its
+        // group's first pair and reads at most 63 past its last, inside
+        // `ncols_pad`; the stores are guarded by the group's count.
+        unsafe {
+            func.launch(
+                cfg,
+                (
+                    table,
+                    group_off,
+                    y,
+                    &mut out,
+                    n_rows as i32,
+                    (n_cols / block.0) as i32,
+                    0i32,
+                    ncols_pad as i32,
+                    row_bytes as i32,
+                ),
+            )
+            .map_err(|e| CudaError::Launch(format!("{name}: {e:?}")))?;
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) use launch::enqueue_mmq;
+pub(crate) use launch::{enqueue_mmq, enqueue_mmq_grouped};
 
 /// The int8 GEMM's arithmetic on the host, in its order: per output,
 /// over the blocks of K ascending, the exact int32 dot of the block's
