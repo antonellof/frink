@@ -202,12 +202,49 @@ pub(crate) fn enqueue_mul_mm_with_body(
             (x, y, THREADS)
         }
     };
+    if body == MulMmBody::TensorCore {
+        // The tensor-core body reads its activations as f16, converted
+        // once here rather than in every block's every tile, and asks for
+        // its tiles as dynamic shared memory (`mul_mm_tc::shared_bytes`).
+        let n_x = batch * n_cols;
+        let x16 = f32_to_f16(dev, d_x, n_x)?;
+        let smem = crate::mul_mm_tc::shared_bytes(kind);
+        opt_in_shared(&func, fn_name, smem)?;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (grid_x as u32, grid_y as u32, 1),
+            block_dim: (threads as u32, 1, 1),
+            shared_mem_bytes: smem as u32,
+        };
+        // SAFETY: as for the SIMT launch below, with the activation the
+        // f16 copy of `d_x`'s first `batch * n_cols` values (`x16` holds
+        // exactly that many, and the kernel reads token rows of
+        // `n_cols` below `batch`), and the dynamic shared memory the
+        // size the body lays its tiles out in, which the function was
+        // opted into above. `x16` is freed stream-ordered after the
+        // launch has read it.
+        unsafe {
+            func.launch(
+                cfg,
+                (
+                    &d_weights.slice,
+                    &x16,
+                    &mut d_out,
+                    n_rows as i32,
+                    n_cols as i32,
+                    batch as i32,
+                    row_bytes as i32,
+                ),
+            )
+            .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
+        }
+        return Ok((d_out, d_weights));
+    }
+
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (grid_x as u32, grid_y as u32, 1),
         block_dim: (threads as u32, 1, 1),
-        // The tiles are declared `__shared__` inside the kernel, so the
-        // dynamic shared-memory request is zero. Asking for more here
-        // would be added to the static allocation, not replace it.
+        // The SIMT body declares its tiles `__shared__`, so the dynamic
+        // shared-memory request is zero.
         shared_mem_bytes: 0,
     };
 
@@ -238,6 +275,61 @@ pub(crate) fn enqueue_mul_mm_with_body(
         .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
     }
     Ok((d_out, d_weights))
+}
+
+/// `x[..n]` as f16 (round to nearest even), on the device.
+fn f32_to_f16(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    x: &cudarc::driver::CudaSlice<f32>,
+    n: usize,
+) -> Result<cudarc::driver::CudaSlice<u16>, CudaError> {
+    use cudarc::driver::LaunchAsync;
+    let (module, name) = crate::mul_mm_tc::F32_TO_F16;
+    crate::gpu::ensure_module_loaded(dev, crate::mul_mm_tc::F32_TO_F16_SRC, module, name)?;
+    let func = dev
+        .get_func(module, name)
+        .ok_or_else(|| CudaError::KernelCompile(format!("function '{name}' not found")))?;
+    // SAFETY: uninitialised, and every one of its `n` elements is
+    // written by the launch below (one thread per element) before the
+    // GEMM reads it.
+    let mut y = unsafe { dev.alloc::<u16>(n) }
+        .map_err(|e| CudaError::Launch(format!("f16 activation alloc: {e:?}")))?;
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: ((n as u32).div_ceil(256).max(1), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float*, unsigned short*, int) matched positionally;
+    // `x` holds at least `n` floats (the caller's `validate_shape`) and
+    // `y` exactly `n`, and thread `i` touches element `i < n` only.
+    unsafe {
+        func.launch(cfg, (x, &mut y, n as i32))
+            .map_err(|e| CudaError::Launch(format!("f32 to f16: {e:?}")))?;
+    }
+    Ok(y)
+}
+
+/// Opts `func` into `bytes` of dynamic shared memory, once per kernel.
+/// Past 48 KiB a launch must; the body's tiles are up to 95 KiB.
+fn opt_in_shared(
+    func: &cudarc::driver::CudaFunction,
+    name: &'static str,
+    bytes: usize,
+) -> Result<(), CudaError> {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static DONE: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
+    let mut done = DONE.lock().unwrap_or_else(|p| p.into_inner());
+    if done.get_or_insert_with(HashSet::new).contains(name) {
+        return Ok(());
+    }
+    func.set_attribute(
+        cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        bytes as i32,
+    )
+    .map_err(|e| CudaError::Launch(format!("{name}: {bytes} bytes of shared memory: {e:?}")))?;
+    done.get_or_insert_with(HashSet::new).insert(name);
+    Ok(())
 }
 
 /// Which GEMM body a launch takes.
