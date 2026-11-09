@@ -16,6 +16,15 @@ pub const THREADS: usize = 256;
 /// The NVRTC target: `mma.m16n8k32` with s8 operands needs `sm_80`.
 pub const ARCH: &str = "compute_80";
 
+/// Helpers every kind's snippet may call, ahead of the snippet.
+const PRELUDE_SRC: &str = r#"
+__device__ __forceinline__ float frink_mmq_f16(unsigned short bits) {
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(bits));
+    return f;
+}
+"#;
+
 /// The skeleton every kind shares. The kind supplies `FX_N_STEPS` (steps
 /// of 128 values a row takes), `FX_XD` (scale floats per 32-value run),
 /// `FX_LOAD_X` (the weight-tile loader, writing `x_qs`, `x_d` and the
@@ -32,12 +41,6 @@ const BODY_SRC: &str = r#"
 #define FX_XS 36
 // A q8_1 block in ints: 4 of header and 32 of values.
 #define FX_YS 36
-
-__device__ __forceinline__ float frink_mmq_f16(unsigned short bits) {
-    float f;
-    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(bits));
-    return f;
-}
 
 __device__ __forceinline__ void frink_mma_s8_k16(int* c, const unsigned int* a, unsigned int b) {
     asm volatile(
@@ -386,7 +389,7 @@ impl MmqKind {
             Self::Q6_K => ("frink_mmq_q6_k", "frink_mmq_q6_k", Q6_K_LOAD_X),
         };
         (
-            format!("#define FX_FN_NAME {name}\n{load}{BODY_SRC}"),
+            format!("#define FX_FN_NAME {name}\n{PRELUDE_SRC}{load}{BODY_SRC}"),
             module,
             name,
         )
@@ -443,6 +446,22 @@ mod tests {
                 "FX_STEP_END",
             ] {
                 assert!(src.contains(&format!("#define {m}")), "{k:?} lacks {m}");
+            }
+            // NVRTC compiles one pass: every helper is defined before
+            // anything calls it (the Q4_K snippet once called the f16
+            // helper ahead of its definition, which only a device saw).
+            for helper in ["frink_mmq_f16", "frink_mmq_round_h", "frink_mmq_u32_a2"] {
+                let Some(first) = src.find(&format!("{helper}(")) else {
+                    continue;
+                };
+                let def = src
+                    .find(&format!(" {helper}("))
+                    .filter(|&i| src[..i].ends_with("float") || src[..i].ends_with("int"));
+                assert_eq!(
+                    def.map(|d| d + 1),
+                    Some(first),
+                    "{k:?}: {helper} used before defined"
+                );
             }
         }
     }
