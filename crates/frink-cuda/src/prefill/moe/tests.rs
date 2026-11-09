@@ -33,6 +33,12 @@ fn a_routed_batch_matches_its_host_twin_through_the_grouped_gemms() {
 /// the host's f32 cannot route a token differently.
 const ROUTE_MARGIN: f32 = 0.05;
 
+/// How far a batch's device logits may sit from the host's, relative to
+/// the larger of the logit and the token's RMS (`assert_close`): the
+/// attention projections run on the tensor-core GEMM's f16 operands,
+/// which moved token 0's logits by 0.17% of their RMS on an A10G.
+const BATCH_LOGIT_TOL: f32 = 5e-3;
+
 /// The routed fixture's per-token logits and top-2 softmax picks, on the
 /// host. Kept apart from the device so the margins can be checked
 /// without one (`the_routed_fixture_routes_with_a_margin`).
@@ -197,6 +203,13 @@ fn the_routed_fixture_routes_with_a_margin() {
             let mut s = lg.clone();
             s.sort_by(|a, b| b.total_cmp(a));
             assert!(s[1] - s[2] >= ROUTE_MARGIN, "token margin {lg:?}");
+            // Two logits each moved by the device's bound cannot swap.
+            let rms = (lg.iter().map(|v| v * v).sum::<f32>() / lg.len() as f32).sqrt();
+            let bound = BATCH_LOGIT_TOL * s[1].abs().max(s[2].abs()).max(rms);
+            assert!(
+                s[1] - s[2] > 2.0 * bound,
+                "margin inside the device bound {lg:?}"
+            );
         }
         if batch > 1 {
             let sets: std::collections::BTreeSet<Vec<usize>> = twin
@@ -257,7 +270,8 @@ fn routed_layer_matches_its_host_twin(batch: usize) {
         |i: usize, got: &[f32]| -> Result<Vec<(ExpertProjCuda<'static>, f32)>, CudaError> {
             assert_eq!(i, 0);
             // Tokens are routed in order, once each.
-            assert_close(got, &twin.logits[asked], 1e-3, "router logits");
+            let tol = if batch == 1 { 1e-3 } else { BATCH_LOGIT_TOL };
+            assert_close(got, &twin.logits[asked], tol, "router logits");
             asked += 1;
             Ok(top2_softmax(got)
                 .into_iter()
