@@ -515,6 +515,7 @@ pub fn launch_stack<'e>(
             stage_at: kv_offsets[i],
             route: route.as_deref_mut(),
         };
+        let _t = crate::phases::phase("enqueue");
         run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
     }
     xfer::dtod(
@@ -524,7 +525,10 @@ pub fn launch_stack<'e>(
         &mut staged.slice_mut(..batch * hidden_dim),
     )?;
     // The stack's one host wait: everything above was enqueued.
-    let staged = xfer::dtoh_staged(&dev, "stack download", &staged)?;
+    let staged = {
+        let _t = crate::phases::phase("wait+download");
+        xfer::dtoh_staged(&dev, "stack download", &staged)?
+    };
     drop(held);
     let out = PrefillStackOut {
         hidden: staged.as_slice()[..batch * hidden_dim].to_vec(),

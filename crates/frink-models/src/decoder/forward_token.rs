@@ -1271,10 +1271,18 @@ impl Decoder {
         #[cfg(not(feature = "metal"))]
         let final_normed = self.final_norm.apply(&hidden, self.config.rms_norm_eps);
 
-        let logits = self.logits_from_normed(&final_normed);
-        // `FRINK_CUDA_COUNT=1`: this token's syncs and copies.
+        let logits = {
+            #[cfg(feature = "cuda")]
+            let _t = frink_cuda::phases::phase("logits");
+            self.logits_from_normed(&final_normed)
+        };
+        // `FRINK_CUDA_COUNT=1`: this token's syncs and copies;
+        // `FRINK_CUDA_TIME=1`: where its wall time went.
         #[cfg(feature = "cuda")]
-        frink_cuda::counters::step_end(frink_cuda::counters::StepKind::Decode);
+        {
+            frink_cuda::counters::step_end(frink_cuda::counters::StepKind::Decode);
+            frink_cuda::phases::step_end(frink_cuda::counters::StepKind::Decode);
+        }
         // Clear dense-stack activation TLS after lm_head (may have consumed it).
         // Keep MoE scratch buffers alive across tokens — `moe_decode_seed`
         // overwrites `h` each token; clearing here forced full realloc.

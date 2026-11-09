@@ -30,15 +30,29 @@ impl Decoder {
         kv_caches: &mut [KvCache],
         host_kv_authoritative: bool,
     ) -> Vec<f32> {
-        let hiddens =
-            self.forward_hidden_batch_inner(tokens, start_pos, kv_caches, host_kv_authoritative);
+        #[cfg(feature = "cuda")]
+        let step = frink_cuda::phases::phase("step");
+        let hiddens = {
+            #[cfg(feature = "cuda")]
+            let _t = frink_cuda::phases::phase("layers+norm");
+            self.forward_hidden_batch_inner(tokens, start_pos, kv_caches, host_kv_authoritative)
+        };
         let Some(last) = hiddens.last() else {
             return Vec::new();
         };
-        let logits = self.logits_from_normed(last);
-        // `FRINK_CUDA_COUNT=1`: this step's syncs and copies.
+        let logits = {
+            #[cfg(feature = "cuda")]
+            let _t = frink_cuda::phases::phase("logits");
+            self.logits_from_normed(last)
+        };
+        // `FRINK_CUDA_COUNT=1`: this step's syncs and copies;
+        // `FRINK_CUDA_TIME=1`: where its wall time went.
         #[cfg(feature = "cuda")]
-        frink_cuda::counters::step_end(frink_cuda::counters::StepKind::Prefill);
+        {
+            drop(step);
+            frink_cuda::counters::step_end(frink_cuda::counters::StepKind::Prefill);
+            frink_cuda::phases::step_end(frink_cuda::counters::StepKind::Prefill);
+        }
         logits
     }
 
