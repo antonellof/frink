@@ -460,9 +460,11 @@ fn enqueue_matvec_at(
     })?;
 
     let d_weights = resident_cuda_weights(dev, launch.weights)?;
-    let mut d_out = dev
-        .alloc_zeros::<f32>(launch.rows)
-        .map_err(|e| CudaError::Launch(format!("output alloc: {e:?}")))?;
+    // SAFETY: every matvec kernel gives each output row one warp (or
+    // one block), returns early only for a row past `rows`, and writes
+    // `out[row]` for every row below it; the launch plan's grid covers
+    // `rows`.
+    let mut d_out = unsafe { alloc_out(dev, launch.rows, "matvec output") }?;
 
     unsafe {
         func.launch(
@@ -480,6 +482,27 @@ fn enqueue_matvec_at(
     }
 
     Ok((d_out, d_weights))
+}
+
+/// A device buffer for one kernel's output, NOT zeroed.
+///
+/// `alloc_zeros` enqueues a memset on the stream before the kernel
+/// that then overwrites every element, and the resident stack made
+/// about fourteen of them per layer per decode token: serialized GPU
+/// work and a driver call each, for nothing a kernel reads.
+///
+/// # Safety
+///
+/// The memory is uninitialised. The caller passes it to a launch that
+/// writes every one of its `n` elements before anything reads one, and
+/// says why in its own `SAFETY` comment.
+pub(crate) unsafe fn alloc_out(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    n: usize,
+    what: &str,
+) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
+    // SAFETY: forwarded to the caller, per the contract above.
+    unsafe { dev.alloc::<f32>(n) }.map_err(|e| CudaError::Launch(format!("{what} alloc: {e:?}")))
 }
 
 // The resident weight cache moved to `crate::resident`; re-exported
@@ -740,6 +763,25 @@ pub fn launch_matvec_multi(
     Ok(results)
 }
 
+/// The gated activation a fused FFN applies to its gate before the
+/// product with `up`: SwiGLU (`silu(gate) * up`) or Gemma's GeGLU
+/// (`gelu(gate) * up`). One launch serves both ([`glu_mul_device`]),
+/// so the two cannot disagree about anything but the function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GluCuda {
+    Silu,
+    Gelu,
+}
+
+impl GluCuda {
+    fn module(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            GluCuda::Silu => (SILU_MUL_KERNEL_SRC, "frink_silu_mul", "silu_mul_f32"),
+            GluCuda::Gelu => (GELU_MUL_KERNEL_SRC, "frink_gelu_mul", "gelu_mul_f32"),
+        }
+    }
+}
+
 /// CUDA C source for an elementwise SwiGLU pair fuse:
 /// `out[i] = silu(gate[i]) * up[i]`, `silu(x) = x / (1 + exp(-x))`.
 /// Mirrors `frink_core::matmul::swiglu` (which is `silu(gate)*up`) and
@@ -762,28 +804,52 @@ extern "C" __global__ void silu_mul_f32(
 }
 "#;
 
-/// Enqueues the elementwise `silu(gate)*up` kernel on the shared
+/// CUDA C source for the GeGLU pair, `out[i] = gelu(gate[i]) * up[i]`,
+/// in ggml-cuda's tanh form (`ggml_cuda_op_gelu_single`,
+/// `ggml/src/ggml-cuda/unary.cuh`), which is what llama.cpp's CUDA
+/// backend runs for Gemma's FFN. The host's `frink_core::matmul::geglu`
+/// evaluates the same function through `x / (1 + exp(-2u))`, so the
+/// two agree to rounding, not bit for bit.
+pub const GELU_MUL_KERNEL_SRC: &str = r#"
+extern "C" __global__ void gelu_mul_f32(
+    const float* gate,
+    const float* up,
+    float* out,
+    int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float GELU_COEF_A = 0.044715f;
+        const float SQRT_2_OVER_PI = 0.79788456080286535587989211986876f;
+        float g = gate[i];
+        float gelu = 0.5f * g * (1.0f + tanhf(SQRT_2_OVER_PI * g * (1.0f + GELU_COEF_A * g * g)));
+        out[i] = up[i] * gelu;
+    }
+}
+"#;
+
+/// Enqueues the elementwise `act(gate) * up` kernel on the shared
 /// device's default stream (no host sync), returning the device output
 /// slice. `gate`/`up` are device slices of length `n` produced by the
-/// two FFN input matvecs; the result feeds straight into the down
-/// matvec without ever touching host memory.
-pub(crate) fn silu_mul_device(
+/// two FFN input projections; the result feeds straight into the down
+/// projection without ever touching host memory.
+pub(crate) fn glu_mul_device(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    glu: GluCuda,
     gate: &cudarc::driver::CudaSlice<f32>,
     up: &cudarc::driver::CudaSlice<f32>,
     n: usize,
 ) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
     use cudarc::driver::LaunchAsync;
 
-    ensure_module_loaded(dev, SILU_MUL_KERNEL_SRC, "frink_silu_mul", "silu_mul_f32")?;
-    let func = dev
-        .get_func("frink_silu_mul", "silu_mul_f32")
-        .ok_or_else(|| {
-            CudaError::KernelCompile("function 'silu_mul_f32' not found after load_ptx".to_string())
-        })?;
-    let mut d_out = dev
-        .alloc_zeros::<f32>(n)
-        .map_err(|e| CudaError::Launch(format!("silu_mul out alloc: {e:?}")))?;
+    let (src, module, name) = glu.module();
+    ensure_module_loaded(dev, src, module, name)?;
+    let func = dev.get_func(module, name).ok_or_else(|| {
+        CudaError::KernelCompile(format!("function '{name}' not found after load_ptx"))
+    })?;
+    // SAFETY: the grid below is `ceil(n / 256)` blocks of 256 threads
+    // and thread `i < n` writes `out[i]`.
+    let mut d_out = unsafe { alloc_out(dev, n, name) }?;
     let block = 256u32;
     let grid = (n as u32).div_ceil(block);
     let cfg = cudarc::driver::LaunchConfig {
@@ -791,9 +857,13 @@ pub(crate) fn silu_mul_device(
         block_dim: (block, 1, 1),
         shared_mem_bytes: 0,
     };
+    // SAFETY: the kernel reads `n` floats from `gate` and `up` and writes
+    // `n` to `d_out`; the caller passes slices of length `n` and `d_out`
+    // was just allocated at `n`. The grid covers `n` threads, each
+    // bounds-checked against `n`.
     unsafe {
         func.launch(cfg, (gate, up, &mut d_out, n as i32))
-            .map_err(|e| CudaError::Launch(format!("silu_mul launch: {e:?}")))?;
+            .map_err(|e| CudaError::Launch(format!("{name} launch: {e:?}")))?;
     }
     Ok(d_out)
 }
@@ -923,7 +993,7 @@ pub fn launch_dense_ffn_swiglu(
     // function so every kernel's weight buffer outlives the final sync.
     let (d_gate, _wg) = enqueue_matvec(&dev, gate, &d_x)?;
     let (d_up, _wu) = enqueue_matvec(&dev, up, &d_x)?;
-    let d_act = silu_mul_device(&dev, &d_gate, &d_up, gate.rows)?;
+    let d_act = glu_mul_device(&dev, GluCuda::Silu, &d_gate, &d_up, gate.rows)?;
     let (d_out, _wd) = enqueue_matvec(&dev, down, &d_act)?;
 
     crate::xfer::dtoh(&dev, "ffn out download", &d_out)
