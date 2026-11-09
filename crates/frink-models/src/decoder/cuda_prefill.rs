@@ -154,11 +154,11 @@ impl Decoder {
         let run_len = described.len();
         let launch: Vec<(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)> =
             described.iter().map(|(d, p)| (d, p)).collect();
-        let kv = if decode {
-            StackKv::Mirrors(&mut slots)
-        } else {
-            StackKv::UploadPrefix
-        };
+        // A prefill step writes its rows into the same device mirrors a
+        // decode token attends over, so the first token after a prompt
+        // does not upload the prompt's whole history again, and a
+        // chunked prefill does not upload its prefix per chunk.
+        let kv = StackKv::Mirrors(&mut slots);
         let out = match launch_prefill_dense_stack(input, &launch, batch_size, kv) {
             Ok(out) => out,
             Err(e) => {
@@ -172,8 +172,9 @@ impl Decoder {
         drop(launch);
         drop(described);
         drop(slots);
-        debug_assert_eq!(out.kv_rows.len(), run_len);
-        for (li, (k_rows, v_rows)) in (l..l + run_len).zip(&out.kv_rows) {
+        debug_assert_eq!(out.layers(), run_len);
+        for (i, li) in (l..l + run_len).enumerate() {
+            let (k_rows, v_rows) = out.kv(i);
             self.layer_for(li).moe.record_activations(&[0]);
             let cache = &mut kv_caches[li];
             for b in 0..batch_size {
