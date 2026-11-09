@@ -664,7 +664,7 @@ mod tests {
             "dry_multiplier": 0.0,
             "dry_base": 1.75,
             "dry_allowed_length": 2,
-            "dry_penalty_last_n": -1,
+            "dry_penalty_last_n": 64,
             "dry_sequence_breakers": ["\n", ":", "\"", "*"],
             "samplers": [],
             "n_probs": 0,

@@ -17,6 +17,12 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **DRY's scan window defaults to llama.cpp's 64 tokens.** frink
+  defaulted `dry_penalty_last_n` to `-1`, the whole context, from an
+  older `common.h`. At the pin it is 64 (`common/common.h:251`), so a
+  request that set `dry_multiplier` alone scanned a different window
+  from llama-server's.
+
 - **A crafted GGUF refuses at load instead of exhausting memory or
   panicking.** `block_count` or `nanbeige.num_loops` of 2^31 made the
   loader allocate until the OS killed it, and 55 other hostile values
