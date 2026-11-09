@@ -15,6 +15,16 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **CUDA decode matvecs give a row several warps.** The coalesced
+  Q4_K / Q5_K / Q6_K / Q8_0 matvecs gave each output row one warp,
+  which walked the row's blocks serially. A row now gets as many warps
+  as it has trips, up to 8, and they add their sums through shared
+  memory, as llama.cpp's decode matvec does. On an A10G that lifted
+  Llama-3.1-8B Q4_K_M `tg128` from 65.0 to 71.3 tokens/s.
+  `FRINK_CUDA_MATVEC_WPR` overrides the choice for an A/B (#133).
+
 ## [0.58.0] - 2026-11-08
 
 ### Added
