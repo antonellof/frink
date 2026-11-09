@@ -206,7 +206,8 @@ mod tests {
     fn a_staged_download_matches_and_a_held_buffer_falls_back() {
         let dev = crate::gpu::shared_device().expect("a CUDA device");
         let pinned = |what: &str, d: &CudaSlice<f32>| -> Download {
-            for _ in 0..400 {
+            // Up to 10 s: another test's whole stack can hold it that long.
+            for _ in 0..2000 {
                 let got = dtoh_staged(&dev, what, d).unwrap();
                 if matches!(got.inner, DownloadInner::Pinned { .. }) {
                     return got;

@@ -4,7 +4,7 @@
 
 use super::super::tests::{
     assert_close, host_causal_gqa_sinks, host_rms_norm_rows, host_swiglu_oai, q8_0_proj,
-    small_q8_0, wave, BATCH_GEMM_TOL,
+    q8_1_round, small_q8_0, wave, BATCH_GEMM_TOL,
 };
 use super::super::*;
 use crate::mul_mm::Q8_0;
@@ -55,10 +55,11 @@ fn a_gpt_oss_batch_matches_its_host_twin_through_the_grouped_gemms() {
 const ROUTE_MARGIN: f32 = 0.05;
 
 /// How far a batch's device logits may sit from the host's, relative to
-/// the larger of the logit and the token's RMS (`assert_close`): the
-/// batch GEMM's q8_1 activations, `BATCH_GEMM_TOL`'s reason (1.4% of the
-/// RMS measured on an A100).
-const BATCH_LOGIT_TOL: f32 = BATCH_GEMM_TOL;
+/// the larger of the logit and the token's RMS (`assert_close`). The
+/// twin rounds the batch GEMMs' inputs through q8_1 as the device does,
+/// so this is f32 accumulation order and an occasional run rounded the
+/// other way.
+const BATCH_LOGIT_TOL: f32 = 5e-3;
 
 /// The routed fixture's per-token logits and top-2 softmax picks, on the
 /// host. Kept apart from the device so the margins can be checked
@@ -219,8 +220,15 @@ impl RoutedFixture {
         let keep = |p: OaiPart| left_out != Some(p);
         let q_w = self.n_heads * self.head_dim;
         let kv_w = self.n_kv_heads * self.head_dim;
+        // A batch's projections are the int8 GEMM's, which takes its
+        // input through q8_1; a decode token's are f32 matvecs.
         let mm = |data: &[u8], rows, cols, x: &[f32], n: usize| {
-            mul_mm_reference(&Q8_0, data, x, rows, cols, n, cols / 32 * 34).unwrap()
+            let x = if batch > 1 {
+                q8_1_round(x, cols)
+            } else {
+                x.to_vec()
+            };
+            mul_mm_reference(&Q8_0, data, &x, rows, cols, n, cols / 32 * 34).unwrap()
         };
         let [qd, kd, vd, od] = self.attn;
         let normed = host_rms_norm_rows(&self.hidden_in, &self.attn_norm_w, hidden, self.eps);
