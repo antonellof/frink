@@ -6,8 +6,8 @@
 use super::kernels::{
     ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC,
     CAUSAL_GQA_PREFILL, CAUSAL_GQA_PREFILL_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC,
-    RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32,
-    ROUTER_F32_KERNEL_SRC,
+    MOE_COMBINE_ROWS, MOE_COMBINE_ROWS_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC,
+    ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
@@ -171,27 +171,61 @@ pub(crate) fn enqueue_moe_combine(
     Ok(out)
 }
 
-/// `w[rows][cols] . x`, f32, the router's logits.
+/// The routed prefill's combine, `[batch][n]` from `y[pairs][n]`.
+pub(crate) fn enqueue_moe_combine_rows(
+    dev: &Arc<CudaDevice>,
+    y: &CudaSlice<f32>,
+    pair_of: &CudaSlice<i32>,
+    w: &CudaSlice<f32>,
+    k: usize,
+    n: usize,
+    batch: usize,
+) -> Result<CudaSlice<f32>, CudaError> {
+    debug_assert!(pair_of.len() >= batch * k && w.len() >= batch * k);
+    let func = func_for(dev, MOE_COMBINE_ROWS_KERNEL_SRC, MOE_COMBINE_ROWS)?;
+    // SAFETY: a grid row per token, and thread `i < n` of it writes
+    // `out[t][i]`.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, batch * n, "moe combine rows") }?;
+    let cfg = LaunchConfig {
+        grid_dim: ((n as u32).div_ceil(BLOCK).max(1), batch as u32, 1),
+        block_dim: (BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float*, const int*, const float*, float*, int, int)
+    // matched positionally; every `pair_of` entry is a row of `y` (the
+    // caller's routing), `w` and `pair_of` hold `batch * k`, `out`
+    // `batch * n`.
+    unsafe {
+        func.launch(cfg, (y, pair_of, w, &mut out, k as i32, n as i32))
+            .map_err(|e| launch_err("moe_combine_rows", e))?;
+    }
+    Ok(out)
+}
+
+/// `w[rows][cols] . x[t]` for each of `batch` rows of `x`, f32, the
+/// router's logits, `[batch][rows]`.
 pub(crate) fn enqueue_router_f32(
     dev: &Arc<CudaDevice>,
     w: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
     rows: usize,
     cols: usize,
+    batch: usize,
 ) -> Result<CudaSlice<f32>, CudaError> {
-    debug_assert!(w.len() >= rows * cols && x.len() >= cols);
+    debug_assert!(w.len() >= rows * cols && x.len() >= batch * cols);
     let func = func_for(dev, ROUTER_F32_KERNEL_SRC, ROUTER_F32)?;
     // SAFETY: one warp per row over a grid of `ceil(rows / 8)` blocks of
-    // eight warps, and every warp below `rows` writes `out[row]`.
-    let mut out = unsafe { crate::gpu::alloc_out(dev, rows, "router logits") }?;
+    // eight warps, a grid row per token, and every warp below `rows`
+    // writes its token's `out[row]`.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, batch * rows, "router logits") }?;
     let cfg = LaunchConfig {
-        grid_dim: ((rows as u32).div_ceil(8).max(1), 1, 1),
+        grid_dim: ((rows as u32).div_ceil(8).max(1), batch as u32, 1),
         block_dim: (256, 1, 1),
         shared_mem_bytes: 0,
     };
     // SAFETY: (const float*, const float*, float*, int, int) matched
-    // positionally; `w` holds `rows * cols` and `x` `cols` (the debug
-    // assert, and the stack's shape check), `out` exactly `rows`.
+    // positionally; `w` holds `rows * cols` and `x` `batch * cols` (the
+    // debug assert, and the stack's shape check), `out` `batch * rows`.
     unsafe {
         func.launch(cfg, (w, x, &mut out, rows as i32, cols as i32))
             .map_err(|e| launch_err("router_f32_matvec", e))?;

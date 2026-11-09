@@ -1,0 +1,294 @@
+//! The routed (MoE) FFN of a resident stack layer.
+//!
+//! The router runs on the device and its logits come back to the
+//! caller's routing, the host's own (`RouteFn`), so every gating rule
+//! routes as it does on the CPU. A decode token's experts then run as
+//! five launches, the matvecs indexed by expert; a prefill batch's
+//! tokens are grouped by expert and each projection of every chosen
+//! expert is one grouped tensor-core GEMM. Either way each token's
+//! experts are summed from zero in its routing's order, as the host's
+//! `combine_expert_outputs` sums them, before the residual add.
+
+use super::enqueue::{
+    enqueue_axpy, enqueue_moe_combine, enqueue_moe_combine_rows, enqueue_router_f32,
+};
+use super::{run_expert, ExpertProjCuda, Held, ProjWeights, RouteFn, RouterCuda};
+use crate::gpu::{glu_mul_device, shared_device, CudaError, GluCuda};
+use crate::xfer;
+use cudarc::driver::{CudaDevice, CudaSlice};
+use std::sync::Arc;
+
+/// A routed layer's FFN over `normed2` (`batch` rows): the summed,
+/// weighted experts of each token, `[batch][hidden_dim]`, ready for the
+/// residual add.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_routed(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    router: RouterCuda<'_>,
+    glu: GluCuda,
+    normed2: &CudaSlice<f32>,
+    batch: usize,
+    hidden_dim: usize,
+    ffn_dim: usize,
+    index: usize,
+    route: &mut RouteFn<'_, '_>,
+) -> Result<CudaSlice<f32>, CudaError> {
+    if batch > 1 {
+        return run_routed_batch(
+            dev, held, router, glu, normed2, batch, hidden_dim, ffn_dim, index, route,
+        );
+    }
+    // The layer's one host wait: the router's logits, for the caller's
+    // routing.
+    let logits = match router {
+        RouterCuda::F32 { data, rows } => {
+            let w = held.vector(dev, data)?;
+            enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, 1)?
+        }
+        RouterCuda::Quant(p) => held.proj(dev, &p, normed2, 1)?,
+    };
+    let logits = xfer::dtoh(dev, "router logits", &logits)?;
+    let picks = route(index, &logits)?;
+    for (ex, _) in &picks {
+        check_expert_shapes(ex, hidden_dim, ffn_dim)?;
+    }
+    // All the experts' gate, up and down in one launch each when their
+    // kinds have a coalesced matvec; one expert at a time otherwise.
+    if let Some(sum) = run_experts_together(dev, held, &picks, glu, normed2, hidden_dim, ffn_dim)? {
+        return Ok(sum);
+    }
+    let mut sum = dev
+        .alloc_zeros::<f32>(hidden_dim)
+        .map_err(|e| CudaError::Launch(format!("MoE sum alloc: {e:?}")))?;
+    for (ex, w) in &picks {
+        let y = run_expert(dev, held, ex, glu, normed2, 1, ffn_dim)?;
+        enqueue_axpy(dev, &mut sum, &y, *w, hidden_dim)?;
+    }
+    Ok(sum)
+}
+
+/// Whether a routed layer can ride the stack in a prefill batch on this
+/// device: its experts run through the grouped tensor-core GEMM, which
+/// needs `sm_80`. A decode token's routed layer needs only the matvecs.
+/// Probed once: the decoder asks for every layer of every step.
+pub fn routed_batch_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        shared_device().is_ok_and(|dev| {
+            crate::mul_mm_launch::MulMmBody::select(&dev)
+                == crate::mul_mm_launch::MulMmBody::TensorCore
+        })
+    })
+}
+
+/// Which projection of an expert.
+#[derive(Clone, Copy)]
+enum Proj {
+    Gate,
+    Up,
+    Down,
+}
+
+impl Proj {
+    fn of<'p, 'a>(self, e: &'p ExpertProjCuda<'a>) -> &'p ProjWeights<'a> {
+        match self {
+            Proj::Gate => &e.gate,
+            Proj::Up => &e.up,
+            Proj::Down => &e.down,
+        }
+    }
+}
+
+/// A routed layer over a prefill batch. The router runs over every row,
+/// its logits come back once, and the caller routes each token. The
+/// tokens' expert assignments ("pairs") are grouped by expert, and each
+/// projection of every chosen expert is ONE grouped tensor-core GEMM
+/// (`mul_mm_launch::enqueue_mul_mm_grouped`), gate and up reading each
+/// pair's token row and down reading its pair's activation. Each token's
+/// output is then the sum of its pairs' outputs from zero in its
+/// routing's order, as `combine_expert_outputs` sums them.
+#[allow(clippy::too_many_arguments)]
+fn run_routed_batch(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    router: RouterCuda<'_>,
+    glu: GluCuda,
+    normed2: &CudaSlice<f32>,
+    batch: usize,
+    hidden_dim: usize,
+    ffn_dim: usize,
+    index: usize,
+    route: &mut RouteFn<'_, '_>,
+) -> Result<CudaSlice<f32>, CudaError> {
+    let n_experts = router.rows();
+    let logits = match router {
+        RouterCuda::F32 { data, rows } => {
+            let w = held.vector(dev, data)?;
+            enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, batch)?
+        }
+        RouterCuda::Quant(p) => held.proj(dev, &p, normed2, batch)?,
+    };
+    // The layer's one host wait.
+    let logits = xfer::dtoh(dev, "router logits", &logits)?;
+    // Route every token, and group its picks by expert: an expert is
+    // identified by its gate's bytes.
+    let mut experts: Vec<ExpertProjCuda<'_>> = Vec::new();
+    let mut members: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut weights = Vec::new();
+    let mut k = None;
+    for t in 0..batch {
+        let picks = route(index, &logits[t * n_experts..(t + 1) * n_experts])?;
+        if *k.get_or_insert(picks.len()) != picks.len() || picks.is_empty() {
+            return Err(CudaError::Unsupported(
+                "resident stack: tokens of a batch routed to different expert counts".to_string(),
+            ));
+        }
+        for (slot, (ex, w)) in picks.into_iter().enumerate() {
+            let key = ex.gate.gemm.data.as_ptr();
+            let g = match experts
+                .iter()
+                .position(|e| e.gate.gemm.data.as_ptr() == key)
+            {
+                Some(g) => g,
+                None => {
+                    check_expert_shapes(&ex, hidden_dim, ffn_dim)?;
+                    experts.push(ex);
+                    members.push(Vec::new());
+                    experts.len() - 1
+                }
+            };
+            members[g].push((t, slot));
+            weights.push(w);
+        }
+    }
+    let k = k.unwrap_or(0);
+    let mut group_off = Vec::with_capacity(experts.len() + 1);
+    let mut gather = Vec::with_capacity(batch * k);
+    let mut pair_of = vec![0i32; batch * k];
+    group_off.push(0i32);
+    for m in &members {
+        for &(t, slot) in m {
+            pair_of[t * k + slot] = gather.len() as i32;
+            gather.push(t as i32);
+        }
+        group_off.push(gather.len() as i32);
+    }
+    let one_kind = |which: Proj| {
+        let first = which.of(&experts[0]);
+        experts.iter().all(|e| {
+            let p = which.of(e);
+            std::ptr::eq(p.kind(), first.kind()) && p.gemm.row_bytes == first.gemm.row_bytes
+        })
+    };
+    if !one_kind(Proj::Gate) || !one_kind(Proj::Up) || !one_kind(Proj::Down) {
+        return Err(CudaError::Unsupported(
+            "resident stack: a layer's experts in more than one kind".to_string(),
+        ));
+    }
+    let grouped = |held: &mut Held,
+                   which: Proj,
+                   x16: &CudaSlice<u16>,
+                   gather: &[i32],
+                   cols: usize|
+     -> Result<CudaSlice<f32>, CudaError> {
+        let p0 = which.of(&experts[0]);
+        let data: Vec<&[u8]> = experts.iter().map(|e| which.of(e).gemm.data).collect();
+        let (out, w) = crate::mul_mm_launch::enqueue_mul_mm_grouped(
+            dev,
+            p0.kind(),
+            &data,
+            x16,
+            &group_off,
+            gather,
+            p0.rows(),
+            cols,
+            p0.gemm.row_bytes,
+        )?;
+        held.weights.extend(w);
+        Ok(out)
+    };
+    let pairs = gather.len();
+    let x16 = crate::mul_mm_launch::f32_to_f16(dev, normed2, batch * hidden_dim)?;
+    let g = grouped(held, Proj::Gate, &x16, &gather, hidden_dim)?;
+    let u = grouped(held, Proj::Up, &x16, &gather, hidden_dim)?;
+    drop(x16);
+    let act = glu_mul_device(dev, glu, &g, &u, pairs * ffn_dim)?;
+    drop((g, u));
+    let act16 = crate::mul_mm_launch::f32_to_f16(dev, &act, pairs * ffn_dim)?;
+    drop(act);
+    let identity: Vec<i32> = (0..pairs as i32).collect();
+    let d = grouped(held, Proj::Down, &act16, &identity, ffn_dim)?;
+    drop(act16);
+    let d_pair_of = xfer::htod(dev, "routed pairs", &pair_of)?;
+    // `weights` is token-major in slot order, the order of `pair_of`.
+    let d_w = xfer::htod(dev, "routed weights", &weights)?;
+    enqueue_moe_combine_rows(dev, &d, &d_pair_of, &d_w, k, hidden_dim, batch)
+}
+
+/// A token's routed experts as five launches: every expert's gate, every
+/// expert's up, the gated activation over all of them, every expert's
+/// down, and the weighted combine. `None`, before any launch, when the
+/// experts' projections do not share a coalesced kind
+/// (`gpu::enqueue_matvec_multi`), and the caller runs them one by one.
+fn run_experts_together(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    picks: &[(ExpertProjCuda<'_>, f32)],
+    glu: GluCuda,
+    x: &CudaSlice<f32>,
+    hidden_dim: usize,
+    ffn_dim: usize,
+) -> Result<Option<CudaSlice<f32>>, CudaError> {
+    let k = picks.len();
+    let gate: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.gate.matvec).collect();
+    let up: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.up.matvec).collect();
+    let down: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.down.matvec).collect();
+    let (Some(gate), Some(up), Some(down)) = (gate, up, down) else {
+        return Ok(None);
+    };
+    let same = |ls: &[crate::gpu::MatvecLaunch<'_>]| {
+        ls.windows(2).all(|w| w[0].fn_name == w[1].fn_name)
+            && crate::matvec_kinds::coalesced::coalesced_kind(ls[0].fn_name).is_some()
+    };
+    if k == 0 || !same(&gate) || !same(&up) || !same(&down) {
+        return Ok(None);
+    }
+    let (g, wg) = crate::gpu::enqueue_matvec_multi(dev, &gate, x, 0)?;
+    let (u, wu) = crate::gpu::enqueue_matvec_multi(dev, &up, x, 0)?;
+    let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
+    drop((g, u));
+    let (d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
+    drop(act);
+    held.weights.extend(wg.into_iter().chain(wu).chain(wd));
+    let weights: Vec<f32> = picks.iter().map(|(_, w)| *w).collect();
+    let d_w = xfer::htod(dev, "routed weights", &weights)?;
+    Ok(Some(enqueue_moe_combine(dev, &d, &d_w, k, hidden_dim)?))
+}
+
+/// A routed expert's shapes against its layer, and the one-row view
+/// every projection needs, before it touches the device.
+pub(super) fn check_expert_shapes(
+    ex: &ExpertProjCuda<'_>,
+    hidden_dim: usize,
+    ffn_dim: usize,
+) -> Result<(), CudaError> {
+    if ex.gate.rows() != ffn_dim
+        || ex.up.rows() != ffn_dim
+        || ex.gate.cols() != hidden_dim
+        || ex.up.cols() != hidden_dim
+        || ex.down.rows() != hidden_dim
+        || ex.down.cols() != ffn_dim
+    {
+        return Err(CudaError::Unsupported(
+            "resident stack: a routed expert's shapes do not agree with its layer".to_string(),
+        ));
+    }
+    for m in [&ex.gate, &ex.up, &ex.down] {
+        m.validate(1)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

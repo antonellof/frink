@@ -134,17 +134,44 @@ extern "C" __global__ void moe_combine_f32(
 }
 "#;
 
+/// A routed prefill's combine: token `t`'s output is
+/// `sum_j w[t][j] * y[pair_of[t][j]]` from zero in its routing's order,
+/// the row form of `moe_combine_f32`.
+pub const MOE_COMBINE_ROWS_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_combine_rows_f32(
+    const float* y,
+    const int* pair_of,
+    const float* w,
+    float* out,
+    int k,
+    int n
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = blockIdx.y;
+    if (i < n) {
+        float acc = 0.0f;
+        for (int j = 0; j < k; j++) {
+            acc += y[(size_t)pair_of[t * k + j] * n + i] * w[t * k + j];
+        }
+        out[(size_t)t * n + i] = acc;
+    }
+}
+"#;
+
 /// `out[r] = w[r] . x` for an f32 matrix, one warp per row: an MoE
 /// router, which a GGUF keeps in f32 (`llama-quantize` leaves
 /// `ffn_gate_inp` alone).
 pub const ROUTER_F32_KERNEL_SRC: &str = r#"
 extern "C" __global__ void router_f32_matvec(
     const float* w,
-    const float* x,
-    float* out,
+    const float* x_rows,
+    float* out_rows,
     int rows,
     int cols
 ) {
+    // Token blockIdx.y of the batch: its input row and its logits.
+    const float* x = x_rows + (size_t)blockIdx.y * cols;
+    float* out = out_rows + (size_t)blockIdx.y * rows;
     const int warp = (int)((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
     const int lane = threadIdx.x & 31;
     if (warp >= rows) return;
@@ -424,6 +451,8 @@ pub const ADD_BIAS_ROWS: (&str, &str) = ("frink_prefill_add_bias_rows", "add_bia
 pub const ADD_ROWS: (&str, &str) = ("frink_prefill_add_rows", "add_rows_f32");
 pub const AXPY: (&str, &str) = ("frink_prefill_axpy", "axpy_f32");
 pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine_f32");
+pub const MOE_COMBINE_ROWS: (&str, &str) =
+    ("frink_prefill_moe_combine_rows", "moe_combine_rows_f32");
 pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
 pub const ROPE_ROWS: (&str, &str) = ("frink_prefill_rope_rows", "rope_rows_f32");
 pub const CAUSAL_GQA_PREFILL: (&str, &str) = ("frink_prefill_causal_gqa", "causal_gqa_prefill_f32");

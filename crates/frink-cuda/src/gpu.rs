@@ -1519,7 +1519,7 @@ mod tests {
     /// weights, input and output. Once with one input for every expert
     /// (gate, up) and once with an input of its own each (down).
     #[test]
-    #[ignore = "requires real CUDA hardware; not yet run"]
+    #[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
     fn several_experts_in_one_launch_equal_one_launch_each() {
         use crate::matvec_kinds::coalesced::COALESCED;
         let dev = super::shared_device().expect("device");
