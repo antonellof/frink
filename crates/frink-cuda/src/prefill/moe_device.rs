@@ -435,9 +435,24 @@ pub(super) fn run_device_routed_batch(
     Ok(Some(out))
 }
 
+/// `FRINK_CUDA_MOE_MMQ=1` runs a routed batch's expert projections on the
+/// int8 grouped GEMM where the kind has one. Off by default: on an A100
+/// it measured slower than the f16 grouped GEMM (Qwen3-30B-A3B `pp512`
+/// 2035 against 2172, gpt-oss-20b 1871 against 2025), the many small
+/// expert groups leaving its 64-token tiles part empty. Read once.
+pub(crate) fn moe_mmq_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("FRINK_CUDA_MOE_MMQ").as_deref(),
+            Ok("1" | "on" | "true")
+        )
+    })
+}
+
 /// One projection of every chosen expert over the grouped pairs: the
-/// int8 grouped GEMM when the kind has one (`crate::mmq`, the default
-/// prefill body for it), the f16 tensor-core one otherwise. `x` holds
+/// int8 grouped GEMM when [`moe_mmq_enabled`] and the kind has one, the
+/// f16 tensor-core one otherwise. `x` holds
 /// the rows `gather` names (a token's, for gate and up) or, without a
 /// gather, the pairs' own rows (the activations, for down); `rows` rows
 /// of it. An expert takes a token at most once, so no group passes
@@ -455,7 +470,9 @@ pub(super) fn grouped_proj(
     pairs: usize,
 ) -> Result<CudaSlice<f32>, CudaError> {
     let cols = shape.n_cols;
-    if let Some(kind) = crate::mul_mm_launch::mmq_kind(dev, shape.kind) {
+    if let Some(kind) =
+        crate::mul_mm_launch::mmq_kind(dev, shape.kind).filter(|_| moe_mmq_enabled())
+    {
         let ncols_pad = (pairs + crate::mmq::kernel::COLS - 1).div_ceil(crate::mmq::kernel::COLS)
             * crate::mmq::kernel::COLS;
         let y = crate::mmq::quantize::enqueue_quantize(

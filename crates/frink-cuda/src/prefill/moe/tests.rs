@@ -220,14 +220,22 @@ impl RoutedFixture {
         let keep = |p: OaiPart| left_out != Some(p);
         let q_w = self.n_heads * self.head_dim;
         let kv_w = self.n_kv_heads * self.head_dim;
-        // A batch's projections are the int8 GEMM's, which takes its
-        // input through q8_1; a decode token's are f32 matvecs.
-        let mm = |data: &[u8], rows, cols, x: &[f32], n: usize| {
-            let x = if batch > 1 {
+        // A batch's attention projections are the int8 GEMM's, which takes
+        // its input through q8_1, and so are its experts' when the grouped
+        // GEMM is the int8 one; a decode token's are f32 matvecs.
+        let quantized = |x: &[f32], cols: usize, on: bool| {
+            if batch > 1 && on {
                 q8_1_round(x, cols)
             } else {
                 x.to_vec()
-            };
+            }
+        };
+        let mm = |data: &[u8], rows, cols, x: &[f32], n: usize| {
+            let x = quantized(x, cols, true);
+            mul_mm_reference(&Q8_0, data, &x, rows, cols, n, cols / 32 * 34).unwrap()
+        };
+        let mm_expert = |data: &[u8], rows, cols, x: &[f32], n: usize| {
+            let x = quantized(x, cols, crate::prefill::moe_device::moe_mmq_enabled());
             mul_mm_reference(&Q8_0, data, &x, rows, cols, n, cols / 32 * 34).unwrap()
         };
         let [qd, kd, vd, od] = self.attn;
@@ -266,8 +274,8 @@ impl RoutedFixture {
                 let bias = oai
                     .filter(|_| keep(OaiPart::ExpertBias))
                     .map(|o| o.expert_bias[eid]);
-                let mut g = mm(gd, ffn, hidden, x, 1);
-                let mut u = mm(ud, ffn, hidden, x, 1);
+                let mut g = mm_expert(gd, ffn, hidden, x, 1);
+                let mut u = mm_expert(ud, ffn, hidden, x, 1);
                 if let Some(b) = bias {
                     add(&mut g, b.gate);
                     add(&mut u, b.up);
@@ -280,7 +288,7 @@ impl RoutedFixture {
                         None => g / (1.0 + (-g).exp()) * u,
                     })
                     .collect();
-                let mut d = mm(dd, hidden, ffn, &act, 1);
+                let mut d = mm_expert(dd, hidden, ffn, &act, 1);
                 if let Some(b) = bias {
                     add(&mut d, b.down);
                 }

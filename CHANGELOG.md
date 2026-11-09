@@ -29,11 +29,14 @@ are the ones worth reading twice.
   Q4_K 14336 x 4096 x 512 GEMM went from 1.65 to 0.89 ms, and
   `pp512` from 2748 to 4080 tokens/s on Llama-3.2-3B Q4_K_M, 1614 to
   2232 on Llama-3.1-8B Q4_K_M and 1449 to 1889 on its Q8_0, each
-  token-identical to the CPU. Q6_K has a loader but measured slower, so
-  it keeps the f16 body. `FRINK_CUDA_MUL_MM=tc` keeps every kind there
-  (#259).
-
-### Changed
+  token-identical to the CPU. On an A100, whose f16 tensor cores
+  accumulate in f32 at full rate, the gain is smaller: Llama-3.1-8B
+  Q4_K_M `pp512` from 2058 to 2168. Q6_K has a loader but measured
+  slower, so it keeps the f16 body. `FRINK_CUDA_MUL_MM=tc` keeps every
+  kind there. A routed batch's experts have the int8 grouped form too,
+  MXFP4 included, behind `FRINK_CUDA_MOE_MMQ=1`: on an A100 it measured
+  6 to 8% slower than the f16 grouped GEMM on Qwen3-30B-A3B and
+  gpt-oss-20b, so it is off by default (#259).
 
 - **A CUDA decode token routes its MoE layers on the device.** Each
   routed layer downloaded its router's logits and waited for the host
