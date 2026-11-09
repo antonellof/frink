@@ -4,6 +4,7 @@
 //! project (spec: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
 //! See docs/THIRD_PARTY_NOTICES.md for design-credit details.
 
+pub mod ftype;
 pub mod sharded;
 pub mod split;
 pub mod writer;

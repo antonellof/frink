@@ -447,3 +447,39 @@ fn the_draft_flags_lower_to_the_variables_the_drafter_reads() {
         )
     );
 }
+
+/// llama.cpp's `--slots` / `--no-slots` pair, its `LLAMA_ARG_ENDPOINT_SLOTS`
+/// in both truthy and falsy spellings, and `--spm-infill`, by their
+/// llama.cpp names. Parsing only: lowering `--no-slots` would turn the
+/// listing off for every HTTP test running beside this one.
+///
+/// Sabotage: drop `overrides_with` from both spellings; the two are then
+/// both set and this goes red.
+#[test]
+fn the_slots_switch_and_spm_infill_parse_like_llama_server() {
+    let pair = |argv: &[&str]| {
+        let a = server_args(argv);
+        frink_core::argv::flag_pair(a.slots, a.no_slots)
+    };
+    assert_eq!(pair(&[]), None);
+    assert_eq!(pair(&["--slots"]), Some(true));
+    assert_eq!(pair(&["--no-slots"]), Some(false));
+    assert_eq!(pair(&["--slots", "--no-slots"]), Some(false));
+    assert_eq!(pair(&["--no-slots", "--slots"]), Some(true));
+    for (value, want) in [("1", Some(true)), ("0", Some(false))] {
+        let mut cmd = ServerArgs::command();
+        cmd.build();
+        let argv = llama_style_argv(&cmd, vec!["frink-server".into()], |k| {
+            (k == "LLAMA_ARG_ENDPOINT_SLOTS").then(|| value.to_string())
+        })
+        .unwrap();
+        let a = ServerArgs::try_parse_from(argv).unwrap();
+        assert_eq!(
+            frink_core::argv::flag_pair(a.slots, a.no_slots),
+            want,
+            "LLAMA_ARG_ENDPOINT_SLOTS={value}"
+        );
+    }
+    assert!(server_args(&["--spm-infill"]).spm_infill);
+    assert!(!server_args(&[]).spm_infill);
+}

@@ -233,12 +233,27 @@ pub const ADMIN_PREPARE_STOP: &str = "/v1/admin/prepare-stop";
 /// [`crate::lora`].
 pub const LORA_ADAPTERS: &str = "/lora-adapters";
 
-/// Save or restore one slot's KV state, llama.cpp's
-/// `POST /slots/:id_slot?action=save|restore`.
+/// Save, restore or erase one slot's KV state, llama.cpp's
+/// `POST /slots/:id_slot?action=save|restore|erase`.
 ///
 /// A template like [`V1_STREAM`], and absent from [`ALL`] for the same
 /// reason: a caller probing a literal `{id_slot}` would get a 404.
 pub const SLOTS_ID: &str = "/slots/{id_slot}";
+
+/// llama.cpp's live slot listing, `GET /slots`: one object per seat of
+/// the continuous batcher. Answered while `--slots` is on (the default)
+/// and refused by name under `--no-slots`, as upstream.
+pub const SLOTS: &str = "/slots";
+
+/// llama.cpp's global properties: `GET /props` describes the served
+/// model and this server, which llama.cpp's own web UI reads first.
+/// `POST /props` is answered as upstream answers it without `--props`.
+pub const PROPS: &str = "/props";
+
+/// llama.cpp's fill-in-the-middle completion: a prefix, a suffix and
+/// optional other files in, the middle out, in `/completion`'s shape
+/// and through its serving path.
+pub const INFILL: &str = "/infill";
 
 /// The concrete slot path for one slot id.
 pub fn slots_id(id_slot: u32) -> String {
@@ -301,6 +316,9 @@ pub const ALL: &[&str] = &[
     V1_CACHE_REBUILD,
     ADMIN_PREPARE_STOP,
     LORA_ADAPTERS,
+    SLOTS,
+    PROPS,
+    INFILL,
 ];
 
 #[cfg(test)]

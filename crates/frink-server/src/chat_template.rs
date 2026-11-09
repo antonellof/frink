@@ -325,6 +325,22 @@ impl PromptTemplate {
         self.inner.template.describe()
     }
 
+    /// The Jinja source this checkpoint is served with, or `None` for a
+    /// builtin, which has no source text to show (`/props`).
+    pub(crate) fn source(&self) -> Option<&str> {
+        self.inner.template.source()
+    }
+
+    /// The BOS and EOS texts the template renders with, which are the
+    /// vocabulary entries the GGUF names (`/props`).
+    pub(crate) fn bos_token(&self) -> Option<&str> {
+        self.inner.bos_token.as_deref()
+    }
+
+    pub(crate) fn eos_token(&self) -> Option<&str> {
+        self.inner.eos_token.as_deref()
+    }
+
     /// The end-of-turn string this family emits before EOS, if it has
     /// one worth adding to the stop set.
     pub(crate) fn end_of_turn(&self) -> Option<&str> {
