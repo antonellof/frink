@@ -133,12 +133,34 @@ pub(crate) fn enqueue_mul_mm(
     ),
     CudaError,
 > {
+    // `FRINK_CUDA_MUL_MM=mmq`: the int8 GEMM for the kinds it has a
+    // loader for, on `sm_80` and up, while it is measured.
+    if let Some(mmq) = mmq_kind(dev, kind) {
+        return crate::mmq::enqueue_mmq(dev, mmq, weights, d_x, n_rows, n_cols, batch, row_bytes);
+    }
     // The tensor-core body on Ampere and up, the SIMT body below it;
     // `FRINK_CUDA_MUL_MM=simt` keeps the SIMT body for an A/B.
     let body = MulMmBody::select(dev);
     enqueue_mul_mm_with_body(
         dev, body, kind, weights, d_x, n_rows, n_cols, batch, row_bytes,
     )
+}
+
+/// The int8 GEMM's kind for `kind` when `FRINK_CUDA_MUL_MM=mmq` asks for
+/// it and the device has the int8 tensor cores it needs (`sm_80`); the
+/// switch is read once.
+fn mmq_kind(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    kind: &MulMmKind,
+) -> Option<crate::mmq::kernel::MmqKind> {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
+        std::env::var("FRINK_CUDA_MUL_MM").is_ok_and(|v| v.eq_ignore_ascii_case("mmq"))
+    });
+    if !asked || crate::gpu::compute_capability_major(dev) < crate::mul_mm_tc::MIN_CC_MAJOR {
+        return None;
+    }
+    crate::mmq::kernel::MmqKind::by_name(kind.name)
 }
 
 /// [`enqueue_mul_mm`] with the body chosen by the caller: the hardware
