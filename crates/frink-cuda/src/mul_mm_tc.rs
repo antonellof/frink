@@ -106,7 +106,7 @@ __device__ __forceinline__ void frink_ldsm_x4(unsigned int* r, const unsigned sh
 
 extern "C" __global__ void FX_FN_NAME(
     const unsigned char* __restrict__ src0,
-    const float* __restrict__ src1,
+    const unsigned short* __restrict__ src1,
     float* __restrict__ dst,
     int n_rows,
     int n_cols,
@@ -199,26 +199,24 @@ extern "C" __global__ void FX_FN_NAME(
                 }
             }
 
-            // B tile: two threads per token, sixteen k each, read as
-            // float4 (n_cols is a multiple of 32 and the activation buffer
-            // is a whole allocation, so the offset is 16-byte aligned) and
-            // packed to f16 pairs. Tokens past the batch are zero.
+            // B tile: two threads per token, sixteen k each, as two
+            // 16-byte loads of the f16 activations the launch converted
+            // once (n_cols is a multiple of 32 and the buffer a whole
+            // allocation, so each run is 16-byte aligned). Tokens past
+            // the batch are zero.
             {
                 const int j = tid >> 1;
                 const int kh = (tid & 1) * 16;
                 const int col = c0 + j;
-                unsigned int* dp = (unsigned int*)&sb[j * FX_LDS + kh];
+                uint4* dp = (uint4*)&sb[j * FX_LDS + kh];
                 if (col < batch) {
-                    const float* sp = src1 + (size_t)col * (size_t)n_cols + (size_t)(k0 + kh);
-#pragma unroll
-                    for (int i = 0; i < 16; i += 4) {
-                        const float4 v = *(const float4*)(sp + i);
-                        dp[i / 2] = frink_pack2h(v.x, v.y);
-                        dp[i / 2 + 1] = frink_pack2h(v.z, v.w);
-                    }
+                    const uint4* sp =
+                        (const uint4*)(src1 + (size_t)col * (size_t)n_cols + (size_t)(k0 + kh));
+                    dp[0] = sp[0];
+                    dp[1] = sp[1];
                 } else {
-#pragma unroll
-                    for (int i = 0; i < 8; i++) dp[i] = 0u;
+                    dp[0] = make_uint4(0u, 0u, 0u, 0u);
+                    dp[1] = make_uint4(0u, 0u, 0u, 0u);
                 }
             }
 
@@ -308,6 +306,23 @@ pub const fn raw_words(kind: &MulMmKind) -> usize {
 pub const fn shared_bytes(kind: &MulMmKind) -> usize {
     TBM * raw_words(kind) * 4 + (TBM + TBN) * LDS * 2
 }
+
+/// f32 activations to f16 (round to nearest even, `cvt.rn.f16.f32`,
+/// what the body's per-tile conversion did), once per launch: the
+/// body reads its B tiles as f16.
+pub const F32_TO_F16_SRC: &str = r#"
+extern "C" __global__ void frink_f32_to_f16(const float* __restrict__ x, unsigned short* __restrict__ y, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        unsigned short h;
+        asm("cvt.rn.f16.f32 %0, %1;" : "=h"(h) : "f"(x[i]));
+        y[i] = h;
+    }
+}
+"#;
+
+/// NVRTC module and function of [`F32_TO_F16_SRC`].
+pub const F32_TO_F16: (&str, &str) = ("frink_f32_to_f16", "frink_f32_to_f16");
 
 /// The complete translation unit for one kind's tensor-core GEMM: the
 /// SIMT unit's preamble (f16 decode, K-scale unpack, codebook, the
