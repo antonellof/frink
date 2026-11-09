@@ -969,6 +969,8 @@ fn run_expert(
 }
 
 #[cfg(test)]
+mod attn_tests;
+#[cfg(test)]
 mod gather_tests;
 #[cfg(test)]
 mod tests;

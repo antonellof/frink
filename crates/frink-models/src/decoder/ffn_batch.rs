@@ -456,14 +456,7 @@ impl Decoder {
         config: &ModelConfig,
         hidden_dim: usize,
     ) -> Vec<f32> {
-        let mut router_logits = layer.moe.router.apply(normed2);
-        for (x, b) in router_logits.iter_mut().zip(oai.router_bias.iter()) {
-            *x += b;
-        }
-        // Selection on the raw biased logits, softmax over the winners
-        // only -- see `route_top_k_softmax_weight`.
-        let decision =
-            frink_moe::route_top_k_softmax_weight(&router_logits, config.moe.n_experts_active);
+        let decision = Self::gpt_oss_route(oai, layer.moe.router.apply(normed2), config);
         layer.moe.record_activations(&decision.expert_ids);
 
         let mut out = vec![0f32; hidden_dim];
@@ -483,6 +476,21 @@ impl Decoder {
             }
         }
         out
+    }
+
+    /// gpt-oss's routing of one position's router logits: the router's
+    /// bias added, selection on the raw biased logits, and a softmax over
+    /// the winners only (`route_top_k_softmax_weight`). The host FFN and
+    /// the CUDA stack's routing both call it, so the two route alike.
+    pub(super) fn gpt_oss_route(
+        oai: &GptOssLayer,
+        mut router_logits: Vec<f32>,
+        config: &ModelConfig,
+    ) -> frink_moe::RoutingDecision {
+        for (x, b) in router_logits.iter_mut().zip(oai.router_bias.iter()) {
+            *x += b;
+        }
+        frink_moe::route_top_k_softmax_weight(&router_logits, config.moe.n_experts_active)
     }
 
     /// `forward_token`'s MoE FFN block for one position: the dense
