@@ -735,6 +735,12 @@ layer and two llama.cpp builds diverge from each other in the same way.
 Run the second dumper's library through the same comparison to see that
 spread. Generic decoder only, on the CPU.
 
+`parity` leaves the integer-dot tier off unless `FRINK_CPU_INT_DOT=1`
+is set, while `frink run` and the server turn it on where it is a win
+(every aarch64 host, and x86 hosts with the AVX2 batch GEMMs). Set it
+to compare the path they take: only then
+does frink quantize activations the way llama.cpp's CPU backend does.
+
 ### The decode half, and token ids
 
 `--decode-steps N` adds a greedy decode of N steps: llama.cpp decodes
