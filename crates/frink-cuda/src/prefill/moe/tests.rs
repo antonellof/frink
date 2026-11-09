@@ -34,7 +34,7 @@ fn a_routed_batch_matches_its_host_twin_through_the_grouped_gemms() {
 /// routing, each expert's three biases and the clamped SwiGLU on the
 /// per-expert path.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn a_gpt_oss_layer_matches_its_host_twin_at_one_token() {
     routed_layer_matches_its_host_twin(1, true);
 }
@@ -43,7 +43,7 @@ fn a_gpt_oss_layer_matches_its_host_twin_at_one_token() {
 /// prefill attention, and each pair's expert biases through the grouped
 /// GEMMs' bias tables.
 #[test]
-#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+#[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn a_gpt_oss_batch_matches_its_host_twin_through_the_grouped_gemms() {
     routed_layer_matches_its_host_twin(6, true);
 }

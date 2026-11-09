@@ -9,7 +9,7 @@ use crate::gpu::shared_device;
 use crate::xfer;
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_a_softcap_and_sinks() {
     let dev = shared_device().unwrap();
     let up = |x: &[f32]| xfer::htod(&dev, "attn test", x).unwrap();
@@ -66,7 +66,7 @@ fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_a_softcap_and_sink
 }
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn decode_attn_matches_its_twin_across_chunks_a_window_a_softcap_and_sinks() {
     let dev = shared_device().unwrap();
     let up = |x: &[f32]| xfer::htod(&dev, "attn test", x).unwrap();

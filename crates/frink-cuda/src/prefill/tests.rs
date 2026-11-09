@@ -259,7 +259,7 @@ fn the_rmsnorm_block_is_whole_warps_within_the_reduction() {
 }
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn rmsnorm_rows_matches_the_host() {
     let dev = shared_device().unwrap();
     // A batch at 256 threads a row, and one long row at 1024: the two
@@ -287,7 +287,7 @@ fn rmsnorm_rows_matches_the_host() {
 }
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors() {
     let dev = shared_device().unwrap();
     let (rows, n_heads, head_dim) = (9, 3, 32);
@@ -362,7 +362,7 @@ fn the_prefill_attention_tile_fits_its_shared_memory() {
 /// `mul_mm_reference` and the naive loops above, in the order the
 /// host batched body runs them.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     dense_layer_matches_its_host_twin(GluCuda::Silu);
 }
@@ -371,7 +371,7 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
 /// differs, so a stack that ran SwiGLU for it would miss by a whole
 /// term in every hidden element.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_dense_layer_matches_a_host_twin_with_a_geglu_ffn() {
     dense_layer_matches_its_host_twin(GluCuda::Gelu);
 }
@@ -380,7 +380,7 @@ fn the_dense_layer_matches_a_host_twin_with_a_geglu_ffn() {
 /// fixture's FFN inputs (in the thousands): a kernel that dropped the
 /// clamp, the `+1` or `alpha` misses by a whole term.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_dense_layer_matches_a_host_twin_with_a_clamped_swiglu() {
     dense_layer_matches_its_host_twin(GluCuda::SwigluOai);
 }
@@ -793,7 +793,7 @@ fn host_llama_row(
 /// for the history), and a mirror the host cache no longer matches
 /// must be rebuilt rather than trusted.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
     let (hidden, n_heads, n_kv_heads, head_dim, ffn) = (64usize, 2usize, 1usize, 32usize, 96usize);
     let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
