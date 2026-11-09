@@ -429,9 +429,11 @@ fn enqueue_matvec_at(
     })?;
 
     let d_weights = resident_cuda_weights(dev, launch.weights)?;
-    let mut d_out = dev
-        .alloc_zeros::<f32>(launch.rows)
-        .map_err(|e| CudaError::Launch(format!("output alloc: {e:?}")))?;
+    // SAFETY: every matvec kernel gives each output row one warp (or
+    // one block), returns early only for a row past `rows`, and writes
+    // `out[row]` for every row below it; the launch plan's grid covers
+    // `rows`.
+    let mut d_out = unsafe { alloc_out(dev, launch.rows, "matvec output") }?;
 
     unsafe {
         func.launch(
@@ -449,6 +451,27 @@ fn enqueue_matvec_at(
     }
 
     Ok((d_out, d_weights))
+}
+
+/// A device buffer for one kernel's output, NOT zeroed.
+///
+/// `alloc_zeros` enqueues a memset on the stream before the kernel
+/// that then overwrites every element, and the resident stack made
+/// about fourteen of them per layer per decode token: serialized GPU
+/// work and a driver call each, for nothing a kernel reads.
+///
+/// # Safety
+///
+/// The memory is uninitialised. The caller passes it to a launch that
+/// writes every one of its `n` elements before anything reads one, and
+/// says why in its own `SAFETY` comment.
+pub(crate) unsafe fn alloc_out(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    n: usize,
+    what: &str,
+) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
+    // SAFETY: forwarded to the caller, per the contract above.
+    unsafe { dev.alloc::<f32>(n) }.map_err(|e| CudaError::Launch(format!("{what} alloc: {e:?}")))
 }
 
 // The resident weight cache moved to `crate::resident`; re-exported
@@ -750,9 +773,9 @@ pub(crate) fn silu_mul_device(
         .ok_or_else(|| {
             CudaError::KernelCompile("function 'silu_mul_f32' not found after load_ptx".to_string())
         })?;
-    let mut d_out = dev
-        .alloc_zeros::<f32>(n)
-        .map_err(|e| CudaError::Launch(format!("silu_mul out alloc: {e:?}")))?;
+    // SAFETY: the grid below is `ceil(n / 256)` blocks of 256 threads
+    // and thread `i < n` writes `out[i]`.
+    let mut d_out = unsafe { alloc_out(dev, n, "silu_mul out") }?;
     let block = 256u32;
     let grid = (n as u32).div_ceil(block);
     let cfg = cudarc::driver::LaunchConfig {

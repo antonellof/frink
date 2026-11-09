@@ -53,9 +53,9 @@ pub(crate) fn enqueue_rmsnorm_rows(
     debug_assert!(x.len() >= n_rows * n);
     debug_assert!(w.len() >= n);
     let func = func_for(dev, RMSNORM_ROWS_KERNEL_SRC, RMSNORM_ROWS)?;
-    let mut out = dev
-        .alloc_zeros::<f32>(n_rows * n)
-        .map_err(|e| launch_err("rmsnorm_rows alloc", e))?;
+    // SAFETY: one block per row (`grid = n_rows`), and each block's
+    // threads stride over all `n` elements of its row's output.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, n_rows * n, "rmsnorm_rows") }?;
     let cfg = LaunchConfig {
         grid_dim: (n_rows as u32, 1, 1),
         block_dim: (BLOCK, 1, 1),
@@ -297,12 +297,19 @@ pub(crate) fn enqueue_decode_attn(
     // registers only the entry points it is told, one per module here.
     let partial = func_for(dev, src, decode_attn::PARTIAL)?;
     let combine = func_for(dev, src, decode_attn::COMBINE)?;
-    let mut part = dev
-        .alloc_zeros::<f32>(decode_attn::scratch_len(n_heads, n_chunks, head_dim))
-        .map_err(|e| launch_err("decode_attn scratch alloc", e))?;
-    let mut out = dev
-        .alloc_zeros::<f32>(n_heads * head_dim)
-        .map_err(|e| launch_err("decode_attn alloc", e))?;
+    // SAFETY: the partial grid is exactly n_heads x n_chunks, and every
+    // block writes its slot's `head_dim` accumulators and its (m, l)
+    // pair, an empty chunk included; the combine gives each head a
+    // block and each of its `head_dim` channels a thread.
+    let mut part = unsafe {
+        crate::gpu::alloc_out(
+            dev,
+            decode_attn::scratch_len(n_heads, n_chunks, head_dim),
+            "decode_attn scratch",
+        )
+    }?;
+    // SAFETY: as above, the combine writes every `out[h * head_dim + d]`.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, n_heads * head_dim, "decode_attn") }?;
     let (grid, block) = decode_attn::geometry::partial(n_heads, n_chunks);
     let cfg = LaunchConfig {
         grid_dim: grid,
