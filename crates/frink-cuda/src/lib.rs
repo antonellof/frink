@@ -35,6 +35,8 @@ pub mod phases;
 /// capability from it on builds that do not link `cudarc`.
 pub mod matvec_kinds;
 
+/// The int8 prefill GEMM (llama.cpp's MMQ) and its q8_1 activations.
+pub mod mmq;
 /// The `mul_mm` kernel source and its per-quant-kind dispatch table.
 /// Always compiled: it is CUDA C *text* plus a scalar twin, neither of
 /// which needs `cudarc`, so the default `cargo test -p frink-cuda` run

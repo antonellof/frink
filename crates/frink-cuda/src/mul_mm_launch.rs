@@ -133,12 +133,38 @@ pub(crate) fn enqueue_mul_mm(
     ),
     CudaError,
 > {
+    // The int8 GEMM for the kinds it is faster on, on `sm_80` and up;
+    // `FRINK_CUDA_MUL_MM=tc` or `simt` keeps the f16 bodies for an A/B.
+    if let Some(mmq) = mmq_kind(dev, kind) {
+        return crate::mmq::enqueue_mmq(dev, mmq, weights, d_x, n_rows, n_cols, batch, row_bytes);
+    }
     // The tensor-core body on Ampere and up, the SIMT body below it;
     // `FRINK_CUDA_MUL_MM=simt` keeps the SIMT body for an A/B.
     let body = MulMmBody::select(dev);
     enqueue_mul_mm_with_body(
         dev, body, kind, weights, d_x, n_rows, n_cols, batch, row_bytes,
     )
+}
+
+/// The int8 GEMM's kind for `kind` unless `FRINK_CUDA_MUL_MM` names an
+/// f16 body (`tc` or `simt`), on a device with the int8 tensor cores it
+/// needs (`sm_80`); the switch is read once.
+pub(crate) fn mmq_kind(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    kind: &MulMmKind,
+) -> Option<crate::mmq::kernel::MmqKind> {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
+        !std::env::var("FRINK_CUDA_MUL_MM")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("tc") || v.eq_ignore_ascii_case("simt"))
+    });
+    if !asked || crate::gpu::compute_capability_major(dev) < crate::mul_mm_tc::MIN_CC_MAJOR {
+        return None;
+    }
+    // Q6_K's int8 GEMM measured slower than the f16 tensor-core body on
+    // an A10G (two k16 dots a run, 2-byte loads), so it keeps that body.
+    crate::mmq::kernel::MmqKind::by_name(kind.name)
+        .filter(|k| *k != crate::mmq::kernel::MmqKind::Q6_K)
 }
 
 /// [`enqueue_mul_mm`] with the body chosen by the caller: the hardware
@@ -273,6 +299,9 @@ pub(crate) fn enqueue_mul_mm_with_body(
 /// `group_off.last()` rows of `n_rows` in all. Every group's weights are
 /// one kind and shape. `Unsupported` below `sm_80`, where there is no
 /// tensor-core body, so the caller keeps the host path.
+/// Only the hardware test drives it now: both routed paths group on the
+/// device and take [`enqueue_mul_mm_grouped_dev`] directly.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enqueue_mul_mm_grouped(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,

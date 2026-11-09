@@ -122,7 +122,10 @@ impl Download {
 ///
 /// The buffer is taken with `try_lock`, so a second download while
 /// one is held (another request's, or a caller holding two) takes the
-/// pageable path instead of waiting.
+/// pageable path instead of waiting. A lock poisoned by a panic while a
+/// download held it is taken all the same: the buffer is scratch bytes,
+/// and treating poisoned as held would send every later download down
+/// the pageable path for the rest of the process.
 pub(crate) fn dtoh_staged(
     dev: &Arc<CudaDevice>,
     what: &str,
@@ -131,7 +134,11 @@ pub(crate) fn dtoh_staged(
     let len = cudarc::driver::DeviceSlice::len(src);
     let bytes = std::mem::size_of::<f32>() * len;
     let guard = if bytes <= PINNED_MAX_BYTES {
-        PINNED.try_lock().ok()
+        match PINNED.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
     } else {
         None
     };
@@ -206,7 +213,8 @@ mod tests {
     fn a_staged_download_matches_and_a_held_buffer_falls_back() {
         let dev = crate::gpu::shared_device().expect("a CUDA device");
         let pinned = |what: &str, d: &CudaSlice<f32>| -> Download {
-            for _ in 0..400 {
+            // Up to 10 s: another test's whole stack can hold it that long.
+            for _ in 0..2000 {
                 let got = dtoh_staged(&dev, what, d).unwrap();
                 if matches!(got.inner, DownloadInner::Pinned { .. }) {
                     return got;
@@ -235,5 +243,20 @@ mod tests {
         assert_eq!(pinned("big", &d2).as_slice(), &big[..]);
         // The grown buffer still serves the smaller download.
         assert_eq!(pinned("small", &d).as_slice(), &host[..]);
+
+        // A panic while a download holds the buffer poisons its lock; the
+        // next download still takes the page-locked path.
+        let poisoner = std::thread::spawn({
+            let d = dev.htod_copy(host.clone()).unwrap();
+            let dev = dev.clone();
+            move || {
+                let _held = PINNED.lock().unwrap_or_else(|p| p.into_inner());
+                let _ = (&dev, &d);
+                panic!("poison the page-locked buffer's lock");
+            }
+        });
+        assert!(poisoner.join().is_err(), "the poisoning thread panicked");
+        assert!(PINNED.is_poisoned(), "the lock is poisoned");
+        assert_eq!(pinned("after a panic", &d).as_slice(), &host[..]);
     }
 }
