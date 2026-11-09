@@ -47,3 +47,8 @@ half = { workspace = true }
 [features]
 default = []
 cuda = ["dep:cudarc"]
+
+# Times the decode matvecs on a real device; needs the `cuda` feature.
+[[example]]
+name = "matvec_bench"
+required-features = ["cuda"]
