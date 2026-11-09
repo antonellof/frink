@@ -28,6 +28,18 @@ are the ones worth reading twice.
   tokens/s and `tg128` from 19.5 to 31.0, token-identical to the CPU.
   Metal keeps the host path (#133, #259).
 
+### Changed
+
+- **MXFP4 decode matvecs are coalesced, and biased experts take the
+  five-launch decode.** The MXFP4 matvec gave each thread a whole
+  17-byte block and looked every E2M1 code up in a `__constant__`
+  table, whose reads serialise across a warp. It now splits a block's
+  elements across lanes as the Q8_0 one does and builds each code's
+  value from its bits, and its routed form runs a token's experts in
+  one launch per projection, gpt-oss's expert biases added between
+  them. On an A10G gpt-oss-20b MXFP4 `tg128` went from 31.0 to 85.7
+  tokens/s (#133).
+
 ## [0.59.0] - 2026-11-09
 
 ### Added

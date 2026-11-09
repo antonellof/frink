@@ -1356,7 +1356,7 @@ mod tests {
     ///
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware. The WIDE width (the default since #133) has NEVER executed on a GPU; the narrow width passed on an RTX 3060/3070. Run with --ignored and record the result"]
+    #[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs) at both widths for every coalesced kind, MXFP4 included; the narrow width earlier on an RTX 3060/3070"]
     fn every_coalesced_matvec_matches_its_twin_at_both_widths() {
         use crate::matvec_kinds::coalesced::{MatvecWidth, COALESCED};
         let rows = 37usize; // not a multiple of the warps per block
