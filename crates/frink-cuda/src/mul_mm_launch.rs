@@ -149,7 +149,7 @@ pub(crate) fn enqueue_mul_mm(
 /// The int8 GEMM's kind for `kind` unless `FRINK_CUDA_MUL_MM` names an
 /// f16 body (`tc` or `simt`), on a device with the int8 tensor cores it
 /// needs (`sm_80`); the switch is read once.
-fn mmq_kind(
+pub(crate) fn mmq_kind(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     kind: &MulMmKind,
 ) -> Option<crate::mmq::kernel::MmqKind> {
