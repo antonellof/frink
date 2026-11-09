@@ -5826,10 +5826,21 @@ mod tests {
         let act = quantize_activations_q8(&x);
         let dispatched = dot_q4_0_q8(&weights, &act);
         let scalar = dot_q4_0_q8_scalar(&weights, &act);
-        assert_eq!(
-            dispatched.to_bits(),
-            scalar.to_bits(),
-            "SIMD Q4_0 int dot must match scalar bit-for-bit"
+        // The SIMD bodies are ggml's (`ggml_vec_dot_q4_0_q8_0`): NEON's
+        // keeps even and odd blocks in two 4-lane f32 sums and reduces
+        // them at the end, so it equals the block-by-block scalar twin up
+        // to f32 summation order, not bit for bit. The integer dots are
+        // exact in both, so the bound is a few ulps of the block terms.
+        let terms: f32 = (0..n_blocks)
+            .map(|b| {
+                let blk = &weights[b * Q4_0_BLOCK_BYTES..];
+                let dw = f16::from_le_bytes([blk[0], blk[1]]).to_f32();
+                dw.abs() * act.d[b] * 127.0 * 8.0 * Q4_0_BLOCK_ELEMS as f32
+            })
+            .sum();
+        assert!(
+            (dispatched - scalar).abs() <= 4.0 * f32::EPSILON * terms,
+            "SIMD Q4_0 int dot {dispatched} vs scalar twin {scalar} (terms {terms})"
         );
 
         let float_dot = dot_q4_0_f32(&weights, &x);
