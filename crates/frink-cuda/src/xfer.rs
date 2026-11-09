@@ -184,6 +184,11 @@ pub(crate) fn dtod<T: DeviceRepr, S: DevicePtr<T>, D: DevicePtrMut<T>>(
     dev.dtod_copy(src, dst).map_err(|e| err(what, e))
 }
 
+/// Waits for everything enqueued on the shared stream: one sync.
+pub(crate) fn sync(dev: &Arc<CudaDevice>, what: &str) -> Result<(), CudaError> {
+    counters::record_sync();
+    dev.synchronize().map_err(|e| err(what, e))
+
 #[cfg(test)]
 mod tests {
     use super::*;

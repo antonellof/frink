@@ -25,7 +25,7 @@
 use frink_core::cache::KvCache;
 use frink_core::kv_store::KvBuf;
 use frink_cuda::prefill::{
-    launch_prefill_dense_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror,
+    launch_prefill_dense_stack, resident_decode_enabled, AttnExtrasCuda, CudaKvMirror, GluCuda,
     LayerRopeCuda, MulMmWeights, PrefillDenseLayerCuda, PrefillParams, ProjWeights, RopeLayoutCuda,
     StackInput, StackKv,
 };
@@ -101,16 +101,13 @@ impl Decoder {
             b if b >= 4 => false,
             _ => return None,
         };
-        // The activation the fused body runs is SwiGLU; `Some(true)` is
-        // GELU, which this launch has no kernel for yet.
-        if self
-            .config
-            .model_ffn_act()
-            .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)
-            != Some(false)
-        {
-            return None;
-        }
+        // The gated activations the launch has a kernel for: SwiGLU,
+        // and GeGLU (`Some(true)`, Gemma). Every other one is the host's.
+        let glu = cuda_glu(
+            self.config
+                .model_ffn_act()
+                .and_then(frink_moe::GluAct::fused_kernel_gelu_flag),
+        )?;
         // One `rms_eps` uniform for the whole layer, so a model whose
         // post-norms run at a different epsilon than its pre-norms
         // (`frink_models::norm::POST_NORM_EPS_LITERAL`) stays on the
@@ -146,7 +143,8 @@ impl Decoder {
                 k,
                 v,
             };
-            let Some(desc) = self.cuda_stack_layer(li, layer, view, start_pos, batch_size) else {
+            let Some(desc) = self.cuda_stack_layer(li, layer, view, start_pos, batch_size, glu)
+            else {
                 break;
             };
             described.push(desc);
@@ -219,6 +217,7 @@ impl Decoder {
         cache: CacheRows<'a>,
         start_pos: usize,
         batch_size: usize,
+        glu: GluCuda,
     ) -> Option<(PrefillDenseLayerCuda<'a>, PrefillParams<'a>)> {
         if !Self::fused_prefill_dense_layer_eligible(layer, &self.config, self.lora_attached())
             || !self.layer_supports_fused_attn(layer)
@@ -288,6 +287,7 @@ impl Decoder {
             gate: view(&ex.gate)?,
             up: view(&ex.up)?,
             down: view(&ex.down)?,
+            glu,
             post_attn_norm: layer.attn.post_attn_norm.as_deref(),
             post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
             extras: AttnExtrasCuda {
@@ -322,6 +322,16 @@ impl Decoder {
     }
 }
 
+/// The launch's activation for `GluAct::fused_kernel_gelu_flag`'s
+/// answer: `Some(false)` is SwiGLU, `Some(true)` GeGLU, and `None` (an
+/// activation no fused kernel computes) declines the layer.
+fn cuda_glu(gelu: Option<bool>) -> Option<GluCuda> {
+    match gelu? {
+        false => Some(GluCuda::Silu),
+        true => Some(GluCuda::Gelu),
+    }
+}
+
 /// One line per distinct message per process: a launch that declines
 /// every step would otherwise say so once per step.
 fn warn_once(msg: &str) {
@@ -334,5 +344,28 @@ fn warn_once(msg: &str) {
         .insert(msg.to_string())
     {
         eprintln!("{msg}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every activation a fused kernel computes reaches the CUDA stack
+    /// as its own kernel, and one no fused kernel computes declines the
+    /// layer rather than running as SwiGLU.
+    #[test]
+    fn each_fused_activation_maps_to_its_cuda_kernel() {
+        use frink_moe::GluAct;
+        assert_eq!(
+            cuda_glu(GluAct::Swiglu.fused_kernel_gelu_flag()),
+            Some(GluCuda::Silu)
+        );
+        assert_eq!(
+            cuda_glu(GluAct::Geglu.fused_kernel_gelu_flag()),
+            Some(GluCuda::Gelu)
+        );
+        assert_eq!(cuda_glu(GluAct::Reglu.fused_kernel_gelu_flag()), None);
+        assert_eq!(cuda_glu(GluAct::ReluSqr.fused_kernel_gelu_flag()), None);
     }
 }

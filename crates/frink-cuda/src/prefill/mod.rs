@@ -29,7 +29,7 @@
 //! about WHICH layers is the decoder's, made through the same
 //! predicates the Metal stack asks, so the two backends cannot admit
 //! different sets. The refusals here are the shapes the kernels cannot
-//! take (`head_dim > 256`, a GELU FFN, an odd rotary width, a one-row
+//! take (`head_dim > 256`, an odd rotary width, a one-row
 //! step on a kind with no matvec), and each is `CudaError::Unsupported`
 //! so the caller falls back to the host body rather than computing
 //! something else.
@@ -39,7 +39,8 @@ pub mod kernels;
 pub mod kv_mirror;
 pub mod proj;
 
-use crate::gpu::{resident_cuda_f32, shared_device, silu_mul_device, CudaError};
+pub use crate::gpu::GluCuda;
+use crate::gpu::{glu_mul_device, resident_cuda_f32, shared_device, CudaError};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
 use cudarc::driver::{CudaDevice, CudaSlice};
@@ -126,6 +127,8 @@ pub struct PrefillDenseLayerCuda<'a> {
     pub gate: ProjWeights<'a>,
     pub up: ProjWeights<'a>,
     pub down: ProjWeights<'a>,
+    /// The FFN's gated activation: SwiGLU, or Gemma's GeGLU.
+    pub glu: GluCuda,
     /// Gemma-2's norms on each branch output before its residual add.
     pub post_attn_norm: Option<&'a [f32]>,
     pub post_ffn_norm: Option<&'a [f32]>,
@@ -241,14 +244,15 @@ pub fn resident_decode_enabled() -> bool {
 /// Runs one dense layer over `hidden` (`batch * hidden_dim`, row-major)
 /// on the device: pre-norm, Q/K/V projections, biases, QK norms, RoPE,
 /// causal GQA over prefix + batch, `wo`, post-norm, residual, pre-norm,
-/// gate/up projections, SwiGLU, down projection, post-norm, residual.
+/// gate/up projections, the gated activation, down projection,
+/// post-norm, residual.
 /// One download at the end and no other sync.
 ///
 /// Refuses (`Unsupported`) rather than approximates: a GEMM shape the
 /// kernel cannot tile, a `head_dim` above 256, a rotary width that is
-/// odd or wider than the head. The activation is SwiGLU: the decoder
-/// only builds a layer for a model whose `fused_kernel_gelu_flag` is
-/// `Some(false)`.
+/// odd or wider than the head. The activation is the layer's
+/// [`GluCuda`]: the decoder builds a layer only for a model whose
+/// `fused_kernel_gelu_flag` names one.
 pub fn launch_prefill_dense_layer(
     hidden: &[f32],
     layer: &PrefillDenseLayerCuda<'_>,
@@ -784,7 +788,7 @@ fn run_layer_resident(
     let gate = held.proj(dev, &layer.gate, &normed2, batch)?;
     let up = held.proj(dev, &layer.up, &normed2, batch)?;
     drop(normed2);
-    let act = silu_mul_device(dev, &gate, &up, batch * ffn_dim)?;
+    let act = glu_mul_device(dev, layer.glu, &gate, &up, batch * ffn_dim)?;
     drop((gate, up));
     let mut down = held.proj(dev, &layer.down, &act, batch)?;
     drop(act);

@@ -32,6 +32,7 @@ fn layer(norm: &'static [f32]) -> PrefillDenseLayerCuda<'static> {
         gate: q8_0_proj(small_q8_0(ffn, HIDDEN, 25), ffn, HIDDEN),
         up: q8_0_proj(small_q8_0(ffn, HIDDEN, 26), ffn, HIDDEN),
         down: q8_0_proj(small_q8_0(HIDDEN, ffn, 27), HIDDEN, ffn),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
