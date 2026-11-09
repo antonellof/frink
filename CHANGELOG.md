@@ -15,6 +15,12 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **The CUDA row RMSNorm reduces by warp shuffles.** A decode token's
+  RMSNorm took 6.5 us on an L40S, 65 of them a Llama-3.1-8B token; one
+  long row now gets up to 1024 threads and two barriers (#133).
+
 ## [0.58.0] - 2026-11-08
 
 ### Added
