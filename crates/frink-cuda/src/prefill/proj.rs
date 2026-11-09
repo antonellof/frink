@@ -8,7 +8,7 @@
 //! and the matvec kernels are the decode arm that has run on hardware.
 
 use super::MulMmWeights;
-use crate::gpu::{enqueue_matvec, CudaError, MatvecLaunch, ResidentCudaWeights};
+use crate::gpu::{enqueue_matvec_in, CudaError, MatvecInput, MatvecLaunch, ResidentCudaWeights};
 use crate::mul_mm::MulMmKind;
 use crate::mul_mm_launch::enqueue_mul_mm;
 use cudarc::driver::{CudaDevice, CudaSlice};
@@ -80,21 +80,32 @@ impl<'a> ProjWeights<'a> {
 
     /// Multiplies `x` (`batch` rows of `cols`) on the device. Returns
     /// the output and the resident weight buffer, which the caller
-    /// holds until the stream has finished.
+    /// holds until the stream has finished. A one-row step's matvec
+    /// reads `x`'s q8_1 copy under `FRINK_CUDA_MATVEC=dp4a`, made once
+    /// for every projection handed the same input.
     pub(super) fn enqueue(
         &self,
         dev: &Arc<CudaDevice>,
-        x: &CudaSlice<f32>,
+        x: &MatvecInput<'_>,
         batch: usize,
     ) -> Result<(CudaSlice<f32>, Arc<ResidentCudaWeights>), CudaError> {
         match (&self.matvec, Self::uses_matvec(batch)) {
-            (Some(mv), true) => enqueue_matvec(dev, mv, x),
+            (Some(mv), true) => enqueue_matvec_in(dev, mv, x),
             (None, true) => Err(CudaError::Unsupported(
                 "resident stack: a one-row step needs a matvec".to_string(),
             )),
             (_, false) => {
                 let m = &self.gemm;
-                enqueue_mul_mm(dev, m.kind, m.data, x, m.rows, m.cols, batch, m.row_bytes)
+                enqueue_mul_mm(
+                    dev,
+                    m.kind,
+                    m.data,
+                    x.x(),
+                    m.rows,
+                    m.cols,
+                    batch,
+                    m.row_bytes,
+                )
             }
         }
     }

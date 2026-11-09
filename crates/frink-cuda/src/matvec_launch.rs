@@ -6,6 +6,8 @@
 //! module cache and the per-kind launchers, and re-exports these names
 //! so every existing path still resolves.
 
+use crate::dp4a_launch::dp4a_route;
+pub(crate) use crate::dp4a_launch::MatvecInput;
 use crate::gpu::{
     ensure_module_loaded_lazy, glu_mul_device, resident_cuda_weights, shared_device, CudaError,
     GluCuda, ResidentCudaWeights,
@@ -154,6 +156,10 @@ impl MatvecPlan {
 /// asynchronously). This is the single per-launch primitive shared by
 /// [`launch_matvec`], [`launch_matvec_multi`] and
 /// [`launch_dense_ffn_swiglu`].
+///
+/// Under `FRINK_CUDA_MATVEC=dp4a` a kind with a dp4a kernel quantizes
+/// `d_x` here, for this launch alone; a caller with several matvecs on
+/// one vector calls [`enqueue_matvec_in`] with one [`MatvecInput`].
 pub(crate) fn enqueue_matvec(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launch: &MatvecLaunch<'_>,
@@ -165,6 +171,27 @@ pub(crate) fn enqueue_matvec(
     ),
     CudaError,
 > {
+    enqueue_matvec_in(dev, launch, &MatvecInput::new(d_x))
+}
+
+/// [`enqueue_matvec`] on an input other matvecs may share: the dp4a
+/// kernel when [`dp4a_route`] says so (the input's q8_1 copy made by
+/// the first matvec that needs it), the f32 kernels otherwise.
+pub(crate) fn enqueue_matvec_in(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    launch: &MatvecLaunch<'_>,
+    input: &MatvecInput<'_>,
+) -> Result<
+    (
+        cudarc::driver::CudaSlice<f32>,
+        std::sync::Arc<ResidentCudaWeights>,
+    ),
+    CudaError,
+> {
+    if let Some(kind) = dp4a_route(launch.fn_name, launch.n_blocks_per_row, input.len(), 0, 1) {
+        return crate::dp4a_launch::enqueue_dp4a(dev, kind, launch, input);
+    }
+    let d_x = input.x();
     // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
     let width = MatvecWidth::from_env();
     let wpr = crate::matvec_kinds::coalesced::matvec_wpr_override().unwrap_or_else(|| {
@@ -202,11 +229,13 @@ pub fn time_matvec(launch: &MatvecLaunch<'_>, x: &[f32], iters: usize) -> Result
 /// every expert reads the same input), and writing its own `rows` of the
 /// output, `launches.len() * rows` in all. `Unsupported` when the
 /// experts do not share one coalesced kind and shape, and the caller
-/// launches them one at a time instead.
+/// launches them one at a time instead. Every dp4a kind is also a
+/// coalesced one (`every_dp4a_kind_has_a_coalesced_kernel`), so the
+/// gate is the same under `FRINK_CUDA_MATVEC=dp4a`.
 pub(crate) fn enqueue_matvec_multi(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launches: &[MatvecLaunch<'_>],
-    d_x: &cudarc::driver::CudaSlice<f32>,
+    input: &MatvecInput<'_>,
     x_stride: usize,
 ) -> Result<
     (
@@ -250,7 +279,7 @@ pub(crate) fn enqueue_matvec_multi(
     // row_bytes` bytes of one coalesced kind each (checked above), held
     // by the caller until its wait.
     let d_out =
-        unsafe { enqueue_matvec_multi_table(dev, &shape, &d_table.slice(..), k, d_x, x_stride) }?;
+        unsafe { enqueue_matvec_multi_table(dev, &shape, &d_table.slice(..), k, input, x_stride) }?;
     Ok((d_out, held))
 }
 
@@ -282,17 +311,30 @@ impl MultiShape {
 /// # Safety
 /// `table` holds `k` device pointers, each to `shape.rows *
 /// shape.row_bytes` live bytes of `shape.fn_name`'s kind, alive until
-/// the stream has run the launch; `d_x` covers `(k - 1) * x_stride +
+/// the stream has run the launch; `input` covers `(k - 1) * x_stride +
 /// shape.n_blocks_per_row` blocks of activations.
 pub(crate) unsafe fn enqueue_matvec_multi_table(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     shape: &MultiShape,
     table: &cudarc::driver::CudaView<'_, u64>,
     k: usize,
-    d_x: &cudarc::driver::CudaSlice<f32>,
+    input: &MatvecInput<'_>,
     x_stride: usize,
 ) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
     use cudarc::driver::{DeviceSlice, LaunchAsync};
+    if let Some(dk) = dp4a_route(
+        shape.fn_name,
+        shape.n_blocks_per_row,
+        input.len(),
+        x_stride,
+        k,
+    ) {
+        // SAFETY: forwarded: the caller's contract is the dp4a launch's.
+        return unsafe {
+            crate::dp4a_launch::enqueue_dp4a_multi_table(dev, dk, shape, table, k, input, x_stride)
+        };
+    }
+    let d_x = input.x();
     let kind = coalesced_kind(shape.fn_name).ok_or_else(|| {
         CudaError::Unsupported(format!("matvec multi: {} is not coalesced", shape.fn_name))
     })?;
@@ -472,8 +514,11 @@ pub fn launch_matvec_multi(
     let mut weight_arcs = Vec::with_capacity(launches.len());
     let mut d_outs = Vec::with_capacity(launches.len());
 
+    // One input for every launch: Q, K and V (or gate and up) read the
+    // same vector, so under dp4a it is quantized once for all of them.
+    let input = MatvecInput::new(&d_x);
     for launch in launches {
-        let (d_out, d_weights) = enqueue_matvec(&dev, launch, &d_x)?;
+        let (d_out, d_weights) = enqueue_matvec_in(&dev, launch, &input)?;
         weight_arcs.push(d_weights);
         d_outs.push(d_out);
     }
@@ -515,8 +560,9 @@ pub fn launch_dense_ffn_swiglu(
 
     // Bind the resident-weight Arcs (`_wg`/`_wu`/`_wd`) for the whole
     // function so every kernel's weight buffer outlives the final sync.
-    let (d_gate, _wg) = enqueue_matvec(&dev, gate, &d_x)?;
-    let (d_up, _wu) = enqueue_matvec(&dev, up, &d_x)?;
+    let input = MatvecInput::new(&d_x);
+    let (d_gate, _wg) = enqueue_matvec_in(&dev, gate, &input)?;
+    let (d_up, _wu) = enqueue_matvec_in(&dev, up, &input)?;
     let d_act = glu_mul_device(&dev, GluCuda::Silu, &d_gate, &d_up, gate.rows)?;
     let (d_out, _wd) = enqueue_matvec(&dev, down, &d_act)?;
 

@@ -713,9 +713,12 @@ extern "C" __global__ void q6_k_matvec_coalesced(
 /// traffic, **5.3%** of the card's 360 GB/s, where llama.cpp reaches
 /// 60.4% (#133).
 ///
-/// The activation stays f32 on purpose. Quantizing it to int8 is what
-/// llama.cpp does, and on a real checkpoint it diverges from the CPU
-/// reference at token 4, which `frink verify` refuses.
+/// The activation stays f32 here. Quantizing it to int8 is what
+/// llama.cpp does, and an earlier int8 attempt diverged from the CPU
+/// reference at token 4 on a real checkpoint, which `frink verify`
+/// refuses. The q8_1 path that follows llama.cpp's CUDA decode exactly
+/// is [`super::dp4a`], behind `FRINK_CUDA_MATVEC=dp4a` until a hardware
+/// run says how it verifies and measures.
 ///
 /// Lane to data mapping, which is the part to get right. With
 /// `B = 128 / FX_LANES` bytes per lane and `sub = lane % FX_LANES`:

@@ -246,10 +246,6 @@ pub(crate) fn ensure_module_loaded_lazy_for_arch(
 // here so `crate::gpu::resident_cuda_weights` still resolves.
 pub(crate) use crate::resident::{resident_cuda_f32, resident_cuda_weights, ResidentCudaWeights};
 
-// The kernel TEXT moved to `matvec_kinds`, one module per format
-// family; `gpu.rs` keeps the device plumbing. Re-exported so every
-// existing path still resolves -- a refactor that moves a definition
-// should not move a public name.
 // The matvec launch path (the plan that pairs a kernel with its
 // geometry, the enqueue primitives, the multi-matvec and fused-FFN
 // launches) moved to `crate::matvec_launch`; re-exported so every
@@ -257,14 +253,20 @@ pub(crate) use crate::resident::{resident_cuda_f32, resident_cuda_weights, Resid
 #[cfg(test)]
 use crate::matvec_kinds::coalesced::coalesced_kind;
 pub(crate) use crate::matvec_launch::{
-    alloc_out, enqueue_matvec, enqueue_matvec_multi, enqueue_matvec_multi_table, launch_matvec,
-    MultiShape,
+    alloc_out, enqueue_matvec_in, enqueue_matvec_multi, enqueue_matvec_multi_table, launch_matvec,
+    MatvecInput, MultiShape,
 };
 #[cfg(test)]
-use crate::matvec_launch::{enqueue_matvec_at, matvec_launch_plan, COALESCED_WARPS_PER_BLOCK};
+use crate::matvec_launch::{
+    enqueue_matvec, enqueue_matvec_at, matvec_launch_plan, COALESCED_WARPS_PER_BLOCK,
+};
 pub use crate::matvec_launch::{
     launch_dense_ffn_swiglu, launch_matvec_multi, time_matvec, MatvecLaunch,
 };
+// The kernel TEXT moved to `matvec_kinds`, one module per format
+// family; `gpu.rs` keeps the device plumbing. Re-exported so every
+// existing path still resolves -- a refactor that moves a definition
+// should not move a public name.
 // The launchers of the matvecs generated from a GEMM dequant, one line
 // each in `gen_launch`; re-exported so every kind's launcher has the
 // same path.
@@ -1021,7 +1023,8 @@ mod tests {
                 let x: Vec<f32> = (0..k * cols).map(|i| ((i as f32) * 0.017).sin()).collect();
                 let d_x = dev.htod_copy(x.clone()).unwrap();
                 let (d_all, _held) =
-                    super::enqueue_matvec_multi(&dev, &launches, &d_x, x_stride).expect("multi");
+                    super::enqueue_matvec_multi(&dev, &launches, &MatvecInput::new(&d_x), x_stride)
+                        .expect("multi");
                 let all = dev.dtoh_sync_copy(&d_all).unwrap();
                 for (e, launch) in launches.iter().enumerate() {
                     let xe = dev

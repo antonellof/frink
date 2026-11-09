@@ -17,21 +17,23 @@ use super::{
     run_expert, DeviceRouting, ExpertBiasCuda, ExpertProjCuda, Held, ProjWeights, RouteFn,
     RouterCuda,
 };
-use crate::gpu::{glu_mul_device, shared_device, CudaError, GluCuda};
+use crate::gpu::{glu_mul_device, shared_device, CudaError, GluCuda, MatvecInput};
 use crate::xfer;
 use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut};
 use std::sync::Arc;
 
 /// A routed layer's FFN over `normed2` (`batch` rows): the summed,
 /// weighted experts of each token, `[batch][hidden_dim]`, ready for the
-/// residual add.
+/// residual add. A decode token's router and every expert's gate and up
+/// read `normed2` through the one input, so its q8_1 copy (dp4a) is
+/// made once for all of them.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_routed(
     dev: &Arc<CudaDevice>,
     held: &mut Held,
     router: RouterCuda<'_>,
     glu: GluCuda,
-    normed2: &CudaSlice<f32>,
+    normed2: &MatvecInput<'_>,
     batch: usize,
     hidden_dim: usize,
     ffn_dim: usize,
@@ -40,15 +42,17 @@ pub(super) fn run_routed(
     device: Option<(DeviceRouting<'_>, CudaViewMut<'_, i32>)>,
 ) -> Result<(CudaSlice<f32>, bool), CudaError> {
     if batch > 1 {
+        // A batch runs the GEMMs, which read the f32 rows.
+        let x = normed2.x();
         if let Some((spec, mut ids)) = device {
             if let Some(out) = super::moe_device::run_device_routed_batch(
-                dev, held, router, glu, normed2, batch, hidden_dim, ffn_dim, &spec, &mut ids,
+                dev, held, router, glu, x, batch, hidden_dim, ffn_dim, &spec, &mut ids,
             )? {
                 return Ok((out, true));
             }
         }
         let out = run_routed_batch(
-            dev, held, router, glu, normed2, batch, hidden_dim, ffn_dim, index, route,
+            dev, held, router, glu, x, batch, hidden_dim, ffn_dim, index, route,
         )?;
         return Ok((out, false));
     }
@@ -64,7 +68,7 @@ pub(super) fn run_routed(
     let logits = match router {
         RouterCuda::F32 { data, rows } => {
             let w = held.vector(dev, data)?;
-            enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, 1)?
+            enqueue_router_f32(dev, &w.slice, normed2.x(), rows, hidden_dim, 1)?
         }
         RouterCuda::Quant(p) => held.proj(dev, &p, normed2, 1)?,
     };
@@ -147,7 +151,7 @@ fn run_routed_batch(
             let w = held.vector(dev, data)?;
             enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, batch)?
         }
-        RouterCuda::Quant(p) => held.proj(dev, &p, normed2, batch)?,
+        RouterCuda::Quant(p) => held.proj(dev, &p, &MatvecInput::new(normed2), batch)?,
     };
     // The layer's one host wait.
     let logits = xfer::dtoh(dev, "router logits", &logits)?;
@@ -313,7 +317,7 @@ fn run_experts_together(
     held: &mut Held,
     picks: &[(ExpertProjCuda<'_>, f32)],
     glu: GluCuda,
-    x: &CudaSlice<f32>,
+    x: &MatvecInput<'_>,
     hidden_dim: usize,
     ffn_dim: usize,
 ) -> Result<Option<CudaSlice<f32>>, CudaError> {
@@ -342,7 +346,8 @@ fn run_experts_together(
     }
     let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
     drop((g, u));
-    let (mut d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
+    let (mut d, wd) =
+        crate::gpu::enqueue_matvec_multi(dev, &down, &MatvecInput::new(&act), ffn_dim)?;
     drop(act);
     if let Some([_, _, db]) = &biases {
         enqueue_add_bias_tab_rows(dev, &mut d, &db.slice(..), None, k, hidden_dim)?;

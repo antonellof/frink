@@ -20,7 +20,7 @@ use super::enqueue::{
     enqueue_moe_group, enqueue_moe_topk, enqueue_router_f32,
 };
 use super::{ExpertProjCuda, Held, RouterCuda};
-use crate::gpu::{glu_mul_device, CudaError, GluCuda, MultiShape};
+use crate::gpu::{glu_mul_device, CudaError, GluCuda, MatvecInput, MultiShape};
 use crate::mul_mm_launch::GroupedShape;
 use crate::resident::ResidentCuda;
 use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut, DevicePtr};
@@ -243,7 +243,7 @@ pub(super) fn run_device_routed(
     held: &mut Held,
     router: RouterCuda<'_>,
     glu: GluCuda,
-    normed2: &CudaSlice<f32>,
+    normed2: &MatvecInput<'_>,
     hidden_dim: usize,
     ffn_dim: usize,
     spec: &DeviceRouting<'_>,
@@ -261,7 +261,7 @@ pub(super) fn run_device_routed(
     let logits = match router {
         RouterCuda::F32 { data, rows } => {
             let w = held.vector(dev, data)?;
-            enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, 1)?
+            enqueue_router_f32(dev, &w.slice, normed2.x(), rows, hidden_dim, 1)?
         }
         RouterCuda::Quant(p) => held.proj(dev, &p, normed2, 1)?,
     };
@@ -297,8 +297,10 @@ pub(super) fn run_device_routed(
     }
     let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
     drop((g, u));
+    let act_in = MatvecInput::new(&act);
     let mut d =
-        unsafe { crate::gpu::enqueue_matvec_multi_table(dev, &ds, &tab(2), k, &act, ffn_dim) }?;
+        unsafe { crate::gpu::enqueue_matvec_multi_table(dev, &ds, &tab(2), k, &act_in, ffn_dim) }?;
+    drop(act_in);
     drop(act);
     if tables.biased {
         enqueue_add_bias_tab_rows(dev, &mut d, &tab(5), None, k, hidden_dim)?;
@@ -346,7 +348,7 @@ pub(super) fn run_device_routed_batch(
             let w = held.vector(dev, data)?;
             enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, batch)?
         }
-        RouterCuda::Quant(p) => held.proj(dev, &p, normed2, batch)?,
+        RouterCuda::Quant(p) => held.proj(dev, &p, &MatvecInput::new(normed2), batch)?,
     };
     let bias = match spec.router_bias {
         Some(b) => Some(held.vector(dev, b)?),

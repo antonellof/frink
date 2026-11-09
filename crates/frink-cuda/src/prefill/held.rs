@@ -2,7 +2,7 @@
 //! two ways a layer adds to it.
 
 use super::ProjWeights;
-use crate::gpu::{resident_cuda_f32, CudaError};
+use crate::gpu::{resident_cuda_f32, CudaError, MatvecInput};
 use cudarc::driver::{CudaDevice, CudaSlice};
 use std::sync::Arc;
 
@@ -31,12 +31,13 @@ impl Held {
         Ok(r)
     }
 
-    /// One projection on the device, its weights held.
+    /// One projection on the device, its weights held. Projections
+    /// handed the same `x` share its q8_1 copy (dp4a).
     pub(super) fn proj(
         &mut self,
         dev: &Arc<CudaDevice>,
         m: &ProjWeights<'_>,
-        x: &CudaSlice<f32>,
+        x: &MatvecInput<'_>,
         batch: usize,
     ) -> Result<CudaSlice<f32>, CudaError> {
         let (out, w) = m.enqueue(dev, x, batch)?;
