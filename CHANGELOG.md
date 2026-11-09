@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.61.0] - 2026-11-09
+
 ### Fixed
 
 - **The CUDA device probe no longer swaps the process's panic hook.**
