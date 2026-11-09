@@ -17,10 +17,12 @@ are the ones worth reading twice.
 
 ### Changed
 
-- **CUDA prefill attention is tiled over the keys.** One warp per query
-  row read every key from global memory, about 4 GB of L2 traffic a
-  Llama-3.1-8B layer at `pp512`. A block of query rows now stages each
-  tile of keys in shared memory once (#259).
+- **Gemma's layers stay on the GPU under CUDA.** The resident CUDA stack
+  refused a GeGLU feed-forward, so Gemma 2 and 3 ran every decode token
+  and prefill step on the per-op path, 337 host waits a Gemma-3-12B
+  token. The stack now runs GeGLU in ggml-cuda's tanh form beside
+  SwiGLU. On an L40S, Gemma-3-12B Q4_K_M `pp512` went from 82 to 727
+  tokens/s and `tg128` from 33 to 55 (#133, #259).
 
 ## [0.58.0] - 2026-11-08
 
