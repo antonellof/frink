@@ -36,7 +36,9 @@ are the ones worth reading twice.
   kernel now takes the whole batch, three small kernels group the pairs
   by expert (counts, offsets, a scatter), and each projection is one
   grouped GEMM over every expert of the layer, reading the offsets and
-  the gather from the device (#259).
+  the gather from the device. On an A10G a Qwen3-30B-A3B `pp512` step
+  went from about 532 to 330 ms and a gpt-oss-20b one from about 345 to
+  293 ms, token-identical to the CPU (#259).
 
 ## [0.60.0] - 2026-11-09
 

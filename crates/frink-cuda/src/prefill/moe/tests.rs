@@ -629,7 +629,7 @@ fn a_device_routed_token_matches_its_host_twin_without_the_host_routing() {
 /// device and every projection one grouped GEMM, with no host routing
 /// either, every token's experts back in order.
 #[test]
-#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+#[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn a_device_routed_batch_matches_its_host_twin_grouped_on_the_device() {
     device_routed_matches_its_host_twin(6);
 }
