@@ -49,6 +49,10 @@ pub mod mul_mm_ref;
 /// The tensor-core body for `mul_mm` (text, always compiled; launched
 /// by `mul_mm_launch` on `sm_80` and up).
 pub mod mul_mm_tc;
+/// Prefill attention on the tensor cores: kernel text, launch geometry
+/// and its host twin, always compiled so the host check can run it. Its
+/// `launch` module (behind `cuda`) runs it on `sm_80` and up.
+pub mod prefill_attn_tc;
 
 #[cfg(feature = "cuda")]
 pub mod attn;
