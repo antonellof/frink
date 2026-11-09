@@ -4,14 +4,32 @@
 
 use crate::gpu::CudaError;
 
-/// Which `module_name`s have already been NVRTC-compiled and
-/// `load_ptx`'d onto the shared device -- `CudaDevice::load_ptx` always
-/// recompiles and overwrites on every call (verified directly against
-/// `cudarc` 0.11.9's own source: `modules.insert(module_name.into(),
-/// module)` with no existing-key check), so skipping a repeat call for
-/// an already-loaded kernel has to be tracked here, not assumed.
-static LOADED_MODULES: std::sync::Mutex<Option<std::collections::HashSet<&'static str>>> =
-    std::sync::Mutex::new(None);
+/// Every module NVRTC has compiled for the process, and which device
+/// objects have loaded which. `CudaDevice::load_ptx` always recompiles
+/// and overwrites on every call (verified directly against `cudarc`
+/// 0.11.9's own source: `modules.insert(module_name.into(), module)`
+/// with no existing-key check), so skipping a repeat call for an
+/// already-loaded kernel has to be tracked here, not assumed.
+///
+/// Loaded is per device object because a module is: the shared device
+/// and the device a decode graph is recorded on (`crate::graph`) are
+/// two `CudaDevice`s over one context, each with its own module table,
+/// and a kernel launched through one is recorded on that one's stream.
+/// The compiled text is kept so the second loads it without compiling
+/// again ([`preload_modules`]).
+#[derive(Default)]
+struct ModuleCache {
+    /// Each module's PTX and its one entry point.
+    ptx: std::collections::HashMap<&'static str, (cudarc::nvrtc::Ptx, &'static str)>,
+    /// `(device object, module)` pairs already loaded.
+    loaded: std::collections::HashSet<(usize, &'static str)>,
+}
+
+static MODULES: std::sync::Mutex<Option<ModuleCache>> = std::sync::Mutex::new(None);
+
+fn device_key(dev: &std::sync::Arc<cudarc::driver::CudaDevice>) -> usize {
+    std::sync::Arc::as_ptr(dev) as usize
+}
 
 pub(crate) fn ensure_module_loaded(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
@@ -46,19 +64,51 @@ pub(crate) fn ensure_module_loaded_lazy_for_arch(
     arch: Option<&'static str>,
     src: impl FnOnce() -> String,
 ) -> Result<(), CudaError> {
-    let mut guard = LOADED_MODULES.lock().unwrap();
-    let set = guard.get_or_insert_with(std::collections::HashSet::new);
-    if set.contains(module_name) {
+    let mut guard = MODULES.lock().unwrap();
+    let cache = guard.get_or_insert_with(ModuleCache::default);
+    let key = (device_key(dev), module_name);
+    if cache.loaded.contains(&key) {
         return Ok(());
     }
-    let opts = cudarc::nvrtc::CompileOptions {
-        arch,
-        ..Default::default()
+    let ptx = match cache.ptx.get(module_name) {
+        Some((ptx, _)) => ptx.clone(),
+        None => {
+            let opts = cudarc::nvrtc::CompileOptions {
+                arch,
+                ..Default::default()
+            };
+            let ptx = cudarc::nvrtc::compile_ptx_with_opts(src(), opts)
+                .map_err(|e| CudaError::KernelCompile(format!("{e:?}")))?;
+            cache.ptx.insert(module_name, (ptx.clone(), fn_name));
+            ptx
+        }
     };
-    let ptx = cudarc::nvrtc::compile_ptx_with_opts(src(), opts)
-        .map_err(|e| CudaError::KernelCompile(format!("{e:?}")))?;
     dev.load_ptx(ptx, module_name, &[fn_name])
         .map_err(|e| CudaError::KernelCompile(format!("{e:?}")))?;
-    set.insert(module_name);
+    cache.loaded.insert(key);
+    Ok(())
+}
+
+/// Loads into `dev` every module compiled so far that it has not
+/// loaded, from the kept PTX: what a capture device does before a
+/// capture, so the warm token's kernels are all there and none is
+/// loaded inside the capture.
+pub(crate) fn preload_modules(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+) -> Result<(), CudaError> {
+    let mut guard = MODULES.lock().unwrap();
+    let cache = guard.get_or_insert_with(ModuleCache::default);
+    let d = device_key(dev);
+    let missing: Vec<(&'static str, cudarc::nvrtc::Ptx, &'static str)> = cache
+        .ptx
+        .iter()
+        .filter(|(m, _)| !cache.loaded.contains(&(d, **m)))
+        .map(|(m, (ptx, f))| (*m, ptx.clone(), *f))
+        .collect();
+    for (module, ptx, entry) in missing {
+        dev.load_ptx(ptx, module, &[entry])
+            .map_err(|e| CudaError::KernelCompile(format!("{e:?}")))?;
+        cache.loaded.insert((d, module));
+    }
     Ok(())
 }

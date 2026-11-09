@@ -225,6 +225,7 @@ pub(crate) fn shared_device() -> Result<std::sync::Arc<cudarc::driver::CudaDevic
 // existing path still resolves.
 pub(crate) use crate::modules::{
     ensure_module_loaded, ensure_module_loaded_lazy, ensure_module_loaded_lazy_for_arch,
+    preload_modules,
 };
 
 // The resident weight cache moved to `crate::resident`; re-exported

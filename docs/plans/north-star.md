@@ -83,8 +83,10 @@ buys on one machine.
    (#61). KV quantization on the host and CUDA stores, not only Metal's
    device store (#535). The disk KV tier wired into serving (#536). MoE
    models larger than memory (#406).
-7. **CUDA graph capture for decode.** `FRINK_CUDA_GRAPH` exists and
-   changes nothing yet (#537). Rides the same rental as item 1.
+7. **CUDA graph capture for decode.** `FRINK_CUDA_GRAPH=1` captures a
+   decode token of the resident stack once and replays it (#537); off
+   until its hardware test has run and the replay is measured. Rides
+   the same rental as item 1.
 
 ### Reach
 

@@ -6,6 +6,7 @@
 
 use super::enqueue::{
     enqueue_causal_gqa_prefill, enqueue_causal_gqa_prefill_simt, enqueue_decode_attn, AttnArgs,
+    StepPos,
 };
 use super::tests::{assert_close, host_causal_gqa_sinks, wave};
 use crate::gpu::{compute_capability_major, shared_device};
@@ -229,7 +230,16 @@ fn decode_attn_matches_its_twin_across_chunks_a_window_a_softcap_and_sinks() {
                 let d_k = up(&k);
                 let d_v = up(&v);
                 let d_s = sinks.as_deref().map(up);
-                let out = enqueue_decode_attn(&dev, &d_q, &d_k, &d_v, &args, d_s.as_ref()).unwrap();
+                let out = enqueue_decode_attn(
+                    &dev,
+                    &d_q,
+                    &d_k,
+                    &d_v,
+                    &args,
+                    d_s.as_ref(),
+                    StepPos::Host(args.start_pos),
+                )
+                .unwrap();
                 let got = xfer::dtoh(&dev, "attn test out", &out).unwrap();
                 let what = format!(
                 "decode attn h={n_heads} hd={head_dim} seq={seq_len} w={window:?} sink={sink:?}"

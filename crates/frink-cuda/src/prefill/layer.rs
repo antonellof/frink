@@ -3,7 +3,7 @@
 
 use super::enqueue::{
     enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
-    enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
+    enqueue_kv_append, enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs, StepPos,
 };
 use super::held::Held;
 use super::shapes::norm_rows;
@@ -31,6 +31,10 @@ pub(super) struct LayerStep<'m, 'r, 'e> {
     /// `(offset, len)` of this layer's K rows in the staging buffer;
     /// its V rows follow them.
     pub(super) stage_at: (usize, usize),
+    /// The device word holding the step's position, for a decode token
+    /// captured into a graph (`super::decode_graph`); `None` takes the
+    /// position from the layer's params, as a step enqueued as it runs.
+    pub(super) pos_word: Option<&'m CudaSlice<i32>>,
 }
 
 /// One layer over the resident hidden batch `h`, in place, answering
@@ -53,6 +57,7 @@ pub(super) fn run_layer_resident<'e>(
         mirror,
         stage_at: (at, n_kv),
         route,
+        pos_word,
     } = step;
     let mut routed_on_device = false;
     let hidden_dim = layer.attn_norm_w.len();
@@ -73,6 +78,21 @@ pub(super) fn run_layer_resident<'e>(
     let q_norm_shape = norm_rows(layer.extras.q_norm, q_width)?;
     let k_norm_shape = norm_rows(layer.extras.k_norm, kv_width)?;
     debug_assert_eq!(n_kv, batch * kv_width);
+    // A device position reads the row a replay writes, and serves only
+    // what a graph captures: one row over the sequence's mirror.
+    let pos = match (pos_word, mirror.as_deref()) {
+        (None, _) => StepPos::Host(start_pos),
+        (Some(word), Some(m)) if batch == 1 => StepPos::Device {
+            pos: word,
+            cap_rows: m.cap_rows(),
+        },
+        _ => {
+            return Err(CudaError::Unsupported(
+                "resident stack: a device position outside a one-row step over a KV mirror"
+                    .to_string(),
+            ))
+        }
+    };
 
     let attn_norm_w = held.vector(dev, layer.attn_norm_w)?;
     let ffn_norm_w = held.vector(dev, layer.ffn_norm_w)?;
@@ -123,8 +143,8 @@ pub(super) fn run_layer_resident<'e>(
             neox: rope.layout == RopeLayoutCuda::Neox,
             mscale: rope.mscale,
         };
-        enqueue_rope_rows(dev, &mut q, batch, n_heads, head_dim, start_pos, &args)?;
-        enqueue_rope_rows(dev, &mut k, batch, n_kv_heads, head_dim, start_pos, &args)?;
+        enqueue_rope_rows(dev, &mut q, batch, n_heads, head_dim, pos, &args)?;
+        enqueue_rope_rows(dev, &mut k, batch, n_kv_heads, head_dim, pos, &args)?;
     }
 
     // The batch's K (post-RoPE) and V rows are final here: stage them
@@ -149,21 +169,30 @@ pub(super) fn run_layer_resident<'e>(
     let total = n_prefix + batch * kv_width;
     let uploaded;
     let (k_all, v_all): (&CudaSlice<f32>, &CudaSlice<f32>) = match mirror {
-        // The sequence's own device history: append on the device.
+        // The sequence's own device history: append on the device, by
+        // a copy at the row's offset, or for a captured token by a
+        // kernel at the row its replay writes.
         Some(m) => {
             debug_assert!(m.rows() == start_pos && m.cap_rows() >= start_pos + batch);
-            xfer::dtod(
-                dev,
-                "K mirror append",
-                &k,
-                &mut m.k.slice_mut(n_prefix..total),
-            )?;
-            xfer::dtod(
-                dev,
-                "V mirror append",
-                &v,
-                &mut m.v.slice_mut(n_prefix..total),
-            )?;
+            match pos {
+                StepPos::Host(_) => {
+                    xfer::dtod(
+                        dev,
+                        "K mirror append",
+                        &k,
+                        &mut m.k.slice_mut(n_prefix..total),
+                    )?;
+                    xfer::dtod(
+                        dev,
+                        "V mirror append",
+                        &v,
+                        &mut m.v.slice_mut(n_prefix..total),
+                    )?;
+                }
+                StepPos::Device { pos, cap_rows } => {
+                    enqueue_kv_append(dev, &k, &v, &mut m.k, &mut m.v, kv_width, cap_rows, pos)?
+                }
+            }
             (&m.k, &m.v)
         }
         None if start_pos == 0 => (&k, &v),
@@ -213,7 +242,7 @@ pub(super) fn run_layer_resident<'e>(
     };
     let sinks = sinks.as_ref().map(|s| &s.slice);
     let attn = if batch == 1 {
-        enqueue_decode_attn(dev, &q, k_all, v_all, &args, sinks)?
+        enqueue_decode_attn(dev, &q, k_all, v_all, &args, sinks, pos)?
     } else {
         enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args, sinks)?
     };

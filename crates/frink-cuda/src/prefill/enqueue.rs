@@ -6,10 +6,11 @@
 use super::kernels::{
     ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_BIAS_TAB_ROWS, ADD_BIAS_TAB_ROWS_KERNEL_SRC,
     ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC, CAUSAL_GQA_PREFILL,
-    CAUSAL_GQA_PREFILL_KERNEL_SRC, GATHER_PTRS, GATHER_PTRS_KERNEL_SRC, MOE_COMBINE,
-    MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS, MOE_COMBINE_ROWS_KERNEL_SRC, MOE_COUNT,
-    MOE_GROUP_KERNEL_SRC, MOE_OFFSETS, MOE_SCATTER, MOE_TOPK, MOE_TOPK_KERNEL_SRC, RMSNORM_ROWS,
-    RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
+    CAUSAL_GQA_PREFILL_KERNEL_SRC, GATHER_PTRS, GATHER_PTRS_KERNEL_SRC, KV_APPEND,
+    KV_APPEND_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS,
+    MOE_COMBINE_ROWS_KERNEL_SRC, MOE_COUNT, MOE_GROUP_KERNEL_SRC, MOE_OFFSETS, MOE_SCATTER,
+    MOE_TOPK, MOE_TOPK_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS,
+    ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
@@ -44,6 +45,34 @@ fn elementwise_cfg(total: usize) -> LaunchConfig {
 
 fn launch_err(what: &str, e: impl std::fmt::Debug) -> CudaError {
     CudaError::Launch(format!("{what}: {e:?}"))
+}
+
+/// Where a launch learns the step's position.
+#[derive(Clone, Copy)]
+pub(crate) enum StepPos<'a> {
+    /// The position itself, for a step enqueued as it runs.
+    Host(usize),
+    /// A device word holding it, for a decode token captured once into a
+    /// CUDA graph and replayed at every position
+    /// (`super::decode_graph`): its launch arguments are frozen at
+    /// capture, and every replay writes the word first. `cap_rows` is
+    /// the most rows the token's history holds while the capture lasts,
+    /// which sizes what grows with the history.
+    Device {
+        pos: &'a CudaSlice<i32>,
+        cap_rows: usize,
+    },
+}
+
+impl StepPos<'_> {
+    /// The by-value position and the word's address (null for a host
+    /// position), as the kernels take them.
+    fn args(self) -> (i32, u64) {
+        match self {
+            StepPos::Host(p) => (p as i32, 0),
+            StepPos::Device { pos, .. } => (0, *pos.device_ptr()),
+        }
+    }
 }
 
 /// Threads per row for the row RMSNorm: a few rows (a decode token's
@@ -429,14 +458,14 @@ pub struct RopeArgs<'a> {
 }
 
 /// RoPE in place over `[n_rows, n_heads, head_dim]`, row `r` at position
-/// `start_pos + r`.
+/// `start + r`, `start` the step's position.
 pub(crate) fn enqueue_rope_rows(
     dev: &Arc<CudaDevice>,
     x: &mut CudaSlice<f32>,
     n_rows: usize,
     n_heads: usize,
     head_dim: usize,
-    start_pos: usize,
+    start: StepPos<'_>,
     rope: &RopeArgs<'_>,
 ) -> Result<(), CudaError> {
     debug_assert!(x.len() >= n_rows * n_heads * head_dim);
@@ -454,13 +483,15 @@ pub(crate) fn enqueue_rope_rows(
         Some(ff) => *ff.device_ptr(),
         None => 0,
     };
-    // SAFETY: (float*, const float*, int x5, float, int, float)
-    // matched positionally; every thread past `n_rows * n_heads *
+    let (start_pos, pos_ptr) = start.args();
+    // SAFETY: (float*, const float*, int x5, float, int, float, const
+    // int*) matched positionally; every thread past `n_rows * n_heads *
     // rot_dim/2` returns, `x` covers `n_rows * n_heads * head_dim` and
     // the two indices a thread touches are below `rot_dim <= head_dim`
     // inside its own head; `ff_ptr` is either 0 (never dereferenced)
     // or a live buffer of at least `rot_dim / 2` values held by the
-    // caller for the duration of the stream.
+    // caller for the duration of the stream, and `pos_ptr` either 0 or
+    // a live one-word buffer the caller holds as long.
     unsafe {
         func.launch(
             cfg,
@@ -471,10 +502,11 @@ pub(crate) fn enqueue_rope_rows(
                 n_heads as i32,
                 head_dim as i32,
                 rope.rot_dim as i32,
-                start_pos as i32,
+                start_pos,
                 rope.theta,
                 i32::from(rope.neox),
                 rope.mscale,
+                pos_ptr,
             ),
         )
         .map_err(|e| launch_err("rope_rows", e))?;
@@ -651,10 +683,13 @@ fn sink_ptr(s: Option<&CudaSlice<f32>>) -> u64 {
 
 /// Attention for ONE query row (`crate::decode_attn`): the keys split
 /// into chunks of [`decode_attn::CHUNK`], one block per (head, chunk),
-/// and a second launch merging the chunks. `k_all` / `v_all` hold at
-/// least `start_pos + 1` rows; the query is at position `start_pos`.
-/// Returns `[n_heads, head_dim]`. Two launches and two scratch
-/// allocations, no host sync.
+/// and a second launch merging the chunks. The query is at position
+/// `pos` (the step's; `args.start_pos` is not read), and `k_all` /
+/// `v_all` hold at least `pos + 1` rows, or for a device position its
+/// `cap_rows`. A host position launches exactly the chunks its keys
+/// fill; a device one [`decode_attn::replay_slots`] for its capacity,
+/// the chunks past its own returning at once. Returns `[n_heads,
+/// head_dim]`. Two launches and two scratch allocations, no host sync.
 pub(crate) fn enqueue_decode_attn(
     dev: &Arc<CudaDevice>,
     q: &CudaSlice<f32>,
@@ -662,12 +697,13 @@ pub(crate) fn enqueue_decode_attn(
     v_all: &CudaSlice<f32>,
     args: &AttnArgs,
     sinks: Option<&CudaSlice<f32>>,
+    pos: StepPos<'_>,
 ) -> Result<CudaSlice<f32>, CudaError> {
     let AttnArgs {
         n_heads,
         n_kv_heads,
         head_dim,
-        start_pos,
+        start_pos: _,
         window,
         scale,
         softcap,
@@ -677,44 +713,65 @@ pub(crate) fn enqueue_decode_attn(
             "decode_attn: head_dim {head_dim} (the kernel takes a multiple of 4 up to 256)"
         )));
     }
-    let seq_len = start_pos + 1;
-    let (lo, hi) = decode_attn::key_range(seq_len, window);
-    let n_chunks = decode_attn::n_chunks(hi - lo);
+    // The rows the keys may reach, and the grid's chunks.
+    let (rows, n_slots) = match pos {
+        StepPos::Host(p) => {
+            let (lo, hi) = decode_attn::key_range(p + 1, window);
+            (p + 1, decode_attn::n_chunks(hi - lo))
+        }
+        StepPos::Device { cap_rows, .. } => (cap_rows, decode_attn::replay_slots(cap_rows, window)),
+    };
+    let (seq_arg, pos_ptr) = match pos {
+        StepPos::Host(p) => ((p + 1) as i32, 0u64),
+        StepPos::Device { .. } => (0, pos.args().1),
+    };
+    let window_arg = window.map_or(0, |w| w as i32);
+    if n_heads >= 1 << 16 || n_kv_heads >= 1 << 16 {
+        return Err(CudaError::Unsupported(format!(
+            "decode_attn: {n_heads} heads over {n_kv_heads} (the launch packs each in 16 bits)"
+        )));
+    }
     debug_assert!(q.len() >= n_heads * head_dim);
-    debug_assert!(k_all.len() >= seq_len * n_kv_heads * head_dim);
-    debug_assert!(v_all.len() >= seq_len * n_kv_heads * head_dim);
+    debug_assert!(k_all.len() >= rows * n_kv_heads * head_dim);
+    debug_assert!(v_all.len() >= rows * n_kv_heads * head_dim);
     let src = decode_attn::DECODE_ATTN_KERNEL_SRC;
     // One translation unit, loaded as two modules: `load_ptx`
     // registers only the entry points it is told, one per module here.
     let partial = func_for(dev, src, decode_attn::PARTIAL)?;
     let combine = func_for(dev, src, decode_attn::COMBINE)?;
-    // SAFETY: the partial grid is exactly n_heads x n_chunks, and every
-    // block writes its slot's `head_dim` accumulators and its (m, l)
-    // pair, an empty chunk included; the combine gives each head a
-    // block and each of its `head_dim` channels a thread.
+    // SAFETY: every block of a chunk the keys fill writes its slot's
+    // `head_dim` accumulators and its (m, l) pair, an empty chunk
+    // included, and the combine reads only those chunks' slots (the
+    // kernels compute the same range, `replay_slots` covers it); the
+    // combine gives each head a block and each of its `head_dim`
+    // channels a thread.
     let mut part = unsafe {
         crate::gpu::alloc_out(
             dev,
-            decode_attn::scratch_len(n_heads, n_chunks, head_dim),
+            decode_attn::scratch_len(n_heads, n_slots, head_dim),
             "decode_attn scratch",
         )
     }?;
     // SAFETY: as above, the combine writes every `out[h * head_dim + d]`.
     let mut out = unsafe { crate::gpu::alloc_out(dev, n_heads * head_dim, "decode_attn") }?;
-    let (grid, block) = decode_attn::geometry::partial(n_heads, n_chunks);
+    let (grid, block) = decode_attn::geometry::partial(n_heads, n_slots);
     let cfg = LaunchConfig {
         grid_dim: grid,
         block_dim: block,
         shared_mem_bytes: 0,
     };
-    // SAFETY: (const float* x3, float*, int x6, float x2) matched
-    // positionally. The grid is exactly n_heads x n_chunks, so every
-    // block's (head, chunk) is in range; every key index is in
-    // `lo..seq_len`, rows the K/V buffers cover (debug asserts above,
-    // the stack's reserve before it); the `float4` views need
-    // `head_dim % 4 == 0` (checked above) on buffers cudarc allocates
-    // 256-byte aligned; the scratch is allocated at exactly
-    // `scratch_len`, every slot the kernel writes.
+    // SAFETY: (const float* x3, float*, int x5, float x2, const int*)
+    // matched positionally, the head counts packed as the kernel unpacks
+    // them (each below 2^16, checked above). The grid is n_heads x n_slots and a block
+    // past its position's chunks returns, so every block's (head,
+    // chunk) is in range; every key index is in `lo..seq_len`, rows the
+    // K/V buffers cover (debug asserts above, the stack's reserve
+    // before it, and for a device position the replay's check that it
+    // is below the capacity); the `float4` views need `head_dim % 4 ==
+    // 0` (checked above) on buffers cudarc allocates 256-byte aligned;
+    // the scratch is allocated at exactly `scratch_len` for `n_slots`,
+    // every slot the kernel writes; `pos_ptr` is 0 or a live word the
+    // caller holds.
     unsafe {
         partial
             .launch(
@@ -724,14 +781,14 @@ pub(crate) fn enqueue_decode_attn(
                     k_all,
                     v_all,
                     &mut part,
-                    n_heads as i32,
-                    n_kv_heads as i32,
+                    (n_heads | (n_kv_heads << 16)) as i32,
                     head_dim as i32,
-                    lo as i32,
-                    hi as i32,
-                    n_chunks as i32,
+                    seq_arg,
+                    window_arg,
+                    n_slots as i32,
                     scale,
                     softcap.filter(|c| *c > 0.0).unwrap_or(0.0),
+                    pos_ptr,
                 ),
             )
             .map_err(|e| launch_err("decode_attn_partial", e))?;
@@ -743,12 +800,13 @@ pub(crate) fn enqueue_decode_attn(
         shared_mem_bytes: 0,
     };
     debug_assert!(sinks.is_none_or(|s| s.len() >= n_heads));
-    // SAFETY: (const float*, float*, int x3, const float*) matched
-    // positionally; the sinks pointer is null or `n_heads` logits (the
-    // debug assert, and the stack's shape check);
+    // SAFETY: (const float*, float*, int x3, const float*, int x2,
+    // const int*) matched positionally; the sinks pointer is null or
+    // `n_heads` logits (the debug assert, and the stack's shape check);
     // one block per head and one thread per channel, both in range by
-    // construction; the scratch holds the `n_chunks` slots per head the
-    // partial launch wrote, ordered before this on the same stream.
+    // construction; the scratch holds `n_slots` slots per head, of
+    // which the partial launch, ordered before this on the same stream,
+    // wrote the chunks this reads.
     unsafe {
         combine
             .launch(
@@ -758,11 +816,46 @@ pub(crate) fn enqueue_decode_attn(
                     &mut out,
                     n_heads as i32,
                     head_dim as i32,
-                    n_chunks as i32,
+                    n_slots as i32,
                     sink_ptr(sinks),
+                    seq_arg,
+                    window_arg,
+                    pos_ptr,
                 ),
             )
             .map_err(|e| launch_err("decode_attn_combine", e))?;
     }
     Ok(out)
+}
+
+/// A decode token's K and V rows into its mirror's `k_all` / `v_all`
+/// (`cap_rows` rows of `width`) at the row the device word `pos` names
+/// ([`KV_APPEND_KERNEL_SRC`]): the append a captured token replays.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_kv_append(
+    dev: &Arc<CudaDevice>,
+    k: &CudaSlice<f32>,
+    v: &CudaSlice<f32>,
+    k_all: &mut CudaSlice<f32>,
+    v_all: &mut CudaSlice<f32>,
+    width: usize,
+    cap_rows: usize,
+    pos: &CudaSlice<i32>,
+) -> Result<(), CudaError> {
+    debug_assert!(k.len() >= width && v.len() >= width);
+    debug_assert!(k_all.len() >= cap_rows * width && v_all.len() >= cap_rows * width);
+    let func = func_for(dev, KV_APPEND_KERNEL_SRC, KV_APPEND)?;
+    // SAFETY: (const float* x2, float* x2, int x2, const int*) matched
+    // positionally; thread `i < width` copies one value of each row, the
+    // kernel writes only a row below `cap_rows`, which both mirror
+    // buffers hold (the debug assert, and the mirror's own shape), and
+    // `pos` is a live one-word buffer the caller holds.
+    unsafe {
+        func.launch(
+            elementwise_cfg(width),
+            (k, v, k_all, v_all, width as i32, cap_rows as i32, pos),
+        )
+        .map_err(|e| launch_err("kv_append", e))?;
+    }
+    Ok(())
 }

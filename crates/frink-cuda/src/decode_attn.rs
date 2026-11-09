@@ -14,16 +14,32 @@
 //! its own block, and merge the chunks' partial softmaxes in a second,
 //! tiny kernel.
 //!
-//! * `decode_attn_partial_f32`, grid `(n_heads, n_chunks)`, four warps:
+//! * `decode_attn_partial_f32`, grid `(n_heads, n_slots)`, four warps:
 //!   warp `w` of chunk `c` takes keys `lo + c*CHUNK + w`, then every
 //!   fourth, with the prefill kernel's online softmax and the same
 //!   `float4` lane slices of Q and V. The four warps' `(m, l, acc)`
 //!   are merged in shared memory and written UNNORMALISED to one
-//!   scratch buffer ([`scratch_len`]): `acc` at `[(h * n_chunks + c) *
-//!   head_dim]`, then the `(m, l)` pairs at `n_heads * n_chunks *
-//!   head_dim + 2 * (h * n_chunks + c)`.
+//!   scratch buffer ([`scratch_len`]): `acc` at `[(h * n_slots + c) *
+//!   head_dim]`, then the `(m, l)` pairs at `n_heads * n_slots *
+//!   head_dim + 2 * (h * n_slots + c)`.
 //! * `decode_attn_combine_f32`, grid `n_heads`, `head_dim` threads:
-//!   `out = sum_c e^(m_c - M) acc_c / sum_c e^(m_c - M) l_c`.
+//!   `out = sum_c e^(m_c - M) acc_c / sum_c e^(m_c - M) l_c` over the
+//!   chunks `c` the keys fill.
+//!
+//! Both kernels compute the key range, `lo..seq_len` and its chunks,
+//! from `seq_len` and the window themselves ([`key_range`] and
+//! [`n_chunks`] in CUDA C), and take `seq_len` either by value or, when
+//! `pos` is not null, as `*pos + 1` from a device word. A token enqueued
+//! as it runs passes it by value and launches exactly the chunks its
+//! keys fill (`n_slots == n_chunks`). A token captured once into a CUDA
+//! graph and replayed at every position (`crate::prefill::decode_graph`)
+//! cannot: its arguments are frozen at capture. It reads the position
+//! from the word its replay writes, and launches [`replay_slots`]
+//! chunks, enough for any position its history's capacity holds; a
+//! chunk past the position's own returns at once. Every block that does
+//! work does the same work in both forms, and the combine reads the
+//! same chunks in the same order, so the two agree to the bit (the host
+//! check runs both).
 //!
 //! The host twin [`decode_attn_twin`] performs the same f32 operations
 //! in the same order, including the shuffle butterfly, so with FP
@@ -68,6 +84,18 @@ pub fn n_chunks(n_keys: usize) -> usize {
     n_keys.div_ceil(CHUNK).max(1)
 }
 
+/// The chunks a replayed token's grid launches over a history that
+/// holds at most `cap_rows` rows: the most any position up to it fills,
+/// which is `cap_rows`' own, or the window's when the window is
+/// narrower (a windowed layer never reads more than `window` keys).
+pub fn replay_slots(cap_rows: usize, window: Option<usize>) -> usize {
+    let widest = match window {
+        Some(w) if w > 0 => w.min(cap_rows),
+        _ => cap_rows,
+    };
+    n_chunks(widest)
+}
+
 pub const DECODE_ATTN_KERNEL_SRC: &str = r#"
 __device__ __forceinline__ float frink_inf_da() {
     return __int_as_float(0x7f800000);
@@ -76,33 +104,52 @@ __device__ __forceinline__ float frink_inf_da() {
 #define FX_DA_CHUNK 64
 #define FX_DA_WARPS 4
 
+// The keys a query at `seq_len - 1` reads, `*lo..seq_len`, and how many
+// chunks they fill: `key_range` and `n_chunks` on the host. `seq_len`
+// is `*pos + 1` when `pos` is not null (a replayed graph's position).
+__device__ __forceinline__ int frink_da_range(
+    int seq_len, int window, const int* pos, int* seq, int* lo
+) {
+    const int n = pos != nullptr ? *pos + 1 : seq_len;
+    *seq = n;
+    *lo = (window > 0 && n > window) ? n - window : 0;
+    const int chunks = (n - *lo + FX_DA_CHUNK - 1) / FX_DA_CHUNK;
+    return chunks > 1 ? chunks : 1;
+}
+
 // q [n_heads, head_dim]; k_all / v_all [>= seq_len, n_kv_heads, head_dim];
-// part: [n_heads, n_chunks, head_dim] accumulators, then
-// [n_heads, n_chunks, 2] (m, l) pairs, in one scratch buffer.
+// part: [n_heads, n_slots, head_dim] accumulators, then
+// [n_heads, n_slots, 2] (m, l) pairs, in one scratch buffer; the grid
+// is (n_heads, n_slots) and the chunks past the keys' own return.
+// `heads` is `n_heads | n_kv_heads << 16`, each below 2^16.
 extern "C" __global__ void decode_attn_partial_f32(
     const float* __restrict__ q,
     const float* __restrict__ k_all,
     const float* __restrict__ v_all,
     float* __restrict__ part,
-    int n_heads,
-    int n_kv_heads,
+    int heads,
     int head_dim,
-    int lo,
-    int seq_len,
-    int n_chunks,
+    int seq_len_arg,
+    int window,
+    int n_slots,
     float scale,
-    float softcap
+    float softcap,
+    const int* __restrict__ pos
 ) {
     __shared__ float sm_m[FX_DA_WARPS];
     __shared__ float sm_l[FX_DA_WARPS];
     __shared__ float sm_acc[FX_DA_WARPS * 256];
+    const int n_heads = heads & 0xffff;
+    const int n_kv_heads = heads >> 16;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
     const int h = blockIdx.x;
     const int c = blockIdx.y;
-    if (h >= n_heads || c >= n_chunks) return;
+    int seq_len, lo;
+    const int n_chunks = frink_da_range(seq_len_arg, window, pos, &seq_len, &lo);
+    if (h >= n_heads || c >= n_chunks || c >= n_slots) return;
     float* part_acc = part;
-    float* part_ml = part + (size_t)n_heads * n_chunks * head_dim;
+    float* part_ml = part + (size_t)n_heads * n_slots * head_dim;
     const int group_size = n_heads / max(n_kv_heads, 1);
     const int kv_h = h / max(group_size, 1);
     const int d4 = head_dim >> 2;
@@ -181,7 +228,7 @@ extern "C" __global__ void decode_attn_partial_f32(
     for (int w = 0; w < FX_DA_WARPS; w++) {
         f[w] = (sm_m[w] == -frink_inf_da()) ? 0.f : expf(sm_m[w] - big);
     }
-    const size_t slot = (size_t)h * n_chunks + c;
+    const size_t slot = (size_t)h * n_slots + c;
     for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
         float sum = 0.f;
         for (int w = 0; w < FX_DA_WARPS; w++) sum += f[w] * sm_acc[w * 256 + d];
@@ -205,15 +252,21 @@ extern "C" __global__ void decode_attn_combine_f32(
     float* __restrict__ out,
     int n_heads,
     int head_dim,
-    int n_chunks,
-    const float* __restrict__ sinks
+    int n_slots,
+    const float* __restrict__ sinks,
+    int seq_len_arg,
+    int window,
+    const int* __restrict__ pos
 ) {
     const int h = blockIdx.x;
     const int d = threadIdx.x;
     if (h >= n_heads || d >= head_dim) return;
+    int seq_len, lo;
+    int n_chunks = frink_da_range(seq_len_arg, window, pos, &seq_len, &lo);
+    if (n_chunks > n_slots) n_chunks = n_slots;
     const float* part_acc = part;
-    const float* part_ml = part + (size_t)n_heads * n_chunks * head_dim;
-    const float* ml = part_ml + (size_t)h * n_chunks * 2;
+    const float* part_ml = part + (size_t)n_heads * n_slots * head_dim;
+    const float* ml = part_ml + (size_t)h * n_slots * 2;
     float big = ml[0];
     for (int c = 1; c < n_chunks; c++) big = fmaxf(big, ml[c * 2]);
     float num = 0.f;
@@ -221,7 +274,7 @@ extern "C" __global__ void decode_attn_combine_f32(
     for (int c = 0; c < n_chunks; c++) {
         const float mc = ml[c * 2];
         const float fc = (mc == -frink_inf_da()) ? 0.f : expf(mc - big);
-        num += fc * part_acc[((size_t)h * n_chunks + c) * head_dim + d];
+        num += fc * part_acc[((size_t)h * n_slots + c) * head_dim + d];
         den += fc * ml[c * 2 + 1];
     }
     if (sinks != nullptr) {
@@ -237,10 +290,10 @@ extern "C" __global__ void decode_attn_combine_f32(
 
 /// The launch geometry, as the enqueue and the host check use it.
 pub mod geometry {
-    /// `(grid, block)` of the partial kernel.
-    pub fn partial(n_heads: usize, n_chunks: usize) -> ((u32, u32, u32), (u32, u32, u32)) {
+    /// `(grid, block)` of the partial kernel over `n_slots` chunks.
+    pub fn partial(n_heads: usize, n_slots: usize) -> ((u32, u32, u32), (u32, u32, u32)) {
         (
-            (n_heads as u32, n_chunks as u32, 1),
+            (n_heads as u32, n_slots as u32, 1),
             ((super::WARPS * 32) as u32, 1, 1),
         )
     }
@@ -425,6 +478,41 @@ pub fn decode_attn_twin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A replayed token's grid is as wide as the widest key range any
+    /// position up to its history's capacity fills: never narrower, or a
+    /// chunk of keys is never read, and never wider than that needs.
+    #[test]
+    fn the_replay_grid_is_the_widest_any_position_up_to_the_capacity_fills() {
+        let windows = [
+            None,
+            Some(0),
+            Some(1),
+            Some(63),
+            Some(64),
+            Some(65),
+            Some(100),
+            Some(128),
+            Some(300),
+            Some(5000),
+        ];
+        for cap in [256usize, 512, 1024] {
+            for window in windows {
+                let widest = (1..=cap)
+                    .map(|seq_len| {
+                        let (lo, hi) = key_range(seq_len, window);
+                        n_chunks(hi - lo)
+                    })
+                    .max()
+                    .unwrap();
+                assert_eq!(
+                    replay_slots(cap, window),
+                    widest,
+                    "cap {cap} window {window:?}"
+                );
+            }
+        }
+    }
 
     /// Two-pass softmax attention, the definition the twin must agree
     /// with: `frink_core::attention::causal_gqa_attention_row` for one

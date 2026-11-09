@@ -34,6 +34,7 @@
 //! so the caller falls back to the host body rather than computing
 //! something else.
 
+mod decode_graph;
 pub mod enqueue;
 mod held;
 pub mod kernels;
@@ -43,14 +44,17 @@ pub mod moe;
 pub mod moe_device;
 pub mod proj;
 mod shapes;
+mod stage;
 
 pub use crate::gpu::GluCuda;
 use crate::gpu::{shared_device, CudaError};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
+use cudarc::driver::{CudaDevice, CudaSlice};
+pub use decode_graph::GraphUse;
 // The tests reach the enqueues through `super::*`, as before the move.
 #[cfg(test)]
-use enqueue::{enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs};
+use enqueue::{enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs, StepPos};
 use held::Held;
 pub use kv_mirror::CudaKvMirror;
 use layer::{run_expert, run_layer_resident, LayerStep};
@@ -59,6 +63,8 @@ pub use moe::routed_batch_supported;
 pub use moe_device::{device_routing_enabled, DeviceGating, DeviceRouting, ExpertSource};
 pub use proj::ProjWeights;
 use shapes::check_layer_shapes;
+use stage::{StackOutBufs, StageLayout};
+use std::sync::Arc;
 
 /// One quantized projection as the GEMM takes it: the GGUF bytes, the
 /// kernel row for their kind, and the shape. `WeightMatrix::
@@ -369,6 +375,8 @@ pub struct PrefillStackOut {
     /// a layer routed on the host (whose caller saw its choice) or not
     /// routed at all.
     pub device_routed: Vec<Option<Vec<usize>>>,
+    /// Whether the step ran eagerly or from a CUDA graph.
+    pub graph: GraphUse,
 }
 
 impl PrefillStackOut {
@@ -416,13 +424,31 @@ pub fn launch_prefill_dense_stack(
 
 /// [`launch_prefill_dense_stack`] with the routing an MoE layer asks
 /// for; a run with an MoE layer and no routing is refused before the
-/// device.
+/// device. A decode token over the mirrors replays a CUDA graph when
+/// `FRINK_CUDA_GRAPH=1` ([`decode_graph`]); the switch is read only for
+/// that step, and a value it does not take refuses the step by name.
 pub fn launch_stack<'e>(
     input: StackInput<'_>,
     layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
     batch: usize,
+    kv: StackKv<'_, '_>,
+    route: Option<&mut RouteFn<'_, 'e>>,
+) -> Result<PrefillStackOut, CudaError> {
+    let graphs = batch == 1 && matches!(kv, StackKv::Mirrors(_)) && crate::graph::decode_graphs()?;
+    launch_stack_in(input, layers, batch, kv, route, graphs)
+}
+
+/// [`launch_stack`] with the graph question answered: `graphs` lets a
+/// one-row step over the mirrors capture and replay a graph on a device
+/// that can, whatever the switch says, which is how the hardware test
+/// holds the two forms to each other.
+pub(crate) fn launch_stack_in<'e>(
+    input: StackInput<'_>,
+    layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
+    batch: usize,
     mut kv: StackKv<'_, '_>,
-    mut route: Option<&mut RouteFn<'_, 'e>>,
+    route: Option<&mut RouteFn<'_, 'e>>,
+    graphs: bool,
 ) -> Result<PrefillStackOut, CudaError> {
     let Some((first, first_params)) = layers.first() else {
         return Err(CudaError::Unsupported(
@@ -484,40 +510,9 @@ pub fn launch_stack<'e>(
     }
 
     // ONE buffer for everything the host gets back: the hidden batch,
-    // then per layer the batch's K rows and V rows.
-    let mut kv_offsets = Vec::with_capacity(layers.len());
-    let mut staged_len = batch * hidden_dim;
-    for (_, p) in layers {
-        let n = batch * p.n_kv_heads * p.head_dim;
-        kv_offsets.push((staged_len, n));
-        staged_len += 2 * n;
-    }
-    let mut staged = dev
-        .alloc_zeros::<f32>(staged_len)
-        .map_err(|e| CudaError::Launch(format!("stack staging alloc: {e:?}")))?;
-
-    let mut held = Held::default();
-    let mut h = match input {
-        StackInput::Hidden(hidden) => xfer::htod(&dev, "hidden upload", hidden)?,
-        StackInput::Gather { table, ids } => {
-            let d_ids = xfer::htod(&dev, "gather ids upload", ids)?;
-            let (h, w) = crate::get_rows_launch::enqueue_get_rows(
-                &dev,
-                table.kind,
-                table.data,
-                &d_ids,
-                table.cols,
-                table.row_bytes,
-            )?;
-            held.weights.push(w);
-            h
-        }
-    };
-    // Device-routed layers write their expert ids here, `IDS_PER_LAYER`
-    // a layer (every token's `k`, at most 16), downloaded once after the
-    // stack.
-    let ids_per_layer = batch * 16;
-    let device_k: Vec<Option<usize>> = layers
+    // then per layer the batch's K rows and V rows. Device-routed layers
+    // write their expert ids beside it, downloaded once after the stack.
+    let device_k = layers
         .iter()
         .map(|(l, _)| match l.ffn {
             StackFfn::Moe {
@@ -526,17 +521,124 @@ pub fn launch_stack<'e>(
             _ => None,
         })
         .collect();
-    let mut ids_all = if device_k.iter().any(Option::is_some) {
-        Some(
-            dev.alloc_zeros::<i32>(layers.len() * ids_per_layer)
-                .map_err(|e| CudaError::Launch(format!("routed ids alloc: {e:?}")))?,
-        )
-    } else {
-        None
+    let layout = StageLayout::of(
+        batch,
+        hidden_dim,
+        layers.iter().map(|(_, p)| p.n_kv_heads * p.head_dim),
+        device_k,
+    );
+    let replayable = graphs
+        && batch == 1
+        && matches!(kv, StackKv::Mirrors(_))
+        && crate::graph::device_supports(&dev);
+    if replayable {
+        return decode_graph::token(&dev, input, layers, &mut kv, &layout, route, start_pos);
+    }
+    run_eager(
+        &dev, input, layers, batch, &mut kv, &layout, route, start_pos,
+    )
+}
+
+/// What a stack's body reads its first hidden rows from: rows already on
+/// the device, updated in place, or ids an embedding gather reads.
+enum BodyInput<'a, 'b> {
+    Hidden(&'b mut CudaSlice<f32>),
+    Gather {
+        table: MulMmWeights<'a>,
+        ids: &'b CudaSlice<u32>,
+    },
+}
+
+/// A stack enqueued as it runs, launch by launch: the input uploaded,
+/// the body, the one wait.
+#[allow(clippy::too_many_arguments)]
+fn run_eager<'e>(
+    dev: &Arc<CudaDevice>,
+    input: StackInput<'_>,
+    layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
+    batch: usize,
+    kv: &mut StackKv<'_, '_>,
+    layout: &StageLayout,
+    route: Option<&mut RouteFn<'_, 'e>>,
+    start_pos: usize,
+) -> Result<PrefillStackOut, CudaError> {
+    let mut out = StackOutBufs::alloc(dev, layout)?;
+    let mut held = Held::default();
+    let mut up_hidden;
+    let up_ids;
+    let body_in = match input {
+        StackInput::Hidden(hidden) => {
+            up_hidden = xfer::htod(dev, "hidden upload", hidden)?;
+            BodyInput::Hidden(&mut up_hidden)
+        }
+        StackInput::Gather { table, ids } => {
+            up_ids = xfer::htod(dev, "gather ids upload", ids)?;
+            BodyInput::Gather {
+                table,
+                ids: &up_ids,
+            }
+        }
     };
+    let on_device = enqueue_body(
+        dev, body_in, layers, batch, kv, layout, None, &mut out, route, &mut held,
+    )?;
+    let stack = finish(
+        dev,
+        &out,
+        &on_device,
+        layout,
+        kv,
+        layers,
+        batch,
+        start_pos,
+        GraphUse::Eager,
+    )?;
+    drop(held);
+    Ok(stack)
+}
+
+/// Every launch of a stack, in order, on `dev`: the input gathered when
+/// it is ids, each layer over the hidden rows in place, the hidden rows
+/// staged. `dev` is the shared device for a stack enqueued as it runs,
+/// and the capture device for a decode token recorded into a graph,
+/// whose position the layers then read from `pos_word`. What this
+/// allocates on `dev` it drops before it returns, which a graph needs
+/// (it frees inside itself every allocation it makes). Answers which
+/// layers routed on the device.
+#[allow(clippy::too_many_arguments)]
+fn enqueue_body<'e>(
+    dev: &Arc<CudaDevice>,
+    input: BodyInput<'_, '_>,
+    layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
+    batch: usize,
+    kv: &mut StackKv<'_, '_>,
+    layout: &StageLayout,
+    pos_word: Option<&CudaSlice<i32>>,
+    out: &mut StackOutBufs,
+    mut route: Option<&mut RouteFn<'_, 'e>>,
+    held: &mut Held,
+) -> Result<Vec<bool>, CudaError> {
+    let mut gathered: CudaSlice<f32>;
+    let h: &mut CudaSlice<f32> = match input {
+        BodyInput::Hidden(h) => h,
+        BodyInput::Gather { table, ids } => {
+            let (g, w) = crate::get_rows_launch::enqueue_get_rows(
+                dev,
+                table.kind,
+                table.data,
+                ids,
+                table.cols,
+                table.row_bytes,
+            )?;
+            held.weights.push(w);
+            gathered = g;
+            &mut gathered
+        }
+    };
+    let n_ids = layout.ids_per_layer;
     let mut on_device = vec![false; layers.len()];
     for (i, (layer, params)) in layers.iter().enumerate() {
-        let mirror = match &mut kv {
+        let mirror = match kv {
             StackKv::UploadPrefix => None,
             StackKv::Mirrors(slots) => Some(
                 slots[i]
@@ -544,8 +646,8 @@ pub fn launch_stack<'e>(
                     .expect("every mirror slot was filled above"),
             ),
         };
-        let ids = match (&mut ids_all, device_k[i]) {
-            (Some(all), Some(_)) => Some(all.slice_mut(i * ids_per_layer..(i + 1) * ids_per_layer)),
+        let ids = match (&mut out.ids, layout.device_k[i]) {
+            (Some(all), Some(_)) => Some(all.slice_mut(i * n_ids..(i + 1) * n_ids)),
             _ => None,
         };
         let step = LayerStep {
@@ -553,36 +655,55 @@ pub fn launch_stack<'e>(
             ids,
             index: i,
             mirror,
-            stage_at: kv_offsets[i],
+            stage_at: layout.kv[i],
             route: route.as_deref_mut(),
+            pos_word,
         };
         let _t = crate::phases::phase("enqueue");
-        on_device[i] =
-            run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
+        on_device[i] = run_layer_resident(dev, h, layer, params, step, &mut out.staged, held)?;
     }
     xfer::dtod(
-        &dev,
+        dev,
         "hidden stage",
-        &h,
-        &mut staged.slice_mut(..batch * hidden_dim),
+        &*h,
+        &mut out.staged.slice_mut(..layout.hidden),
     )?;
-    // The stack's one host wait: everything above was enqueued.
+    Ok(on_device)
+}
+
+/// The stack's one host wait and what follows it: the staged download,
+/// the ids of the layers that routed on the device, and each mirror's
+/// record of the rows it now holds.
+#[allow(clippy::too_many_arguments)]
+fn finish(
+    dev: &Arc<CudaDevice>,
+    out: &StackOutBufs,
+    on_device: &[bool],
+    layout: &StageLayout,
+    kv: &mut StackKv<'_, '_>,
+    layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
+    batch: usize,
+    start_pos: usize,
+    graph: GraphUse,
+) -> Result<PrefillStackOut, CudaError> {
+    // Everything before this was enqueued.
     let staged = {
         let _t = crate::phases::phase("wait+download");
-        xfer::dtoh_staged(&dev, "stack download", &staged)?
+        xfer::dtoh_staged(dev, "stack download", &out.staged)?
     };
     // The device-routed layers' expert ids, for the caller's activation
     // counts: after the stack's wait, so this copy waits on nothing.
-    let device_routed = match &ids_all {
+    let n_ids = layout.ids_per_layer;
+    let device_routed = match &out.ids {
         Some(all) if on_device.iter().any(|&b| b) => {
-            let ids = xfer::dtoh(&dev, "routed ids", all)?;
+            let ids = xfer::dtoh(dev, "routed ids", all)?;
             on_device
                 .iter()
-                .zip(&device_k)
+                .zip(&layout.device_k)
                 .enumerate()
                 .map(|(i, (&on, k))| {
                     on.then(|| {
-                        ids[i * ids_per_layer..i * ids_per_layer + batch * k.unwrap_or(0)]
+                        ids[i * n_ids..i * n_ids + batch * k.unwrap_or(0)]
                             .iter()
                             .map(|&e| e as usize)
                             .collect()
@@ -592,22 +713,22 @@ pub fn launch_stack<'e>(
         }
         _ => vec![None; layers.len()],
     };
-    drop(held);
-    let out = PrefillStackOut {
-        hidden: staged.as_slice()[..batch * hidden_dim].to_vec(),
+    let stack = PrefillStackOut {
+        hidden: staged.as_slice()[..layout.hidden].to_vec(),
         staged,
-        kv_offsets,
+        kv_offsets: layout.kv.clone(),
         device_routed,
+        graph,
     };
-    if let StackKv::Mirrors(slots) = &mut kv {
+    if let StackKv::Mirrors(slots) = kv {
         for (i, (slot, (_, p))) in slots.iter_mut().zip(layers).enumerate() {
             let width = p.n_kv_heads * p.head_dim;
-            let (k_rows, _) = out.kv(i);
+            let (k_rows, _) = stack.kv(i);
             let m = slot.as_mut().expect("every mirror slot was filled above");
             m.commit(start_pos + batch, &k_rows[k_rows.len() - width..]);
         }
     }
-    Ok(out)
+    Ok(stack)
 }
 
 #[cfg(test)]
