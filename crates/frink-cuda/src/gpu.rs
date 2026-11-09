@@ -184,6 +184,32 @@ pub(crate) fn compute_capability_major(dev: &std::sync::Arc<cudarc::driver::Cuda
     })
 }
 
+/// The shared device's compute capability `(major, minor)`, asked once;
+/// `(0, 0)` when the query fails.
+pub(crate) fn compute_capability(dev: &std::sync::Arc<cudarc::driver::CudaDevice>) -> (i32, i32) {
+    static CC: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+    *CC.get_or_init(|| {
+        let minor = dev
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+            )
+            .unwrap_or(0);
+        (compute_capability_major(dev), minor)
+    })
+}
+
+/// The shared device's multiprocessor count, asked once; `1` when the
+/// query fails.
+pub(crate) fn multiprocessor_count(dev: &std::sync::Arc<cudarc::driver::CudaDevice>) -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        dev.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+        )
+        .map_or(1, |n| n.max(1) as usize)
+    })
+}
+
 pub(crate) fn shared_device() -> Result<std::sync::Arc<cudarc::driver::CudaDevice>, CudaError> {
     let mut guard = CUDA_DEVICE.lock().unwrap();
     if let Some(dev) = guard.as_ref() {
