@@ -62,8 +62,8 @@ rental, asked for before it is booked (#542).
    `stream` on `/v1/completions`, which is refused by name today, and
    the FIM pad, repo and file-separator tokens as end-of-generation
    tokens, which `/infill` notices most (#534).
-3. **Numerics.** The activation quantizers' last bit (#476), and the
-   statistic `frink bench` prints (#481).
+3. **Numerics.** The deviations ADR 0009 still lists, the largest the
+   CPU attention's arithmetic under 64 query rows and in decode.
 
 ### A server that holds up under load
 

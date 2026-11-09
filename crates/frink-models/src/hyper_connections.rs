@@ -27,9 +27,7 @@ use frink_core::weight_matrix::WeightMatrix;
 /// this hyper-connection router computation has no weight tensor for
 /// it in `deepseek4.cpp`.
 fn rms_norm_no_weight(x: &[f32], eps: f32) -> Vec<f32> {
-    let mean_sq = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
-    let scale = 1.0 / (mean_sq + eps).sqrt();
-    x.iter().map(|v| v * scale).collect()
+    crate::norm::rms_norm_no_params(x, eps)
 }
 
 /// The real reference implementation's only supported hyper-connection

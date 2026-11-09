@@ -48,6 +48,7 @@
 mod calibration;
 mod decode;
 mod dump;
+mod layers;
 mod metrics;
 mod quant;
 mod tokenize;
@@ -109,6 +110,9 @@ pub struct ParityArgs {
     pub dumper: Vec<String>,
     /// Prefix to write every compared logit vector under. See [`dump`].
     pub dump_logits: Option<String>,
+    /// Directory to dump both engines' per-layer intermediates under,
+    /// then compare. See [`layers`].
+    pub dump_tensors: Option<String>,
     /// Token ids to compare on instead of tokenizing a prompt. The
     /// tokenizer half is skipped, said so, and not counted as a pass.
     pub tokens: Option<Vec<u32>>,
@@ -149,6 +153,13 @@ pub fn run(args: ParityArgs) -> anyhow::Result<()> {
     println!();
 
     let prompt = args.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
+
+    // Opened before the prefill, which is the pass the hooks write.
+    let dump_tensors = args.dump_tensors.as_deref().map(Path::new);
+    if let Some(root) = dump_tensors {
+        frink_models::tensor_dump::dump_to(&layers::frink_dir(root))
+            .with_context(|| format!("opening the tensor dump under {}", root.display()))?;
+    }
 
     let (tokens, frink_logits) = match &args.tokens {
         Some(ids) if ids.is_empty() => anyhow::bail!("--tokens is empty"),
@@ -216,6 +227,9 @@ pub fn run(args: ParityArgs) -> anyhow::Result<()> {
         &band,
         &report,
     );
+    if let Some(root) = dump_tensors {
+        layers::run(&dumpers[0], &path, &tokens, root, ref_logits[0])?;
+    }
 
     // Both halves are reported before either is allowed to abort the
     // command: a run that printed the tokenizer divergence and then
@@ -263,7 +277,7 @@ fn collect_references(
     let mut out: Vec<Reference> = Vec::new();
     for (i, dumper) in dumpers.iter().enumerate() {
         let primary = i == 0;
-        let reference = match reference_logits(dumper, model, tokens, i) {
+        let reference = match reference_logits(dumper, model, tokens, i, None) {
             Ok(r) => r,
             Err(e) if primary => return Err(e),
             Err(e) => {
@@ -660,16 +674,23 @@ const LIBLLAMA_LINE: &str = "libllama ";
 /// `slot` distinguishes the temporary file per reference: two dumpers
 /// run in one process would otherwise write the same path, and the
 /// second answer would be read as the first.
+///
+/// `dump_tensors` turns on the dumper's per-tensor dump into that
+/// directory ([`layers`]).
 fn reference_logits(
     dumper: &Path,
     model: &str,
     tokens: &[u32],
     slot: usize,
+    dump_tensors: Option<&Path>,
 ) -> anyhow::Result<Reference> {
     let out_path =
         std::env::temp_dir().join(format!("frink-parity-{}-{slot}.bin", std::process::id()));
     let mut cmd = Command::new(dumper);
     cmd.arg(model).arg(&out_path);
+    if let Some(dir) = dump_tensors {
+        cmd.env("LLAMA_LOGITS_DUMP_TENSORS", dir);
+    }
     for t in tokens {
         cmd.arg(t.to_string());
     }

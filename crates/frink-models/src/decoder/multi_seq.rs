@@ -321,6 +321,7 @@ impl Decoder {
                 inputs,
                 ffn_block::BatchedFfnKernels::PerRow,
                 skip_rows.as_deref().map(|rows| SkipStream { rows }),
+                None,
             );
             self.hrm_store(hrm.as_mut(), l, &hidden_batch);
         }

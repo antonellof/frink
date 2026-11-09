@@ -52,10 +52,8 @@ pub fn matmul_f32(a: &Tensor, b_t: &Tensor) -> Tensor {
 /// x_normalized = x / sqrt(mean(x^2) + eps) * weight
 pub fn rms_norm(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
     assert_eq!(x.len(), weight.len());
-    let mean_sq = sum_sq(x) / x.len() as f32;
-    let scale = 1.0 / (mean_sq + eps).sqrt();
     let mut out = vec![0f32; x.len()];
-    mul3_scale(x, weight, scale, &mut out);
+    mul3_scale(x, weight, rms_scale(x, eps), &mut out);
     out
 }
 
@@ -67,28 +65,33 @@ pub fn rms_norm_per_head(x: &[f32], weight: &[f32], head_dim: usize, eps: f32) -
     assert_eq!(x.len() % head_dim, 0);
     let mut out = vec![0f32; x.len()];
     for (head, out_h) in x.chunks_exact(head_dim).zip(out.chunks_exact_mut(head_dim)) {
-        let mean_sq = sum_sq(head) / head_dim as f32;
-        let scale = 1.0 / (mean_sq + eps).sqrt();
-        mul3_scale(head, weight, scale, out_h);
+        mul3_scale(head, weight, rms_scale(head, eps), out_h);
     }
     out
 }
 
-#[inline]
-fn sum_sq(x: &[f32]) -> f32 {
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            return unsafe { sum_sq_neon(x) };
-        }
+/// `1 / sqrt(mean(x^2) + eps)` the way `ggml_compute_forward_rms_norm_f32`
+/// (`ggml-cpu/ops.cpp`) computes it, bit for bit: each square in f32,
+/// summed IN ORDER in f64, the mean rounded to f32, then `1.0f/sqrtf`.
+///
+/// The order is the point. ggml's loop is scalar (`ggml_float` is
+/// double), so every libllama build gets the same bits, and the norm is
+/// the input of the first activation quantizer of every layer. An f32
+/// SIMD sum here differed from it in the last bit on 93-99% of
+/// elements, and one ulp at an input that scales to `k + 0.5` flips a
+/// quant: 78 flips in layer 0 alone on Llama-3.2-1B Q8_0 (#476). With
+/// this, layer 0's Q/K/V are bit-identical to libllama's there and on
+/// gpt-oss-20b.
+///
+/// Every RMS norm on the CPU goes through here, so there is one answer.
+pub fn rms_scale(x: &[f32], eps: f32) -> f32 {
+    debug_assert!(!x.is_empty(), "a norm over no elements");
+    let mut sum = 0f64;
+    for &v in x {
+        sum += (v * v) as f64;
     }
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            return unsafe { sum_sq_avx2(x) };
-        }
-    }
-    x.iter().map(|v| v * v).sum()
+    let mean = (sum / x.len() as f64) as f32;
+    1.0 / (mean + eps).sqrt()
 }
 
 #[inline]
@@ -116,26 +119,6 @@ fn mul3_scale(x: &[f32], w: &[f32], scale: f32, out: &mut [f32]) {
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn sum_sq_neon(x: &[f32]) -> f32 {
-    use std::arch::aarch64::*;
-    let n = x.len();
-    let mut acc = vdupq_n_f32(0.0);
-    let mut i = 0;
-    while i + 4 <= n {
-        let v = vld1q_f32(x.as_ptr().add(i));
-        acc = vfmaq_f32(acc, v, v);
-        i += 4;
-    }
-    let mut sum = vaddvq_f32(acc);
-    while i < n {
-        sum += x[i] * x[i];
-        i += 1;
-    }
-    sum
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
 unsafe fn mul3_scale_neon(x: &[f32], w: &[f32], scale: f32, out: &mut [f32]) {
     use std::arch::aarch64::*;
     let n = x.len();
@@ -151,31 +134,6 @@ unsafe fn mul3_scale_neon(x: &[f32], w: &[f32], scale: f32, out: &mut [f32]) {
         out[i] = x[i] * scale * w[i];
         i += 1;
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn sum_sq_avx2(x: &[f32]) -> f32 {
-    use std::arch::x86_64::*;
-    let n = x.len();
-    let mut acc = _mm256_setzero_ps();
-    let mut i = 0;
-    while i + 8 <= n {
-        let v = _mm256_loadu_ps(x.as_ptr().add(i));
-        acc = _mm256_fmadd_ps(v, v, acc);
-        i += 8;
-    }
-    let lo = _mm256_castps256_ps128(acc);
-    let hi = _mm256_extractf128_ps(acc, 1);
-    let mut s128 = _mm_add_ps(lo, hi);
-    s128 = _mm_add_ps(s128, _mm_movehl_ps(s128, s128));
-    s128 = _mm_add_ss(s128, _mm_shuffle_ps(s128, s128, 1));
-    let mut sum = _mm_cvtss_f32(s128);
-    while i < n {
-        sum += x[i] * x[i];
-        i += 1;
-    }
-    sum
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1025,6 +983,39 @@ mod tests {
         let out = rms_norm(&x, &w, 1e-6);
         // ratio between components should be preserved
         assert!((out[0] / out[1] - 3.0 / 4.0).abs() < 1e-4);
+    }
+
+    /// Expected bits are `ggml_rms_norm`'s at the pin (libggml-cpu on an
+    /// M2, one thread), not a re-derivation. `1e8 + 1` is `1e8` in f32,
+    /// so a single-precision sum of these squares loses all 63 ones and
+    /// lands on a scale 0x3a51b717; ggml's f64 sum keeps them (#476).
+    #[test]
+    fn rms_scale_is_ggmls_f64_ordered_sum() {
+        let mut x = vec![1.0f32; 64];
+        x[0] = 1e4;
+        let scale = rms_scale(&x, 1e-5);
+        assert_eq!(scale.to_bits(), 0x3a51_b713);
+        let f32_sum: f32 = x.iter().map(|v| v * v).sum();
+        assert_ne!(
+            (1.0 / (f32_sum / 64.0 + 1e-5).sqrt()).to_bits(),
+            scale.to_bits()
+        );
+        let y = rms_norm(&x, &[1.0; 64], 1e-5);
+        assert_eq!((y[0].to_bits(), y[1].to_bits()), (0x40ff_fffb, 0x3a51_b713));
+    }
+
+    /// The same, on a 2048-wide row with no structure to it: the first
+    /// four outputs of `ggml_rms_norm` at the pin, eps 1e-6.
+    #[test]
+    fn rms_norm_matches_ggml_on_a_hidden_sized_row() {
+        let x: Vec<f32> = (0..2048)
+            .map(|i| ((i * 7919) % 2003) as f32 / 1000.0 - 1.0)
+            .collect();
+        let y = rms_norm(&x, &vec![1.0; 2048], 1e-6);
+        let got: Vec<u32> = y[..4].iter().map(|v| v.to_bits()).collect();
+        assert_eq!(got, [0xbfdd_3007, 0x3fc9_47dd, 0x3fb4_b5d5, 0x3fa0_23cb]);
+        let per_head = rms_norm_per_head(&x, &vec![1.0; 2048], 2048, 1e-6);
+        assert_eq!(per_head, y);
     }
 
     #[test]

@@ -12,6 +12,10 @@
 //! `frink-models`'
 //! GGUF-roundtrip tests.
 
+mod act_quant;
+pub use act_quant::{
+    quantize_activations_q8, quantize_activations_q8_k, Q8Activations, Q8KActivations,
+};
 pub mod encode;
 pub use encode::q4_k::{encode_block_q4_k, encode_row_q4_k};
 pub use encode::q5_k::{encode_block_q5_k, encode_row_q5_k};
@@ -679,115 +683,6 @@ pub fn dot_q8_0_f32_scalar(row_bytes: &[u8], x: &[f32]) -> f32 {
         acc += block_acc * scale;
     }
     acc
-}
-
-/// An activation vector quantized to signed 8-bit in 32-element blocks,
-/// each with its own f32 scale (`d`), so it can feed the integer
-/// `vec_dot` paths against Q8_0 weights. This mirrors llama.cpp's
-/// `quantize_row_q8_1` (minus the block sum, which is only needed for
-/// asymmetric weight formats): quantizing the shared activation once per
-/// matvec turns every weight-row dot into an int8×int8 → int32 reduction
-/// (`vdotq_s32` / `_mm256_maddubs`-class ops) plus a single scale, which
-/// is what lets llama.cpp's CPU matmul stay in integer SIMD.
-#[derive(Clone, Debug)]
-pub struct Q8Activations {
-    /// Signed 8-bit quantized values, `n_blocks * 32` long.
-    pub q: Vec<i8>,
-    /// Per-block scale, `n_blocks` long. `x ≈ q * d`.
-    pub d: Vec<f32>,
-}
-
-impl Q8Activations {
-    pub fn n_blocks(&self) -> usize {
-        self.d.len()
-    }
-}
-
-/// ggml `block_q8_K` activations for K-quant int-dot (`Q4_K`/`Q5_K`/`Q6_K`).
-/// Super-blocks of 256 elements with 16-wide `bsums` for the min term.
-#[derive(Clone, Debug)]
-pub struct Q8KActivations {
-    pub q: Vec<i8>,
-    pub d: Vec<f32>,
-    /// Per 16-wide group sums of `q`, `n_blocks * 16` long.
-    pub bsums: Vec<i16>,
-}
-
-impl Q8KActivations {
-    pub fn n_blocks(&self) -> usize {
-        self.d.len()
-    }
-}
-
-/// Quantize activations to ggml `Q8_K` (256-elem super-blocks). Positive
-/// scale convention (`d = amax/127`) matching our `Q8_0` path; `bsums`
-/// enable the Q4_K min correction without re-scanning `q`.
-pub fn quantize_activations_q8_k(x: &[f32]) -> Q8KActivations {
-    debug_assert_eq!(x.len() % Q4_K_BLOCK_ELEMS, 0);
-    let n_blocks = x.len() / Q4_K_BLOCK_ELEMS;
-    let mut q = vec![0i8; n_blocks * Q4_K_BLOCK_ELEMS];
-    let mut d = vec![0f32; n_blocks];
-    let mut bsums = vec![0i16; n_blocks * 16];
-    let quant_one =
-        |(q_slot, d_slot, bsum_slot, chunk): (&mut [i8], &mut f32, &mut [i16], &[f32])| {
-            let amax = chunk.iter().fold(0f32, |m, &v| m.max(v.abs()));
-            let scale = amax / 127.0;
-            let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-            *d_slot = scale;
-            for (i, &v) in chunk.iter().enumerate() {
-                let qi = (v * inv).round();
-                q_slot[i] = qi.clamp(-127.0, 127.0) as i8;
-            }
-            for (slot, group) in bsum_slot.iter_mut().zip(q_slot.as_chunks::<16>().0) {
-                *slot = group.iter().map(|&q| q as i32).sum::<i32>() as i16;
-            }
-        };
-    // Serial on purpose: every batch caller is already inside a Rayon
-    // region (one task per activation), so an inner region here nested
-    // ~batch_size fork-joins per matmul; and one row's blocks are far too
-    // little work to amortize one. llama quantizes serially per thread
-    // chunk too (`ggml_compute_forward_mul_mat`, `ggml-cpu.c`).
-    for (b, chunk) in x.as_chunks::<Q4_K_BLOCK_ELEMS>().0.iter().enumerate() {
-        quant_one((
-            &mut q[b * Q4_K_BLOCK_ELEMS..(b + 1) * Q4_K_BLOCK_ELEMS],
-            &mut d[b],
-            &mut bsums[b * 16..(b + 1) * 16],
-            chunk,
-        ));
-    }
-    Q8KActivations { q, d, bsums }
-}
-
-/// Quantize an activation row to [`Q8Activations`] (32-element blocks,
-/// ggml `quantize_row_q8_0` rounding: `d = amax/127`, `q = round(x/d)`).
-/// `x.len()` must be a multiple of 32.
-pub fn quantize_activations_q8(x: &[f32]) -> Q8Activations {
-    debug_assert_eq!(x.len() % Q8_0_BLOCK_ELEMS, 0);
-    let n_blocks = x.len() / Q8_0_BLOCK_ELEMS;
-    let mut q = vec![0i8; n_blocks * Q8_0_BLOCK_ELEMS];
-    let mut d = vec![0f32; n_blocks];
-    let quant_one = |(q_slot, d_slot, chunk): (&mut [i8], &mut f32, &[f32])| {
-        let amax = chunk.iter().fold(0f32, |m, &v| m.max(v.abs()));
-        let scale = amax / 127.0;
-        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        *d_slot = scale;
-        for (i, &v) in chunk.iter().enumerate() {
-            // round-half-away-from-zero, clamped to i8 range.
-            let qi = (v * inv).round();
-            q_slot[i] = qi.clamp(-127.0, 127.0) as i8;
-        }
-    };
-    // Serial on purpose — see `quantize_activations_q8_k`. The parallel
-    // split this replaces was also 32-byte `q` chunks (two per cache
-    // line) with adjacent `d` writes: false sharing on every store.
-    for (b, chunk) in x.as_chunks::<Q8_0_BLOCK_ELEMS>().0.iter().enumerate() {
-        quant_one((
-            &mut q[b * Q8_0_BLOCK_ELEMS..(b + 1) * Q8_0_BLOCK_ELEMS],
-            &mut d[b],
-            chunk,
-        ));
-    }
-    Q8Activations { q, d }
 }
 
 /// Integer `vec_dot` of a Q8_0 weight row against pre-quantized Q8
@@ -5726,90 +5621,6 @@ mod tests {
     }
 
     #[test]
-    fn quantize_activations_q8_reconstructs_within_quant_error() {
-        let x: Vec<f32> = (0..64)
-            .map(|i| ((i as f32) * 0.13 - 4.0).sin() * 3.0)
-            .collect();
-        let act = quantize_activations_q8(&x);
-        assert_eq!(act.n_blocks(), 2);
-        assert_eq!(act.q.len(), 64);
-        for (b, chunk) in x.as_chunks::<32>().0.iter().enumerate() {
-            let amax = chunk.iter().fold(0f32, |m, &v| m.max(v.abs()));
-            let tol = amax / 127.0 + 1e-6;
-            for (i, &v) in chunk.iter().enumerate() {
-                let recon = act.q[b * 32 + i] as f32 * act.d[b];
-                assert!((recon - v).abs() <= tol, "b={b} i={i} v={v} recon={recon}");
-            }
-        }
-    }
-
-    #[test]
-    fn quantize_activations_q8_handles_all_zero_block() {
-        let act = quantize_activations_q8(&[0f32; 32]);
-        assert_eq!(act.d[0], 0.0);
-        assert!(act.q.iter().all(|&q| q == 0));
-    }
-
-    #[test]
-    fn quantize_activations_q8_parallel_matches_serial() {
-        let x: Vec<f32> = (0..512)
-            .map(|i| ((i as f32) * 0.07 - 8.0).sin() * 2.5)
-            .collect();
-        let got = quantize_activations_q8(&x);
-        let n_blocks = x.len() / Q8_0_BLOCK_ELEMS;
-        let mut q = vec![0i8; n_blocks * Q8_0_BLOCK_ELEMS];
-        let mut d = vec![0f32; n_blocks];
-        for (b, chunk) in x.as_chunks::<Q8_0_BLOCK_ELEMS>().0.iter().enumerate() {
-            let amax = chunk.iter().fold(0f32, |m, &v| m.max(v.abs()));
-            let scale = amax / 127.0;
-            let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-            d[b] = scale;
-            let base = b * Q8_0_BLOCK_ELEMS;
-            for (i, &v) in chunk.iter().enumerate() {
-                let qi = (v * inv).round();
-                q[base + i] = qi.clamp(-127.0, 127.0) as i8;
-            }
-        }
-        assert_eq!(got.q, q);
-        assert_eq!(got.d, d);
-    }
-
-    #[test]
-    fn quantize_activations_q8_k_parallel_matches_serial() {
-        let x: Vec<f32> = (0..1024)
-            .map(|i| ((i as f32) * 0.05 - 12.0).cos() * 1.7)
-            .collect();
-        let got = quantize_activations_q8_k(&x);
-        let n_blocks = x.len() / Q4_K_BLOCK_ELEMS;
-        let mut q = vec![0i8; n_blocks * Q4_K_BLOCK_ELEMS];
-        let mut d = vec![0f32; n_blocks];
-        let mut bsums = vec![0i16; n_blocks * 16];
-        for (b, chunk) in x.as_chunks::<Q4_K_BLOCK_ELEMS>().0.iter().enumerate() {
-            let amax = chunk.iter().fold(0f32, |m, &v| m.max(v.abs()));
-            let scale = amax / 127.0;
-            let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-            d[b] = scale;
-            let base = b * Q4_K_BLOCK_ELEMS;
-            for (i, &v) in chunk.iter().enumerate() {
-                let qi = (v * inv).round();
-                q[base + i] = qi.clamp(-127.0, 127.0) as i8;
-            }
-            let bsum_base = b * 16;
-            for g in 0..16 {
-                let mut s = 0i32;
-                let off = base + g * 16;
-                for i in 0..16 {
-                    s += q[off + i] as i32;
-                }
-                bsums[bsum_base + g] = s as i16;
-            }
-        }
-        assert_eq!(got.q, q);
-        assert_eq!(got.d, d);
-        assert_eq!(got.bsums, bsums);
-    }
-
-    #[test]
     fn dot_q4_k_q8_matches_scalar_and_tracks_float_dot() {
         let n_blocks = 3;
         let cols = n_blocks * Q4_K_BLOCK_ELEMS;
@@ -6015,10 +5826,21 @@ mod tests {
         let act = quantize_activations_q8(&x);
         let dispatched = dot_q4_0_q8(&weights, &act);
         let scalar = dot_q4_0_q8_scalar(&weights, &act);
-        assert_eq!(
-            dispatched.to_bits(),
-            scalar.to_bits(),
-            "SIMD Q4_0 int dot must match scalar bit-for-bit"
+        // The SIMD bodies are ggml's (`ggml_vec_dot_q4_0_q8_0`): NEON's
+        // keeps even and odd blocks in two 4-lane f32 sums and reduces
+        // them at the end, so it equals the block-by-block scalar twin up
+        // to f32 summation order, not bit for bit. The integer dots are
+        // exact in both, so the bound is a few ulps of the block terms.
+        let terms: f32 = (0..n_blocks)
+            .map(|b| {
+                let blk = &weights[b * Q4_0_BLOCK_BYTES..];
+                let dw = f16::from_le_bytes([blk[0], blk[1]]).to_f32();
+                dw.abs() * act.d[b] * 127.0 * 8.0 * Q4_0_BLOCK_ELEMS as f32
+            })
+            .sum();
+        assert!(
+            (dispatched - scalar).abs() <= 4.0 * f32::EPSILON * terms,
+            "SIMD Q4_0 int dot {dispatched} vs scalar twin {scalar} (terms {terms})"
         );
 
         let float_dot = dot_q4_0_f32(&weights, &x);

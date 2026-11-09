@@ -442,6 +442,7 @@ impl Decoder {
         inputs: BranchInputs,
         kernels: BatchedFfnKernels,
         skip: Option<SkipStream<'_>>,
+        dump: Option<&crate::tensor_dump::TensorDump>,
     ) {
         if self.config.layer_shape(layer_idx).ffn_dim == 0 {
             return;
@@ -461,20 +462,40 @@ impl Decoder {
                 x
             }
         };
+        // `frink parity --dump-tensors`, under llama.cpp's names for this
+        // graph: openai-moe.cpp calls the FFN's norm `attn_post_norm`
+        // and its output `ffn_moe_out`, llama.cpp `ffn_norm` and
+        // `ffn_out` (dense) or `ffn_moe_out` (routed). `dump` is `None`
+        // outside the batched prefill body.
+        let dense = Self::is_dense_layer(layer);
+        let (norm_name, out_name) = match (oai.is_some(), dense) {
+            (true, _) => ("attn_post_norm", "ffn_moe_out"),
+            (false, true) => ("ffn_norm", "ffn_out"),
+            (false, false) => ("ffn_norm", "ffn_moe_out"),
+        };
+        if let Some(d) = dump {
+            d.write(norm_name, Some(layer_idx), 1, hidden_dim, &normed2_batch);
+        }
 
         if let Some(oai) = oai {
+            let mut dumped = dump.map(|_| Vec::with_capacity(batch_size * hidden_dim));
             for b in 0..batch_size {
                 let normed2 = &normed2_batch[b * hidden_dim..(b + 1) * hidden_dim];
                 let ffn_out = Self::gpt_oss_ffn(layer, oai, normed2, config, hidden_dim);
+                if let Some(rows) = dumped.as_mut() {
+                    rows.extend_from_slice(&ffn_out);
+                }
                 let hidden_row = &mut hidden_batch[b * hidden_dim..(b + 1) * hidden_dim];
                 residual_add(hidden_row, &ffn_out, config.residual_scale);
+            }
+            if let (Some(d), Some(rows)) = (dump, dumped) {
+                d.write(out_name, Some(layer_idx), 1, hidden_dim, &rows);
             }
             Self::apply_skip_stream(layer, hidden_batch, skip, batch_size, hidden_dim);
             self.apply_loop_norm(layer_idx, hidden_batch, batch_size);
             return;
         }
 
-        let dense = Self::is_dense_layer(layer);
         // Skip the batched router matmul entirely for a dense layer --
         // there is nothing to route (see `is_dense_layer`'s doc
         // comment), so computing it here just to ignore it below would
@@ -535,6 +556,9 @@ impl Decoder {
         };
 
         if let Some(mut ffn_batch) = batched {
+            if let Some(d) = dump {
+                d.write(out_name, Some(layer_idx), 1, hidden_dim, &ffn_batch);
+            }
             Self::apply_parallel_sum_scale(layer, &mut ffn_batch);
             Self::apply_down_scale(layer, &mut ffn_batch);
             if let Some(post) = &layer.attn.post_ffn_norm {

@@ -709,6 +709,38 @@ published numbers were measured with the default). `FRINK_CTK=f32`
 runs an f32 K/V cache on BOTH sides: the dumper reads the same variable
 frink does, so the two cannot disagree about it.
 
+### Per layer (`--dump-tensors`)
+
+A first-token KL says that the engines disagree, not where.
+`--dump-tensors DIR` makes both engines write the prompt's intermediates
+under llama.cpp's tensor names (`attn_norm-N`, `Qcur-N`, `kqv_out-N`,
+`attn_out-N`, `ffn_inp-N`, `ffn_norm-N`, `ffn_out-N`, `l_out-N`,
+`result_norm`) and prints, per tensor, the relative L2 distance of
+frink's from llama.cpp's: over all rows, for the worst row, and for the
+output row. The dumper writes through llama.cpp's own eval callback
+(`LLAMA_LOGITS_DUMP_TENSORS`, `tools/llama_logits.c`), and `parity`
+checks that its logits with the callback on are bit-identical to the
+run without it.
+
+```bash
+./target/release/frink parity -m model.gguf --dumper target/llama_logits \
+    -p "..." --prompt-tokens 64 --dump-tensors /tmp/layers
+```
+
+Read a row against the tensor before it: an op whose distance jumps
+from its input's is where the difference enters. On int8-activation
+paths a one-ulp input difference at a rounding boundary moves a whole
+quant step, so past the first such flip the distance grows layer by
+layer and two llama.cpp builds diverge from each other in the same way.
+Run the second dumper's library through the same comparison to see that
+spread. Generic decoder only, on the CPU.
+
+`parity` leaves the integer-dot tier off unless `FRINK_CPU_INT_DOT=1`
+is set, while `frink run` and the server turn it on where it is a win
+(every aarch64 host, and x86 hosts with the AVX2 batch GEMMs). Set it
+to compare the path they take: only then
+does frink quantize activations the way llama.cpp's CPU backend does.
+
 ### The decode half, and token ids
 
 `--decode-steps N` adds a greedy decode of N steps: llama.cpp decodes

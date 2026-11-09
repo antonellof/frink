@@ -73,6 +73,22 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **CPU activation quantization and the RMS norm are ggml's, bit for
+  bit (#476).** The `Q8_K` quantizer in front of every K-quant integer
+  dot now takes ggml's `iscale = 127/amax`, `d = 1/iscale` and rounds
+  half to even; the `Q8_0` one (Q8_0, Q4_0, IQ4_NL, MXFP4) stores its
+  scale as f16 and follows the host ISA's `quantize_row_q8_0` (NEON
+  `1/d`, AVX `127/amax`, both half to even). The RMS norm sums its
+  squares in order in f64, as `ggml_compute_forward_rms_norm_f32` does,
+  where it summed in f32 lanes. Fed llama.cpp's own dumped inputs,
+  frink's Q8_0 and MXFP4-model matmuls were up to 2e-3 and 3e-3 off
+  libllama's per op; they are now identical, and on Llama-3.2-1B Q8_0
+  and gpt-oss-20b everything before layer 0's attention is
+  bit-identical. This changes tokens on every CPU int-dot path.
+  gpt-oss-20b's first-token KL against llama.cpp on a 64-token prompt
+  goes from 3.4e-3 to 4.6e-4, below the 3.4e-3 between two llama.cpp
+  builds.
+
 - **The CUDA decode matvecs run as llama.cpp's do, by default.** The
   dp4a matvecs of 0.61.0 (the activation quantized once to q8_1, Q4_K,
   Q6_K, Q8_0 and MXFP4 rows dotted against it with `dp4a`, llama.cpp's
@@ -88,6 +104,16 @@ are the ones worth reading twice.
   matvec reads, the activation's q8_1 rounding by default and its f32
   values under `wide` and `narrow`, by the same once-read switch
   (#133).
+
+### Added
+
+- **`frink parity --dump-tensors DIR`.** Both engines write the
+  prompt's per-layer intermediates under llama.cpp's tensor names (the
+  dumper through llama.cpp's own eval callback,
+  `LLAMA_LOGITS_DUMP_TENSORS`), and `parity` prints each tensor's
+  relative L2 distance over all rows, for the worst row and for the
+  output row. It says at which layer and op two engines part, which a
+  first-token KL cannot.
 
 ## [0.61.0] - 2026-11-09
 
