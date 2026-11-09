@@ -104,8 +104,21 @@ __device__ __forceinline__ void frink_ldsm_x4(unsigned int* r, const unsigned sh
         : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
 }
 
+#ifndef FX_GROUPED
+#define FX_GROUPED 0
+#endif
+
 extern "C" __global__ void FX_FN_NAME(
+#if FX_GROUPED
+    // One routed expert per blockIdx.z: its weights through `wtab`, its
+    // tokens the pairs `group_off[z] .. group_off[z + 1]`, pair p reading
+    // activation row `gather[p]` and writing output row p.
+    const unsigned long long* __restrict__ wtab,
+    const int* __restrict__ group_off,
+    const int* __restrict__ gather,
+#else
     const unsigned char* __restrict__ src0,
+#endif
     const unsigned short* __restrict__ src1,
     float* __restrict__ dst,
     int n_rows,
@@ -113,6 +126,20 @@ extern "C" __global__ void FX_FN_NAME(
     int batch,
     int row_bytes
 ) {
+#if FX_GROUPED
+    const int g_off = group_off[blockIdx.z];
+    const int g_cnt = group_off[blockIdx.z + 1] - g_off;
+    // A whole block past its group's tokens has nothing to do; the test
+    // is the block's, so no barrier below is reached by part of it.
+    if ((int)(blockIdx.x * FX_TBN) >= g_cnt) return;
+    const unsigned char* src0 = (const unsigned char*)wtab[blockIdx.z];
+    batch = g_cnt;
+#define FX_SRC_ROW(col) ((size_t)gather[g_off + (col)])
+#define FX_DST_ROW(col) ((size_t)(g_off + (col)))
+#else
+#define FX_SRC_ROW(col) ((size_t)(col))
+#define FX_DST_ROW(col) ((size_t)(col))
+#endif
     // The weight rows' raw bytes for one stage of FX_SE columns, staged
     // by coalesced word loads, then dequantized out of shared memory: a
     // lane of the dequant reads its own row, and reading that row from
@@ -211,7 +238,7 @@ extern "C" __global__ void FX_FN_NAME(
                 uint4* dp = (uint4*)&sb[j * FX_LDS + kh];
                 if (col < batch) {
                     const uint4* sp =
-                        (const uint4*)(src1 + (size_t)col * (size_t)n_cols + (size_t)(k0 + kh));
+                        (const uint4*)(src1 + FX_SRC_ROW(col) * (size_t)n_cols + (size_t)(k0 + kh));
                     dp[0] = sp[0];
                     dp[1] = sp[1];
                 } else {
@@ -264,12 +291,12 @@ extern "C" __global__ void FX_FN_NAME(
             const int col0 = c0 + wn * FX_WARP_N + nf * 8 + tg * 2;
             const int col1 = col0 + 1;
             if (col0 < batch) {
-                if (row0 < n_rows) dst[(size_t)col0 * (size_t)n_rows + (size_t)row0] = acc[mf][nf][0];
-                if (row1 < n_rows) dst[(size_t)col0 * (size_t)n_rows + (size_t)row1] = acc[mf][nf][2];
+                if (row0 < n_rows) dst[FX_DST_ROW(col0) * (size_t)n_rows + (size_t)row0] = acc[mf][nf][0];
+                if (row1 < n_rows) dst[FX_DST_ROW(col0) * (size_t)n_rows + (size_t)row1] = acc[mf][nf][2];
             }
             if (col1 < batch) {
-                if (row0 < n_rows) dst[(size_t)col1 * (size_t)n_rows + (size_t)row0] = acc[mf][nf][1];
-                if (row1 < n_rows) dst[(size_t)col1 * (size_t)n_rows + (size_t)row1] = acc[mf][nf][3];
+                if (row0 < n_rows) dst[FX_DST_ROW(col1) * (size_t)n_rows + (size_t)row0] = acc[mf][nf][1];
+                if (row1 < n_rows) dst[FX_DST_ROW(col1) * (size_t)n_rows + (size_t)row1] = acc[mf][nf][3];
             }
         }
     }
@@ -355,6 +382,36 @@ pub fn tc_kernel_src(kind: &MulMmKind) -> String {
     let (_, fn_name) = tc_names(kind);
     let body = TC_BODY_SRC.replace("FX_FN_NAME", fn_name);
     format!("{defines}{}", kernel_src_with_body(kind, &body))
+}
+
+/// [`tc_kernel_src`] for the grouped form: the experts of a routed layer
+/// in one launch, one per `blockIdx.z` (`FX_GROUPED`).
+pub fn tc_grouped_kernel_src(kind: &MulMmKind) -> String {
+    let (_, fn_name) = tc_grouped_names(kind);
+    let src = tc_kernel_src(kind);
+    let (_, plain) = tc_names(kind);
+    format!("#define FX_GROUPED 1\n{}", src.replace(plain, fn_name))
+}
+
+/// The NVRTC names of [`tc_grouped_kernel_src`]: the tensor-core names
+/// with `_grouped` after them.
+pub fn tc_grouped_names(kind: &MulMmKind) -> (&'static str, &'static str) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<HashMap<&'static str, (&'static str, &'static str)>>> =
+        OnceLock::new();
+    let (m, f) = tc_names(kind);
+    *NAMES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(kind.name)
+        .or_insert_with(|| {
+            (
+                Box::leak(format!("{m}_grouped").into_boxed_str()),
+                Box::leak(format!("{f}_grouped").into_boxed_str()),
+            )
+        })
 }
 
 /// The NVRTC module and function names for a kind's tensor-core

@@ -263,7 +263,8 @@ impl Decoder {
     /// applied before the experts, the gpt-oss FFN (biases, its clamped
     /// SwiGLU), a sub-norm, scales on the branch, a router that reads
     /// anything but the normed FFN input, and an expert whose kinds have
-    /// no matvec.
+    /// no matvec. A prefill batch also needs the tensor-core GEMM, which
+    /// the stack checks before it touches the device.
     fn cuda_moe_layer_eligible<'a>(
         &'a self,
         l: usize,
@@ -324,11 +325,13 @@ impl Decoder {
         batch_size: usize,
         glu: GluCuda,
     ) -> Option<(PrefillDenseLayerCuda<'a>, PrefillParams<'a>)> {
-        // A routed layer rides the stack one token at a time
-        // (`cuda_moe_layer_eligible`); every other is the dense body's.
+        // A routed layer rides the stack at a decode token and in a
+        // prefill batch (`cuda_moe_layer_eligible`); every other layer is
+        // the dense body's.
         let routed = !Self::is_dense_layer(layer);
         let eligible = if routed {
-            batch_size == 1 && self.cuda_moe_layer_eligible(l, layer).is_some()
+            (batch_size == 1 || frink_cuda::prefill::routed_batch_supported())
+                && self.cuda_moe_layer_eligible(l, layer).is_some()
         } else {
             Self::fused_prefill_dense_layer_eligible(layer, &self.config, self.lora_attached())
         };
