@@ -75,27 +75,46 @@ impl MatvecWidth {
 /// The environment switch for warps per row (`1`, `2`, `4` or `8`).
 pub const MATVEC_WPR_ENV: &str = "FRINK_CUDA_MATVEC_WPR";
 
-/// Warps per output row the coalesced kernels run with: the
-/// `FRINK_CUDA_MATVEC_WPR` value when it is 1, 2, 4 or 8, else
-/// [`DEFAULT_WPR`]. A warp walks every `wpr`-th trip of its row's
-/// blocks and the row's warps add their sums in order, so more warps
-/// per row put more of a row's loads in flight at once. Read once.
-pub fn matvec_wpr() -> usize {
-    static WPR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// `FRINK_CUDA_MATVEC_WPR` when it names 1, 2, 4 or 8: an A/B lever
+/// that holds every matvec at that many warps per row instead of
+/// [`wpr_for`]'s choice. Read once.
+pub fn matvec_wpr_override() -> Option<usize> {
+    static WPR: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *WPR.get_or_init(|| parse_wpr(std::env::var(MATVEC_WPR_ENV).ok().as_deref()))
 }
 
-/// Warps per row when the switch is unset.
-pub const DEFAULT_WPR: usize = 1;
-
-/// The rule [`matvec_wpr`] applies, without the environment.
-pub fn parse_wpr(value: Option<&str>) -> usize {
+/// The rule [`matvec_wpr_override`] applies, without the environment.
+pub fn parse_wpr(value: Option<&str>) -> Option<usize> {
     match value.map(str::trim) {
-        Some("1") => 1,
-        Some("2") => 2,
-        Some("4") => 4,
-        Some("8") => 8,
-        _ => DEFAULT_WPR,
+        Some("1") => Some(1),
+        Some("2") => Some(2),
+        Some("4") => Some(4),
+        Some("8") => Some(8),
+        _ => None,
+    }
+}
+
+/// Warps per output row for a matvec of `rows` rows of
+/// `n_blocks_per_row` blocks, where one warp covers `blocks_per_trip`
+/// blocks a trip. Each of a row's warps walks every `wpr`-th trip, so
+/// more warps put more of a row's loads in flight at once, and the
+/// rule stops where a warp would have less than a whole trip: as many
+/// as a row has trips, up to 4, and 8 for a long row (eight trips or
+/// more) of a matrix of at most 8192 rows, where the extra warps still
+/// fit. Measured on an A10G (#133): 4 beat 1 on every decode shape of
+/// Llama-3.1-8B, by up to 45% on the 14336-wide down projection, and
+/// 8 helped that projection further and hurt the 14336-row gate and
+/// the vocabulary-wide LM head.
+pub fn wpr_for(rows: usize, n_blocks_per_row: usize, blocks_per_trip: usize) -> usize {
+    let trips = n_blocks_per_row / blocks_per_trip.max(1);
+    if trips >= 8 && rows <= 8192 {
+        8
+    } else if trips >= 4 {
+        4
+    } else if trips >= 2 {
+        2
+    } else {
+        1
     }
 }
 
@@ -755,6 +774,34 @@ mod tests {
             );
             assert_ne!(k.module(MatvecWidth::Wide), k.module(MatvecWidth::Narrow));
         }
+    }
+
+    /// The warps-per-row rule on Llama-3.1-8B's decode shapes, wide
+    /// Q4_K (four blocks a trip) and Q8_0 (eight): 4 for the square and
+    /// the tall projections, 8 for the long down projection, never more
+    /// warps than a row has trips.
+    #[test]
+    fn warps_per_row_follow_the_row_s_trips() {
+        assert_eq!(wpr_for(4096, 16, 4), 4, "Q4_K Q/O");
+        assert_eq!(wpr_for(14336, 16, 4), 4, "Q4_K gate/up");
+        assert_eq!(wpr_for(4096, 56, 4), 8, "Q4_K down");
+        assert_eq!(wpr_for(128_256, 16, 4), 4, "Q4_K LM head");
+        assert_eq!(wpr_for(14336, 128, 8), 4, "Q8_0 gate: too many rows for 8");
+        assert_eq!(wpr_for(4096, 448, 8), 8, "Q8_0 down");
+        assert_eq!(wpr_for(1024, 12, 4), 2, "a 3072-wide row has three trips");
+        assert_eq!(wpr_for(1024, 3, 4), 1, "under one trip");
+        for rows in [1usize, 37, 4096, 200_000] {
+            for blocks in [1usize, 3, 16, 56, 448] {
+                for bpt in [1usize, 4, 8] {
+                    let w = wpr_for(rows, blocks, bpt);
+                    assert!([1, 2, 4, 8].contains(&w));
+                    assert!(w == 1 || w * bpt <= blocks, "{rows} {blocks} {bpt}: {w}");
+                }
+            }
+        }
+        assert_eq!(parse_wpr(Some(" 4 ")), Some(4));
+        assert_eq!(parse_wpr(Some("3")), None);
+        assert_eq!(parse_wpr(None), None);
     }
 
     /// The source handed to NVRTC carries its width. A source that

@@ -396,13 +396,17 @@ pub(crate) fn enqueue_matvec(
     CudaError,
 > {
     // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
-    enqueue_matvec_at(
-        dev,
-        launch,
-        d_x,
-        MatvecWidth::from_env(),
-        crate::matvec_kinds::coalesced::matvec_wpr(),
-    )
+    let width = MatvecWidth::from_env();
+    let wpr = crate::matvec_kinds::coalesced::matvec_wpr_override().unwrap_or_else(|| {
+        coalesced_kind(launch.fn_name).map_or(1, |k| {
+            crate::matvec_kinds::coalesced::wpr_for(
+                launch.rows,
+                launch.n_blocks_per_row,
+                32 / k.lanes(width),
+            )
+        })
+    });
+    enqueue_matvec_at(dev, launch, d_x, width, wpr)
 }
 
 /// Seconds per launch of the matvec the plan picks for `launch`, over
