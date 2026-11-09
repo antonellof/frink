@@ -35,6 +35,7 @@
 //! something else.
 
 pub mod enqueue;
+mod held;
 pub mod kernels;
 pub mod kv_mirror;
 pub mod moe;
@@ -42,10 +43,11 @@ pub mod moe_device;
 pub mod proj;
 
 pub use crate::gpu::GluCuda;
-use crate::gpu::{glu_mul_device, resident_cuda_f32, shared_device, CudaError};
+use crate::gpu::{glu_mul_device, shared_device, CudaError};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
 use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut};
+use held::Held;
 use enqueue::{
     enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
     enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
@@ -732,45 +734,6 @@ fn norm_rows(w: Option<&[f32]>, width: usize) -> Result<Option<(usize, usize)>, 
             )))
         }
         Some(w) => Ok(Some((w.len(), width / w.len()))),
-    }
-}
-
-/// Every resident buffer a launch reads, held until the stack's one
-/// download has synchronised the stream: the kernels read them
-/// asynchronously, and a buffer must not be released under a kernel
-/// that is still reading it.
-#[derive(Default)]
-struct Held {
-    weights: Vec<Arc<crate::gpu::ResidentCudaWeights>>,
-    vectors: Vec<Arc<crate::resident::ResidentCuda<f32>>>,
-    /// Anything else a kernel reads: a layer's expert tables.
-    keep: Vec<Arc<dyn std::any::Any + Send + Sync>>,
-}
-
-impl Held {
-    /// A long-lived f32 vector (norm weight, bias, RoPE divisors) on
-    /// the device, held: uploaded on first use, never per call.
-    fn vector(
-        &mut self,
-        dev: &Arc<CudaDevice>,
-        v: &[f32],
-    ) -> Result<Arc<crate::resident::ResidentCuda<f32>>, CudaError> {
-        let r = resident_cuda_f32(dev, v)?;
-        self.vectors.push(r.clone());
-        Ok(r)
-    }
-
-    /// One projection on the device, its weights held.
-    fn proj(
-        &mut self,
-        dev: &Arc<CudaDevice>,
-        m: &ProjWeights<'_>,
-        x: &CudaSlice<f32>,
-        batch: usize,
-    ) -> Result<CudaSlice<f32>, CudaError> {
-        let (out, w) = m.enqueue(dev, x, batch)?;
-        self.weights.push(w);
-        Ok(out)
     }
 }
 
