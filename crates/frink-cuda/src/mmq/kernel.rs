@@ -10,6 +10,22 @@
 pub const ROWS: usize = 128;
 /// Tokens per block.
 pub const COLS: usize = 64;
+
+/// The wide tile's tokens: llama.cpp's MMQ takes 128 at `pp512` on
+/// Ampere and Ada, amortizing each weight tile's unpack over twice the
+/// tokens. Dense GEMMs take it under `FRINK_CUDA_MMQ_COLS=128`.
+pub const WIDE_COLS: usize = 128;
+
+/// The token tile a dense int8 GEMM takes: [`WIDE_COLS`] when
+/// `FRINK_CUDA_MMQ_COLS=128`, else [`COLS`]. An A/B lever while the wide
+/// tile is measured. Read once.
+pub fn dense_cols() -> usize {
+    static COLS_ENV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COLS_ENV.get_or_init(|| match std::env::var("FRINK_CUDA_MMQ_COLS").as_deref() {
+        Ok("128") => WIDE_COLS,
+        _ => COLS,
+    })
+}
 /// Threads per block: 8 warps.
 pub const THREADS: usize = 256;
 
@@ -34,7 +50,11 @@ __device__ __forceinline__ float frink_mmq_f16(unsigned short bits) {
 /// `FX_STEP_END` (folding a step's `tmp` into the accumulator).
 const BODY_SRC: &str = r#"
 #define FX_I 128
+#ifndef FX_J
 #define FX_J 64
+#endif
+// Each warp: 32 rows by FX_J / 2 tokens, FX_NF fragments of 8 tokens.
+#define FX_NF (FX_J / 16)
 #define FX_NT 256
 // The weight tile's row stride in ints: 32 of data and 4 of padding,
 // so a row stride that is 4 mod 8 makes `ldmatrix` conflict-free.
@@ -71,7 +91,7 @@ __device__ __forceinline__ void frink_mmq_ldsm_x4(unsigned int* r, const int* p)
 #define FX_GROUPED 0
 #endif
 
-extern "C" __global__ void FX_FN_NAME(
+extern "C" __global__ void __launch_bounds__(FX_NT) FX_FN_NAME(
 #if FX_GROUPED
     // One routed expert per blockIdx.z: its weights through `wtab`, its
     // pairs the activation columns `group_off[z] .. group_off[z + 1]`
@@ -115,21 +135,21 @@ extern "C" __global__ void FX_FN_NAME(
     const int y_col0 = 0;
 #endif
 
-    float acc[2][4][4];
+    float acc[2][FX_NF][4];
 #pragma unroll
     for (int mf = 0; mf < 2; mf++)
 #pragma unroll
-        for (int nf = 0; nf < 4; nf++)
+        for (int nf = 0; nf < FX_NF; nf++)
 #pragma unroll
             for (int e = 0; e < 4; e++) acc[mf][nf][e] = 0.0f;
 
     const int n_steps = FX_N_STEPS;
     for (int ks = 0; ks < n_steps; ks++) {
-        float tmp[2][4][4];
+        float tmp[2][FX_NF][4];
 #pragma unroll
         for (int mf = 0; mf < 2; mf++)
 #pragma unroll
-            for (int nf = 0; nf < 4; nf++)
+            for (int nf = 0; nf < FX_NF; nf++)
 #pragma unroll
                 for (int e = 0; e < 4; e++) tmp[mf][nf][e] = 0.0f;
         FX_LOAD_X
@@ -148,12 +168,12 @@ extern "C" __global__ void FX_FN_NAME(
                 frink_mmq_ldsm_x4(a[mf], &x_qs[row * FX_XS + kk * 8 + (lane >> 4) * 4]);
             }
 #pragma unroll
-            for (int nf = 0; nf < 4; nf++) {
-                const int col = wn * 32 + nf * 8 + g;
+            for (int nf = 0; nf < FX_NF; nf++) {
+                const int col = wn * (FX_J / 2) + nf * 8 + g;
                 unsigned int b[2];
                 b[0] = (unsigned int)y_s[col * FX_YS + 4 + kk * 8 + t];
                 b[1] = (unsigned int)y_s[col * FX_YS + 4 + kk * 8 + 4 + t];
-                const int ca = wn * 32 + nf * 8 + 2 * t;
+                const int ca = wn * (FX_J / 2) + nf * 8 + 2 * t;
                 float dy0, sy0, dy1, sy1;
                 FX_Y_SCALE(ca, dy0, sy0);
                 FX_Y_SCALE(ca + 1, dy1, sy1);
@@ -174,7 +194,7 @@ extern "C" __global__ void FX_FN_NAME(
         for (int mf = 0; mf < 2; mf++) {
             const int ra = wm * 32 + mf * 16 + g;
 #pragma unroll
-            for (int nf = 0; nf < 4; nf++) {
+            for (int nf = 0; nf < FX_NF; nf++) {
                 FX_STEP_END(acc[mf][nf][0], tmp[mf][nf][0], ra);
                 FX_STEP_END(acc[mf][nf][1], tmp[mf][nf][1], ra);
                 FX_STEP_END(acc[mf][nf][2], tmp[mf][nf][2], ra + 8);
@@ -189,8 +209,8 @@ extern "C" __global__ void FX_FN_NAME(
         const int row0 = r0 + wm * 32 + mf * 16 + g;
         const int row1 = row0 + 8;
 #pragma unroll
-        for (int nf = 0; nf < 4; nf++) {
-            const int col0 = c0 + wn * 32 + nf * 8 + 2 * t;
+        for (int nf = 0; nf < FX_NF; nf++) {
+            const int col0 = c0 + wn * (FX_J / 2) + nf * 8 + 2 * t;
             const int col1 = col0 + 1;
             const size_t o0 = (size_t)(y_col0 + col0) * n_rows;
             const size_t o1 = (size_t)(y_col0 + col1) * n_rows;
@@ -494,6 +514,23 @@ impl MmqKind {
         }
     }
 
+    /// [`Self::source`] with a [`WIDE_COLS`]-token tile.
+    pub fn wide_source(self) -> (String, &'static str, &'static str) {
+        let (src, _, _) = self.source();
+        let (module, name) = match self {
+            Self::Q8_0 => ("frink_mmq_q8_0_wide", "frink_mmq_q8_0_wide"),
+            Self::Q4_K => ("frink_mmq_q4_k_wide", "frink_mmq_q4_k_wide"),
+            Self::Q6_K => ("frink_mmq_q6_k_wide", "frink_mmq_q6_k_wide"),
+            Self::MXFP4 => ("frink_mmq_mxfp4_wide", "frink_mmq_mxfp4_wide"),
+        };
+        let (_, plain) = self.names();
+        (
+            format!("#define FX_J {WIDE_COLS}\n{}", src.replace(plain, name)),
+            module,
+            name,
+        )
+    }
+
     /// The translation unit and its NVRTC module and function names.
     pub fn source(self) -> (String, &'static str, &'static str) {
         let (module, name) = self.names();
@@ -511,17 +548,26 @@ impl MmqKind {
     }
 }
 
-/// `(grid, block)`: token tiles along x, row tiles along y.
-pub fn geometry(n_rows: usize, ncols_pad: usize) -> ((u32, u32, u32), (u32, u32, u32)) {
+/// `(grid, block)`: token tiles of `cols` along x, row tiles along y.
+pub fn geometry(
+    n_rows: usize,
+    ncols_pad: usize,
+    cols: usize,
+) -> ((u32, u32, u32), (u32, u32, u32)) {
     (
-        ((ncols_pad / COLS) as u32, n_rows.div_ceil(ROWS) as u32, 1),
+        ((ncols_pad / cols) as u32, n_rows.div_ceil(ROWS) as u32, 1),
         (THREADS as u32, 1, 1),
     )
 }
 
-/// The activation columns padded to whole token tiles.
+/// The activation columns padded to whole [`COLS`]-token tiles.
 pub fn ncols_pad(batch: usize) -> usize {
-    batch.div_ceil(COLS) * COLS
+    ncols_pad_for(batch, COLS)
+}
+
+/// The activation columns padded to whole `cols`-token tiles.
+pub fn ncols_pad_for(batch: usize, cols: usize) -> usize {
+    batch.div_ceil(cols) * cols
 }
 
 #[cfg(test)]
@@ -535,16 +581,28 @@ mod tests {
     fn the_kernel_text_spells_the_launch_s_tile() {
         let (src, module, name) = MmqKind::Q8_0.source();
         assert!(src.contains(&format!("#define FX_I {ROWS}\n")));
-        assert!(src.contains(&format!("#define FX_J {COLS}\n")));
+        assert!(src.contains(&format!("#ifndef FX_J\n#define FX_J {COLS}\n")));
         assert!(src.contains(&format!("#define FX_NT {THREADS}\n")));
         assert!(src.contains(&format!("#define FX_FN_NAME {name}\n")));
-        assert!(src.contains("void FX_FN_NAME("));
+        assert!(src.contains("void __launch_bounds__(FX_NT) FX_FN_NAME("));
         assert_eq!(module, "frink_mmq_q8_0");
-        // 8 warps of 32 x 32 cover the block's 128 x 64.
-        assert_eq!((THREADS / 32) * 32 * 32, ROWS * COLS);
+        // The wide form defines its width ahead of the default, under its
+        // own names, so the two never share a cached module.
+        let (wide, wmod, wname) = MmqKind::Q8_0.wide_source();
+        assert!(wide.starts_with(&format!("#define FX_J {WIDE_COLS}\n")));
+        assert!(wide.contains(&format!("#define FX_FN_NAME {wname}\n")));
+        assert_ne!(wmod, module);
+        // 8 warps of 32 rows by `cols / 2` tokens cover the block, in
+        // fragments of 8 tokens.
+        for cols in [COLS, WIDE_COLS] {
+            assert_eq!((THREADS / 32) * 32 * (cols / 2), ROWS * cols);
+            assert!(cols.is_multiple_of(16));
+        }
         assert_eq!(ncols_pad(1), 64);
         assert_eq!(ncols_pad(130), 192);
-        assert_eq!(geometry(4096, 512), ((8, 32, 1), (256, 1, 1)));
+        assert_eq!(ncols_pad_for(130, WIDE_COLS), 256);
+        assert_eq!(geometry(4096, 512, COLS), ((8, 32, 1), (256, 1, 1)));
+        assert_eq!(geometry(4096, 512, WIDE_COLS), ((4, 32, 1), (256, 1, 1)));
         assert_eq!(MmqKind::by_name("Q8_0"), Some(MmqKind::Q8_0));
         assert_eq!(MmqKind::by_name("Q4_K"), Some(MmqKind::Q4_K));
         assert_eq!(MmqKind::by_name("Q6_K"), Some(MmqKind::Q6_K));
