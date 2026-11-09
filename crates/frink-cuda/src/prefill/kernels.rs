@@ -260,6 +260,52 @@ extern "C" __global__ void moe_topk_f32(
 }
 "#;
 
+/// A routed prefill batch's pairs grouped by expert on the device:
+/// `moe_count_i32` counts each expert's pairs, `moe_offsets_i32` turns
+/// the counts into each expert's first pair, and `moe_scatter_i32` gives
+/// every pair `p` (token `p / k`, slot `p % k`) a place in its expert's
+/// group, recording the token it reads (`gather`), where its output
+/// lands (`pair_of`) and its expert (`pair_group`). Which place a pair
+/// takes inside its group depends on the atomics' order and changes no
+/// value: each output row is its own token's and its own expert's.
+pub const MOE_GROUP_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_count_i32(const int* ids, int pairs, int* counts) {
+    const int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p < pairs) atomicAdd(&counts[ids[p]], 1);
+}
+
+extern "C" __global__ void moe_offsets_i32(const int* counts, int n, int* group_off) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        int acc = 0;
+        group_off[0] = 0;
+        for (int e = 0; e < n; e++) {
+            acc += counts[e];
+            group_off[e + 1] = acc;
+        }
+    }
+}
+
+extern "C" __global__ void moe_scatter_i32(
+    const int* ids,
+    int pairs,
+    int k,
+    const int* group_off,
+    int* cursor,
+    int* gather,
+    int* pair_of,
+    int* pair_group
+) {
+    const int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p < pairs) {
+        const int e = ids[p];
+        const int pos = group_off[e] + atomicAdd(&cursor[e], 1);
+        gather[pos] = p / k;
+        pair_of[p] = pos;
+        pair_group[pos] = e;
+    }
+}
+"#;
+
 /// Each table's pointers for a decode token's chosen experts: `out[t][s]
 /// = all[t][ids[s]]` for `n_tabs` tables of `n` experts, so the routed
 /// matvecs read the chosen experts' weights without the host picking.
@@ -614,6 +660,9 @@ pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine
 pub const MOE_COMBINE_ROWS: (&str, &str) =
     ("frink_prefill_moe_combine_rows", "moe_combine_rows_f32");
 pub const MOE_TOPK: (&str, &str) = ("frink_prefill_moe_topk", "moe_topk_f32");
+pub const MOE_COUNT: (&str, &str) = ("frink_prefill_moe_count", "moe_count_i32");
+pub const MOE_OFFSETS: (&str, &str) = ("frink_prefill_moe_offsets", "moe_offsets_i32");
+pub const MOE_SCATTER: (&str, &str) = ("frink_prefill_moe_scatter", "moe_scatter_i32");
 pub const GATHER_PTRS: (&str, &str) = ("frink_prefill_gather_ptrs", "gather_ptrs_u64");
 pub const ADD_BIAS_TAB_ROWS: (&str, &str) =
     ("frink_prefill_add_bias_tab_rows", "add_bias_tab_rows_f32");

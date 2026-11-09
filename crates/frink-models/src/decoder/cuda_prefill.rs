@@ -483,9 +483,7 @@ impl Decoder {
         let (ffn, glu) = if routed {
             let (router, glu) = self.cuda_moe_layer_eligible(l, layer)?;
             let ffn_dim = experts.first()?.gate.rows();
-            let device = (batch_size == 1)
-                .then(|| self.cuda_device_routing(l, experts))
-                .flatten();
+            let device = self.cuda_device_routing(l, experts);
             (
                 StackFfn::Moe {
                     router,

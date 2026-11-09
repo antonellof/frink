@@ -134,7 +134,8 @@ extern "C" __global__ void FX_FN_NAME(
     if ((int)(blockIdx.x * FX_TBN) >= g_cnt) return;
     const unsigned char* src0 = (const unsigned char*)wtab[blockIdx.z];
     batch = g_cnt;
-#define FX_SRC_ROW(col) ((size_t)gather[g_off + (col)])
+// A null gather is the identity: pair `p` reads activation row `p`.
+#define FX_SRC_ROW(col) ((size_t)(gather != nullptr ? gather[g_off + (col)] : g_off + (col)))
 #define FX_DST_ROW(col) ((size_t)(g_off + (col)))
 #else
 #define FX_SRC_ROW(col) ((size_t)(col))

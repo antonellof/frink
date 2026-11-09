@@ -201,9 +201,9 @@ pub enum StackFfn<'a> {
         router: RouterCuda<'a>,
         /// Each routed expert's FFN width.
         ffn_dim: usize,
-        /// The routing on the device at a decode token, when the layer's
-        /// gating is one the device has ([`moe_device`]); the caller's
-        /// routing otherwise, and for a prefill batch.
+        /// The routing on the device, at a decode token and over a
+        /// prefill batch, when the layer's gating is one the device has
+        /// ([`moe_device`]); the caller's routing otherwise.
         device: Option<DeviceRouting<'a>>,
     },
 }
@@ -361,9 +361,10 @@ pub struct PrefillStackOut {
     /// out per layer (134 MB a Llama-3.1-8B `pp512` step).
     staged: xfer::Download,
     kv_offsets: Vec<(usize, usize)>,
-    /// Per layer of the run, the experts a decode token's device routing
-    /// chose, in its order; `None` for a layer routed on the host (whose
-    /// caller saw its choice) or not routed at all.
+    /// Per layer of the run, the experts its device routing chose, every
+    /// token's `k` in its routing's order, token after token; `None` for
+    /// a layer routed on the host (whose caller saw its choice) or not
+    /// routed at all.
     pub device_routed: Vec<Option<Vec<usize>>>,
 }
 
@@ -509,21 +510,22 @@ pub fn launch_stack<'e>(
             h
         }
     };
-    // A decode token's device-routed layers write their expert ids here,
-    // `IDS_PER_LAYER` a layer, downloaded once after the stack.
-    const IDS_PER_LAYER: usize = 16;
+    // Device-routed layers write their expert ids here, `IDS_PER_LAYER`
+    // a layer (every token's `k`, at most 16), downloaded once after the
+    // stack.
+    let ids_per_layer = batch * 16;
     let device_k: Vec<Option<usize>> = layers
         .iter()
         .map(|(l, _)| match l.ffn {
             StackFfn::Moe {
                 device: Some(d), ..
-            } if batch == 1 => Some(d.k),
+            } => Some(d.k),
             _ => None,
         })
         .collect();
     let mut ids_all = if device_k.iter().any(Option::is_some) {
         Some(
-            dev.alloc_zeros::<i32>(layers.len() * IDS_PER_LAYER)
+            dev.alloc_zeros::<i32>(layers.len() * ids_per_layer)
                 .map_err(|e| CudaError::Launch(format!("routed ids alloc: {e:?}")))?,
         )
     } else {
@@ -540,7 +542,7 @@ pub fn launch_stack<'e>(
             ),
         };
         let ids = match (&mut ids_all, device_k[i]) {
-            (Some(all), Some(_)) => Some(all.slice_mut(i * IDS_PER_LAYER..(i + 1) * IDS_PER_LAYER)),
+            (Some(all), Some(_)) => Some(all.slice_mut(i * ids_per_layer..(i + 1) * ids_per_layer)),
             _ => None,
         };
         let step = LayerStep {
@@ -577,7 +579,7 @@ pub fn launch_stack<'e>(
                 .enumerate()
                 .map(|(i, (&on, k))| {
                     on.then(|| {
-                        ids[i * IDS_PER_LAYER..i * IDS_PER_LAYER + k.unwrap_or(0)]
+                        ids[i * ids_per_layer..i * ids_per_layer + batch * k.unwrap_or(0)]
                             .iter()
                             .map(|&e| e as usize)
                             .collect()
@@ -1001,7 +1003,7 @@ fn run_layer_resident<'e>(
             let route = route.ok_or_else(|| {
                 CudaError::Unsupported("resident stack: an MoE layer with no routing".to_string())
             })?;
-            let device = device.filter(|_| batch == 1).zip(ids);
+            let device = device.zip(ids);
             let (out, on_device) = moe::run_routed(
                 dev, held, router, layer.glu, &normed2, batch, hidden_dim, ffn_dim, index, route,
                 device,

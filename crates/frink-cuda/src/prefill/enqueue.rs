@@ -7,9 +7,9 @@ use super::kernels::{
     ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_BIAS_TAB_ROWS, ADD_BIAS_TAB_ROWS_KERNEL_SRC,
     ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC, CAUSAL_GQA_PREFILL,
     CAUSAL_GQA_PREFILL_KERNEL_SRC, GATHER_PTRS, GATHER_PTRS_KERNEL_SRC, MOE_COMBINE,
-    MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS, MOE_COMBINE_ROWS_KERNEL_SRC, MOE_TOPK,
-    MOE_TOPK_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC,
-    ROUTER_F32, ROUTER_F32_KERNEL_SRC,
+    MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS, MOE_COMBINE_ROWS_KERNEL_SRC, MOE_COUNT,
+    MOE_GROUP_KERNEL_SRC, MOE_OFFSETS, MOE_SCATTER, MOE_TOPK, MOE_TOPK_KERNEL_SRC, RMSNORM_ROWS,
+    RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
@@ -250,6 +250,82 @@ pub(crate) fn enqueue_moe_topk(
         .map_err(|e| launch_err("moe_topk", e))?;
     }
     Ok(w)
+}
+
+/// A routed batch's pairs grouped by expert ([`MOE_GROUP_KERNEL_SRC`]).
+pub(crate) struct MoeGroups {
+    /// `n + 1` pair indices: expert `e`'s pairs are `[off[e], off[e+1])`.
+    pub group_off: CudaSlice<i32>,
+    /// The token each grouped pair reads.
+    pub gather: CudaSlice<i32>,
+    /// Where pair `t * k + s`'s output row lands.
+    pub pair_of: CudaSlice<i32>,
+    /// The expert of each grouped pair, for its bias rows.
+    pub pair_group: CudaSlice<i32>,
+}
+
+/// Groups `pairs` routed pairs (`ids`, `k` a token) by their `n`
+/// experts on the device: three launches and no host wait.
+pub(crate) fn enqueue_moe_group(
+    dev: &Arc<CudaDevice>,
+    ids: &CudaView<'_, i32>,
+    pairs: usize,
+    k: usize,
+    n: usize,
+) -> Result<MoeGroups, CudaError> {
+    debug_assert!(ids.len() >= pairs && k > 0);
+    let zeros =
+        |len: usize, what: &str| dev.alloc_zeros::<i32>(len).map_err(|e| launch_err(what, e));
+    let mut counts = zeros(n, "moe counts")?;
+    let mut cursor = zeros(n, "moe cursor")?;
+    let mut group_off = zeros(n + 1, "moe offsets")?;
+    let mut gather = zeros(pairs, "moe gather")?;
+    let mut pair_of = zeros(pairs, "moe pair_of")?;
+    let mut pair_group = zeros(pairs, "moe pair_group")?;
+    let count = func_for(dev, MOE_GROUP_KERNEL_SRC, MOE_COUNT)?;
+    let offsets = func_for(dev, MOE_GROUP_KERNEL_SRC, MOE_OFFSETS)?;
+    let scatter = func_for(dev, MOE_GROUP_KERNEL_SRC, MOE_SCATTER)?;
+    let one = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (1, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const int*, int, int*) / (const int*, int, int*) /
+    // (const int*, int x2, const int*, int* x4) matched positionally;
+    // every id is an expert below `n` (the routing kernel picks among
+    // `n`), so every counts, cursor and offsets index is in range; the
+    // offsets' last entry is `pairs`, so every scattered place is below
+    // `pairs`, the length of gather and pair_group; thread `p < pairs`
+    // writes `pair_of[p]`. The three launches run in order on the stream.
+    unsafe {
+        count
+            .launch(elementwise_cfg(pairs), (ids, pairs as i32, &mut counts))
+            .map_err(|e| launch_err("moe_count", e))?;
+        offsets
+            .launch(one, (&counts, n as i32, &mut group_off))
+            .map_err(|e| launch_err("moe_offsets", e))?;
+        scatter
+            .launch(
+                elementwise_cfg(pairs),
+                (
+                    ids,
+                    pairs as i32,
+                    k as i32,
+                    &group_off,
+                    &mut cursor,
+                    &mut gather,
+                    &mut pair_of,
+                    &mut pair_group,
+                ),
+            )
+            .map_err(|e| launch_err("moe_scatter", e))?;
+    }
+    Ok(MoeGroups {
+        group_off,
+        gather,
+        pair_of,
+        pair_group,
+    })
 }
 
 /// `out[t][s] = all[t][ids[s]]` for `n_tabs` tables of `n` pointers.

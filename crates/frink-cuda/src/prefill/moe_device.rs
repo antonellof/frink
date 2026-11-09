@@ -16,11 +16,12 @@
 //! recorded as such and keeps the host routing.
 
 use super::enqueue::{
-    enqueue_add_bias_tab_rows, enqueue_gather_ptrs, enqueue_moe_combine, enqueue_moe_topk,
-    enqueue_router_f32,
+    enqueue_add_bias_tab_rows, enqueue_gather_ptrs, enqueue_moe_combine, enqueue_moe_combine_rows,
+    enqueue_moe_group, enqueue_moe_topk, enqueue_router_f32,
 };
 use super::{ExpertProjCuda, Held, RouterCuda};
 use crate::gpu::{glu_mul_device, CudaError, GluCuda, MultiShape};
+use crate::mul_mm_launch::GroupedShape;
 use crate::resident::ResidentCuda;
 use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut, DevicePtr};
 use frink_quant::fingerprint::WeightFingerprint;
@@ -97,6 +98,9 @@ struct ExpertTables {
     n: usize,
     biased: bool,
     shapes: [MultiShape; 3],
+    /// The grouped GEMM's shapes, when every expert's GEMM bytes are the
+    /// bytes its matvec table points at (a prefill batch's path).
+    gemm: Option<[GroupedShape<'static>; 3]>,
     probe: [WeightFingerprint; 2],
     // The uploads the pointers point into, alive with the tables.
     _weights: Vec<Arc<crate::gpu::ResidentCudaWeights>>,
@@ -194,11 +198,35 @@ fn build_tables(
         }
     }
     let tabs = crate::xfer::htod(dev, "expert tables", &ptrs)?;
+    let gemm_of = |which: usize| -> Option<GroupedShape<'static>> {
+        let g0 = [experts[0].gate, experts[0].up, experts[0].down][which].gemm;
+        let same = experts.iter().all(|e| {
+            let p = [e.gate, e.up, e.down][which];
+            let g = p.gemm;
+            std::ptr::eq(g.kind, g0.kind)
+                && g.rows == g0.rows
+                && g.cols == g0.cols
+                && g.row_bytes == g0.row_bytes
+                && p.matvec
+                    .is_some_and(|m| std::ptr::eq(m.weights.as_ptr(), g.data.as_ptr()))
+        });
+        same.then_some(GroupedShape {
+            kind: g0.kind,
+            n_rows: g0.rows,
+            n_cols: g0.cols,
+            row_bytes: g0.row_bytes,
+        })
+    };
+    let gemm = match (gemm_of(0), gemm_of(1), gemm_of(2)) {
+        (Some(g), Some(u), Some(d)) => Some([g, u, d]),
+        _ => None,
+    };
     Ok(Some(Arc::new(ExpertTables {
         tabs,
         n,
         biased,
         shapes: [shapes[0], shapes[1], shapes[2]],
+        gemm,
         probe,
         _weights: weights,
         _vectors: vectors,
@@ -277,4 +305,147 @@ pub(super) fn run_device_routed(
     }
     held.keep.push(tables);
     Ok(Some(enqueue_moe_combine(dev, &d, &w, k, hidden_dim)?))
+}
+
+/// A routed prefill batch with the routing and the grouping on the
+/// device: the router over every row, the top-k of every token, its
+/// pairs grouped by expert, each projection one grouped GEMM over every
+/// expert of the layer (an empty one exits at once), and each token's
+/// experts summed in its routing's order. No host wait; the chosen ids
+/// (`batch * k` of them, token-major) are written to `ids`. `None`,
+/// before any launch, for a layer the device cannot route this way.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_device_routed_batch(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    router: RouterCuda<'_>,
+    glu: GluCuda,
+    normed2: &CudaSlice<f32>,
+    batch: usize,
+    hidden_dim: usize,
+    ffn_dim: usize,
+    spec: &DeviceRouting<'_>,
+    ids: &mut CudaViewMut<'_, i32>,
+) -> Result<Option<CudaSlice<f32>>, CudaError> {
+    if !super::moe::routed_batch_supported() {
+        return Ok(None);
+    }
+    let Some(tables) = tables_for(dev, spec)? else {
+        return Ok(None);
+    };
+    let Some([gs, us, ds]) = tables.gemm else {
+        return Ok(None);
+    };
+    if gs.n_rows != ffn_dim || us.n_rows != ffn_dim || ds.n_rows != hidden_dim {
+        return Ok(None);
+    }
+    let (n, k) = (tables.n, spec.k);
+    let pairs = batch * k;
+    let logits = match router {
+        RouterCuda::F32 { data, rows } => {
+            let w = held.vector(dev, data)?;
+            enqueue_router_f32(dev, &w.slice, normed2, rows, hidden_dim, batch)?
+        }
+        RouterCuda::Quant(p) => held.proj(dev, &p, normed2, batch)?,
+    };
+    let bias = match spec.router_bias {
+        Some(b) => Some(held.vector(dev, b)?),
+        None => None,
+    };
+    let w = enqueue_moe_topk(
+        dev,
+        &logits,
+        bias.as_ref().map(|b| &b.slice),
+        n,
+        k,
+        spec.gating.mode(),
+        batch,
+        ids,
+    )?;
+    drop(logits);
+    let groups = enqueue_moe_group(dev, &ids.slice(..pairs), pairs, k, n)?;
+    let tab = |t: usize| tables.tabs.slice(t * n..(t + 1) * n);
+    // An expert takes a token at most once, so no group exceeds `batch`.
+    let x16 = crate::mul_mm_launch::f32_to_f16(dev, normed2, batch * hidden_dim)?;
+    // SAFETY (all three): the tables hold every expert's live weights of
+    // the checked shape, kept alive by the tables the stack holds below;
+    // the offsets end at `pairs` and no group passes `batch`; the gather
+    // names token rows of `x16`, and the down projection reads the pairs'
+    // own activation rows.
+    let mut g = unsafe {
+        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
+            dev,
+            &gs,
+            &tab(0),
+            n,
+            &groups.group_off,
+            Some(&groups.gather),
+            &x16,
+            pairs,
+            batch,
+        )
+    }?;
+    let mut u = unsafe {
+        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
+            dev,
+            &us,
+            &tab(1),
+            n,
+            &groups.group_off,
+            Some(&groups.gather),
+            &x16,
+            pairs,
+            batch,
+        )
+    }?;
+    drop(x16);
+    if tables.biased {
+        enqueue_add_bias_tab_rows(
+            dev,
+            &mut g,
+            &tab(3),
+            Some(&groups.pair_group),
+            pairs,
+            ffn_dim,
+        )?;
+        enqueue_add_bias_tab_rows(
+            dev,
+            &mut u,
+            &tab(4),
+            Some(&groups.pair_group),
+            pairs,
+            ffn_dim,
+        )?;
+    }
+    let act = glu_mul_device(dev, glu, &g, &u, pairs * ffn_dim)?;
+    drop((g, u));
+    let act16 = crate::mul_mm_launch::f32_to_f16(dev, &act, pairs * ffn_dim)?;
+    drop(act);
+    let mut d = unsafe {
+        crate::mul_mm_launch::enqueue_mul_mm_grouped_dev(
+            dev,
+            &ds,
+            &tab(2),
+            n,
+            &groups.group_off,
+            None,
+            &act16,
+            pairs,
+            batch,
+        )
+    }?;
+    drop(act16);
+    if tables.biased {
+        enqueue_add_bias_tab_rows(
+            dev,
+            &mut d,
+            &tab(5),
+            Some(&groups.pair_group),
+            pairs,
+            hidden_dim,
+        )?;
+    }
+    let out = enqueue_moe_combine_rows(dev, &d, &groups.pair_of, &w, k, hidden_dim, batch)?;
+    held.keep.push(tables);
+    Ok(Some(out))
 }
