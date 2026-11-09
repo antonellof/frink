@@ -58,7 +58,7 @@ pub(crate) struct SamplingKnobs {
     pub(crate) dry_base: Option<f32>,
     /// llama.cpp's `dry_allowed_length`, default 2.
     pub(crate) dry_allowed_length: Option<i32>,
-    /// llama.cpp's `dry_penalty_last_n`, default `-1` (the context).
+    /// llama.cpp's `dry_penalty_last_n`, default 64 (`-1` is the context).
     pub(crate) dry_penalty_last_n: Option<i32>,
     /// llama.cpp's `dry_sequence_breakers`. `None` is llama.cpp's own
     /// four defaults; an explicit empty list is "no breakers", which is

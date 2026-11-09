@@ -17,6 +17,22 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **DRY's scan window defaults to llama.cpp's 64 tokens.** frink
+  defaulted `dry_penalty_last_n` to `-1`, the whole context, from an
+  older `common.h`. At the pin it is 64 (`common/common.h:251`), so a
+  request that set `dry_multiplier` alone scanned a different window
+  from llama-server's.
+
+- **A crafted GGUF refuses at load instead of exhausting memory or
+  panicking.** `block_count` or `nanbeige.num_loops` of 2^31 made the
+  loader allocate until the OS killed it, and 55 other hostile values
+  panicked: zero layers indexing an empty per-layer array, a one-layer
+  minimax-01, and `rope_freqs` lengths that did not match the rotary
+  width. The layer count is now capped at llama.cpp's
+  `LLAMA_MAX_LAYERS` (512), as its loader refuses, and each of the
+  others is a named refusal. `tests/hostile_metadata.rs` sets every
+  integer key of every graph fixture to a hostile value (#577).
+
 - **`frink bench` reports llama-bench's statistics.** It printed the
   median ± the population stddev and said that is what llama-bench
   prints. llama-bench prints the mean ± the sample stddev
