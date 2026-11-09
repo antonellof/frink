@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-11-09
+
 ### Added
 
 - **gpt-oss runs in the resident CUDA stack.** Every gpt-oss layer took
