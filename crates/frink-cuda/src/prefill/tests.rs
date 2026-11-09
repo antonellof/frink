@@ -132,6 +132,14 @@ pub(super) fn wave(n: usize, seed: f32) -> Vec<f32> {
 /// vector whose terms cancel (a residual stream after two adds) is
 /// held to the same absolute error as its neighbours rather than to a
 /// relative one it cannot meet through f16 operands.
+/// GELU's tanh approximation in f64, the function both the device
+/// kernel and `frink_core::matmul::geglu` evaluate in f32.
+fn host_gelu(x: f32) -> f32 {
+    let x = f64::from(x);
+    let u = (2.0 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+    (0.5 * x * (1.0 + u.tanh())) as f32
+}
+
 fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let rms = (want.iter().map(|w| w * w).sum::<f32>() / want.len().max(1) as f32).sqrt();
@@ -167,6 +175,7 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
         gate: m(96, 64),
         up: m(96, 64),
         down: m(64, 96),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
@@ -302,6 +311,19 @@ fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
 fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
+    dense_layer_matches_its_host_twin(GluCuda::Silu);
+}
+
+/// The same layer with Gemma's GeGLU: only the FFN's activation
+/// differs, so a stack that ran SwiGLU for it would miss by a whole
+/// term in every hidden element.
+#[test]
+#[ignore = "requires real CUDA hardware; not yet run"]
+fn the_dense_layer_matches_a_host_twin_with_a_geglu_ffn() {
+    dense_layer_matches_its_host_twin(GluCuda::Gelu);
+}
+
+fn dense_layer_matches_its_host_twin(glu: GluCuda) {
     let (batch, hidden, n_heads, n_kv_heads, head_dim, ffn) =
         (40usize, 64usize, 2usize, 1usize, 32usize, 96usize);
     let start_pos = 6;
@@ -436,11 +458,14 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     let normed2 = host_rms_norm_rows(&h, &ffn_norm_w, hidden, eps);
     let g = gemm(gd, ffn, hidden, &normed2);
     let u = gemm(ud, ffn, hidden, &normed2);
-    let act: Vec<f32> = g
-        .iter()
-        .zip(&u)
-        .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
-        .collect();
+    let act: Vec<f32> = match glu {
+        GluCuda::Silu => g
+            .iter()
+            .zip(&u)
+            .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+            .collect(),
+        GluCuda::Gelu => g.iter().zip(&u).map(|(&g, u)| host_gelu(g) * u).collect(),
+    };
     let d = gemm(dd, hidden, ffn, &act);
     for (a, b) in h.iter_mut().zip(&d) {
         *a += b;
@@ -457,6 +482,7 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
         gate: view(gd, ffn, hidden),
         up: view(ud, ffn, hidden),
         down: view(dd, hidden, ffn),
+        glu,
         post_attn_norm: Some(&post_attn),
         post_ffn_norm: None,
         extras: AttnExtrasCuda {
@@ -564,6 +590,7 @@ fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
         gate: gemm(96, 64),
         up: gemm(96, 64),
         down: gemm(64, 96),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
@@ -762,6 +789,7 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         gate: q8_0_proj(w[4], ffn, hidden),
         up: q8_0_proj(w[5], ffn, hidden),
         down: q8_0_proj(w[6], hidden, ffn),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
