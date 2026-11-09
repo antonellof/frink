@@ -11,7 +11,7 @@ crate.
 
 ```toml
 [dependencies]
-frink-inference = "0.58"
+frink-inference = "0.59"
 ```
 
 ```rust

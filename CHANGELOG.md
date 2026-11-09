@@ -15,6 +15,35 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-11-09
+
+### Added
+
+- **Routed MoE layers run in the resident CUDA decode stack.** An MoE
+  layer ran every decode token on the per-op path, 577 host waits a
+  Qwen3-30B-A3B token. The stack now takes a routed layer at one token:
+  the attention as for a dense layer, the router on the device, its
+  logits back to the host's own routing (`route_for_layer`, so every
+  gating function routes as it does on the CPU), and the chosen experts
+  on the device in five launches: gate, up and down each indexed by
+  expert through a pointer table, the gated activation, and a combine
+  that sums the experts from zero in the routing's order. A
+  Qwen3-30B-A3B token now waits on the host 51 times. Shared
+  experts, the gpt-oss FFN and a few rarer shapes keep the host path
+  (#133).
+- **Routed MoE layers run in a CUDA prefill batch.** A routed layer in
+  a prompt took the host path. The router now runs over the whole batch,
+  its logits come back once for the host to route every token, and each
+  projection of every chosen expert is one grouped tensor-core GEMM over
+  the tokens routed to it, then each token's experts are summed in its
+  routing's order. On an A10G Qwen3-30B-A3B Q4_K_M `pp512` went from
+  about 77 to 962 tokens/s. It needs `sm_80` and up, and older cards
+  keep the host path (#259).
+- **CUDA rows in `benchmarks/RESULTS.md`**: ten models on an L40S at
+  0.58.0 against llama.cpp at the pin, the job that measured them
+  (`tools/hf_jobs/cuda_bench.sh`), and a Performance section in the
+  README (#542).
+
 ### Changed
 
 - **Gemma's layers stay on the GPU under CUDA.** The resident CUDA stack
@@ -31,6 +60,29 @@ are the ones worth reading twice.
   4096 projection on an L40S (63 to 107 TFLOPS), and Llama-3.1-8B
   Q4_K_M `pp512` from 1346 to 1648 tokens/s. `mul_mm_bench` times
   the GEMM alone (#259).
+- **A CUDA prefill step's K/V comes back through page-locked memory, in
+  parallel, and stays on the GPU.** The stack's one download (143 MB
+  for Llama-3.1-8B `pp512`) went to pageable memory at 1.9 GB/s, then
+  was copied twice more on one host thread: 208 of the step's 383 ms
+  on an L40S. It now lands in a reused page-locked buffer (11 ms) and
+  is pushed into the layers' caches in parallel straight from there.
+  The prompt's rows are also written into the device mirrors a decode
+  token attends over, so the first token does not upload the prompt
+  again (#259).
+- **CUDA prefill attention is tiled over the keys.** One warp per query
+  row read every key from global memory, about 4 GB of L2 traffic a
+  Llama-3.1-8B layer at `pp512`. A block of query rows now stages each
+  tile of keys in shared memory once (#259).
+- **CUDA decode matvecs give a row several warps.** A row gets as many
+  warps as it has trips of its blocks, up to 8, as llama.cpp's decode
+  matvec does: on an A10G Llama-3.1-8B Q4_K_M `tg128` from 65.0 to
+  71.3 tokens/s. `FRINK_CUDA_MATVEC_WPR` overrides the choice for an
+  A/B, and `matvec_bench` times the decode shapes (#133).
+- **CUDA kernel outputs are no longer zeroed before the kernel writes
+  them.** An L40S profile shows 1 286 memsets where it showed 100 682
+  (#133).
+- **The CUDA row RMSNorm reduces by warp shuffles**, and one long row
+  gets up to 1024 threads (#133).
 
 ## [0.58.0] - 2026-11-08
 
