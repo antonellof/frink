@@ -64,56 +64,58 @@ fn the_quantizer_writes_its_twin_s_blocks() {
     }
 }
 
-/// The Q8_0 int8 GEMM is its twin's, within the f32 rounding of two
-/// accumulation orders (none: one thread owns each output and walks K
-/// in order), and close to the f32 reference within the q8_1 rounding:
-/// a row count and a K that are not whole tiles, a batch past one tile
-/// and one under it.
+/// The int8 GEMM is its twin's for every kind, within the f32 rounding
+/// of one accumulation order (one thread owns each output and walks K in
+/// order, so only the FMA contraction can differ), and close to the f32
+/// reference within the q8_1 rounding: a row count and a K that are not
+/// whole tiles, a batch past one tile and one under it.
 #[test]
 #[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
-fn the_q8_0_int8_gemm_matches_its_twin_and_the_reference() {
+fn the_int8_gemm_matches_its_twin_and_the_reference() {
     let dev = shared_device().unwrap();
-    for (n_rows, n_cols, batch) in [(135usize, 96usize, 37usize), (256, 2880, 130), (33, 128, 1)] {
-        let row_bytes = n_cols / 32 * 34;
-        let w = crate::mul_mm_ref::fixtures::weights(&crate::mul_mm::Q8_0, n_rows, n_cols, 91);
-        let x = wave(batch * n_cols, 0.4);
-        let d_x = xfer::htod(&dev, "mmq x", &x).unwrap();
-        let (out, held) = super::enqueue_mmq(
-            &dev,
+    for (kind, mm, shapes) in [
+        (
             MmqKind::Q8_0,
-            &w,
-            &d_x,
-            n_rows,
-            n_cols,
-            batch,
-            row_bytes,
-        )
-        .unwrap();
-        let got = xfer::dtoh(&dev, "mmq out", &out).unwrap();
-        drop(held);
-        let ncols_pad = kernel::ncols_pad(batch);
-        let y = quantize::quantize_twin(&x, None, n_cols, batch, ncols_pad, Layout::D4);
-        let twin = super::mmq_q8_0_twin(&w, &y, n_rows, n_cols, batch, ncols_pad);
-        let reference = crate::mul_mm_ref::mul_mm_reference(
             &crate::mul_mm::Q8_0,
-            &w,
-            &x,
-            n_rows,
-            n_cols,
-            batch,
-            row_bytes,
-        )
-        .unwrap();
-        let rms = (reference.iter().map(|v| v * v).sum::<f32>() / reference.len() as f32).sqrt();
-        for (i, ((g, t), r)) in got.iter().zip(&twin).zip(&reference).enumerate() {
-            let what = format!("{n_rows}x{n_cols}x{batch} [{i}]");
-            assert!(
-                (g - t).abs() <= 1e-5 * t.abs().max(rms),
-                "{what}: GPU {g} twin {t}"
-            );
-            // q8_1 rounds each activation by up to half a step, 1/254 of
-            // its run's amax: a few parts in a thousand of the row's scale.
-            assert!((g - r).abs() <= 2e-2 * rms, "{what}: GPU {g} reference {r}");
+            &[(135usize, 96usize, 37usize), (256, 2880, 130), (33, 128, 1)][..],
+        ),
+        (
+            MmqKind::Q4_K,
+            &crate::mul_mm::Q4_K,
+            &[(135, 256, 37), (256, 4096, 130), (33, 512, 1)][..],
+        ),
+    ] {
+        for &(n_rows, n_cols, batch) in shapes {
+            let (be, bb) = kind.block();
+            let row_bytes = n_cols / be * bb;
+            let w = crate::mul_mm_ref::fixtures::weights(mm, n_rows, n_cols, 91);
+            let x = wave(batch * n_cols, 0.4);
+            let d_x = xfer::htod(&dev, "mmq x", &x).unwrap();
+            let (out, held) =
+                super::enqueue_mmq(&dev, kind, &w, &d_x, n_rows, n_cols, batch, row_bytes).unwrap();
+            let got = xfer::dtoh(&dev, "mmq out", &out).unwrap();
+            drop(held);
+            let ncols_pad = kernel::ncols_pad(batch);
+            let y = quantize::quantize_twin(&x, None, n_cols, batch, ncols_pad, kind.layout());
+            let twin = match kind {
+                MmqKind::Q8_0 => super::mmq_q8_0_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
+                MmqKind::Q4_K => super::mmq_q4_k_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
+            };
+            let reference =
+                crate::mul_mm_ref::mul_mm_reference(mm, &w, &x, n_rows, n_cols, batch, row_bytes)
+                    .unwrap();
+            let rms =
+                (reference.iter().map(|v| v * v).sum::<f32>() / reference.len() as f32).sqrt();
+            for (i, ((g, t), r)) in got.iter().zip(&twin).zip(&reference).enumerate() {
+                let what = format!("{kind:?} {n_rows}x{n_cols}x{batch} [{i}]");
+                assert!(
+                    (g - t).abs() <= 1e-5 * t.abs().max(rms),
+                    "{what}: GPU {g} twin {t}"
+                );
+                // q8_1 rounds each activation by up to half a step, 1/254
+                // of its run's amax: well inside 2% of the row's scale.
+                assert!((g - r).abs() <= 2e-2 * rms, "{what}: GPU {g} reference {r}");
+            }
         }
     }
 }
