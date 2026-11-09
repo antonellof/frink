@@ -43,13 +43,13 @@ impl CacheProbe {
 
 /// A timed row needs at least one timed repetition. `-r 0` used to run
 /// the warmup and nothing else, leaving a row with zero samples whose
-/// median printed as `0.00` -- a fabricated number in the same column
+/// mean printed as `0.00` -- a fabricated number in the same column
 /// as the measured ones.
 pub fn check_repetitions(reps: usize) -> anyhow::Result<()> {
     anyhow::ensure!(
         reps >= 1,
         "-r {reps} leaves no timed repetitions: the warmup would run and the row \
-         would report a median over an empty sample set. Pass -r 1 or more."
+         would report a mean over an empty sample set. Pass -r 1 or more."
     );
     Ok(())
 }
@@ -58,13 +58,13 @@ pub fn check_repetitions(reps: usize) -> anyhow::Result<()> {
 /// `reps` samples, meaning `WARMUP_REPS` repetitions ran and were
 /// thrown away. Fires if a later edit changes the loop bound or the
 /// discard condition, which is how a shader-compile timing quietly
-/// gets back into a published median.
+/// gets back into a published mean.
 pub fn check_timed_samples(test: &str, reps: usize, samples: usize) -> anyhow::Result<()> {
     anyhow::ensure!(
         samples == reps,
         "{test}: {samples} timed samples for -r {reps}. Exactly {WARMUP_REPS} warmup \
          repetition must run before timing and be discarded; a mismatch means either \
-         an untimed repetition leaked into the median or the warmup did not run, and \
+         an untimed repetition leaked into the mean or the warmup did not run, and \
          the first repetition pays for page faults and shader compilation."
     );
     Ok(())
@@ -72,11 +72,10 @@ pub fn check_timed_samples(test: &str, reps: usize, samples: usize) -> anyhow::R
 
 /// Every timed sample has to be a usable rate.
 ///
-/// A repetition whose duration rounded to zero yields `inf` tok/s, and
-/// `inf` sorts to one end of the sample vector, so a single one moves
-/// the median of an even sample count and *is* the median of an odd
-/// one. It would print as `inf` in the same column as measured rows and
-/// render into the ledger as a win.
+/// A repetition whose duration rounded to zero yields `inf` tok/s, and a
+/// single `inf` makes the mean `inf` (and the stddev NaN). It would
+/// print as `inf` in the same column as measured rows and render into
+/// the ledger as a win.
 pub fn check_sample_rates(test: &str, samples: &[f64]) -> anyhow::Result<()> {
     if let Some((i, &v)) = samples
         .iter()
@@ -85,8 +84,8 @@ pub fn check_sample_rates(test: &str, samples: &[f64]) -> anyhow::Result<()> {
     {
         anyhow::bail!(
             "{test} rep {i} produced a rate of {v}: the timer measured no elapsed \
-             time, so this is not a throughput. It would still sort into the \
-             median and be published as one."
+             time, so this is not a throughput. It would still enter the \
+             mean and be published as one."
         );
     }
     Ok(())
@@ -306,8 +305,8 @@ impl WorkloadDigest {
 /// temperature does not apply. That is exactly the claim worth
 /// enforcing -- if a future edit fed generated tokens back into the
 /// decode loop, any temperature above zero would make repetition 2 do
-/// different work from repetition 1, and the median across them would
-/// stop being a median of anything. Identical digests are what
+/// different work from repetition 1, and the mean across them would
+/// stop being a mean of anything. Identical digests are what
 /// "temperature 0" means for a benchmark; divergent digests catch its
 /// absence whatever the cause.
 pub fn check_same_workload(
@@ -320,7 +319,7 @@ pub fn check_same_workload(
         first == current,
         "{test} rep {rep} fed a different token stream than the first repetition \
          ({} vs {}): the repetitions are not repetitions of the same work, so their \
-         median is not a measurement. A timed run must be deterministic -- \
+         mean is not a measurement. A timed run must be deterministic -- \
          temperature 0, no sampling, no data-dependent token feedback.",
         current.hex(),
         first.hex()
@@ -361,7 +360,7 @@ pub fn greedy_pick(logits: &[f32]) -> anyhow::Result<Option<(usize, f32)>> {
 /// a routing decision that depends on a warmed expert cache, a
 /// reduction whose order varies with how work happened to be split, a
 /// kernel that races. Those change what the repetition *did* while
-/// leaving the digest identical, and the median once again averages
+/// leaving the digest identical, and the mean once again averages
 /// unlike things.
 ///
 /// Compared on the greedy token id rather than on exact logit bits:
@@ -378,7 +377,7 @@ pub fn check_same_result(
         "{test} rep {rep} computed a different answer than the first repetition \
          from the identical token stream: greedy token {} (logit {}) vs {} (logit \
          {}). The engine is not deterministic here, so these repetitions measured \
-         different work and their median is not a measurement of either.",
+         different work and their mean is not a measurement of either.",
         current.0,
         current.1,
         first.0,
@@ -464,7 +463,7 @@ mod tests {
     #[test]
     fn a_row_must_carry_exactly_one_discarded_warmup() {
         assert!(check_timed_samples("pp512", 3, 3).is_ok());
-        // The warmup leaked into the median.
+        // The warmup leaked into the mean.
         let err = check_timed_samples("pp512", 3, 4).unwrap_err().to_string();
         assert!(err.contains("shader compilation"), "{err}");
         // A repetition vanished.
@@ -641,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn an_infinite_rate_is_refused_because_it_would_sort_into_the_median() {
+    fn an_infinite_rate_is_refused_because_it_would_enter_the_mean() {
         assert!(check_sample_rates("pp512", &[10.0, 11.0, 12.0]).is_ok());
         // dt rounded to zero. `inf` is not caught by any length or
         // cache check -- the work really was done, the clock just did

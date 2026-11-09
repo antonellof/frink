@@ -124,6 +124,42 @@ fn a_models_prefill_and_decode_share_one_row() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A schema-3 receipt wrote the median as `frink_tps`. The ledger shows
+/// the mean of its samples instead, llama-bench's statistic and the one
+/// the llama.cpp column holds, and the gap divides by that (#481).
+///
+/// Sabotage: have `frink_rate` return `frink_tps` first.
+#[test]
+fn an_old_receipt_renders_the_mean_of_its_samples_not_its_median() {
+    let dir = scratch("mean");
+    let engine = dir.join("receipts").join("engine");
+    let r = serde_json::json!({
+        "schema": 3, "kind": "engine", "id": "m1",
+        "backend": "cuda", "backend_active": "cuda",
+        "host_spec": {"label": "Box One"},
+        "frink_version": CURRENT_VERSION,
+        "tests": [{"test": "tg128", "frink_tps": 20.0, "frink_samples": [10.0, 20.0, 60.0],
+                   "llama_tps": 60.0, "gap": 3.0}],
+    });
+    write(&engine, "m1_cuda_old", &r);
+
+    render(&dir).expect("render");
+    let out = std::fs::read_to_string(dir.join("RESULTS.md")).expect("read");
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| m1 |"))
+        .unwrap_or_else(|| panic!("no row for the model:\n{out}"));
+    assert!(
+        row.contains("| 30.0 |"),
+        "the mean of the samples, not the median 20: {row}"
+    );
+    assert!(
+        row.contains("**2.00×**"),
+        "60 / 30, not the stored 3.00: {row}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Column headers name the workloads that were actually measured.
 ///
 /// Hard-coding `pp512` / `tg128` would mislabel a suite run at any

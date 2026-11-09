@@ -15,6 +15,17 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`frink bench` reports llama-bench's statistics.** It printed the
+  median ± the population stddev and said that is what llama-bench
+  prints. llama-bench prints the mean ± the sample stddev
+  (`llama-bench.cpp:102-118`), and frink's own `-o json` already did.
+  So the `--compare` gap divided llama.cpp's mean by frink's median.
+  The table, the gap and the receipt (schema 4, `frink_stat`) now take
+  the mean and the sample stddev, and `--render` takes the mean of every
+  receipt's samples, so the published rows moved by under 2% (#481).
+
 ### Added
 
 - **llama-server's `/props`, `GET /slots` and `/infill`, and slot

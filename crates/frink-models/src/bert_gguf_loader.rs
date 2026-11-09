@@ -181,7 +181,11 @@ pub fn read_bert_hparams(file: &impl TensorSource) -> Result<BertHparams, LoadEr
         .map(|(_, s)| *s)
         .expect("check_arch admitted this architecture");
     let ffn = spec.ffn;
-    let n_layer = meta_u64(file, &p("block_count"))? as usize;
+    let n_layer = crate::mtp_blocks::checked_block_count(
+        file,
+        &p("block_count"),
+        meta_u64(file, &p("block_count"))? as usize,
+    )?;
     let n_embd = meta_u64(file, &p("embedding_length"))? as usize;
     let n_ff = meta_u64(file, &p("feed_forward_length"))? as usize;
     let n_head = meta_u64(file, &p("attention.head_count"))? as usize;

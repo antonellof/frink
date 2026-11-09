@@ -138,6 +138,16 @@ impl Lightning {
         head_dim: usize,
         hidden_dim: usize,
     ) -> Result<Self, LoadError> {
+        if n_layer < 2 {
+            // `slope_scale` would assert: refused here, at load.
+            return Err(LoadError::UnsupportedFeature(
+                "minimax-01".to_string(),
+                format!(
+                    "{n_layer} layer(s): minimax-01.cpp:288 divides by n_layer - 1, so a \
+                     model needs at least two"
+                ),
+            ));
+        }
         let width = n_head * head_dim;
         let name = |t: &str| format!("blk.{layer}.{t}");
         let matrix = |t: &str, rows: usize, cols: usize| -> Result<WeightMatrix, LoadError> {
