@@ -17,7 +17,7 @@ use frink_core::cache::{
     PagedStoreExhausted, SharedPagedKv,
 };
 use frink_models::sampling::SamplingParams;
-use frink_models::tokenizer::{prepend_bos, SpecialTokens, StopTokens};
+use frink_models::tokenizer::StopTokens;
 use frink_models::{Ceiling, Decoder, Engine, KvShape, PrefixCache, TextTokenizer};
 
 use crate::budget::ContextCeiling;
@@ -1915,12 +1915,12 @@ pub(crate) struct GeneratedChoice {
 // decoder/tokenizer/stop_tokens/bos_id/prompt/kv_pool/prefix_cache/emit
 // re-wrapped for no real benefit at this call depth (two call sites,
 // both in this crate).
-pub fn generate(
+pub fn generate<'p>(
     decoder: &Decoder,
     tokenizer: &ServerTokenizer,
     stop_tokens: &StopTokens,
     bos_id: Option<usize>,
-    prompt: &str,
+    prompt: impl Into<crate::prompt_input::Prompt<'p>>,
     params: &GenerationParams,
     kv_pool: Option<&KvPoolConfig>,
     paged_kv: Option<&PagedKvConfig>,
@@ -1957,9 +1957,11 @@ pub fn generate(
 
     // `Parse`: the prompt is what a chat template rendered, or a raw
     // completion, and llama.cpp's server tokenizes both with
-    // `parse_special = true`. See `Model::encode`.
-    let mut tokens = tokenizer.encode(prompt, SpecialTokens::Parse);
-    prepend_bos(&mut tokens, bos_id);
+    // `parse_special = true`. See `Model::encode`. An id prompt
+    // (`/infill`) is prefilled as its route assembled it.
+    let prompt: crate::prompt_input::Prompt<'_> = prompt.into();
+    let mut tokens = prompt.tokens(tokenizer, bos_id);
+    let prompt = prompt.text();
     // Before anything is prefilled, so the truncated sequence is the
     // only one that ever exists: the KV, the usage, the prefix cache
     // and `echo` all read the prompt that was ANSWERED.
@@ -2511,7 +2513,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     tokenizer: &T,
     stop_tokens: &StopTokens,
     bos_id: Option<usize>,
-    prompt: &str,
+    prompt: crate::prompt_input::Prompt<'_>,
     params: &GenerationParams,
     mut emit: impl FnMut(&str),
     // A `Vec` for the same reason `generate` returns one: two shapes
@@ -2533,8 +2535,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
 
     let vocab_size = engine.vocab_size();
     // `Parse`, as the GGUF path above. See `Model::encode`.
-    let mut tokens = tokenizer.encode(prompt, SpecialTokens::Parse);
-    prepend_bos(&mut tokens, bos_id);
+    let tokens = prompt.tokens(tokenizer, bos_id);
     let prompt_tokens = tokens.len();
     if let Some(&bad) = tokens.iter().find(|&&t| t >= vocab_size) {
         return Err(DecodeError::TokenOutOfVocab {

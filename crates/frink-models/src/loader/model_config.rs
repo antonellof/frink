@@ -1018,6 +1018,28 @@ impl ModelConfig {
         // special-case it.
         let rope_dim = widths.full;
         let rope_dim_swa = widths.swa;
+        // llama.cpp creates `rope_freqs.weight` and LongRoPE's pair as
+        // `{n_rot / 2}`, one factor per rotation band, and refuses any
+        // other shape at load. A vector of another length is not this
+        // file's rotary width, and the rotary kernel asserts on it.
+        let bands = rope_dim.unwrap_or(head_dim) / 2;
+        for (name, f) in [
+            ("rope_freqs.weight", rope_freqs.as_ref()),
+            ("rope_factors_long.weight", rope_freqs_long.as_ref()),
+            ("rope_factors_short.weight", rope_freqs_short.as_ref()),
+        ] {
+            if let Some(f) = f.filter(|f| f.len() != bands) {
+                return Err(LoadError::UnsupportedFeature(
+                    arch.clone(),
+                    format!(
+                        "{name} has {} factors but the rotary width {} has {bands} bands; \
+                         llama.cpp creates it as {{n_rot / 2}}",
+                        f.len(),
+                        rope_dim.unwrap_or(head_dim)
+                    ),
+                ));
+            }
+        }
 
         // See `ModelConfig::rope_attn_factor`. `mut` because YaRN's
         // magnitude term is folded into it below.

@@ -15,6 +15,62 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **DRY's scan window defaults to llama.cpp's 64 tokens.** frink
+  defaulted `dry_penalty_last_n` to `-1`, the whole context, from an
+  older `common.h`. At the pin it is 64 (`common/common.h:251`), so a
+  request that set `dry_multiplier` alone scanned a different window
+  from llama-server's.
+
+- **A crafted GGUF refuses at load instead of exhausting memory or
+  panicking.** `block_count` or `nanbeige.num_loops` of 2^31 made the
+  loader allocate until the OS killed it, and 55 other hostile values
+  panicked: zero layers indexing an empty per-layer array, a one-layer
+  minimax-01, and `rope_freqs` lengths that did not match the rotary
+  width. The layer count is now capped at llama.cpp's
+  `LLAMA_MAX_LAYERS` (512), as its loader refuses, and each of the
+  others is a named refusal. `tests/hostile_metadata.rs` sets every
+  integer key of every graph fixture to a hostile value (#577).
+
+- **`frink bench` reports llama-bench's statistics.** It printed the
+  median ± the population stddev and said that is what llama-bench
+  prints. llama-bench prints the mean ± the sample stddev
+  (`llama-bench.cpp:102-118`), and frink's own `-o json` already did.
+  So the `--compare` gap divided llama.cpp's mean by frink's median.
+  The table, the gap and the receipt (schema 4, `frink_stat`) now take
+  the mean and the sample stddev, and `--render` takes the mean of every
+  receipt's samples, so the published rows moved by under 2% (#481).
+
+### Added
+
+- **llama-server's `/props`, `GET /slots` and `/infill`, and slot
+  erase.** A client written for llama-server no longer gets a 404 on
+  them (#534).
+  - `GET /props` answers in llama.cpp's shape with every field frink can
+    state: `/completion`'s defaults, the context ceiling, the `-np`
+    slots, the served name, path and file type, the template and its
+    BOS and EOS, and the endpoint switches. Asleep it answers from the
+    snapshot the sleep took. A field frink has no value for (`seed`,
+    the knobs of samplers it does not have, llama.cpp's template caps)
+    is left out, and `docs/API.md` lists each. `POST /props` is
+    llama.cpp's 501 without `--props`.
+  - `GET /slots` lists the continuous batcher's `-np` seats, the busy
+    ones first, with llama.cpp's four always-present fields, and
+    honours `?fail_on_no_slot`. `--slots` / `--no-slots` and
+    `LLAMA_ARG_ENDPOINT_SLOTS` gate it as upstream. A deployment
+    without seats says so by name.
+  - `POST /infill` reads the vocabulary's FIM tokens as llama.cpp does
+    (the GGUF keys, then the token texts), refuses a model without them
+    in llama.cpp's words, validates the body with its messages,
+    assembles the prompt as `format_prompt_infill` does (the repo-level
+    `input_extra` pattern, the `-b` budgets, `--spm-infill`) and serves
+    it through `/completion`'s path, prefilling the assembled ids as
+    they are.
+  - `POST /slots/{id}?action=erase` empties one slot and answers
+    `n_erased`, dropping the prefix cache entry the slot's save or
+    restore stored unless another slot holds the same prompt.
+
 ### Changed
 
 - **CPU activation quantization and the RMS norm are ggml's, bit for

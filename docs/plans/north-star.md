@@ -59,12 +59,11 @@ rental, asked for before it is booked (#542).
    largest gap, on the hardware most people own. Next step: the batched
    rental.
 2. **Same commands, same API.** The flag and `LLAMA_ARG_*` tail (#404).
-   The `llama-server` endpoints frink does not serve: `/infill`,
-   `/props`, `GET /slots`, slot erase (#534), and
-   `stream` on `/v1/completions`, which is refused by name today.
+   `stream` on `/v1/completions`, which is refused by name today, and
+   the FIM pad, repo and file-separator tokens as end-of-generation
+   tokens, which `/infill` notices most (#534).
 3. **Numerics.** The deviations ADR 0009 still lists, the largest the
-   CPU attention's arithmetic under 64 query rows and in decode, and
-   the statistic `frink bench` prints (#481).
+   CPU attention's arithmetic under 64 query rows and in decode.
 
 ### A server that holds up under load
 

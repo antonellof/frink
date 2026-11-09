@@ -184,6 +184,7 @@ impl ContinuousBatcher {
                 self.config.max_seqs
             },
             prefill_chunk: self.config.prefill_chunk,
+            running: self.counters.running.load(Ordering::Relaxed),
         }
     }
 
