@@ -114,22 +114,23 @@ pub enum CudaError {
 /// found at all -- it panics
 /// (`cudarc::panic_no_lib_found`/`driver::sys::lib`). That is a
 /// meaningfully different failure mode than "library loaded, but no
-/// device present," and this function has to catch it explicitly with
-/// `catch_unwind` or a CPU-only host would crash the whole process
-/// just from calling this probe. This is exactly the kind of bug that
-/// only surfaces by actually running code against a real (lack of)
-/// environment, not by reading API docs.
+/// device present," so this function opens the library itself first
+/// ([`driver_library_opens`]) and returns `None` when it will not, and
+/// keeps a `catch_unwind` behind that for a driver cudarc cannot use.
+/// The process's panic hook is left alone.
 pub fn probe() -> Option<CudaInfo> {
-    // Temporarily silence the default panic hook: on a host with no
-    // CUDA shared library at all, the catch_unwind below is expected
-    // to trigger on every single call (e.g. every process start that
-    // checks capabilities), and printing a full Rust panic backtrace
-    // for an anticipated, handled condition would be noise, not a bug
-    // report. The previous hook is always restored, even if the
-    // probed closure panics.
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = std::panic::catch_unwind(|| {
+    // cudarc panics on first use when the driver library will not open.
+    // This used to swap the process's panic hook for a silent one around
+    // the call, which silenced every panic any other thread raised in
+    // that window, a server's journal record included. Opening the
+    // library first, as cudarc does, keeps a GPU-less host quiet without
+    // touching the hook.
+    if !driver_library_opens() {
+        return None;
+    }
+    // A backstop for a driver that opens but lacks a symbol cudarc needs:
+    // that panics with cudarc's message, which is worth seeing.
+    std::panic::catch_unwind(|| {
         let dev = cudarc::driver::CudaDevice::new(0).ok()?;
         let name = dev.name().ok();
         let (free, total) = cudarc::driver::result::mem_get_info().ok()?;
@@ -139,9 +140,20 @@ pub fn probe() -> Option<CudaInfo> {
             total_vram_bytes: total as u64,
             free_vram_bytes: free as u64,
         })
-    });
-    std::panic::set_hook(previous_hook);
-    result.unwrap_or(None)
+    })
+    .unwrap_or(None)
+}
+
+/// Whether the CUDA driver library opens under the names cudarc 0.11
+/// tries (`driver::sys::lib`: `cuda`, then `nvcuda`), so that cudarc's
+/// own open, which panics on failure, will succeed.
+fn driver_library_opens() -> bool {
+    ["cuda", "nvcuda"].iter().any(|name| {
+        // SAFETY: opening the driver library runs its initialisers, the
+        // same open cudarc makes next; the handle is dropped at once and
+        // cudarc's own handle keeps the library loaded.
+        unsafe { libloading::Library::new(libloading::library_filename(name)) }.is_ok()
+    })
 }
 
 /// Process-wide CUDA device handle, created once and reused for every
@@ -1059,6 +1071,34 @@ pub fn launch_dense_ffn_swiglu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process's panic hook is the binary's: a server journals every
+    /// panic through it. Nothing in this crate may swap it, even briefly,
+    /// because a swap silences whatever another thread panics with in the
+    /// window (`probe` did, and lost the server journal test's record).
+    #[test]
+    fn no_source_here_swaps_the_process_panic_hook() {
+        // Spelled in pieces so this test's own text does not match.
+        let calls = [concat!("set_", "hook("), concat!("take_", "hook(")];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut scanned = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for call in calls {
+                        assert!(!text.contains(call), "{} calls {call}", path.display());
+                    }
+                    scanned += 1;
+                }
+            }
+        }
+        assert!(scanned > 20, "scanned {scanned} files");
+    }
 
     #[test]
     fn probe_degrades_cleanly_regardless_of_real_hardware_presence() {
