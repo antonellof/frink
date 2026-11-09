@@ -38,13 +38,14 @@ pub mod enqueue;
 pub mod kernels;
 pub mod kv_mirror;
 pub mod moe;
+pub mod moe_device;
 pub mod proj;
 
 pub use crate::gpu::GluCuda;
 use crate::gpu::{glu_mul_device, resident_cuda_f32, shared_device, CudaError};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
-use cudarc::driver::{CudaDevice, CudaSlice};
+use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut};
 use enqueue::{
     enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
     enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
@@ -52,6 +53,7 @@ use enqueue::{
 pub use kv_mirror::CudaKvMirror;
 use moe::check_expert_shapes;
 pub use moe::routed_batch_supported;
+pub use moe_device::{device_routing_enabled, DeviceGating, DeviceRouting, ExpertSource};
 pub use proj::ProjWeights;
 use std::sync::Arc;
 
@@ -199,6 +201,10 @@ pub enum StackFfn<'a> {
         router: RouterCuda<'a>,
         /// Each routed expert's FFN width.
         ffn_dim: usize,
+        /// The routing on the device at a decode token, when the layer's
+        /// gating is one the device has ([`moe_device`]); the caller's
+        /// routing otherwise, and for a prefill batch.
+        device: Option<DeviceRouting<'a>>,
     },
 }
 
@@ -355,6 +361,10 @@ pub struct PrefillStackOut {
     /// out per layer (134 MB a Llama-3.1-8B `pp512` step).
     staged: xfer::Download,
     kv_offsets: Vec<(usize, usize)>,
+    /// Per layer of the run, the experts a decode token's device routing
+    /// chose, in its order; `None` for a layer routed on the host (whose
+    /// caller saw its choice) or not routed at all.
+    pub device_routed: Vec<Option<Vec<usize>>>,
 }
 
 impl PrefillStackOut {
@@ -499,6 +509,27 @@ pub fn launch_stack<'e>(
             h
         }
     };
+    // A decode token's device-routed layers write their expert ids here,
+    // `IDS_PER_LAYER` a layer, downloaded once after the stack.
+    const IDS_PER_LAYER: usize = 16;
+    let device_k: Vec<Option<usize>> = layers
+        .iter()
+        .map(|(l, _)| match l.ffn {
+            StackFfn::Moe {
+                device: Some(d), ..
+            } if batch == 1 => Some(d.k),
+            _ => None,
+        })
+        .collect();
+    let mut ids_all = if device_k.iter().any(Option::is_some) {
+        Some(
+            dev.alloc_zeros::<i32>(layers.len() * IDS_PER_LAYER)
+                .map_err(|e| CudaError::Launch(format!("routed ids alloc: {e:?}")))?,
+        )
+    } else {
+        None
+    };
+    let mut on_device = vec![false; layers.len()];
     for (i, (layer, params)) in layers.iter().enumerate() {
         let mirror = match &mut kv {
             StackKv::UploadPrefix => None,
@@ -508,15 +539,21 @@ pub fn launch_stack<'e>(
                     .expect("every mirror slot was filled above"),
             ),
         };
+        let ids = match (&mut ids_all, device_k[i]) {
+            (Some(all), Some(_)) => Some(all.slice_mut(i * IDS_PER_LAYER..(i + 1) * IDS_PER_LAYER)),
+            _ => None,
+        };
         let step = LayerStep {
             batch,
+            ids,
             index: i,
             mirror,
             stage_at: kv_offsets[i],
             route: route.as_deref_mut(),
         };
         let _t = crate::phases::phase("enqueue");
-        run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
+        on_device[i] =
+            run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
     }
     xfer::dtod(
         &dev,
@@ -529,11 +566,33 @@ pub fn launch_stack<'e>(
         let _t = crate::phases::phase("wait+download");
         xfer::dtoh_staged(&dev, "stack download", &staged)?
     };
+    // The device-routed layers' expert ids, for the caller's activation
+    // counts: after the stack's wait, so this copy waits on nothing.
+    let device_routed = match &ids_all {
+        Some(all) if on_device.iter().any(|&b| b) => {
+            let ids = xfer::dtoh(&dev, "routed ids", all)?;
+            on_device
+                .iter()
+                .zip(&device_k)
+                .enumerate()
+                .map(|(i, (&on, k))| {
+                    on.then(|| {
+                        ids[i * IDS_PER_LAYER..i * IDS_PER_LAYER + k.unwrap_or(0)]
+                            .iter()
+                            .map(|&e| e as usize)
+                            .collect()
+                    })
+                })
+                .collect()
+        }
+        _ => vec![None; layers.len()],
+    };
     drop(held);
     let out = PrefillStackOut {
         hidden: staged.as_slice()[..batch * hidden_dim].to_vec(),
         staged,
         kv_offsets,
+        device_routed,
     };
     if let StackKv::Mirrors(slots) = &mut kv {
         for (i, (slot, (_, p))) in slots.iter_mut().zip(layers).enumerate() {
@@ -565,7 +624,10 @@ fn check_layer_shapes(
     } = *params;
     let q_width = n_heads * head_dim;
     let kv_width = n_kv_heads * head_dim;
-    if let StackFfn::Moe { router, ffn_dim } = layer.ffn {
+    if let StackFfn::Moe {
+        router, ffn_dim, ..
+    } = layer.ffn
+    {
         let fits = match router {
             RouterCuda::F32 { data, rows } => data.len() == rows * hidden_dim,
             RouterCuda::Quant(p) => p.cols() == hidden_dim && p.validate(batch).is_ok(),
@@ -679,6 +741,8 @@ fn norm_rows(w: Option<&[f32]>, width: usize) -> Result<Option<(usize, usize)>, 
 struct Held {
     weights: Vec<Arc<crate::gpu::ResidentCudaWeights>>,
     vectors: Vec<Arc<crate::resident::ResidentCuda<f32>>>,
+    /// Anything else a kernel reads: a layer's expert tables.
+    keep: Vec<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl Held {
@@ -712,6 +776,8 @@ impl Held {
 /// where its history lives, and where its K/V rows are staged.
 struct LayerStep<'m, 'r, 'e> {
     batch: usize,
+    /// Where a decode token's device routing writes its expert ids.
+    ids: Option<CudaViewMut<'m, i32>>,
     /// This layer's index in the run, which the routing is asked by.
     index: usize,
     /// The caller's routing, for an MoE layer.
@@ -723,8 +789,9 @@ struct LayerStep<'m, 'r, 'e> {
     stage_at: (usize, usize),
 }
 
-/// One layer over the resident hidden batch `h`, in place. Stages the
-/// batch's K/V rows into `staged`. Shapes were checked by
+/// One layer over the resident hidden batch `h`, in place, answering
+/// whether its experts were routed on the device. Stages the batch's
+/// K/V rows into `staged`. Shapes were checked by
 /// `check_layer_shapes`.
 fn run_layer_resident<'e>(
     dev: &Arc<CudaDevice>,
@@ -734,14 +801,16 @@ fn run_layer_resident<'e>(
     step: LayerStep<'_, '_, 'e>,
     staged: &mut CudaSlice<f32>,
     held: &mut Held,
-) -> Result<(), CudaError> {
+) -> Result<bool, CudaError> {
     let LayerStep {
         batch,
+        ids,
         index,
         mirror,
         stage_at: (at, n_kv),
         route,
     } = step;
+    let mut routed_on_device = false;
     let hidden_dim = layer.attn_norm_w.len();
     let PrefillParams {
         n_heads,
@@ -924,13 +993,21 @@ fn run_layer_resident<'e>(
             let ffn_dim = ex.gate.rows();
             run_expert(dev, held, &ex, layer.glu, &normed2, batch, ffn_dim)?
         }
-        StackFfn::Moe { router, ffn_dim } => {
+        StackFfn::Moe {
+            router,
+            ffn_dim,
+            device,
+        } => {
             let route = route.ok_or_else(|| {
                 CudaError::Unsupported("resident stack: an MoE layer with no routing".to_string())
             })?;
-            moe::run_routed(
+            let device = device.filter(|_| batch == 1).zip(ids);
+            let (out, on_device) = moe::run_routed(
                 dev, held, router, layer.glu, &normed2, batch, hidden_dim, ffn_dim, index, route,
-            )?
+                device,
+            )?;
+            routed_on_device = on_device;
+            out
         }
     };
     drop(normed2);
@@ -940,7 +1017,7 @@ fn run_layer_resident<'e>(
     }
     enqueue_add_rows(dev, h, &down, batch * hidden_dim)?;
     drop(down);
-    Ok(())
+    Ok(routed_on_device)
 }
 
 /// One gated FFN over `x` (`batch` rows): gate and up, the gated

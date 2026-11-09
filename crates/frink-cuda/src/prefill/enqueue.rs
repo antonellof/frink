@@ -6,14 +6,16 @@
 use super::kernels::{
     ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_BIAS_TAB_ROWS, ADD_BIAS_TAB_ROWS_KERNEL_SRC,
     ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC, CAUSAL_GQA_PREFILL,
-    CAUSAL_GQA_PREFILL_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS,
-    MOE_COMBINE_ROWS_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS,
-    ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
+    CAUSAL_GQA_PREFILL_KERNEL_SRC, GATHER_PTRS, GATHER_PTRS_KERNEL_SRC, MOE_COMBINE,
+    MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS, MOE_COMBINE_ROWS_KERNEL_SRC, MOE_TOPK,
+    MOE_TOPK_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC,
+    ROUTER_F32, ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
 use cudarc::driver::{
-    CudaDevice, CudaFunction, CudaSlice, DevicePtr, DeviceSlice, LaunchAsync, LaunchConfig,
+    CudaDevice, CudaFunction, CudaSlice, CudaView, CudaViewMut, DevicePtr, DeviceSlice,
+    LaunchAsync, LaunchConfig,
 };
 use std::sync::Arc;
 
@@ -172,32 +174,108 @@ pub(crate) fn enqueue_moe_combine(
     Ok(out)
 }
 
-/// `x[r] += tab[row_group[r]]` for each of `n_rows` rows of `n`.
+/// `x[r] += tab[row_group[r]]` for each of `n_rows` rows of `n`, or
+/// `tab[r]` without a `row_group`.
 pub(crate) fn enqueue_add_bias_tab_rows(
     dev: &Arc<CudaDevice>,
     x: &mut CudaSlice<f32>,
-    tab: &CudaSlice<u64>,
-    row_group: &CudaSlice<i32>,
+    tab: &CudaView<'_, u64>,
+    row_group: Option<&CudaSlice<i32>>,
     n_rows: usize,
     n: usize,
 ) -> Result<(), CudaError> {
-    debug_assert!(x.len() >= n_rows * n && row_group.len() >= n_rows);
+    debug_assert!(x.len() >= n_rows * n);
+    debug_assert!(row_group.is_none_or(|g| g.len() >= n_rows));
+    debug_assert!(row_group.is_some() || tab.len() >= n_rows);
     let func = func_for(dev, ADD_BIAS_TAB_ROWS_KERNEL_SRC, ADD_BIAS_TAB_ROWS)?;
     let cfg = LaunchConfig {
         grid_dim: ((n as u32).div_ceil(BLOCK).max(1), n_rows as u32, 1),
         block_dim: (BLOCK, 1, 1),
         shared_mem_bytes: 0,
     };
-    // SAFETY: (float*, const u64*, const int*, int) matched positionally;
-    // a grid row per row of `x` and thread `i < n` of it; every
-    // `row_group` entry indexes `tab` (the caller builds both from one
-    // grouping), and every table entry is a live device vector of at
-    // least `n` floats the caller holds until its wait.
+    let row_group = row_group.map_or(0u64, |g| *cudarc::driver::DevicePtr::device_ptr(g));
+    // SAFETY: (float*, const u64*, const int* or null, int) matched
+    // positionally; a grid row per row of `x` and thread `i < n` of it;
+    // every `row_group` entry (or, without one, every row index) indexes
+    // `tab` (the caller builds them from one grouping), and every table
+    // entry is a live device vector of at least `n` floats the caller
+    // holds until its wait.
     unsafe {
         func.launch(cfg, (x, tab, row_group, n as i32))
             .map_err(|e| launch_err("add_bias_tab_rows", e))?;
     }
     Ok(())
+}
+
+/// The routing of `batch` rows of router logits on the device
+/// (`kernels::MOE_TOPK_KERNEL_SRC`): `k` expert ids into `ids` and
+/// their weights, `[batch][k]` each.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_moe_topk(
+    dev: &Arc<CudaDevice>,
+    logits: &CudaSlice<f32>,
+    bias: Option<&CudaSlice<f32>>,
+    n_experts: usize,
+    k: usize,
+    mode: i32,
+    batch: usize,
+    ids: &mut CudaViewMut<'_, i32>,
+) -> Result<CudaSlice<f32>, CudaError> {
+    if n_experts > 256 || k == 0 || k > 16 || k > n_experts {
+        return Err(CudaError::Unsupported(format!(
+            "moe_topk: {k} of {n_experts} experts (the kernel takes up to 16 of 256)"
+        )));
+    }
+    debug_assert!(logits.len() >= batch * n_experts && ids.len() >= batch * k);
+    debug_assert!(bias.is_none_or(|b| b.len() >= n_experts));
+    let func = func_for(dev, MOE_TOPK_KERNEL_SRC, MOE_TOPK)?;
+    // SAFETY: lane 0 of each token's warp writes all `k` of its weights.
+    let mut w = unsafe { crate::gpu::alloc_out(dev, batch * k, "moe weights") }?;
+    let bias = bias.map_or(0u64, |b| *cudarc::driver::DevicePtr::device_ptr(b));
+    let cfg = LaunchConfig {
+        grid_dim: (batch as u32, 1, 1),
+        block_dim: (32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float*, const float* or null, int x3, int*, float*)
+    // matched positionally; one warp per token reads its `n_experts`
+    // logits (and `n_experts` biases) and lane 0 writes its `k` ids and
+    // weights, every buffer that long (the debug asserts, the check
+    // above and the caller's shapes).
+    unsafe {
+        func.launch(
+            cfg,
+            (logits, bias, n_experts as i32, k as i32, mode, ids, &mut w),
+        )
+        .map_err(|e| launch_err("moe_topk", e))?;
+    }
+    Ok(w)
+}
+
+/// `out[t][s] = all[t][ids[s]]` for `n_tabs` tables of `n` pointers.
+pub(crate) fn enqueue_gather_ptrs(
+    dev: &Arc<CudaDevice>,
+    all: &CudaSlice<u64>,
+    ids: &CudaView<'_, i32>,
+    n: usize,
+    n_tabs: usize,
+    k: usize,
+) -> Result<CudaSlice<u64>, CudaError> {
+    debug_assert!(all.len() >= n_tabs * n && ids.len() >= k);
+    let func = func_for(dev, GATHER_PTRS_KERNEL_SRC, GATHER_PTRS)?;
+    // SAFETY: uninitialised, and thread `i < n_tabs * k` writes `out[i]`
+    // before anything reads it.
+    let mut out = unsafe { dev.alloc::<u64>(n_tabs * k) }
+        .map_err(|e| launch_err("gathered pointers alloc", e))?;
+    let cfg = elementwise_cfg(n_tabs * k);
+    // SAFETY: (const u64*, const int*, u64*, int x3) matched positionally;
+    // every id is below `n` (the routing kernel picks among `n`), so
+    // every read is inside `all`'s `n_tabs * n` entries.
+    unsafe {
+        func.launch(cfg, (all, ids, &mut out, n as i32, n_tabs as i32, k as i32))
+            .map_err(|e| launch_err("gather_ptrs", e))?;
+    }
+    Ok(out)
 }
 
 /// The routed prefill's combine, `[batch][n]` from `y[pairs][n]`.

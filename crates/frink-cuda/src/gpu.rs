@@ -445,15 +445,18 @@ pub(crate) fn enqueue_matvec_multi(
     ),
     CudaError,
 > {
-    use cudarc::driver::{DevicePtr, LaunchAsync};
+    use cudarc::driver::DevicePtr;
     let Some(first) = launches.first() else {
         return Err(CudaError::Unsupported(
             "matvec multi: no experts".to_string(),
         ));
     };
-    let kind = coalesced_kind(first.fn_name).ok_or_else(|| {
-        CudaError::Unsupported(format!("matvec multi: {} is not coalesced", first.fn_name))
-    })?;
+    if coalesced_kind(first.fn_name).is_none() {
+        return Err(CudaError::Unsupported(format!(
+            "matvec multi: {} is not coalesced",
+            first.fn_name
+        )));
+    }
     if launches.iter().any(|l| {
         l.fn_name != first.fn_name
             || l.rows != first.rows
@@ -466,11 +469,73 @@ pub(crate) fn enqueue_matvec_multi(
         ));
     }
     let k = launches.len();
+    let held: Vec<_> = launches
+        .iter()
+        .map(|l| resident_cuda_weights(dev, l.weights))
+        .collect::<Result<_, _>>()?;
+    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
+    let d_table = crate::xfer::htod(dev, "matvec multi table", &table)?;
+    let shape = MultiShape::of(first);
+    // SAFETY: the table holds `k` live device pointers to `rows *
+    // row_bytes` bytes of one coalesced kind each (checked above), held
+    // by the caller until its wait.
+    let d_out =
+        unsafe { enqueue_matvec_multi_table(dev, &shape, &d_table.slice(..), k, d_x, x_stride) }?;
+    Ok((d_out, held))
+}
+
+/// The shape every expert of a multi launch shares.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MultiShape {
+    pub fn_name: &'static str,
+    pub rows: usize,
+    pub row_bytes: usize,
+    pub n_blocks_per_row: usize,
+}
+
+impl MultiShape {
+    pub(crate) fn of(l: &MatvecLaunch<'_>) -> Self {
+        Self {
+            fn_name: l.fn_name,
+            rows: l.rows,
+            row_bytes: l.row_bytes,
+            n_blocks_per_row: l.n_blocks_per_row,
+        }
+    }
+}
+
+/// The launch half of [`enqueue_matvec_multi`], with the weights'
+/// device pointers already in a device table: `table[j]` is slot `j`'s
+/// weights. The routed decode gathers that table on the device from the
+/// chosen experts' ids, so no host round trip picks them.
+///
+/// # Safety
+/// `table` holds `k` device pointers, each to `shape.rows *
+/// shape.row_bytes` live bytes of `shape.fn_name`'s kind, alive until
+/// the stream has run the launch; `d_x` covers `(k - 1) * x_stride +
+/// shape.n_blocks_per_row` blocks of activations.
+pub(crate) unsafe fn enqueue_matvec_multi_table(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    shape: &MultiShape,
+    table: &cudarc::driver::CudaView<'_, u64>,
+    k: usize,
+    d_x: &cudarc::driver::CudaSlice<f32>,
+    x_stride: usize,
+) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
+    use cudarc::driver::{DeviceSlice, LaunchAsync};
+    let kind = coalesced_kind(shape.fn_name).ok_or_else(|| {
+        CudaError::Unsupported(format!("matvec multi: {} is not coalesced", shape.fn_name))
+    })?;
+    if k == 0 || table.len() < k {
+        return Err(CudaError::Unsupported(
+            "matvec multi: the table is shorter than its slots".to_string(),
+        ));
+    }
     let width = MatvecWidth::from_env();
     let wpr = crate::matvec_kinds::coalesced::matvec_wpr_override().unwrap_or_else(|| {
         crate::matvec_kinds::coalesced::wpr_for(
-            first.rows,
-            first.n_blocks_per_row,
+            shape.rows,
+            shape.n_blocks_per_row,
             32 / kind.lanes(width),
         )
     });
@@ -482,18 +547,12 @@ pub(crate) fn enqueue_matvec_multi(
             kind.entry
         ))
     })?;
-    let held: Vec<_> = launches
-        .iter()
-        .map(|l| resident_cuda_weights(dev, l.weights))
-        .collect::<Result<_, _>>()?;
-    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
-    let d_table = crate::xfer::htod(dev, "matvec multi table", &table)?;
     // SAFETY: as for `enqueue_matvec_at`, per expert: each `blockIdx.y`
     // slot writes every one of its `rows` outputs.
-    let mut d_out = unsafe { alloc_out(dev, k * first.rows, "matvec multi output") }?;
+    let mut d_out = unsafe { alloc_out(dev, k * shape.rows, "matvec multi output") }?;
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (
-            first.rows.div_ceil(COALESCED_WARPS_PER_BLOCK / wpr) as u32,
+            shape.rows.div_ceil(COALESCED_WARPS_PER_BLOCK / wpr) as u32,
             k as u32,
             1,
         ),
@@ -501,27 +560,26 @@ pub(crate) fn enqueue_matvec_multi(
         shared_mem_bytes: 0,
     };
     // SAFETY: (const void*, const float*, float*, int x4) matched
-    // positionally by the kernel's FX_MULTI parameter list; the table
-    // holds `k` live device pointers to `rows * row_bytes` bytes each
-    // (checked above, held until the caller's wait), `d_x` covers
-    // `(k - 1) * x_stride + n_blocks_per_row` blocks' worth of
-    // activations (the caller's shape), and `d_out` is `k * rows`.
+    // positionally by the kernel's FX_MULTI parameter list; the table's
+    // first `k` pointers are live weights of this kind and shape and `d_x`
+    // covers every slot's activations (the caller's contract), and
+    // `d_out` is `k * rows`.
     unsafe {
         func.launch(
             cfg,
             (
-                &d_table,
+                table,
                 d_x,
                 &mut d_out,
-                first.rows as i32,
-                first.row_bytes as i32,
-                first.n_blocks_per_row as i32,
+                shape.rows as i32,
+                shape.row_bytes as i32,
+                shape.n_blocks_per_row as i32,
                 x_stride as i32,
             ),
         )
         .map_err(|e| CudaError::Launch(format!("kernel {} multi: {e:?}", kind.entry)))?;
     }
-    Ok((d_out, held))
+    Ok(d_out)
 }
 
 /// [`enqueue_matvec`] at an explicit width and warps per row, so the

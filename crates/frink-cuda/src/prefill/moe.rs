@@ -13,10 +13,13 @@ use super::enqueue::{
     enqueue_add_bias_tab_rows, enqueue_axpy, enqueue_moe_combine, enqueue_moe_combine_rows,
     enqueue_router_f32,
 };
-use super::{run_expert, ExpertBiasCuda, ExpertProjCuda, Held, ProjWeights, RouteFn, RouterCuda};
+use super::{
+    run_expert, DeviceRouting, ExpertBiasCuda, ExpertProjCuda, Held, ProjWeights, RouteFn,
+    RouterCuda,
+};
 use crate::gpu::{glu_mul_device, shared_device, CudaError, GluCuda};
 use crate::xfer;
-use cudarc::driver::{CudaDevice, CudaSlice};
+use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut};
 use std::sync::Arc;
 
 /// A routed layer's FFN over `normed2` (`batch` rows): the summed,
@@ -34,11 +37,20 @@ pub(super) fn run_routed(
     ffn_dim: usize,
     index: usize,
     route: &mut RouteFn<'_, '_>,
-) -> Result<CudaSlice<f32>, CudaError> {
+    device: Option<(DeviceRouting<'_>, CudaViewMut<'_, i32>)>,
+) -> Result<(CudaSlice<f32>, bool), CudaError> {
     if batch > 1 {
-        return run_routed_batch(
+        let out = run_routed_batch(
             dev, held, router, glu, normed2, batch, hidden_dim, ffn_dim, index, route,
-        );
+        )?;
+        return Ok((out, false));
+    }
+    if let Some((spec, mut ids)) = device {
+        if let Some(out) = super::moe_device::run_device_routed(
+            dev, held, router, glu, normed2, hidden_dim, ffn_dim, &spec, &mut ids,
+        )? {
+            return Ok((out, true));
+        }
     }
     // The layer's one host wait: the router's logits, for the caller's
     // routing.
@@ -57,7 +69,7 @@ pub(super) fn run_routed(
     // All the experts' gate, up and down in one launch each when their
     // kinds have a coalesced matvec; one expert at a time otherwise.
     if let Some(sum) = run_experts_together(dev, held, &picks, glu, normed2, hidden_dim, ffn_dim)? {
-        return Ok(sum);
+        return Ok((sum, false));
     }
     let mut sum = dev
         .alloc_zeros::<f32>(hidden_dim)
@@ -66,7 +78,7 @@ pub(super) fn run_routed(
         let y = run_expert(dev, held, ex, glu, normed2, 1, ffn_dim)?;
         enqueue_axpy(dev, &mut sum, &y, *w, hidden_dim)?;
     }
-    Ok(sum)
+    Ok((sum, false))
 }
 
 /// Whether a routed layer can ride the stack in a prefill batch on this
@@ -232,8 +244,8 @@ fn run_routed_batch(
     let mut u = grouped(held, Proj::Up, &x16, &gather, hidden_dim)?;
     drop(x16);
     if let Some(((gb, ub, _), pg)) = &biases {
-        enqueue_add_bias_tab_rows(dev, &mut g, gb, pg, pairs, ffn_dim)?;
-        enqueue_add_bias_tab_rows(dev, &mut u, ub, pg, pairs, ffn_dim)?;
+        enqueue_add_bias_tab_rows(dev, &mut g, &gb.slice(..), Some(pg), pairs, ffn_dim)?;
+        enqueue_add_bias_tab_rows(dev, &mut u, &ub.slice(..), Some(pg), pairs, ffn_dim)?;
     }
     let act = glu_mul_device(dev, glu, &g, &u, pairs * ffn_dim)?;
     drop((g, u));
@@ -243,7 +255,7 @@ fn run_routed_batch(
     let mut d = grouped(held, Proj::Down, &act16, &identity, ffn_dim)?;
     drop(act16);
     if let Some(((_, _, db), pg)) = &biases {
-        enqueue_add_bias_tab_rows(dev, &mut d, db, pg, pairs, hidden_dim)?;
+        enqueue_add_bias_tab_rows(dev, &mut d, &db.slice(..), Some(pg), pairs, hidden_dim)?;
     }
     let d_pair_of = xfer::htod(dev, "routed pairs", &pair_of)?;
     // `weights` is token-major in slot order, the order of `pair_of`.
@@ -314,25 +326,19 @@ fn run_experts_together(
     }
     // Biased experts (gpt-oss): slot `j`'s rows gain expert `j`'s biases.
     let ex_bias: Vec<_> = picks.iter().map(|(ex, _)| ex.bias).collect();
-    let biases = match bias_tables(dev, held, &ex_bias)? {
-        Some(tabs) => {
-            let slots: Vec<i32> = (0..k as i32).collect();
-            Some((tabs, xfer::htod(dev, "routed slots", &slots)?))
-        }
-        None => None,
-    };
+    let biases = bias_tables(dev, held, &ex_bias)?;
     let (mut g, wg) = crate::gpu::enqueue_matvec_multi(dev, &gate, x, 0)?;
     let (mut u, wu) = crate::gpu::enqueue_matvec_multi(dev, &up, x, 0)?;
-    if let Some(([gb, ub, _], slots)) = &biases {
-        enqueue_add_bias_tab_rows(dev, &mut g, gb, slots, k, ffn_dim)?;
-        enqueue_add_bias_tab_rows(dev, &mut u, ub, slots, k, ffn_dim)?;
+    if let Some([gb, ub, _]) = &biases {
+        enqueue_add_bias_tab_rows(dev, &mut g, &gb.slice(..), None, k, ffn_dim)?;
+        enqueue_add_bias_tab_rows(dev, &mut u, &ub.slice(..), None, k, ffn_dim)?;
     }
     let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
     drop((g, u));
     let (mut d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
     drop(act);
-    if let Some(([_, _, db], slots)) = &biases {
-        enqueue_add_bias_tab_rows(dev, &mut d, db, slots, k, hidden_dim)?;
+    if let Some([_, _, db]) = &biases {
+        enqueue_add_bias_tab_rows(dev, &mut d, &db.slice(..), None, k, hidden_dim)?;
     }
     held.weights.extend(wg.into_iter().chain(wu).chain(wd));
     let weights: Vec<f32> = picks.iter().map(|(_, w)| *w).collect();

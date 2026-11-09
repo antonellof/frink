@@ -135,7 +135,8 @@ extern "C" __global__ void moe_combine_f32(
 "#;
 
 /// A routed prefill's per-pair bias: row `r` of `x` gains the bias row
-/// of its expert, `tab[row_group[r]]` (gpt-oss's `ggml_add_id`).
+/// of its expert, `tab[row_group[r]]` (gpt-oss's `ggml_add_id`), or
+/// `tab[r]` when `row_group` is null (a decode token's slots).
 pub const ADD_BIAS_TAB_ROWS_KERNEL_SRC: &str = r#"
 extern "C" __global__ void add_bias_tab_rows_f32(
     float* x,
@@ -146,8 +147,135 @@ extern "C" __global__ void add_bias_tab_rows_f32(
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int r = blockIdx.y;
     if (i < n) {
-        const float* b = (const float*)tab[row_group[r]];
+        const float* b = (const float*)tab[row_group != nullptr ? row_group[r] : r];
         x[(size_t)r * n + i] += b[i];
+    }
+}
+"#;
+
+/// A decode token's routing on the device, one warp per token row
+/// (`blockIdx.x`): the top `k` of `n_experts` logits (`bias` added
+/// first when not null, gpt-oss's router bias) and their weights, ids
+/// and weights in the order the host's routing returns them, so the
+/// combine sums them as the host does. `mode`:
+///
+/// * 0, `route_top_k_softmax`: a softmax over every expert, the top `k`
+///   by probability, their probabilities;
+/// * 1, the same with the chosen renormalised (`norm_topk_prob`);
+/// * 2, `route_top_k_softmax_weight`: the top `k` by logit and a
+///   softmax over the chosen alone (gpt-oss).
+///
+/// A tie goes to the lower expert id. `n_experts <= 256`, `k <= 16`;
+/// the launch refuses more.
+pub const MOE_TOPK_KERNEL_SRC: &str = r#"
+#define FX_TOPK_PER_LANE 8
+#define FX_TOPK_MAX_K 16
+
+__device__ __forceinline__ float frink_inf_tk() {
+    return __int_as_float(0x7f800000);
+}
+
+extern "C" __global__ void moe_topk_f32(
+    const float* __restrict__ logits,
+    const float* __restrict__ bias,
+    int n_experts,
+    int k,
+    int mode,
+    int* __restrict__ ids_out,
+    float* __restrict__ w_out
+) {
+    const int t = blockIdx.x;
+    const int lane = threadIdx.x;
+    const unsigned FULL = 0xffffffffu;
+    const float* lg = logits + (size_t)t * n_experts;
+    float v[FX_TOPK_PER_LANE];
+#pragma unroll
+    for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+        const int e = lane + 32 * j;
+        v[j] = e < n_experts ? lg[e] + (bias != nullptr ? bias[e] : 0.0f) : -frink_inf_tk();
+    }
+    // The softmax over every expert (modes 0 and 1).
+    float mx = -frink_inf_tk();
+#pragma unroll
+    for (int j = 0; j < FX_TOPK_PER_LANE; j++) mx = fmaxf(mx, v[j]);
+    for (int off = 16; off > 0; off >>= 1) mx = fmaxf(mx, __shfl_xor_sync(FULL, mx, off));
+    float sum = 0.0f;
+#pragma unroll
+    for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+        if (lane + 32 * j < n_experts) sum += expf(v[j] - mx);
+    }
+    for (int off = 16; off > 0; off >>= 1) sum += __shfl_xor_sync(FULL, sum, off);
+
+    float cv[FX_TOPK_MAX_K];
+    int ci[FX_TOPK_MAX_K];
+    for (int s = 0; s < k; s++) {
+        float bv = -frink_inf_tk();
+        int bi = 0x7fffffff;
+#pragma unroll
+        for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+            const int e = lane + 32 * j;
+            if (e < n_experts && (v[j] > bv || (v[j] == bv && e < bi))) {
+                bv = v[j];
+                bi = e;
+            }
+        }
+        for (int off = 16; off > 0; off >>= 1) {
+            const float ov = __shfl_xor_sync(FULL, bv, off);
+            const int oi = __shfl_xor_sync(FULL, bi, off);
+            if (ov > bv || (ov == bv && oi < bi)) {
+                bv = ov;
+                bi = oi;
+            }
+        }
+        cv[s] = bv;
+        ci[s] = bi;
+#pragma unroll
+        for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+            if (lane + 32 * j == bi) v[j] = -frink_inf_tk();
+        }
+    }
+    if (lane != 0) return;
+    int* ids = ids_out + (size_t)t * k;
+    float* w = w_out + (size_t)t * k;
+    if (mode == 2) {
+        float es = 0.0f;
+        for (int s = 0; s < k; s++) es += expf(cv[s] - cv[0]);
+        for (int s = 0; s < k; s++) {
+            const float e = expf(cv[s] - cv[0]);
+            w[s] = es > 0.0f ? e / es : e;
+            ids[s] = ci[s];
+        }
+        return;
+    }
+    float ts = 0.0f;
+    for (int s = 0; s < k; s++) {
+        const float p = expf(cv[s] - mx) / sum;
+        w[s] = p;
+        ts += p;
+        ids[s] = ci[s];
+    }
+    if (mode == 1) {
+        for (int s = 0; s < k; s++) w[s] = w[s] / ts;
+    }
+}
+"#;
+
+/// Each table's pointers for a decode token's chosen experts: `out[t][s]
+/// = all[t][ids[s]]` for `n_tabs` tables of `n` experts, so the routed
+/// matvecs read the chosen experts' weights without the host picking.
+pub const GATHER_PTRS_KERNEL_SRC: &str = r#"
+extern "C" __global__ void gather_ptrs_u64(
+    const unsigned long long* __restrict__ all,
+    const int* __restrict__ ids,
+    unsigned long long* __restrict__ out,
+    int n,
+    int n_tabs,
+    int k
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_tabs * k) {
+        const int tab = i / k;
+        out[i] = all[(size_t)tab * n + ids[i - tab * k]];
     }
 }
 "#;
@@ -485,6 +613,8 @@ pub const AXPY: (&str, &str) = ("frink_prefill_axpy", "axpy_f32");
 pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine_f32");
 pub const MOE_COMBINE_ROWS: (&str, &str) =
     ("frink_prefill_moe_combine_rows", "moe_combine_rows_f32");
+pub const MOE_TOPK: (&str, &str) = ("frink_prefill_moe_topk", "moe_topk_f32");
+pub const GATHER_PTRS: (&str, &str) = ("frink_prefill_gather_ptrs", "gather_ptrs_u64");
 pub const ADD_BIAS_TAB_ROWS: (&str, &str) =
     ("frink_prefill_add_bias_tab_rows", "add_bias_tab_rows_f32");
 pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
