@@ -63,6 +63,9 @@ mod glu;
 pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod graph;
+/// The decode matvec launch path: plan, enqueue, multi and fused FFN.
+#[cfg(feature = "cuda")]
+mod matvec_launch;
 #[cfg(feature = "cuda")]
 pub mod mul_mm_launch;
 /// One dense prefill layer resident on the device (#259).
