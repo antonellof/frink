@@ -210,38 +210,22 @@ fn run_routed_batch(
         Ok(out)
     };
     let pairs = gather.len();
-    // Every chosen expert biased or none (gpt-oss biases all of them):
-    // each pair's bias row is its expert's, through a table.
-    let biases = match experts.iter().filter(|e| e.bias.is_some()).count() {
-        0 => None,
-        n if n == experts.len() => {
+    // Each pair's bias rows are its expert's, through the tables.
+    let ex_bias: Vec<_> = experts.iter().map(|e| e.bias).collect();
+    let biases = match bias_tables(dev, held, &ex_bias)? {
+        Some(tabs) => {
             let pair_group: Vec<i32> = group_off
                 .windows(2)
                 .enumerate()
                 .flat_map(|(g, w)| std::iter::repeat_n(g as i32, (w[1] - w[0]) as usize))
                 .collect();
-            // 0, 1, 2: the gate's, up's and down's bias of each expert.
-            let mut table = |which: usize| -> Result<_, CudaError> {
-                let ptrs = experts
-                    .iter()
-                    .map(|e| {
-                        let b = e.bias.as_ref().map_or(&[][..], |b: &ExpertBiasCuda<'_>| {
-                            [b.gate, b.up, b.down][which]
-                        });
-                        let v = held.vector(dev, b)?;
-                        Ok(*cudarc::driver::DevicePtr::device_ptr(&v.slice))
-                    })
-                    .collect::<Result<Vec<u64>, CudaError>>()?;
-                xfer::htod(dev, "routed bias table", &ptrs)
-            };
-            let tabs = (table(0)?, table(1)?, table(2)?);
-            Some((tabs, xfer::htod(dev, "routed pair experts", &pair_group)?))
-        }
-        _ => {
-            return Err(CudaError::Unsupported(
-                "resident stack: a layer's experts with and without biases".to_string(),
+            let [gb, ub, db] = tabs;
+            Some((
+                (gb, ub, db),
+                xfer::htod(dev, "routed pair experts", &pair_group)?,
             ))
         }
+        None => None,
     };
     let x16 = crate::mul_mm_launch::f32_to_f16(dev, normed2, batch * hidden_dim)?;
     let mut g = grouped(held, Proj::Gate, &x16, &gather, hidden_dim)?;
@@ -267,9 +251,42 @@ fn run_routed_batch(
     enqueue_moe_combine_rows(dev, &d, &d_pair_of, &d_w, k, hidden_dim, batch)
 }
 
+/// The device bias tables of a set of routed experts, one entry per
+/// expert in order: the gate's, up's and down's biases. `None` when no
+/// expert carries biases. Refused when some do and some do not, which no
+/// checkpoint does (gpt-oss biases every expert).
+fn bias_tables(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    biases: &[Option<ExpertBiasCuda<'_>>],
+) -> Result<Option<[CudaSlice<u64>; 3]>, CudaError> {
+    match biases.iter().filter(|b| b.is_some()).count() {
+        0 => return Ok(None),
+        n if n == biases.len() => {}
+        _ => {
+            return Err(CudaError::Unsupported(
+                "resident stack: a layer's experts with and without biases".to_string(),
+            ))
+        }
+    }
+    let mut table = |which: usize| -> Result<CudaSlice<u64>, CudaError> {
+        let ptrs = biases
+            .iter()
+            .flatten()
+            .map(|b| {
+                let v = held.vector(dev, [b.gate, b.up, b.down][which])?;
+                Ok(*cudarc::driver::DevicePtr::device_ptr(&v.slice))
+            })
+            .collect::<Result<Vec<u64>, CudaError>>()?;
+        xfer::htod(dev, "routed bias table", &ptrs)
+    };
+    Ok(Some([table(0)?, table(1)?, table(2)?]))
+}
+
 /// A token's routed experts as five launches: every expert's gate, every
 /// expert's up, the gated activation over all of them, every expert's
-/// down, and the weighted combine. `None`, before any launch, when the
+/// down, and the weighted combine, with three bias launches between
+/// them for experts that carry biases. `None`, before any launch, when the
 /// experts' projections do not share a coalesced kind
 /// (`gpu::enqueue_matvec_multi`), and the caller runs them one by one.
 fn run_experts_together(
@@ -282,10 +299,6 @@ fn run_experts_together(
     ffn_dim: usize,
 ) -> Result<Option<CudaSlice<f32>>, CudaError> {
     let k = picks.len();
-    // Biased experts (gpt-oss) take the per-expert loop, which adds them.
-    if picks.iter().any(|(ex, _)| ex.bias.is_some()) {
-        return Ok(None);
-    }
     let gate: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.gate.matvec).collect();
     let up: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.up.matvec).collect();
     let down: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.down.matvec).collect();
@@ -299,12 +312,28 @@ fn run_experts_together(
     if k == 0 || !same(&gate) || !same(&up) || !same(&down) {
         return Ok(None);
     }
-    let (g, wg) = crate::gpu::enqueue_matvec_multi(dev, &gate, x, 0)?;
-    let (u, wu) = crate::gpu::enqueue_matvec_multi(dev, &up, x, 0)?;
+    // Biased experts (gpt-oss): slot `j`'s rows gain expert `j`'s biases.
+    let ex_bias: Vec<_> = picks.iter().map(|(ex, _)| ex.bias).collect();
+    let biases = match bias_tables(dev, held, &ex_bias)? {
+        Some(tabs) => {
+            let slots: Vec<i32> = (0..k as i32).collect();
+            Some((tabs, xfer::htod(dev, "routed slots", &slots)?))
+        }
+        None => None,
+    };
+    let (mut g, wg) = crate::gpu::enqueue_matvec_multi(dev, &gate, x, 0)?;
+    let (mut u, wu) = crate::gpu::enqueue_matvec_multi(dev, &up, x, 0)?;
+    if let Some(([gb, ub, _], slots)) = &biases {
+        enqueue_add_bias_tab_rows(dev, &mut g, gb, slots, k, ffn_dim)?;
+        enqueue_add_bias_tab_rows(dev, &mut u, ub, slots, k, ffn_dim)?;
+    }
     let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
     drop((g, u));
-    let (d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
+    let (mut d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
     drop(act);
+    if let Some(([_, _, db], slots)) = &biases {
+        enqueue_add_bias_tab_rows(dev, &mut d, db, slots, k, hidden_dim)?;
+    }
     held.weights.extend(wg.into_iter().chain(wu).chain(wd));
     let weights: Vec<f32> = picks.iter().map(|(_, w)| *w).collect();
     let d_w = xfer::htod(dev, "routed weights", &weights)?;

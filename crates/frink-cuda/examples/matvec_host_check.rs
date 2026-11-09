@@ -31,6 +31,8 @@ fn f16_fields(name: &str) -> &'static [usize] {
         "Q4_K" | "Q5_K" => &[0, 2],
         "Q6_K" => &[208],
         "Q8_0" => &[0],
+        // An E8M0 scale byte, not an f16 field: kept finite in `main`.
+        "MXFP4" => &[],
         "Q4_1" | "Q5_1" => &[0, 2],
         "TQ1_0" => &[52],
         "PTQ1_0" => &[26],
@@ -72,6 +74,11 @@ fn main() {
                 for blk in 0..ROWS * n_blocks {
                     for at in f16_fields(mv.name) {
                         weights[blk * mm.block_bytes + at + 1] &= 0x3F;
+                    }
+                    // MXFP4's E8M0 byte near 2^0, both sides of the bias.
+                    if mv.name == "MXFP4" {
+                        let e = &mut weights[blk * mm.block_bytes];
+                        *e = 120 + *e % 16;
                     }
                 }
                 let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.019).cos()).collect();

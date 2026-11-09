@@ -1356,7 +1356,7 @@ mod tests {
     ///
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware. The WIDE width (the default since #133) has NEVER executed on a GPU; the narrow width passed on an RTX 3060/3070. Run with --ignored and record the result"]
+    #[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs) at both widths for every coalesced kind, MXFP4 included; the narrow width earlier on an RTX 3060/3070"]
     fn every_coalesced_matvec_matches_its_twin_at_both_widths() {
         use crate::matvec_kinds::coalesced::{MatvecWidth, COALESCED};
         let rows = 37usize; // not a multiple of the warps per block
@@ -1379,7 +1379,14 @@ mod tests {
                 for (n_blocks_per_row, seed) in [(3usize, 7u32), (12, 23)] {
                     let row_bytes = n_blocks_per_row * mm.block_bytes;
                     let cols = n_blocks_per_row * mm.block_elems;
-                    let weights = pseudo_bytes(seed, rows * row_bytes);
+                    let mut weights = pseudo_bytes(seed, rows * row_bytes);
+                    // MXFP4's E8M0 scale near 2^0: a random byte reaches
+                    // 2^128, an infinity no relative tolerance can hold.
+                    if mv.name == "MXFP4" {
+                        for b in weights.chunks_mut(mm.block_bytes) {
+                            b[0] = 120 + b[0] % 16;
+                        }
+                    }
                     let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
                     // Enter through the ordinary kernel identity, not the
                     // coalesced one, so this exercises the ROUTING too.
