@@ -17,13 +17,12 @@ are the ones worth reading twice.
 
 ### Changed
 
-- **CUDA decode matvecs give a row several warps.** The coalesced
-  Q4_K / Q5_K / Q6_K / Q8_0 matvecs gave each output row one warp,
-  which walked the row's blocks serially. A row now gets as many warps
-  as it has trips, up to 8, and they add their sums through shared
-  memory, as llama.cpp's decode matvec does. On an A10G that lifted
-  Llama-3.1-8B Q4_K_M `tg128` from 65.0 to 71.3 tokens/s.
-  `FRINK_CUDA_MATVEC_WPR` overrides the choice for an A/B (#133).
+- **Gemma's layers stay on the GPU under CUDA.** The resident CUDA stack
+  refused a GeGLU feed-forward, so Gemma 2 and 3 ran every decode token
+  and prefill step on the per-op path, 337 host waits a Gemma-3-12B
+  token. The stack now runs GeGLU in ggml-cuda's tanh form beside
+  SwiGLU. On an L40S, Gemma-3-12B Q4_K_M `pp512` went from 82 to 727
+  tokens/s and `tg128` from 33 to 55 (#133, #259).
 
 ## [0.58.0] - 2026-11-08
 
