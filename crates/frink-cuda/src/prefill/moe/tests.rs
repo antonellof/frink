@@ -4,7 +4,7 @@
 
 use super::super::tests::{
     assert_close, host_causal_gqa_sinks, host_rms_norm_rows, host_swiglu_oai, q8_0_proj,
-    small_q8_0, wave,
+    small_q8_0, wave, BATCH_GEMM_TOL,
 };
 use super::super::*;
 use crate::mul_mm::Q8_0;
@@ -56,9 +56,9 @@ const ROUTE_MARGIN: f32 = 0.05;
 
 /// How far a batch's device logits may sit from the host's, relative to
 /// the larger of the logit and the token's RMS (`assert_close`): the
-/// attention projections run on the tensor-core GEMM's f16 operands,
-/// which moved token 0's logits by 0.17% of their RMS on an A10G.
-const BATCH_LOGIT_TOL: f32 = 5e-3;
+/// batch GEMM's q8_1 activations, `BATCH_GEMM_TOL`'s reason (1.4% of the
+/// RMS measured on an A100).
+const BATCH_LOGIT_TOL: f32 = BATCH_GEMM_TOL;
 
 /// The routed fixture's per-token logits and top-2 softmax picks, on the
 /// host. Kept apart from the device so the margins can be checked
@@ -449,7 +449,8 @@ fn routed_layer_matches_its_host_twin(batch: usize, oai: bool) {
     )
     .unwrap();
     assert_eq!(asked, batch, "the routing is asked once per token");
-    assert_close(&out.hidden, &twin.hidden, 1e-2, "routed layer hidden");
+    let tol = if batch == 1 { 1e-2 } else { BATCH_GEMM_TOL };
+    assert_close(&out.hidden, &twin.hidden, tol, "routed layer hidden");
 
     // Without a routing the same run is refused before the device.
     let err = launch_prefill_dense_stack(
@@ -728,11 +729,7 @@ fn device_routed_matches_its_host_twin(batch: usize) {
             vec![Some(want_ids)],
             "batch={batch} oai={oai}"
         );
-        assert_close(
-            &out.hidden,
-            &twin.hidden,
-            1e-2,
-            "device-routed layer hidden",
-        );
+        let tol = if batch == 1 { 1e-2 } else { BATCH_GEMM_TOL };
+        assert_close(&out.hidden, &twin.hidden, tol, "device-routed layer hidden");
     }
 }

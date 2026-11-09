@@ -173,6 +173,15 @@ pub(super) fn host_swiglu_oai(g: f32, u: f32) -> f32 {
     x / (1.0 + (A * -x).exp()) * (y + 1.0)
 }
 
+/// How far a prefill batch's outputs may sit from the f32 host twins,
+/// relative to the larger of the value and its vector's RMS: the batch
+/// GEMM quantizes its activations to q8_1 as llama.cpp's MMQ does (each
+/// value rounded to 1/254 of its 32-value run's amax), and on these
+/// fixtures, whose dots span only two runs, that moved K rows by up to
+/// 1.55% of their RMS on an A100. The f16 body this replaced stayed under
+/// 1%; the decode matvecs keep their own tighter bounds.
+pub(super) const BATCH_GEMM_TOL: f32 = 3e-2;
+
 pub(super) fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let rms = (want.iter().map(|w| w * w).sum::<f32>() / want.len().max(1) as f32).sqrt();
@@ -592,9 +601,9 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
     // off by 6e-3 in a vector of RMS about 1 after two residual adds.
     // A wrong kernel is off by a whole term. The GEMM's own exactness
     // is `mul_mm_launch`'s test.
-    assert_close(&out.k_rows, &k, 1e-2, "K rows");
-    assert_close(&out.v_rows, &v, 1e-2, "V rows");
-    assert_close(&out.hidden, &h, 1e-2, "hidden");
+    assert_close(&out.k_rows, &k, BATCH_GEMM_TOL, "K rows");
+    assert_close(&out.v_rows, &v, BATCH_GEMM_TOL, "V rows");
+    assert_close(&out.hidden, &h, BATCH_GEMM_TOL, "hidden");
 
     // The stack: the same layer twice with the hidden batch resident
     // between them must equal two single launches, K/V rows per layer.
