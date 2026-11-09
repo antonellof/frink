@@ -104,12 +104,14 @@ pub struct LayerRopeCuda<'a> {
     pub mscale: f32,
 }
 
-/// The optional per-layer attention ops the host body applies between
-/// the QKV projections and RoPE: the biases (Qwen2), the QK norms
+/// The optional per-layer attention ops the host body applies: the
+/// biases between the QKV projections and RoPE (Qwen2), the QK norms
 /// (Qwen3 / Gemma-3 per head, OLMoE whole vector; the weight's length
-/// says which). Built by `Decoder::fused_attn_extras`, the ONE
-/// exhaustive destructure of `AttnWeights`, so a field that arrives
-/// here has been accounted for there.
+/// says which), the attention sinks (gpt-oss: one logit per query head
+/// in the softmax, with no value) and the bias on `wo`'s output
+/// (gpt-oss). Built by `Decoder::fused_attn_extras`, the ONE exhaustive
+/// destructure of `AttnWeights`, so a field that arrives here has been
+/// accounted for there.
 #[derive(Clone, Copy, Default)]
 pub struct AttnExtrasCuda<'a> {
     pub q_bias: Option<&'a [f32]>,
@@ -117,6 +119,8 @@ pub struct AttnExtrasCuda<'a> {
     pub v_bias: Option<&'a [f32]>,
     pub q_norm: Option<&'a [f32]>,
     pub k_norm: Option<&'a [f32]>,
+    pub sinks: Option<&'a [f32]>,
+    pub o_bias: Option<&'a [f32]>,
 }
 
 /// One dense layer as the launch takes it.
@@ -144,6 +148,18 @@ pub struct ExpertProjCuda<'a> {
     pub gate: ProjWeights<'a>,
     pub up: ProjWeights<'a>,
     pub down: ProjWeights<'a>,
+    /// Its biases, for a routed expert that carries them (gpt-oss).
+    pub bias: Option<ExpertBiasCuda<'a>>,
+}
+
+/// A routed expert's biases: on its gate and up projections before the
+/// activation and on its down projection after, as `run_expert_oai`
+/// and `build_moe_ffn`'s `ggml_add_id`s add them.
+#[derive(Clone, Copy)]
+pub struct ExpertBiasCuda<'a> {
+    pub gate: &'a [f32],
+    pub up: &'a [f32],
+    pub down: &'a [f32],
 }
 
 /// An MoE layer's router, `[n_experts, hidden_dim]`.
@@ -608,10 +624,20 @@ fn check_layer_shapes(
     }
     norm_rows(layer.extras.q_norm, q_width)?;
     norm_rows(layer.extras.k_norm, kv_width)?;
+    if let Some(sinks) = layer.extras.sinks {
+        if sinks.len() != params.n_heads {
+            return Err(CudaError::Unsupported(format!(
+                "prefill dense layer: {} attention sinks for {} heads",
+                sinks.len(),
+                params.n_heads
+            )));
+        }
+    }
     for (bias, width) in [
         (layer.extras.q_bias, q_width),
         (layer.extras.k_bias, kv_width),
         (layer.extras.v_bias, kv_width),
+        (layer.extras.o_bias, hidden_dim),
     ] {
         if let Some(bias) = bias {
             if bias.len() != width {
@@ -861,14 +887,25 @@ fn run_layer_resident<'e>(
     };
     // One query row is the decode kernel's shape, split across the
     // keys; a batch is the prefill kernel's, one warp per row.
+    let sinks = match layer.extras.sinks {
+        Some(s) => Some(held.vector(dev, s)?),
+        None => None,
+    };
+    let sinks = sinks.as_ref().map(|s| &s.slice);
     let attn = if batch == 1 {
-        enqueue_decode_attn(dev, &q, k_all, v_all, &args)?
+        enqueue_decode_attn(dev, &q, k_all, v_all, &args, sinks)?
     } else {
-        enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args)?
+        enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args, sinks)?
     };
     drop(q);
     let mut o = held.proj(dev, &layer.o, &attn, batch)?;
     drop(attn);
+    // `wo`'s bias, on the projection before any norm of it, where
+    // `build_attn` adds `wo_b`.
+    if let Some(b) = layer.extras.o_bias {
+        let d_b = held.vector(dev, b)?;
+        enqueue_add_bias_rows(dev, &mut o, &d_b.slice, batch, hidden_dim)?;
+    }
     if let Some(post) = layer.post_attn_norm {
         let d_w = held.vector(dev, post)?;
         o = enqueue_rmsnorm_rows(dev, &o, &d_w.slice, batch, hidden_dim, rms_eps)?;
@@ -913,11 +950,22 @@ fn run_expert(
     batch: usize,
     ffn_dim: usize,
 ) -> Result<CudaSlice<f32>, CudaError> {
-    let gate = held.proj(dev, &ex.gate, x, batch)?;
-    let up = held.proj(dev, &ex.up, x, batch)?;
+    let mut gate = held.proj(dev, &ex.gate, x, batch)?;
+    let mut up = held.proj(dev, &ex.up, x, batch)?;
+    if let Some(b) = ex.bias {
+        let d_g = held.vector(dev, b.gate)?;
+        enqueue_add_bias_rows(dev, &mut gate, &d_g.slice, batch, ffn_dim)?;
+        let d_u = held.vector(dev, b.up)?;
+        enqueue_add_bias_rows(dev, &mut up, &d_u.slice, batch, ffn_dim)?;
+    }
     let act = glu_mul_device(dev, glu, &gate, &up, batch * ffn_dim)?;
     drop((gate, up));
-    held.proj(dev, &ex.down, &act, batch)
+    let mut down = held.proj(dev, &ex.down, &act, batch)?;
+    if let Some(b) = ex.bias {
+        let d_d = held.vector(dev, b.down)?;
+        enqueue_add_bias_rows(dev, &mut down, &d_d.slice, batch, ex.down.rows())?;
+    }
+    Ok(down)
 }
 
 #[cfg(test)]

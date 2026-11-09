@@ -196,12 +196,17 @@ extern "C" __global__ void decode_attn_partial_f32(
 }
 
 // out [n_heads, head_dim]. One block per head, one thread per channel.
+// `sinks`, when not null, is one logit per query head (gpt-oss's
+// `attn_sinks`): a key with no value that takes part in the softmax's
+// max and sum, folded in after every real key as `frink_core`'s
+// `online_attn_accumulate` and ggml's flash-attention sink arm fold it.
 extern "C" __global__ void decode_attn_combine_f32(
     const float* __restrict__ part,
     float* __restrict__ out,
     int n_heads,
     int head_dim,
-    int n_chunks
+    int n_chunks,
+    const float* __restrict__ sinks
 ) {
     const int h = blockIdx.x;
     const int d = threadIdx.x;
@@ -218,6 +223,13 @@ extern "C" __global__ void decode_attn_combine_f32(
         const float fc = (mc == -frink_inf_da()) ? 0.f : expf(mc - big);
         num += fc * part_acc[((size_t)h * n_chunks + c) * head_dim + d];
         den += fc * ml[c * 2 + 1];
+    }
+    if (sinks != nullptr) {
+        const float s = sinks[h];
+        const float m2 = fmaxf(big, s);
+        const float a = (big == -frink_inf_da()) ? 0.f : expf(big - m2);
+        num *= a;
+        den = den * a + expf(s - m2);
     }
     out[(size_t)h * head_dim + d] = (den > 0.f) ? num / den : 0.f;
 }
@@ -260,6 +272,7 @@ pub fn decode_attn_twin(
     window: Option<usize>,
     scale: f32,
     softcap: Option<f32>,
+    sinks: Option<&[f32]>,
 ) -> Vec<f32> {
     assert!(head_dim_ok(head_dim), "head_dim {head_dim}");
     let softcap = softcap.filter(|c| *c > 0.0).unwrap_or(0.0);
@@ -392,6 +405,17 @@ pub fn decode_attn_twin(
                 num += fc * part_acc[c * head_dim + d];
                 den += fc * part_ml[c * 2 + 1];
             }
+            if let Some(sinks) = sinks {
+                let s = sinks[h];
+                let m2 = big.max(s);
+                let a = if big == f32::NEG_INFINITY {
+                    0.0
+                } else {
+                    (big - m2).exp()
+                };
+                num *= a;
+                den = den * a + (s - m2).exp();
+            }
             out[h * head_dim + d] = if den > 0.0 { num / den } else { 0.0 };
         }
     }
@@ -417,6 +441,7 @@ mod tests {
         window: Option<usize>,
         scale: f32,
         softcap: Option<f32>,
+        sinks: Option<&[f32]>,
     ) -> Vec<f32> {
         let (lo, hi) = key_range(seq_len, window);
         let group = n_heads / n_kv_heads;
@@ -435,9 +460,16 @@ mod tests {
                     x
                 })
                 .collect();
-            let mx = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            // A sink is one more logit in the max and the sum, with no
+            // value: the plain definition of `ggml_soft_max_add_sinks`.
+            let sink = sinks.map(|s| s[h] as f64);
+            let mx = s
+                .iter()
+                .cloned()
+                .chain(sink)
+                .fold(f64::NEG_INFINITY, f64::max);
             let e: Vec<f64> = s.iter().map(|x| (x - mx).exp()).collect();
-            let z: f64 = e.iter().sum();
+            let z: f64 = e.iter().sum::<f64>() + sink.map_or(0.0, |s| (s - mx).exp());
             for (ti, t) in (lo..hi).enumerate() {
                 let vt = &v[(t * n_kv_heads + kv_h) * hd..][..hd];
                 for d in 0..hd {
@@ -474,21 +506,28 @@ mod tests {
                 (300, Some(100), None),
                 (130, None, Some(30.0)),
             ] {
-                let q = wave(n_heads * hd, 0.3);
-                let k = wave(seq_len * n_kv * hd, 0.7);
-                let v = wave(seq_len * n_kv * hd, 1.1);
-                let scale = (hd as f32).sqrt().recip();
-                let got = decode_attn_twin(
-                    &q, &k, &v, n_heads, n_kv, hd, seq_len, window, scale, softcap,
-                );
-                let want = naive(
-                    &q, &k, &v, n_heads, n_kv, hd, seq_len, window, scale, softcap,
-                );
-                for (i, (g, w)) in got.iter().zip(&want).enumerate() {
-                    assert!(
-                        (g - w).abs() <= 2e-5 * w.abs().max(1.0),
-                        "hd={hd} seq={seq_len} window={window:?} cap={softcap:?} [{i}]: twin {g} want {w}"
+                // No sink, one below every score, one above them all.
+                for sink in [None, Some(-3.0f32), Some(4.0)] {
+                    let q = wave(n_heads * hd, 0.3);
+                    let k = wave(seq_len * n_kv * hd, 0.7);
+                    let v = wave(seq_len * n_kv * hd, 1.1);
+                    let scale = (hd as f32).sqrt().recip();
+                    let sinks: Option<Vec<f32>> =
+                        sink.map(|s| (0..n_heads).map(|h| s + 0.25 * h as f32).collect());
+                    let sinks = sinks.as_deref();
+                    let got = decode_attn_twin(
+                        &q, &k, &v, n_heads, n_kv, hd, seq_len, window, scale, softcap, sinks,
                     );
+                    let want = naive(
+                        &q, &k, &v, n_heads, n_kv, hd, seq_len, window, scale, softcap, sinks,
+                    );
+                    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                        assert!(
+                            (g - w).abs() <= 2e-5 * w.abs().max(1.0),
+                            "hd={hd} seq={seq_len} window={window:?} cap={softcap:?} \
+                             sink={sink:?} [{i}]: twin {g} want {w}"
+                        );
+                    }
                 }
             }
         }

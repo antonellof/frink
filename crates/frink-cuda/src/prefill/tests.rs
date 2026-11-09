@@ -66,6 +66,20 @@ pub(super) fn host_causal_gqa(
     n_q: usize,
     a: &AttnArgs,
 ) -> Vec<f32> {
+    host_causal_gqa_sinks(q, k, v, n_q, a, None)
+}
+
+/// [`host_causal_gqa`] with one sink logit per head: a key with no
+/// value in the max and the sum (`ggml_soft_max_add_sinks`'s plain
+/// definition).
+pub(super) fn host_causal_gqa_sinks(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_q: usize,
+    a: &AttnArgs,
+    sinks: Option<&[f32]>,
+) -> Vec<f32> {
     let hd = a.head_dim;
     let group = a.n_heads / a.n_kv_heads.max(1);
     let mut out = vec![0f32; n_q * a.n_heads * hd];
@@ -86,8 +100,13 @@ pub(super) fn host_causal_gqa(
                     s
                 })
                 .collect();
-            let m = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut l = 0.0;
+            let sink = sinks.map(|s| s[h]);
+            let m = scores
+                .iter()
+                .cloned()
+                .chain(sink)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mut l = sink.map_or(0.0, |s| (s - m).exp());
             for s in scores.iter_mut() {
                 *s = (*s - m).exp();
                 l += *s;
@@ -146,6 +165,14 @@ fn host_gelu(x: f32) -> f32 {
     (0.5 * x * (1.0 + u.tanh())) as f32
 }
 
+/// gpt-oss's clamped SwiGLU, `frink_moe::swiglu_oai`'s arithmetic.
+pub(super) fn host_swiglu_oai(g: f32, u: f32) -> f32 {
+    use crate::gpu::{SWIGLU_OAI_ALPHA as A, SWIGLU_OAI_LIMIT as L};
+    let x = g.min(L);
+    let y = u.clamp(-L, L);
+    x / (1.0 + (A * -x).exp()) * (y + 1.0)
+}
+
 pub(super) fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let rms = (want.iter().map(|w| w * w).sum::<f32>() / want.len().max(1) as f32).sqrt();
@@ -182,6 +209,7 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
             gate: m(96, 64),
             up: m(96, 64),
             down: m(64, 96),
+            bias: None,
         }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
@@ -332,7 +360,7 @@ fn the_prefill_attention_tile_fits_its_shared_memory() {
 
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
-fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
+fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_a_softcap_and_sinks() {
     let dev = shared_device().unwrap();
     // One block; several blocks of rows whose keys span tiles; a head
     // of 256 (two float4s a lane) under GQA 2:1; and a window that
@@ -347,34 +375,42 @@ fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
         (40, 2, 1, 256, 3, None, Some(30.0)),
         (150, 4, 4, 96, 0, Some(33), None),
     ] {
-        let total = start_pos + n_q;
-        let q = wave(n_q * n_heads * head_dim, 0.2);
-        let k = wave(total * n_kv_heads * head_dim, 0.4);
-        let v = wave(total * n_kv_heads * head_dim, 0.6);
-        let args = AttnArgs {
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            start_pos,
-            window,
-            scale: (head_dim as f32).sqrt().recip(),
-            softcap,
-        };
-        let want = host_causal_gqa(&q, &k, &v, n_q, &args);
-        let d_q = dev.htod_copy(q).unwrap();
-        let d_k = dev.htod_copy(k).unwrap();
-        let d_v = dev.htod_copy(v).unwrap();
-        let out = enqueue_causal_gqa_prefill(&dev, &d_q, &d_k, &d_v, n_q, &args).unwrap();
-        let got = dev.dtoh_sync_copy(&out).unwrap();
-        assert_close(
-            &got,
-            &want,
-            1e-4,
-            &format!(
-                "attn n_q={n_q} hd={head_dim} start={start_pos} window={window:?} \
-                 softcap={softcap:?}"
-            ),
-        );
+        // No sinks, then gpt-oss's: one logit per head, below some rows'
+        // scores and above others'.
+        for sink in [None, Some(-1.0f32), Some(3.0)] {
+            let total = start_pos + n_q;
+            let q = wave(n_q * n_heads * head_dim, 0.2);
+            let k = wave(total * n_kv_heads * head_dim, 0.4);
+            let v = wave(total * n_kv_heads * head_dim, 0.6);
+            let args = AttnArgs {
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                start_pos,
+                window,
+                scale: (head_dim as f32).sqrt().recip(),
+                softcap,
+            };
+            let sinks: Option<Vec<f32>> =
+                sink.map(|s| (0..n_heads).map(|h| s + 0.5 * h as f32).collect());
+            let want = host_causal_gqa_sinks(&q, &k, &v, n_q, &args, sinks.as_deref());
+            let d_q = dev.htod_copy(q).unwrap();
+            let d_k = dev.htod_copy(k).unwrap();
+            let d_v = dev.htod_copy(v).unwrap();
+            let d_s = sinks.map(|s| dev.htod_copy(s).unwrap());
+            let out = enqueue_causal_gqa_prefill(&dev, &d_q, &d_k, &d_v, n_q, &args, d_s.as_ref())
+                .unwrap();
+            let got = dev.dtoh_sync_copy(&out).unwrap();
+            assert_close(
+                &got,
+                &want,
+                1e-4,
+                &format!(
+                    "attn n_q={n_q} hd={head_dim} start={start_pos} window={window:?} \
+                     softcap={softcap:?} sink={sink:?}"
+                ),
+            );
+        }
     }
 }
 
@@ -394,6 +430,15 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
 #[ignore = "requires real CUDA hardware; not yet run"]
 fn the_dense_layer_matches_a_host_twin_with_a_geglu_ffn() {
     dense_layer_matches_its_host_twin(GluCuda::Gelu);
+}
+
+/// And with gpt-oss's clamped SwiGLU, whose clamps bind on this
+/// fixture's FFN inputs (in the thousands): a kernel that dropped the
+/// clamp, the `+1` or `alpha` misses by a whole term.
+#[test]
+#[ignore = "requires real CUDA hardware; not yet run"]
+fn the_dense_layer_matches_a_host_twin_with_a_clamped_swiglu() {
+    dense_layer_matches_its_host_twin(GluCuda::SwigluOai);
 }
 
 fn dense_layer_matches_its_host_twin(glu: GluCuda) {
@@ -538,6 +583,11 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
             .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
             .collect(),
         GluCuda::Gelu => g.iter().zip(&u).map(|(&g, u)| host_gelu(g) * u).collect(),
+        GluCuda::SwigluOai => g
+            .iter()
+            .zip(&u)
+            .map(|(&g, &u)| host_swiglu_oai(g, u))
+            .collect(),
     };
     let d = gemm(dd, hidden, ffn, &act);
     for (a, b) in h.iter_mut().zip(&d) {
@@ -556,11 +606,14 @@ fn dense_layer_matches_its_host_twin(glu: GluCuda) {
             gate: view(gd, ffn, hidden),
             up: view(ud, ffn, hidden),
             down: view(dd, hidden, ffn),
+            bias: None,
         }),
         glu,
         post_attn_norm: Some(&post_attn),
         post_ffn_norm: None,
         extras: AttnExtrasCuda {
+            sinks: None,
+            o_bias: None,
             q_bias: Some(&q_bias),
             k_bias: Some(&k_bias),
             v_bias: Some(&v_bias),
@@ -671,6 +724,7 @@ fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
             gate: gemm(96, 64),
             up: gemm(96, 64),
             down: gemm(64, 96),
+            bias: None,
         }),
         glu: GluCuda::Silu,
         post_attn_norm: None,
@@ -722,7 +776,7 @@ fn a_matvec_view_of_other_bytes_is_refused() {
 
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
-fn decode_attn_matches_its_twin_across_chunks_a_window_and_a_softcap() {
+fn decode_attn_matches_its_twin_across_chunks_a_window_a_softcap_and_sinks() {
     let dev = shared_device().unwrap();
     for (n_heads, n_kv_heads, head_dim) in [(24usize, 8usize, 128usize), (4, 2, 64), (2, 1, 256)] {
         for (seq_len, window, softcap) in [
@@ -734,33 +788,50 @@ fn decode_attn_matches_its_twin_across_chunks_a_window_and_a_softcap() {
             (777, Some(300), None),
             (130, None, Some(50.0)),
         ] {
-            let q = wave(n_heads * head_dim, 0.2);
-            let k = wave(seq_len * n_kv_heads * head_dim, 0.4);
-            let v = wave(seq_len * n_kv_heads * head_dim, 0.6);
-            let scale = (head_dim as f32).sqrt().recip();
-            let want = crate::decode_attn::decode_attn_twin(
-                &q, &k, &v, n_heads, n_kv_heads, head_dim, seq_len, window, scale, softcap,
+            for sink in [None, Some(-1.0f32), Some(3.0)] {
+                let q = wave(n_heads * head_dim, 0.2);
+                let k = wave(seq_len * n_kv_heads * head_dim, 0.4);
+                let v = wave(seq_len * n_kv_heads * head_dim, 0.6);
+                let scale = (head_dim as f32).sqrt().recip();
+                let sinks: Option<Vec<f32>> =
+                    sink.map(|s| (0..n_heads).map(|h| s + 0.5 * h as f32).collect());
+                let want = crate::decode_attn::decode_attn_twin(
+                    &q,
+                    &k,
+                    &v,
+                    n_heads,
+                    n_kv_heads,
+                    head_dim,
+                    seq_len,
+                    window,
+                    scale,
+                    softcap,
+                    sinks.as_deref(),
+                );
+                let args = AttnArgs {
+                    n_heads,
+                    n_kv_heads,
+                    head_dim,
+                    start_pos: seq_len - 1,
+                    window,
+                    scale,
+                    softcap,
+                };
+                let d_q = dev.htod_copy(q.clone()).unwrap();
+                let d_k = dev.htod_copy(k.clone()).unwrap();
+                let d_v = dev.htod_copy(v.clone()).unwrap();
+                let d_s = sinks.as_ref().map(|s| dev.htod_copy(s.clone()).unwrap());
+                let out = enqueue_decode_attn(&dev, &d_q, &d_k, &d_v, &args, d_s.as_ref()).unwrap();
+                let got = dev.dtoh_sync_copy(&out).unwrap();
+                let what = format!(
+                "decode attn h={n_heads} hd={head_dim} seq={seq_len} w={window:?} sink={sink:?}"
             );
-            let args = AttnArgs {
-                n_heads,
-                n_kv_heads,
-                head_dim,
-                start_pos: seq_len - 1,
-                window,
-                scale,
-                softcap,
-            };
-            let d_q = dev.htod_copy(q.clone()).unwrap();
-            let d_k = dev.htod_copy(k.clone()).unwrap();
-            let d_v = dev.htod_copy(v.clone()).unwrap();
-            let out = enqueue_decode_attn(&dev, &d_q, &d_k, &d_v, &args).unwrap();
-            let got = dev.dtoh_sync_copy(&out).unwrap();
-            let what = format!("decode attn h={n_heads} hd={head_dim} seq={seq_len} w={window:?}");
-            assert_close(&got, &want, 1e-4, &what);
-            // And against the definition, through the prefill kernel's
-            // host loop at one query row.
-            let naive = host_causal_gqa(&q, &k, &v, 1, &args);
-            assert_close(&got, &naive, 1e-4, &format!("{what} vs naive"));
+                assert_close(&got, &want, 1e-4, &what);
+                // And against the definition, through the prefill kernel's
+                // host loop at one query row.
+                let naive = host_causal_gqa_sinks(&q, &k, &v, 1, &args, sinks.as_deref());
+                assert_close(&got, &naive, 1e-4, &format!("{what} vs naive"));
+            }
         }
     }
 }
@@ -872,6 +943,7 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
             gate: q8_0_proj(w[4], ffn, hidden),
             up: q8_0_proj(w[5], ffn, hidden),
             down: q8_0_proj(w[6], hidden, ffn),
+            bias: None,
         }),
         glu: GluCuda::Silu,
         post_attn_norm: None,

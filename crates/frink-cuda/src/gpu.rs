@@ -862,23 +862,56 @@ pub fn launch_matvec_multi(
 }
 
 /// The gated activation a fused FFN applies to its gate before the
-/// product with `up`: SwiGLU (`silu(gate) * up`) or Gemma's GeGLU
-/// (`gelu(gate) * up`). One launch serves both ([`glu_mul_device`]),
-/// so the two cannot disagree about anything but the function.
+/// product with `up`: SwiGLU (`silu(gate) * up`), Gemma's GeGLU
+/// (`gelu(gate) * up`), or gpt-oss's clamped SwiGLU ([`SWIGLU_OAI_SRC`]).
+/// One launch serves all three ([`glu_mul_device`]), so they cannot
+/// disagree about anything but the function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GluCuda {
     Silu,
     Gelu,
+    /// `min(g, L) * sigmoid(A * min(g, L)) * (clamp(u, -L, L) + 1)` at
+    /// [`SWIGLU_OAI_ALPHA`] and [`SWIGLU_OAI_LIMIT`].
+    SwigluOai,
 }
+
+/// gpt-oss's sigmoid steepness and clamp, `llama-graph.cpp`'s
+/// `LLM_FFN_SWIGLU_OAI_MOE` constants. The decoder holds them equal to
+/// `frink_moe`'s, which its host path computes with.
+pub const SWIGLU_OAI_ALPHA: f32 = 1.702;
+pub const SWIGLU_OAI_LIMIT: f32 = 7.0;
 
 impl GluCuda {
     fn module(self) -> (&'static str, &'static str, &'static str) {
         match self {
             GluCuda::Silu => (SILU_MUL_KERNEL_SRC, "frink_silu_mul", "silu_mul_f32"),
             GluCuda::Gelu => (GELU_MUL_KERNEL_SRC, "frink_gelu_mul", "gelu_mul_f32"),
+            GluCuda::SwigluOai => (SWIGLU_OAI_SRC, "frink_swiglu_oai", "swiglu_oai_f32"),
         }
     }
 }
+
+/// gpt-oss's clamped SwiGLU, `frink_moe::swiglu_oai` (and ggml's
+/// `swiglu_oai`) in its order: the gate clamped from above only, the
+/// sigmoid steepened by `alpha`, and `up` clamped both ways with a `+1`.
+pub const SWIGLU_OAI_SRC: &str = r#"
+extern "C" __global__ void swiglu_oai_f32(
+    const float* gate,
+    const float* up,
+    float* out,
+    int n,
+    float alpha,
+    float limit
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float x = fminf(gate[i], limit);
+        const float y = fmaxf(fminf(up[i], limit), -limit);
+        const float out_glu = x / (1.0f + expf(alpha * -x));
+        out[i] = out_glu * (y + 1.0f);
+    }
+}
+"#;
 
 /// CUDA C source for an elementwise SwiGLU pair fuse:
 /// `out[i] = silu(gate[i]) * up[i]`, `silu(x) = x / (1 + exp(-x))`.
@@ -958,10 +991,24 @@ pub(crate) fn glu_mul_device(
     // SAFETY: the kernel reads `n` floats from `gate` and `up` and writes
     // `n` to `d_out`; the caller passes slices of length `n` and `d_out`
     // was just allocated at `n`. The grid covers `n` threads, each
-    // bounds-checked against `n`.
+    // bounds-checked against `n`. The clamped form takes its two
+    // constants after `n`, matched positionally.
     unsafe {
-        func.launch(cfg, (gate, up, &mut d_out, n as i32))
-            .map_err(|e| CudaError::Launch(format!("{name} launch: {e:?}")))?;
+        match glu {
+            GluCuda::Silu | GluCuda::Gelu => func.launch(cfg, (gate, up, &mut d_out, n as i32)),
+            GluCuda::SwigluOai => func.launch(
+                cfg,
+                (
+                    gate,
+                    up,
+                    &mut d_out,
+                    n as i32,
+                    SWIGLU_OAI_ALPHA,
+                    SWIGLU_OAI_LIMIT,
+                ),
+            ),
+        }
+        .map_err(|e| CudaError::Launch(format!("{name} launch: {e:?}")))?;
     }
     Ok(d_out)
 }

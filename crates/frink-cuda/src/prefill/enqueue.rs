@@ -4,10 +4,11 @@
 //! hardware tests call them one at a time against a host twin.
 
 use super::kernels::{
-    ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC,
-    CAUSAL_GQA_PREFILL, CAUSAL_GQA_PREFILL_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC,
-    MOE_COMBINE_ROWS, MOE_COMBINE_ROWS_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC,
-    ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
+    ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_BIAS_TAB_ROWS, ADD_BIAS_TAB_ROWS_KERNEL_SRC,
+    ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC, CAUSAL_GQA_PREFILL,
+    CAUSAL_GQA_PREFILL_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC, MOE_COMBINE_ROWS,
+    MOE_COMBINE_ROWS_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS,
+    ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
@@ -169,6 +170,34 @@ pub(crate) fn enqueue_moe_combine(
             .map_err(|e| launch_err("moe_combine", e))?;
     }
     Ok(out)
+}
+
+/// `x[r] += tab[row_group[r]]` for each of `n_rows` rows of `n`.
+pub(crate) fn enqueue_add_bias_tab_rows(
+    dev: &Arc<CudaDevice>,
+    x: &mut CudaSlice<f32>,
+    tab: &CudaSlice<u64>,
+    row_group: &CudaSlice<i32>,
+    n_rows: usize,
+    n: usize,
+) -> Result<(), CudaError> {
+    debug_assert!(x.len() >= n_rows * n && row_group.len() >= n_rows);
+    let func = func_for(dev, ADD_BIAS_TAB_ROWS_KERNEL_SRC, ADD_BIAS_TAB_ROWS)?;
+    let cfg = LaunchConfig {
+        grid_dim: ((n as u32).div_ceil(BLOCK).max(1), n_rows as u32, 1),
+        block_dim: (BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (float*, const u64*, const int*, int) matched positionally;
+    // a grid row per row of `x` and thread `i < n` of it; every
+    // `row_group` entry indexes `tab` (the caller builds both from one
+    // grouping), and every table entry is a live device vector of at
+    // least `n` floats the caller holds until its wait.
+    unsafe {
+        func.launch(cfg, (x, tab, row_group, n as i32))
+            .map_err(|e| launch_err("add_bias_tab_rows", e))?;
+    }
+    Ok(())
 }
 
 /// The routed prefill's combine, `[batch][n]` from `y[pairs][n]`.
@@ -359,6 +388,7 @@ pub(crate) fn enqueue_causal_gqa_prefill(
     v_all: &CudaSlice<f32>,
     n_q: usize,
     args: &AttnArgs,
+    sinks: Option<&CudaSlice<f32>>,
 ) -> Result<CudaSlice<f32>, CudaError> {
     let AttnArgs {
         n_heads,
@@ -379,6 +409,12 @@ pub(crate) fn enqueue_causal_gqa_prefill(
             "causal_gqa_prefill: {n_heads} heads over {n_kv_heads} (the launch packs each in 16 bits)"
         )));
     }
+    if n_q >= 1 << 15 {
+        return Err(CudaError::Unsupported(format!(
+            "causal_gqa_prefill: a batch of {n_q} rows (the launch packs it in 15 bits)"
+        )));
+    }
+    debug_assert!(sinks.is_none_or(|s| s.len() >= n_heads));
     debug_assert!(q.len() >= n_q * n_heads * head_dim);
     debug_assert!(k_all.len() >= (start_pos + n_q) * n_kv_heads * head_dim);
     debug_assert!(v_all.len() >= (start_pos + n_q) * n_kv_heads * head_dim);
@@ -398,9 +434,12 @@ pub(crate) fn enqueue_causal_gqa_prefill(
         block_dim: (128, 1, 1),
         shared_mem_bytes: smem as u32,
     };
-    // SAFETY: (const float* x3, float*, int x5, float, float, int)
-    // matched positionally, the head counts and the tile packed as the
-    // kernel unpacks them (each below 2^16 and 2^8); the grid covers `n_q x n_heads`, every key
+    // SAFETY: (const float* x3, float*, int x2, const float*, int x2,
+    // float, float, int) matched positionally, the shape, the head
+    // counts and the tile packed as the kernel unpacks them (`n_q` below
+    // 2^15, the rest below 2^16 and 2^8); the sinks pointer is null or
+    // `n_heads` logits (the debug assert, and the stack's shape check);
+    // the grid covers `n_q x n_heads`, every key
     // index read is below `start_pos + n_q`, which the K/V buffers
     // cover, the `float4` views need `head_dim % 4 == 0` (checked above)
     // on buffers cudarc allocates 256-byte aligned, and the dynamic
@@ -414,9 +453,9 @@ pub(crate) fn enqueue_causal_gqa_prefill(
                 k_all,
                 v_all,
                 &mut out,
-                n_q as i32,
+                (head_dim | (n_q << 16)) as i32,
                 (n_heads | (n_kv_heads << 16)) as i32,
-                head_dim as i32,
+                sink_ptr(sinks),
                 start_pos as i32,
                 window.map_or(0, |w| w as i32),
                 scale,
@@ -427,6 +466,14 @@ pub(crate) fn enqueue_causal_gqa_prefill(
         .map_err(|e| launch_err("causal_gqa_prefill", e))?;
     }
     Ok(out)
+}
+
+/// A kernel's nullable `const float*` argument: the slice's device
+/// address, or null. The caller keeps the slice alive until the stream
+/// has run the launch (the stack holds it until its one wait).
+fn sink_ptr(s: Option<&CudaSlice<f32>>) -> u64 {
+    use cudarc::driver::DevicePtr;
+    s.map_or(0, |s| *s.device_ptr())
 }
 
 /// Attention for ONE query row (`crate::decode_attn`): the keys split
@@ -441,6 +488,7 @@ pub(crate) fn enqueue_decode_attn(
     k_all: &CudaSlice<f32>,
     v_all: &CudaSlice<f32>,
     args: &AttnArgs,
+    sinks: Option<&CudaSlice<f32>>,
 ) -> Result<CudaSlice<f32>, CudaError> {
     let AttnArgs {
         n_heads,
@@ -521,7 +569,10 @@ pub(crate) fn enqueue_decode_attn(
         block_dim: block,
         shared_mem_bytes: 0,
     };
-    // SAFETY: (const float*, float*, int x3) matched positionally;
+    debug_assert!(sinks.is_none_or(|s| s.len() >= n_heads));
+    // SAFETY: (const float*, float*, int x3, const float*) matched
+    // positionally; the sinks pointer is null or `n_heads` logits (the
+    // debug assert, and the stack's shape check);
     // one block per head and one thread per channel, both in range by
     // construction; the scratch holds the `n_chunks` slots per head the
     // partial launch wrote, ordered before this on the same stream.
@@ -535,6 +586,7 @@ pub(crate) fn enqueue_decode_attn(
                     n_heads as i32,
                     head_dim as i32,
                     n_chunks as i32,
+                    sink_ptr(sinks),
                 ),
             )
             .map_err(|e| launch_err("decode_attn_combine", e))?;

@@ -282,6 +282,7 @@ fn routed_layer_matches_its_host_twin(batch: usize) {
                             gate: q8_0_proj(gd, ffn, hidden),
                             up: q8_0_proj(ud, ffn, hidden),
                             down: q8_0_proj(dd, hidden, ffn),
+                            bias: None,
                         },
                         w,
                     )

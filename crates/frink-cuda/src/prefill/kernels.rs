@@ -134,6 +134,24 @@ extern "C" __global__ void moe_combine_f32(
 }
 "#;
 
+/// A routed prefill's per-pair bias: row `r` of `x` gains the bias row
+/// of its expert, `tab[row_group[r]]` (gpt-oss's `ggml_add_id`).
+pub const ADD_BIAS_TAB_ROWS_KERNEL_SRC: &str = r#"
+extern "C" __global__ void add_bias_tab_rows_f32(
+    float* x,
+    const unsigned long long* tab,
+    const int* row_group,
+    int n
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int r = blockIdx.y;
+    if (i < n) {
+        const float* b = (const float*)tab[row_group[r]];
+        x[(size_t)r * n + i] += b[i];
+    }
+}
+"#;
+
 /// A routed prefill's combine: token `t`'s output is
 /// `sum_j w[t][j] * y[pair_of[t][j]]` from zero in its routing's order,
 /// the row form of `moe_combine_f32`.
@@ -293,9 +311,9 @@ extern "C" __global__ void causal_gqa_prefill_f32(
     const float* __restrict__ k_all,
     const float* __restrict__ v_all,
     float* __restrict__ out,
-    int n_q,
+    int dims,       // head_dim | n_q << 16
     int heads,      // n_heads | n_kv_heads << 16
-    int head_dim,
+    const float* __restrict__ sinks,  // one logit per head, or null
     int start_pos,
     int window,
     float scale,
@@ -303,6 +321,8 @@ extern "C" __global__ void causal_gqa_prefill_f32(
     int tile        // rows per warp | keys per tile << 8
 ) {
     extern __shared__ __align__(16) float fx_smem[];
+    const int head_dim = dims & 0xffff;
+    const int n_q = dims >> 16;
     const int n_heads = heads & 0xffff;
     const int n_kv_heads = heads >> 16;
     const int rpw = tile & 0xff;
@@ -430,14 +450,26 @@ extern "C" __global__ void causal_gqa_prefill_f32(
         if (i >= rpw) break;
         const int r = r0 + warp + FX_ATTN_WARPS * i;
         if (r >= n_q) break;
-        const float inv = (l[i] > 0.f) ? (1.f / l[i]) : 0.f;
+        // A sink (gpt-oss) is one more logit with no value, folded in
+        // after every key as the host's `online_attn_accumulate` folds
+        // it: the running max and sum move, the accumulator is rescaled.
+        float li = l[i];
+        float ai = 1.f;
+        if (sinks != nullptr) {
+            const float sk = sinks[h];
+            const float m2 = fmaxf(m[i], sk);
+            ai = (m[i] == -frink_inf_pf()) ? 0.f : expf(m[i] - m2);
+            li = li * ai + expf(sk - m2);
+        }
+        const float inv = (li > 0.f) ? (1.f / li) : 0.f;
         float4* out_h = (float4*)(out + ((size_t)r * n_heads + h) * head_dim);
 #pragma unroll
         for (int s = 0; s < 2; s++) {
             const int c = lane + 32 * s;
             if (s < n_slices && c < d4) {
                 const float4 a4 = acc[i][s];
-                out_h[c] = make_float4(a4.x * inv, a4.y * inv, a4.z * inv, a4.w * inv);
+                out_h[c] = make_float4(a4.x * ai * inv, a4.y * ai * inv,
+                                       a4.z * ai * inv, a4.w * ai * inv);
             }
         }
     }
@@ -453,6 +485,8 @@ pub const AXPY: (&str, &str) = ("frink_prefill_axpy", "axpy_f32");
 pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine_f32");
 pub const MOE_COMBINE_ROWS: (&str, &str) =
     ("frink_prefill_moe_combine_rows", "moe_combine_rows_f32");
+pub const ADD_BIAS_TAB_ROWS: (&str, &str) =
+    ("frink_prefill_add_bias_tab_rows", "add_bias_tab_rows_f32");
 pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
 pub const ROPE_ROWS: (&str, &str) = ("frink_prefill_rope_rows", "rope_rows_f32");
 pub const CAUSAL_GQA_PREFILL: (&str, &str) = ("frink_prefill_causal_gqa", "causal_gqa_prefill_f32");
