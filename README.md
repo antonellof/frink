@@ -88,6 +88,26 @@ in Rust.
   says. A cross-encoder answers `/v1/rerank` through its rank head, and
   `/v1/score` takes either.
 
+## Performance
+
+`frink bench` runs llama-bench's workload (`pp512` prefill, `tg128`
+decode) on the same GGUF and machine as `llama-bench`, and every
+published number has a receipt. The full table is
+[`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
+
+- **Metal (Apple M2 Pro).** Level with llama.cpp on prefill and ahead
+  of it on decode across most of the suite.
+- **CUDA (NVIDIA L40S, 0.58.0, 2026-11-09).** Correct on all ten models
+  measured: greedy tokens identical to frink's CPU path, and the
+  first-token distribution matching llama.cpp's. Not yet as fast. On
+  the dense 3B to 12B models decode is 1.4x to 1.7x slower and prefill
+  5x to 10x, and the two MoE models are further behind
+  ([the L40S rows](benchmarks/RESULTS.md#amd-epyc-7r13-processor-4c-linux-612113-138209amzn2023x86_64--nvidia-l40s)).
+  Closing that is the top of the [roadmap](docs/plans/north-star.md)
+  (#133, #259).
+- **CPU.** Close to llama.cpp on decode and behind on some prefill. The
+  CPU rows predate the current code and are marked stale in the table.
+
 ## Install
 
 ```bash

@@ -164,7 +164,8 @@
       "gguf": "models/Phi-4-mini-instruct-Q4_K_M.gguf",
       "backends": [
         "metal",
-        "cpu"
+        "cpu",
+        "cuda"
       ],
       "estimated_ram_gb": 5,
       "expect": "ok",
@@ -233,6 +234,97 @@
       "estimated_ram_gb": 8,
       "expect": "ok",
       "notes": "Second point in the 7-8B tier, which rested on Mistral-7B alone. The CPU gap scales inversely with size, so the large end needs more than one model"
+    },
+    {
+      "id": "qwen3_8b_q4km",
+      "name": "Qwen3-8B Q4_K_M",
+      "gguf": "models/Qwen3-8B-Q4_K_M.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 7,
+      "expect": "ok",
+      "notes": "Qwen/Qwen3-8B-GGUF; QK norms"
+    },
+    {
+      "id": "qwen25_7b_q4km",
+      "name": "Qwen2.5-7B-Instruct Q4_K_M",
+      "gguf": "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 7,
+      "expect": "ok",
+      "notes": "bartowski/Qwen2.5-7B-Instruct-GGUF; QKV biases"
+    },
+    {
+      "id": "mistral_7b_v03_q4km",
+      "name": "Mistral-7B-Instruct-v0.3 Q4_K_M",
+      "gguf": "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 6,
+      "expect": "ok",
+      "notes": "bartowski/Mistral-7B-Instruct-v0.3-GGUF"
+    },
+    {
+      "id": "gemma3_12b_q4km",
+      "name": "Gemma-3-12B-IT Q4_K_M",
+      "gguf": "models/gemma-3-12b-it-Q4_K_M.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 10,
+      "expect": "ok",
+      "notes": "ggml-org/gemma-3-12b-it-GGUF; GeGLU, sliding window, head_dim 256"
+    },
+    {
+      "id": "llama31_8b_q8",
+      "name": "Meta-Llama-3.1-8B-Instruct Q8_0",
+      "gguf": "models/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 11,
+      "expect": "ok",
+      "notes": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF; the Q8_0 kernels at 8B"
+    },
+    {
+      "id": "gpt_oss_20b_mxfp4",
+      "name": "gpt-oss-20b MXFP4",
+      "gguf": "models/gpt-oss-20b-MXFP4.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 14,
+      "expect": "ok",
+      "notes": "ggml-org/gpt-oss-20b-GGUF; MoE, MXFP4 experts"
+    },
+    {
+      "id": "qwen3_30b_a3b_q4km",
+      "name": "Qwen3-30B-A3B Q4_K_M",
+      "gguf": "models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "backends": [
+        "metal",
+        "cuda",
+        "cpu"
+      ],
+      "estimated_ram_gb": 21,
+      "expect": "ok",
+      "notes": "Qwen/Qwen3-30B-A3B-GGUF; MoE, 128 experts top-8"
     }
   ],
   "threads_note": "Not forced. Each engine picks its own default; llama.cpp uses performance cores and degrades 2-4x above them, so pinning both to one count flatters frink. Override with frink bench -t N / llama-bench -t N."

@@ -264,10 +264,25 @@ cargo build -p frink-cli --release --features cuda
 ```
 
 Record the GPU and driver whenever you quote a CUDA number. CUDA rows
-come from rented hosts (an RTX 3090 and an RTX 3060 so far); their
-receipts are the `*_cuda__*.json` files under
-[`receipts/engine/`](receipts/engine/), and `RESULTS.md` renders them
-beside the Metal and CPU rows.
+come from rented hosts; their receipts are the `*_cuda__*.json` files
+under [`receipts/engine/`](receipts/engine/), and `RESULTS.md` renders
+them beside the Metal and CPU rows. The RTX 3090 and RTX 3060 rows
+predate the resident CUDA stack and are marked stale.
+
+The current CUDA rows ran on 2026-11-09 on an NVIDIA L40S (48 GB, driver
+580, CUDA 13.0) rented through Hugging Face Jobs, 8 vCPU of an AMD EPYC
+7R13, against llama.cpp at the pin built with CUDA for `sm_89`. Before
+each timed run the job checked frink's CUDA output against its CPU
+output (`frink verify`, 24 greedy tokens) and against llama.cpp
+(`frink parity`): every model matched, gpt-oss-20b at the DRIFT its CPU
+path shows too. [`tools/hf_jobs/cuda_bench.sh`](../tools/hf_jobs/cuda_bench.sh)
+is the whole job, rerunnable with your own token:
+
+```bash
+hf jobs run --flavor l40sx1 --timeout 3h --secrets HF_TOKEN \
+  -e MODELS="llama31_8b_q4km|bartowski/Meta-Llama-3.1-8B-Instruct-GGUF|Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" \
+  nvidia/cuda:12.8.1-devel-ubuntu22.04 bash -c "$(cat tools/hf_jobs/cuda_bench.sh)"
+```
 
 ## Serving (HTTP)
 
