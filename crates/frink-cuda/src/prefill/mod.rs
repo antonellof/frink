@@ -259,13 +259,14 @@ pub fn launch_prefill_dense_layer(
     params: &PrefillParams<'_>,
     batch: usize,
 ) -> Result<PrefillLayerOut, CudaError> {
-    let mut out = launch_prefill_dense_stack(
+    let out = launch_prefill_dense_stack(
         StackInput::Hidden(hidden),
         &[(layer, params)],
         batch,
         StackKv::UploadPrefix,
     )?;
-    let (k_rows, v_rows) = out.kv_rows.pop().expect("one layer in, one layer out");
+    let (k_rows, v_rows) = out.kv(0);
+    let (k_rows, v_rows) = (k_rows.to_vec(), v_rows.to_vec());
     Ok(PrefillLayerOut {
         hidden: out.hidden,
         k_rows,
@@ -277,7 +278,36 @@ pub fn launch_prefill_dense_layer(
 /// each layer's K (post-RoPE) and V rows in the host cache's layout.
 pub struct PrefillStackOut {
     pub hidden: Vec<f32>,
-    pub kv_rows: Vec<(Vec<f32>, Vec<f32>)>,
+    /// The stack's one download: the hidden batch, then each layer's K
+    /// rows and V rows, read in place by [`Self::kv`] rather than copied
+    /// out per layer (134 MB a Llama-3.1-8B `pp512` step).
+    staged: xfer::Download,
+    kv_offsets: Vec<(usize, usize)>,
+}
+
+impl PrefillStackOut {
+    /// Layers in the run.
+    pub fn layers(&self) -> usize {
+        self.kv_offsets.len()
+    }
+
+    /// Layer `i`'s K rows and V rows, `batch` rows of the layer's
+    /// `n_kv_heads * head_dim` each, in the host cache's layout.
+    pub fn kv(&self, i: usize) -> (&[f32], &[f32]) {
+        let (at, n) = self.kv_offsets[i];
+        let all = self.staged.as_slice();
+        (&all[at..at + n], &all[at + n..at + 2 * n])
+    }
+
+    /// Every layer's rows, copied: for the tests, which compare runs.
+    pub fn kv_rows_owned(&self) -> Vec<(Vec<f32>, Vec<f32>)> {
+        (0..self.layers())
+            .map(|i| {
+                let (k, v) = self.kv(i);
+                (k.to_vec(), v.to_vec())
+            })
+            .collect()
+    }
 }
 
 /// A run of consecutive dense layers with the hidden batch resident
@@ -395,25 +425,22 @@ pub fn launch_prefill_dense_stack(
         &mut staged.slice_mut(..batch * hidden_dim),
     )?;
     // The stack's one host wait: everything above was enqueued.
-    let mut all = xfer::dtoh(&dev, "stack download", &staged)?;
+    let staged = xfer::dtoh_staged(&dev, "stack download", &staged)?;
     drop(held);
-
-    let kv_rows: Vec<(Vec<f32>, Vec<f32>)> = kv_offsets
-        .iter()
-        .map(|&(at, n)| (all[at..at + n].to_vec(), all[at + n..at + 2 * n].to_vec()))
-        .collect();
+    let out = PrefillStackOut {
+        hidden: staged.as_slice()[..batch * hidden_dim].to_vec(),
+        staged,
+        kv_offsets,
+    };
     if let StackKv::Mirrors(slots) = &mut kv {
-        for ((slot, (_, p)), (k_rows, _)) in slots.iter_mut().zip(layers).zip(&kv_rows) {
+        for (i, (slot, (_, p))) in slots.iter_mut().zip(layers).enumerate() {
             let width = p.n_kv_heads * p.head_dim;
+            let (k_rows, _) = out.kv(i);
             let m = slot.as_mut().expect("every mirror slot was filled above");
             m.commit(start_pos + batch, &k_rows[k_rows.len() - width..]);
         }
     }
-    all.truncate(batch * hidden_dim);
-    Ok(PrefillStackOut {
-        hidden: all,
-        kv_rows,
-    })
+    Ok(out)
 }
 
 /// The host-side shape agreement, before any device work: a mismatch

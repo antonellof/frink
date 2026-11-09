@@ -142,8 +142,8 @@ fn a_gathered_stack_input_is_the_uploaded_host_row() {
             ids.len()
         );
         assert_eq!(
-            gathered.kv_rows,
-            uploaded.kv_rows,
+            gathered.kv_rows_owned(),
+            uploaded.kv_rows_owned(),
             "{} rows: K/V",
             ids.len()
         );
