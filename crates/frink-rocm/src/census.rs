@@ -7,9 +7,11 @@
 //! so a new quant kind joins it without an edit here.
 //!
 //! Left out, deliberately: the tensor-core `mul_mm` body
-//! (`mul_mm_tc`, `mma.sync` / `ldmatrix`), which is NVIDIA's instruction
-//! set. AMD prefills through the generic `mul_mm` until a WMMA (RDNA3+)
-//! or MFMA (CDNA) body exists. The kernels `frink-cuda` keeps behind its
+//! (`mul_mm_tc`, `mma.sync` / `ldmatrix`) and the tensor-core prefill
+//! attention (`prefill_attn_tc`, the same PTX), which are NVIDIA's
+//! instruction set. AMD prefills through the generic `mul_mm` and the
+//! SIMT prefill attention until a WMMA (RDNA3+) or MFMA (CDNA) body
+//! exists. The kernels `frink-cuda` keeps behind its
 //! `cuda` feature (attention, prefill, elementwise) are added by the
 //! gate test itself, which sees them through a dev-dependency.
 
