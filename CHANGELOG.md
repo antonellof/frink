@@ -15,6 +15,13 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **CUDA kernel outputs are no longer zeroed before the kernel writes
+  them.** Every op of the resident stack took a zeroed buffer, a
+  memset on the stream each, about 390 per Llama-3.1-8B decode token;
+  an L40S profile now shows 1 286 memsets where it showed 100 682 (#133).
+
 ## [0.58.0] - 2026-11-08
 
 ### Added
