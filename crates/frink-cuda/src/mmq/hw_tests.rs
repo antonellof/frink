@@ -70,7 +70,7 @@ fn the_quantizer_writes_its_twin_s_blocks() {
 /// reference within the q8_1 rounding: a row count and a K that are not
 /// whole tiles, a batch past one tile and one under it.
 #[test]
-#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+#[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn the_int8_gemm_matches_its_twin_and_the_reference() {
     let dev = shared_device().unwrap();
     for (kind, mm, shapes) in [
@@ -145,7 +145,7 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
 /// group's gathered rows, bit for bit: an empty group, a group of one,
 /// one wider than a tile of tokens, tokens shared between groups.
 #[test]
-#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+#[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn the_grouped_int8_gemm_equals_one_gemm_per_group() {
     let dev = shared_device().unwrap();
     let tokens = 90usize;
