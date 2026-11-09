@@ -426,6 +426,104 @@ pub fn time_matvec(launch: &MatvecLaunch<'_>, x: &[f32], iters: usize) -> Result
     Ok(t0.elapsed().as_secs_f64() / iters.max(1) as f64)
 }
 
+/// The same projection of several routed experts in ONE launch: one
+/// expert per `blockIdx.y`, each reading its weights through a table of
+/// device pointers, its input `x_stride` floats along `d_x` (`0` when
+/// every expert reads the same input), and writing its own `rows` of the
+/// output, `launches.len() * rows` in all. `Unsupported` when the
+/// experts do not share one coalesced kind and shape, and the caller
+/// launches them one at a time instead.
+pub(crate) fn enqueue_matvec_multi(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    launches: &[MatvecLaunch<'_>],
+    d_x: &cudarc::driver::CudaSlice<f32>,
+    x_stride: usize,
+) -> Result<
+    (
+        cudarc::driver::CudaSlice<f32>,
+        Vec<std::sync::Arc<ResidentCudaWeights>>,
+    ),
+    CudaError,
+> {
+    use cudarc::driver::{DevicePtr, LaunchAsync};
+    let Some(first) = launches.first() else {
+        return Err(CudaError::Unsupported(
+            "matvec multi: no experts".to_string(),
+        ));
+    };
+    let kind = coalesced_kind(first.fn_name).ok_or_else(|| {
+        CudaError::Unsupported(format!("matvec multi: {} is not coalesced", first.fn_name))
+    })?;
+    if launches.iter().any(|l| {
+        l.fn_name != first.fn_name
+            || l.rows != first.rows
+            || l.row_bytes != first.row_bytes
+            || l.n_blocks_per_row != first.n_blocks_per_row
+            || l.weights.len() != first.rows * first.row_bytes
+    }) {
+        return Err(CudaError::Unsupported(
+            "matvec multi: the experts differ in kind or shape".to_string(),
+        ));
+    }
+    let k = launches.len();
+    let width = MatvecWidth::from_env();
+    let wpr = crate::matvec_kinds::coalesced::matvec_wpr_override().unwrap_or_else(|| {
+        crate::matvec_kinds::coalesced::wpr_for(
+            first.rows,
+            first.n_blocks_per_row,
+            32 / kind.lanes(width),
+        )
+    });
+    let module = kind.multi_module_for(width, wpr);
+    ensure_module_loaded_lazy(dev, module, kind.entry, || kind.multi_source(width, wpr))?;
+    let func = dev.get_func(module, kind.entry).ok_or_else(|| {
+        CudaError::KernelCompile(format!(
+            "function '{}' not found after load_ptx",
+            kind.entry
+        ))
+    })?;
+    let held: Vec<_> = launches
+        .iter()
+        .map(|l| resident_cuda_weights(dev, l.weights))
+        .collect::<Result<_, _>>()?;
+    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
+    let d_table = crate::xfer::htod(dev, "matvec multi table", &table)?;
+    // SAFETY: as for `enqueue_matvec_at`, per expert: each `blockIdx.y`
+    // slot writes every one of its `rows` outputs.
+    let mut d_out = unsafe { alloc_out(dev, k * first.rows, "matvec multi output") }?;
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            first.rows.div_ceil(COALESCED_WARPS_PER_BLOCK / wpr) as u32,
+            k as u32,
+            1,
+        ),
+        block_dim: ((COALESCED_WARPS_PER_BLOCK * 32) as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const void*, const float*, float*, int x4) matched
+    // positionally by the kernel's FX_MULTI parameter list; the table
+    // holds `k` live device pointers to `rows * row_bytes` bytes each
+    // (checked above, held until the caller's wait), `d_x` covers
+    // `(k - 1) * x_stride + n_blocks_per_row` blocks' worth of
+    // activations (the caller's shape), and `d_out` is `k * rows`.
+    unsafe {
+        func.launch(
+            cfg,
+            (
+                &d_table,
+                d_x,
+                &mut d_out,
+                first.rows as i32,
+                first.row_bytes as i32,
+                first.n_blocks_per_row as i32,
+                x_stride as i32,
+            ),
+        )
+        .map_err(|e| CudaError::Launch(format!("kernel {} multi: {e:?}", kind.entry)))?;
+    }
+    Ok((d_out, held))
+}
+
 /// [`enqueue_matvec`] at an explicit width and warps per row, so the
 /// hardware test can hold every geometry against the twins whatever
 /// the environment says.
@@ -1409,6 +1507,66 @@ mod tests {
                             got[r]
                         );
                         assert_close_relative(got[r], want, r);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Several experts' projections in one launch equal the same
+    /// projections launched one at a time, bit for bit: a slot of the
+    /// routed-expert form is the single kernel's arithmetic on its own
+    /// weights, input and output. Once with one input for every expert
+    /// (gate, up) and once with an input of its own each (down).
+    #[test]
+    #[ignore = "requires real CUDA hardware; not yet run"]
+    fn several_experts_in_one_launch_equal_one_launch_each() {
+        use crate::matvec_kinds::coalesced::COALESCED;
+        let dev = super::shared_device().expect("device");
+        let (rows, k) = (37usize, 3usize);
+        for kind in COALESCED {
+            let mv = crate::matvec_kinds::KINDS
+                .iter()
+                .find(|m| m.fn_name == kind.base_fn)
+                .expect("routed from a MatvecKind");
+            let mm = crate::mul_mm::kind_by_name(mv.name).expect("geometry");
+            let n_blocks_per_row = 12;
+            let row_bytes = n_blocks_per_row * mm.block_bytes;
+            let cols = n_blocks_per_row * mm.block_elems;
+            let weights: Vec<Vec<u8>> = (0..k as u32)
+                .map(|e| crate::mul_mm_ref::fixtures::weights(mm, rows, cols, 50 + e))
+                .collect();
+            let launches: Vec<super::MatvecLaunch<'_>> = weights
+                .iter()
+                .map(|w| super::MatvecLaunch {
+                    kernel_src: mv.source(),
+                    module_name: mv.module_name,
+                    fn_name: mv.fn_name,
+                    weights: w,
+                    rows,
+                    row_bytes,
+                    n_blocks_per_row,
+                })
+                .collect();
+            for x_stride in [0, cols] {
+                let x: Vec<f32> = (0..k * cols).map(|i| ((i as f32) * 0.017).sin()).collect();
+                let d_x = dev.htod_copy(x.clone()).unwrap();
+                let (d_all, _held) =
+                    super::enqueue_matvec_multi(&dev, &launches, &d_x, x_stride).expect("multi");
+                let all = dev.dtoh_sync_copy(&d_all).unwrap();
+                for (e, launch) in launches.iter().enumerate() {
+                    let xe = dev
+                        .htod_copy(x[e * x_stride..e * x_stride + cols].to_vec())
+                        .unwrap();
+                    let (d_one, _w) = super::enqueue_matvec(&dev, launch, &xe).expect("one");
+                    let one = dev.dtoh_sync_copy(&d_one).unwrap();
+                    let got = &all[e * rows..(e + 1) * rows];
+                    for (r, (a, b)) in got.iter().zip(&one).enumerate() {
+                        assert!(
+                            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                            "{} expert {e} row {r} stride {x_stride}: multi {a} one {b}",
+                            mv.name
+                        );
                     }
                 }
             }
