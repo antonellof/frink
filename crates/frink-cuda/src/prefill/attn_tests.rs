@@ -25,7 +25,7 @@ use crate::xfer;
 /// check cannot see: NVRTC, the real `mma.sync` and `ldmatrix`, the
 /// shared memory opt-in and the scheduler.
 #[test]
-#[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+#[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn tensor_core_prefill_attention_matches_the_host_within_its_f16_bound() {
     let dev = shared_device().unwrap();
     assert!(
