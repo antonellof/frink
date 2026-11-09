@@ -46,7 +46,7 @@ to name a real flag of its tool.
 | cli, server | `-ctk` | llama.cpp's types are accepted; `f16`, `q8_0`, `q4_0` and frink's `fp8` are served, the rest fall back and the banner says so. The quantized wires are Metal's device store only | The host store keeps `f16` or `f32`, CUDA's is `f32`, and only Metal's device store takes a quantized type |
 | server | `-c` | `0` is refused. Unset derives the ceiling from the device budget, capped at the trained context | llama.cpp's `-c 0` means "the trained context", which may not fit; omit the flag instead |
 | server | `-np` | The cap on concurrent sequences under continuous batching; implies `-cb`. `-1` (auto) is refused, omit it | frink has no fixed slots; sequences share one batched worker |
-| server | `-b` | `-b` and `-ub` resolve to ONE prefill chunk (the smaller named) | frink has no logical/physical batch split |
+| server | `-b` | `-b` and `-ub` resolve to ONE prefill chunk (the smaller named). `/infill` sizes its prefix and suffix by `-b` alone, as llama.cpp does | frink has no logical/physical batch split |
 | server | `-a` | One name. A comma-separated list is refused | `/v1/models` serves one model name |
 | cli, server | `--jinja` | Always on; `--no-jinja` is refused | frink always renders the GGUF's own template and has no template-free mode |
 | cli, server | `--chat-template` | Jinja source, or `chatml`. Any other bare name is refused, and `--chat-template-file` follows the same rule | Under `--jinja`, llama.cpp's default, a name like `llama3` compiles as plain text and every prompt becomes that word. Its named templates need `--no-jinja`, which frink does not have |
@@ -1393,7 +1393,10 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `FRINK_TLS_CERT`; one without the other is refused rather than serving
 plain HTTP), `--cors-origins` (sets `FRINK_CORS_ORIGINS`),
 `--threads-http N` (sets `FRINK_TOKIO_WORKERS`; below 1 keeps the
-default, as upstream), `--metrics`, `--usage` and `--version`.
+default, as upstream), `--metrics`, `--slots` / `--no-slots` (sets
+`FRINK_ENDPOINT_SLOTS`, and `GET /slots` is on by default, as upstream),
+`--spm-infill` (sets `FRINK_SPM_INFILL`, and `/infill` puts the suffix
+first), `--usage` and `--version`.
 
 Notes that are frink's own:
 
@@ -1408,7 +1411,11 @@ Notes that are frink's own:
   `/admin/models/load`, attaches the same adapters or refuses the
   checkpoint by name ([`API.md`](API.md#lora-adapters)).
 - `-cb`/`-np` read back as `frink_scheduler_max_seqs`, and `-b`/`-ub` as
-  `frink_scheduler_prefill_chunk`, on `GET /metrics`.
+  `frink_scheduler_prefill_chunk`, on `GET /metrics`. `-np N` is also
+  the N slots `GET /slots` lists and `/props` reports as `total_slots`.
+  Without it there is no slot count, and `GET /slots` says so.
+- `-b` also sets `FRINK_LOGICAL_BATCH`, the `n_batch` `/infill` budgets
+  its prompt with (2048 without the flag, llama.cpp's default).
 - `--chat-template` and `--chat-template-file` set
   `FRINK_CHAT_TEMPLATE`, which replaces the checkpoint's template on
   every load path. Both are checked at startup by rendering one user

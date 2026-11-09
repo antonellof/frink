@@ -425,13 +425,11 @@ mod banner_tests {
     }
 }
 
-/// `general.file_type` as llama.cpp names it.
+/// `general.file_type` as llama.cpp names it, through the one table
+/// ([`frink_gguf::ftype::llama_ftype_name`], which `frink-server`'s
+/// `/props` reads too).
 ///
-/// The values are `llama_ftype` (`llama.h`), and the strings are
-/// `llama_model_ftype_name`'s (`llama-model.cpp`), so the banner reads
-/// the same as llama.cpp's for the same file.
-///
-/// A value this table does not carry reports the NUMBER rather than a
+/// A value the table does not carry reports the NUMBER rather than a
 /// guess: an unknown ftype printed as a plausible name is worse than
 /// one printed as `ftype 38`, because only the second sends somebody
 /// to look it up.
@@ -439,43 +437,10 @@ pub fn ftype_name(ftype: Option<u64>) -> String {
     let Some(v) = ftype else {
         return "unknown".to_string();
     };
-    let name = match v {
-        0 => "all F32",
-        1 => "F16",
-        2 => "Q4_0",
-        3 => "Q4_1",
-        7 => "Q8_0",
-        8 => "Q5_0",
-        9 => "Q5_1",
-        10 => "Q2_K - Medium",
-        11 => "Q3_K - Small",
-        12 => "Q3_K - Medium",
-        13 => "Q3_K - Large",
-        14 => "Q4_K - Small",
-        15 => "Q4_K - Medium",
-        16 => "Q5_K - Small",
-        17 => "Q5_K - Medium",
-        18 => "Q6_K",
-        19 => "IQ2_XXS - 2.0625 bpw",
-        20 => "IQ2_XS - 2.3125 bpw",
-        21 => "Q2_K - Small",
-        22 => "IQ3_XS - 3.3 bpw",
-        23 => "IQ3_XXS - 3.0625 bpw",
-        24 => "IQ1_S - 1.5625 bpw",
-        25 => "IQ4_NL - 4.5 bpw",
-        26 => "IQ3_S - 3.4375 bpw",
-        27 => "IQ3_M - 3.66 bpw",
-        28 => "IQ2_S - 2.5 bpw",
-        29 => "IQ2_M - 2.7 bpw",
-        30 => "IQ4_XS - 4.25 bpw",
-        31 => "IQ1_M - 1.75 bpw",
-        32 => "BF16",
-        36 => "TQ1_0 - 1.69 bpw ternary",
-        37 => "TQ2_0 - 2.06 bpw ternary",
-        38 => "MXFP4 MoE",
-        _ => return format!("ftype {v}"),
-    };
-    name.to_string()
+    match frink_gguf::ftype::llama_ftype_name(v) {
+        Some(name) => name.to_string(),
+        None => format!("ftype {v}"),
+    }
 }
 
 #[cfg(test)]

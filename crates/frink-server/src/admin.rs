@@ -680,6 +680,7 @@ pub(crate) async fn sleep(State(state): State<Arc<AppState>>) -> Response {
     *state.slept.lock().unwrap_or_else(|p| p.into_inner()) = Some(crate::SleptModel {
         id: active.id.clone(),
         path,
+        props: crate::props::snapshot(&active),
     });
     // After the record, so a wake between the two cannot find an empty
     // one.

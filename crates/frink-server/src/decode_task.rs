@@ -32,6 +32,7 @@ use std::sync::{Arc, Mutex};
 use frink_models::PrefixCache;
 
 use crate::generate::GenerationParams;
+use crate::prompt_input::Prompt;
 use crate::{
     budget, decode_error_response, generate, join_error_response, serving, ActiveModel, ApiError,
     AppState, Model,
@@ -92,7 +93,7 @@ impl DecodeHandles {
     /// `spawn_blocking` (or through [`buffered`], which does that).
     pub(crate) fn run(
         &self,
-        prompt: &str,
+        prompt: Prompt<'_>,
         params: &GenerationParams,
         // Per choice, choice 0 first. See `crate::run_generation_emit`.
     ) -> Result<generate::Generated, generate::DecodeError> {
@@ -113,7 +114,7 @@ impl DecodeHandles {
     /// Blocking, for the same reason.
     pub(crate) fn run_emit(
         &self,
-        prompt: &str,
+        prompt: Prompt<'_>,
         params: &GenerationParams,
         emit: impl FnMut(usize, &str),
         // Per choice, choice 0 first. See `crate::run_generation_emit`.
@@ -140,12 +141,20 @@ impl DecodeHandles {
 /// in it becomes a 500 through `join_error_response` rather than a
 /// hung request, and a decode error becomes the status
 /// `decode_error_response` names.
-pub(crate) async fn buffered(
+///
+/// `prompt` is the route's own: text (`String`) for every route but
+/// `/infill`, whose ids (`Vec<usize>`) are already assembled. See
+/// [`crate::prompt_input`].
+pub(crate) async fn buffered<P>(
     handles: DecodeHandles,
-    prompt: String,
+    prompt: P,
     params: GenerationParams,
-) -> Result<generate::Generated, ApiError> {
-    tokio::task::spawn_blocking(move || handles.run(&prompt, &params))
+) -> Result<generate::Generated, ApiError>
+where
+    P: Send + 'static,
+    for<'a> &'a P: Into<Prompt<'a>>,
+{
+    tokio::task::spawn_blocking(move || handles.run((&prompt).into(), &params))
         .await
         .map_err(join_error_response)?
         .map_err(decode_error_response)

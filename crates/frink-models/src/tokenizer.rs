@@ -30,6 +30,7 @@
 //! segmenter. Still missing: `rwkv`, which needs a trie tokenizer, and
 //! `none`.
 
+mod fim;
 mod plamo2;
 mod pretokenize;
 mod scored_vocab;
@@ -38,6 +39,7 @@ mod unicode;
 mod unicode_data;
 mod wordpiece;
 
+pub use fim::FimTokens;
 pub use plamo2::GgufPlamo2Tokenizer;
 use scored_vocab::ScoredVocab;
 pub use special::SpecialTokens;
