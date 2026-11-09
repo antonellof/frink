@@ -508,16 +508,21 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
         StackKv::UploadPrefix,
     )
     .unwrap();
-    assert_eq!(stacked.kv_rows.len(), 2);
-    assert_close(&stacked.kv_rows[0].0, &out.k_rows, 1e-5, "stack layer 0 K");
+    assert_eq!(stacked.kv_rows_owned().len(), 2);
     assert_close(
-        &stacked.kv_rows[1].0,
+        &stacked.kv_rows_owned()[0].0,
+        &out.k_rows,
+        1e-5,
+        "stack layer 0 K",
+    );
+    assert_close(
+        &stacked.kv_rows_owned()[1].0,
         &second.k_rows,
         1e-5,
         "stack layer 1 K",
     );
     assert_close(
-        &stacked.kv_rows[1].1,
+        &stacked.kv_rows_owned()[1].1,
         &second.v_rows,
         1e-5,
         "stack layer 1 V",
@@ -825,7 +830,8 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
             "pos {pos}: mirror vs upload"
         );
         assert_eq!(
-            via_mirror.kv_rows, via_upload.kv_rows,
+            via_mirror.kv_rows_owned(),
+            via_upload.kv_rows_owned(),
             "pos {pos}: K/V rows"
         );
         // And the host twin, layer by layer.
@@ -842,13 +848,13 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
                 pos,
             );
             assert_close(
-                &via_mirror.kv_rows[l].0,
+                &via_mirror.kv_rows_owned()[l].0,
                 &k,
                 1e-3,
                 &format!("pos {pos} layer {l} K"),
             );
             assert_close(
-                &via_mirror.kv_rows[l].1,
+                &via_mirror.kv_rows_owned()[l].1,
                 &v,
                 1e-3,
                 &format!("pos {pos} layer {l} V"),
@@ -857,8 +863,8 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         }
         assert_close(&via_mirror.hidden, &h, 1e-3, &format!("pos {pos} hidden"));
         for l in 0..2 {
-            host_k[l].extend_from_slice(&via_mirror.kv_rows[l].0);
-            host_v[l].extend_from_slice(&via_mirror.kv_rows[l].1);
+            host_k[l].extend_from_slice(&via_mirror.kv_rows_owned()[l].0);
+            host_v[l].extend_from_slice(&via_mirror.kv_rows_owned()[l].1);
             assert_eq!(mirrors[l].as_ref().unwrap().rows(), pos + 1);
         }
         row = via_mirror.hidden;
