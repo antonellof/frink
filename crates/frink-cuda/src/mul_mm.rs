@@ -296,6 +296,15 @@ pub fn kind_by_name(name: &str) -> Option<&'static MulMmKind> {
 /// on the include path, which this crate deliberately does not require.
 const F16_SRC: &str = r#"
 __device__ __forceinline__ float frink_f16_to_f32(unsigned short bits) {
+#ifdef __CUDA_ARCH__
+    // One instruction on the device, the same value for every finite
+    // and infinite half (a NaN stays a NaN); the bit surgery below is
+    // what `tools/mul_mm_host_check` runs on a host CPU, and the
+    // scalar twin's form.
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(bits));
+    return f;
+#else
     unsigned int sign = (bits >> 15) & 0x1u;
     unsigned int exp = (bits >> 10) & 0x1Fu;
     unsigned int mant = bits & 0x3FFu;
@@ -308,6 +317,7 @@ __device__ __forceinline__ float frink_f16_to_f32(unsigned short bits) {
         scale = ldexpf((float)(mant | 0x400), (int)exp - 25);
     }
     return sign ? -scale : scale;
+#endif
 }
 "#;
 
