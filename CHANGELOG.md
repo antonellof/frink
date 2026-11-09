@@ -15,6 +15,15 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **Gemma's layers stay on the GPU under CUDA.** The resident CUDA stack
+  refused a GeGLU feed-forward, so Gemma 2 and 3 ran every decode token
+  and prefill step on the per-op path, 337 host waits a Gemma-3-12B
+  token. The stack now runs GeGLU in ggml-cuda's tanh form beside
+  SwiGLU. On an L40S, Gemma-3-12B Q4_K_M `pp512` went from 82 to 727
+  tokens/s and `tg128` from 33 to 55 (#133, #259).
+
 ## [0.58.0] - 2026-11-08
 
 ### Added
