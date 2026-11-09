@@ -18,9 +18,11 @@ pub const ARCH: &str = "compute_80";
 
 /// The skeleton every kind shares. The kind supplies `FX_N_STEPS` (steps
 /// of 128 values a row takes), `FX_XD` (scale floats per 32-value run),
-/// `FX_LOAD_X` (the weight-tile loader, writing `x_qs` and `x_d`),
-/// `FX_Y_SCALE` (reading an activation run's scale and sum) and `FX_ACC`
-/// (scaling one int32 dot into the accumulator, in ggml's order).
+/// `FX_LOAD_X` (the weight-tile loader, writing `x_qs`, `x_d` and the
+/// per-row `x_e`), `FX_Y_SCALE` (an activation run's scale and sum),
+/// `FX_DOT` (the run's int32 dot or dots), `FX_ACC` (folding them into
+/// the accumulator `a`, or the step's `tmp`, in ggml's order) and
+/// `FX_STEP_END` (folding a step's `tmp` into the accumulator).
 const BODY_SRC: &str = r#"
 #define FX_I 128
 #define FX_J 64
@@ -35,6 +37,14 @@ __device__ __forceinline__ float frink_mmq_f16(unsigned short bits) {
     float f;
     asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(bits));
     return f;
+}
+
+__device__ __forceinline__ void frink_mma_s8_k16(int* c, const unsigned int* a, unsigned int b) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 "
+        "{%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};"
+        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(b));
 }
 
 __device__ __forceinline__ void frink_mma_s8(int* c, const unsigned int* a, const unsigned int* b) {
@@ -66,6 +76,7 @@ extern "C" __global__ void FX_FN_NAME(
 ) {
     __shared__ __align__(16) int x_qs[FX_I * FX_XS];
     __shared__ float x_d[FX_I * 4 * FX_XD];
+    __shared__ float x_e[FX_I];
     __shared__ __align__(16) int y_s[FX_J * FX_YS];
 
     const int tid = threadIdx.x;
@@ -88,6 +99,13 @@ extern "C" __global__ void FX_FN_NAME(
 
     const int n_steps = FX_N_STEPS;
     for (int ks = 0; ks < n_steps; ks++) {
+        float tmp[2][4][4];
+#pragma unroll
+        for (int mf = 0; mf < 2; mf++)
+#pragma unroll
+            for (int nf = 0; nf < 4; nf++)
+#pragma unroll
+                for (int e = 0; e < 4; e++) tmp[mf][nf][e] = 0.0f;
         FX_LOAD_X
         // The step's activation blocks for this tile's tokens are
         // contiguous (K-block-major): one copy of 64 x 144 bytes.
@@ -116,13 +134,25 @@ extern "C" __global__ void FX_FN_NAME(
 #pragma unroll
                 for (int mf = 0; mf < 2; mf++) {
                     int c[4] = {0, 0, 0, 0};
-                    frink_mma_s8(c, a[mf], b);
+                    int c2[4] = {0, 0, 0, 0};
+                    FX_DOT(c, c2, a[mf], b);
                     const int ra = wm * 32 + mf * 16 + g;
-                    FX_ACC(acc[mf][nf][0], c[0], ra, dy0, sy0);
-                    FX_ACC(acc[mf][nf][1], c[1], ra, dy1, sy1);
-                    FX_ACC(acc[mf][nf][2], c[2], ra + 8, dy0, sy0);
-                    FX_ACC(acc[mf][nf][3], c[3], ra + 8, dy1, sy1);
+                    FX_ACC(acc[mf][nf][0], tmp[mf][nf][0], c[0], c2[0], ra, dy0, sy0);
+                    FX_ACC(acc[mf][nf][1], tmp[mf][nf][1], c[1], c2[1], ra, dy1, sy1);
+                    FX_ACC(acc[mf][nf][2], tmp[mf][nf][2], c[2], c2[2], ra + 8, dy0, sy0);
+                    FX_ACC(acc[mf][nf][3], tmp[mf][nf][3], c[3], c2[3], ra + 8, dy1, sy1);
                 }
+            }
+        }
+#pragma unroll
+        for (int mf = 0; mf < 2; mf++) {
+            const int ra = wm * 32 + mf * 16 + g;
+#pragma unroll
+            for (int nf = 0; nf < 4; nf++) {
+                FX_STEP_END(acc[mf][nf][0], tmp[mf][nf][0], ra);
+                FX_STEP_END(acc[mf][nf][1], tmp[mf][nf][1], ra);
+                FX_STEP_END(acc[mf][nf][2], tmp[mf][nf][2], ra + 8);
+                FX_STEP_END(acc[mf][nf][3], tmp[mf][nf][3], ra + 8);
             }
         }
         __syncthreads();
@@ -160,7 +190,9 @@ const Q8_0_LOAD_X: &str = r#"
 // D4 activations: one f32 scale per run; `acc += C * dw * dy`
 // (`vec_dot_q8_0_q8_1_mma`).
 #define FX_Y_SCALE(col, d, s) { d = ((const float*)&y_s[(col) * FX_YS])[kk]; s = 0.0f; }
-#define FX_ACC(a, c, row, d, s) a += (float)(c) * x_d[(row) * 4 + kk] * (d);
+#define FX_DOT(c, c2, af, b) frink_mma_s8(c, af, b);
+#define FX_ACC(a, t, c, c2, row, d, s) a += (float)(c) * x_d[(row) * 4 + kk] * (d);
+#define FX_STEP_END(a, t, row)
 #define FX_LOAD_X \
     { \
         const int kb0 = ks * 4; \
@@ -209,11 +241,13 @@ __device__ __forceinline__ float frink_mmq_round_h(float x) {
         d = frink_mmq_f16((unsigned short)(hs & 0xffffu)); \
         s = frink_mmq_f16((unsigned short)(hs >> 16)); \
     }
-#define FX_ACC(a, c, row, d, s) \
+#define FX_DOT(c, c2, af, b) frink_mma_s8(c, af, b);
+#define FX_ACC(a, t, c, c2, row, d, s) \
     { \
         a += x_d[((row) * 4 + kk) * 2] * (d) * (float)(c); \
         a += x_d[((row) * 4 + kk) * 2 + 1] * (s); \
     }
+#define FX_STEP_END(a, t, row)
 #define FX_LOAD_X \
     { \
         const int sbk = ks >> 1; \
@@ -250,6 +284,61 @@ __device__ __forceinline__ float frink_mmq_round_h(float x) {
     }
 "#;
 
+/// Q6_K's weight tile for one step, half a 210-byte superblock a row: each
+/// of the half's 128 values rebuilt from its 4 low bits (`ql`) and 2 high
+/// bits (`qh`) with the -32 offset applied at load (`load_tiles_q6_K`'s
+/// `__vsub4`), its 16-value sub-scales as floats (exact small ints) and
+/// the superblock's `d` per row. A 32-value run takes two k16 dots, one
+/// per sub-scale; the step accumulates `tmp += (C0 * sc0 + C1 * sc1) * dy`
+/// and folds `acc += tmp * d` at its end (`vec_dot_q6_K_q8_1_mma`; the
+/// int products are exact in f32). The block is only 2-byte aligned.
+const Q6_K_LOAD_X: &str = r#"
+#define FX_N_STEPS (n_blocks * 2)
+#define FX_XD 2
+#define FX_Y_SCALE(col, d, s) { d = ((const float*)&y_s[(col) * FX_YS])[kk]; s = 0.0f; }
+#define FX_DOT(c, c2, af, b) \
+    { \
+        frink_mma_s8_k16(c, af, b[0]); \
+        frink_mma_s8_k16(c2, af + 2, b[1]); \
+    }
+#define FX_ACC(a, t, c, c2, row, d, s) \
+    t += ((float)(c) * x_d[((row) * 4 + kk) * 2] + (float)(c2) * x_d[((row) * 4 + kk) * 2 + 1]) * (d);
+#define FX_STEP_END(a, t, row) a += (t) * x_e[row];
+__device__ __forceinline__ unsigned int frink_mmq_u32_a2(const unsigned char* p) {
+    const unsigned short* h = (const unsigned short*)p;
+    return (unsigned int)h[0] | ((unsigned int)h[1] << 16);
+}
+#define FX_LOAD_X \
+    { \
+        const int sbk = ks >> 1; \
+        const int h = ks & 1; \
+        const int ii = tid & 31; \
+        const int r = ii >> 3; \
+        const int l0 = 4 * (ii & 7); \
+        for (int pass = 0; pass < FX_I / 8; pass++) { \
+            const int i = pass * 8 + (tid >> 5); \
+            const int row = min(r0 + i, n_rows - 1); \
+            const unsigned char* blk = w + (size_t)row * row_bytes + (size_t)sbk * 210; \
+            const unsigned int ql = frink_mmq_u32_a2(blk + h * 64 + (r & 1) * 32 + l0); \
+            const unsigned int qh = frink_mmq_u32_a2(blk + 128 + h * 32 + l0); \
+            const unsigned int lo = ((r < 2) ? ql : (ql >> 4)) & 0x0F0F0F0Fu; \
+            const unsigned int hi = ((qh >> (2 * r)) & 0x03030303u) << 4; \
+            x_qs[i * FX_XS + ii] = (int)__vsub4(lo | hi, 0x20202020u); \
+        } \
+        for (int e = tid; e < FX_I * 8; e += FX_NT) { \
+            const int i = e >> 3; \
+            const int row = min(r0 + i, n_rows - 1); \
+            const unsigned char* blk = w + (size_t)row * row_bytes + (size_t)sbk * 210; \
+            x_d[e] = (float)(signed char)blk[192 + h * 8 + (e & 7)]; \
+        } \
+        for (int i = tid; i < FX_I; i += FX_NT) { \
+            const int row = min(r0 + i, n_rows - 1); \
+            x_e[i] = frink_mmq_f16(*(const unsigned short*)(w + (size_t)row * row_bytes \
+                + (size_t)sbk * 210 + 208)); \
+        } \
+    }
+"#;
+
 /// The kinds the int8 GEMM has a weight loader for, named as GGUF names
 /// them.
 #[allow(non_camel_case_types)]
@@ -257,6 +346,7 @@ __device__ __forceinline__ float frink_mmq_round_h(float x) {
 pub enum MmqKind {
     Q8_0,
     Q4_K,
+    Q6_K,
 }
 
 impl MmqKind {
@@ -265,6 +355,7 @@ impl MmqKind {
         match name {
             "Q8_0" => Some(Self::Q8_0),
             "Q4_K" => Some(Self::Q4_K),
+            "Q6_K" => Some(Self::Q6_K),
             _ => None,
         }
     }
@@ -274,6 +365,7 @@ impl MmqKind {
         match self {
             Self::Q8_0 => (32, 34),
             Self::Q4_K => (256, 144),
+            Self::Q6_K => (256, 210),
         }
     }
 
@@ -282,6 +374,7 @@ impl MmqKind {
         match self {
             Self::Q8_0 => super::quantize::Layout::D4,
             Self::Q4_K => super::quantize::Layout::Ds4,
+            Self::Q6_K => super::quantize::Layout::D4,
         }
     }
 
@@ -290,6 +383,7 @@ impl MmqKind {
         let (module, name, load) = match self {
             Self::Q8_0 => ("frink_mmq_q8_0", "frink_mmq_q8_0", Q8_0_LOAD_X),
             Self::Q4_K => ("frink_mmq_q4_k", "frink_mmq_q4_k", Q4_K_LOAD_X),
+            Self::Q6_K => ("frink_mmq_q6_k", "frink_mmq_q6_k", Q6_K_LOAD_X),
         };
         (
             format!("#define FX_FN_NAME {name}\n{load}{BODY_SRC}"),
@@ -335,10 +429,19 @@ mod tests {
         assert_eq!(geometry(4096, 512), ((8, 32, 1), (256, 1, 1)));
         assert_eq!(MmqKind::by_name("Q8_0"), Some(MmqKind::Q8_0));
         assert_eq!(MmqKind::by_name("Q4_K"), Some(MmqKind::Q4_K));
-        assert_eq!(MmqKind::by_name("Q6_K"), None);
-        for k in [MmqKind::Q8_0, MmqKind::Q4_K] {
+        assert_eq!(MmqKind::by_name("Q6_K"), Some(MmqKind::Q6_K));
+        assert_eq!(MmqKind::by_name("Q5_K"), None);
+        for k in [MmqKind::Q8_0, MmqKind::Q4_K, MmqKind::Q6_K] {
             let (src, _, _) = k.source();
-            for m in ["FX_N_STEPS", "FX_XD", "FX_LOAD_X", "FX_Y_SCALE", "FX_ACC"] {
+            for m in [
+                "FX_N_STEPS",
+                "FX_XD",
+                "FX_LOAD_X",
+                "FX_Y_SCALE",
+                "FX_DOT",
+                "FX_ACC",
+                "FX_STEP_END",
+            ] {
                 assert!(src.contains(&format!("#define {m}")), "{k:?} lacks {m}");
             }
         }

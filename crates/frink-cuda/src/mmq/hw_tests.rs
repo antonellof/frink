@@ -84,6 +84,11 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
             &crate::mul_mm::Q4_K,
             &[(135, 256, 37), (256, 4096, 130), (33, 512, 1)][..],
         ),
+        (
+            MmqKind::Q6_K,
+            &crate::mul_mm::Q6_K,
+            &[(135, 256, 37), (256, 4096, 130), (33, 512, 1)][..],
+        ),
     ] {
         for &(n_rows, n_cols, batch) in shapes {
             let (be, bb) = kind.block();
@@ -100,6 +105,7 @@ fn the_int8_gemm_matches_its_twin_and_the_reference() {
             let twin = match kind {
                 MmqKind::Q8_0 => super::mmq_q8_0_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
                 MmqKind::Q4_K => super::mmq_q4_k_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
+                MmqKind::Q6_K => super::mmq_q6_k_twin(&w, &y, n_rows, n_cols, batch, ncols_pad),
             };
             let reference =
                 crate::mul_mm_ref::mul_mm_reference(mm, &w, &x, n_rows, n_cols, batch, row_bytes)

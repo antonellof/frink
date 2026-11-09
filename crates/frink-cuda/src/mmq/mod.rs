@@ -200,6 +200,61 @@ pub(crate) fn mmq_q4_k_twin(
     out
 }
 
+/// [`mmq_q8_0_twin`] for Q6_K. Per half superblock (128 values) a
+/// temporary takes `tmp = (C0 * sc0 + C1 * sc1) * dy + tmp` for each
+/// 32-value run (`C0`, `C1` its two 16-value dots, `sc` their int8
+/// sub-scales), then `acc = tmp * d + acc`.
+#[cfg(test)]
+pub(crate) fn mmq_q6_k_twin(
+    w: &[u8],
+    y: &[u8],
+    n_rows: usize,
+    n_cols: usize,
+    batch: usize,
+    ncols_pad: usize,
+) -> Vec<f32> {
+    let n_sb = n_cols / 256;
+    let row_bytes = n_sb * 210;
+    let mut out = vec![0f32; batch * n_rows];
+    for col in 0..batch {
+        for row in 0..n_rows {
+            let mut acc = 0f32;
+            for sb in 0..n_sb {
+                let blk = &w[row * row_bytes + sb * 210..row * row_bytes + sb * 210 + 210];
+                let (ql, qh, sc) = (&blk[..128], &blk[128..192], &blk[192..208]);
+                let d = half::f16::from_le_bytes([blk[208], blk[209]]).to_f32();
+                for h in 0..2 {
+                    let q = |v: usize| -> i32 {
+                        let (r, l) = (v / 32, v % 32);
+                        let lb = ql[h * 64 + (r & 1) * 32 + l];
+                        let nib = if r < 2 { lb & 0xF } else { lb >> 4 };
+                        let hb = (qh[h * 32 + l] >> (2 * r)) & 3;
+                        i32::from(nib | (hb << 4)) - 32
+                    };
+                    let step = sb * 2 + h;
+                    let yb = &y[(step * ncols_pad + col) * quantize::BLOCK_BYTES..];
+                    let mut tmp = 0f32;
+                    for kk in 0..4 {
+                        let dy = f32::from_le_bytes(yb[4 * kk..4 * kk + 4].try_into().unwrap());
+                        let dot = |lo: usize| -> i32 {
+                            (lo..lo + 16)
+                                .map(|e| q(kk * 32 + e) * i32::from(yb[16 + kk * 32 + e] as i8))
+                                .sum()
+                        };
+                        let (c0, c1) = (dot(0), dot(16));
+                        let sc0 = f32::from(sc[h * 8 + kk * 2] as i8);
+                        let sc1 = f32::from(sc[h * 8 + kk * 2 + 1] as i8);
+                        tmp = (c0 as f32 * sc0 + c1 as f32 * sc1).mul_add(dy, tmp);
+                    }
+                    acc = tmp.mul_add(d, acc);
+                }
+            }
+            out[col * n_rows + row] = acc;
+        }
+    }
+    out
+}
+
 #[cfg(all(test, feature = "cuda"))]
 mod hw_tests;
 
@@ -211,6 +266,36 @@ mod tests {
     /// int8 GEMM over q8_1 activations lands within the activations'
     /// rounding of the f32 reference, over a K with a partial step and a
     /// batch with padding columns.
+    /// The Q6_K twin, held to the f32 reference the same way.
+    #[test]
+    fn the_q6_k_twin_is_the_gemm_within_the_q8_1_rounding() {
+        let (n_rows, n_cols, batch) = (7usize, 512usize, 3usize);
+        let w = crate::mul_mm_ref::fixtures::weights(&crate::mul_mm::Q6_K, n_rows, n_cols, 17);
+        let x: Vec<f32> = (0..batch * n_cols)
+            .map(|i| ((i as f32) * 0.29).sin() * (1u32 << ((i / 32) % 5)) as f32)
+            .collect();
+        let ncols_pad = kernel::ncols_pad(batch);
+        let y = quantize::quantize_twin(&x, None, n_cols, batch, ncols_pad, quantize::Layout::D4);
+        let got = mmq_q6_k_twin(&w, &y, n_rows, n_cols, batch, ncols_pad);
+        let want = crate::mul_mm_ref::mul_mm_reference(
+            &crate::mul_mm::Q6_K,
+            &w,
+            &x,
+            n_rows,
+            n_cols,
+            batch,
+            n_cols / 256 * 210,
+        )
+        .unwrap();
+        let rms = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+        for (i, (g, r)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - r).abs() <= 2e-2 * rms,
+                "[{i}]: twin {g} reference {r} (rms {rms})"
+            );
+        }
+    }
+
     /// The Q4_K twin, held to the f32 reference the same way, over two
     /// superblocks a row (both halves of each).
     #[test]
