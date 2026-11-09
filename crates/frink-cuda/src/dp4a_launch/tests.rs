@@ -82,7 +82,7 @@ fn term_scale(kind: &Dp4aKind, row: &[u8], y: &[u8]) -> f64 {
 /// sum overflows, and a long vector over several threadblocks. Nothing
 /// here contracts (no multiply feeds an add), so equality is the bar.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn the_q8_1_quantizer_matches_its_twin_byte_for_byte() {
     let dev = crate::gpu::shared_device().expect("device");
     let mut edge = vec![0f32; 32];
@@ -117,7 +117,7 @@ fn the_q8_1_quantizer_matches_its_twin_byte_for_byte() {
 /// that the loads' alignment holds. The device contracts into FMAs, so
 /// the bar is a few ulps of the row's term scale, not equality.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn every_dp4a_matvec_matches_its_twin_at_every_geometry() {
     let dev = crate::gpu::shared_device().expect("device");
     let rows = 37usize;
@@ -161,7 +161,7 @@ fn every_dp4a_matvec_matches_its_twin_at_every_geometry() {
 /// magnitude). Decode shapes: a 4096-wide K-quant row, a 4096-wide
 /// Q8_0 row, gpt-oss's 2880-wide MXFP4 row.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn the_dp4a_matvec_is_within_the_q8_1_rounding_of_the_f32_one() {
     use crate::matvec_kinds::coalesced::{coalesced_kind, wpr_for, MatvecWidth};
     let dev = crate::gpu::shared_device().expect("device");
@@ -209,7 +209,7 @@ fn the_dp4a_matvec_is_within_the_q8_1_rounding_of_the_f32_one() {
 /// slot (gate, up) and once with an input each (down). The input is
 /// quantized once for all of them.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn several_experts_in_one_dp4a_launch_equal_one_launch_each() {
     use cudarc::driver::DevicePtr;
     let dev = crate::gpu::shared_device().expect("device");
@@ -279,7 +279,7 @@ fn several_experts_in_one_dp4a_launch_equal_one_launch_each() {
 ///
 ///   FRINK_CUDA_MATVEC=dp4a cargo test -p frink-cuda --features cuda -- --ignored the_switch
 #[test]
-#[ignore = "requires real CUDA hardware and FRINK_CUDA_MATVEC=dp4a; not yet run"]
+#[ignore = "requires real CUDA hardware and FRINK_CUDA_MATVEC=dp4a. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn the_switch_routes_the_dp4a_kinds_through_one_quantized_input() {
     if !dp4a_enabled() {
         eprintln!("FRINK_CUDA_MATVEC is not dp4a in this process: nothing to check");
