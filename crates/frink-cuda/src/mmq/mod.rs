@@ -24,7 +24,7 @@ mod launch {
 
     /// `out[t][r] = w[r] . x[t]` for `batch` rows `x` of `n_cols`: the
     /// activations quantized, then the int8 GEMM on the dense token tile
-    /// ([`kernel::dense_cols`]). The caller holds the returned weights
+    /// ([`kernel::dense_cols_for`]). The caller holds the returned weights
     /// until it synchronises.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_mmq(
@@ -37,7 +37,8 @@ mod launch {
         batch: usize,
         row_bytes: usize,
     ) -> Result<(CudaSlice<f32>, Arc<crate::gpu::ResidentCudaWeights>), CudaError> {
-        let cols = kernel::dense_cols();
+        let n_sm = crate::gpu::multiprocessor_count(dev);
+        let cols = kernel::dense_cols_for(kind, n_rows, batch, n_sm);
         enqueue_mmq_cols(
             dev, kind, weights, x, n_rows, n_cols, batch, row_bytes, cols,
         )
@@ -81,6 +82,8 @@ mod launch {
         } else {
             kind.source()
         };
+        let fast = kernel::fast_i2f_for(crate::gpu::compute_capability(dev));
+        let src = kernel::with_i2f(src, fast);
         crate::gpu::ensure_module_loaded_lazy_for_arch(
             dev,
             module,
@@ -164,6 +167,8 @@ mod launch {
             )));
         }
         let (src, module, name) = kind.grouped_source();
+        let fast = kernel::fast_i2f_for(crate::gpu::compute_capability(dev));
+        let src = kernel::with_i2f(src, fast);
         crate::gpu::ensure_module_loaded_lazy_for_arch(
             dev,
             module,

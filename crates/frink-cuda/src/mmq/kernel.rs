@@ -12,19 +12,55 @@ pub const ROWS: usize = 128;
 pub const COLS: usize = 64;
 
 /// The wide tile's tokens: llama.cpp's MMQ takes 128 at `pp512` on
-/// Ampere and Ada, amortizing each weight tile's unpack over twice the
-/// tokens. Dense GEMMs take it under `FRINK_CUDA_MMQ_COLS=128`.
+/// Ampere and Ada, reading each weight tile once per 128 tokens.
 pub const WIDE_COLS: usize = 128;
 
-/// The token tile a dense int8 GEMM takes: [`WIDE_COLS`] when
-/// `FRINK_CUDA_MMQ_COLS=128`, else [`COLS`]. An A/B lever while the wide
-/// tile is measured. Read once.
-pub fn dense_cols() -> usize {
-    static COLS_ENV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// `FRINK_CUDA_MMQ_COLS=64` or `128` holds every dense int8 GEMM at that
+/// token tile, an A/B lever over [`dense_cols_for`]'s choice. Read once.
+fn cols_override() -> Option<usize> {
+    static COLS_ENV: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     *COLS_ENV.get_or_init(|| match std::env::var("FRINK_CUDA_MMQ_COLS").as_deref() {
-        Ok("128") => WIDE_COLS,
-        _ => COLS,
+        Ok("64") => Some(COLS),
+        Ok("128") => Some(WIDE_COLS),
+        _ => None,
     })
+}
+
+/// The token tile a dense int8 GEMM of `n_rows` over `batch` tokens takes
+/// on a device of `n_sm` multiprocessors. Q8_0 takes [`WIDE_COLS`] when
+/// its wide tiles still fill every multiprocessor once, halving the
+/// weight reads (on an A10G its 4096 x 14336 x 512 GEMM went from 1.73
+/// to 1.24 ms, on an A100 from 1.34 to 1.25), and [`COLS`] when they do
+/// not (its 1024-row projections, slower wide on both). Every other
+/// kind keeps [`COLS`]: Q4_K measured slower wide on both cards.
+pub fn dense_cols_for(kind: MmqKind, n_rows: usize, batch: usize, n_sm: usize) -> usize {
+    if let Some(cols) = cols_override() {
+        return cols;
+    }
+    let wide_tiles = n_rows.div_ceil(ROWS) * batch.div_ceil(WIDE_COLS);
+    if kind == MmqKind::Q8_0 && wide_tiles >= n_sm.max(1) {
+        WIDE_COLS
+    } else {
+        COLS
+    }
+}
+
+/// Whether a device of compute capability `cc` converts the GEMM's mma
+/// results with `frink_mmq_i2f`'s integer add (`FX_FAST_I2F`) rather
+/// than `cvt`. Only sm_80: on an A100 it took the Q4_K 14336 x 4096 x
+/// 512 GEMM from 1.16 to 0.84 ms, and on an A10G (sm_86, whose integer
+/// lanes are half its f32 lanes) it made the same GEMM 15% slower.
+pub fn fast_i2f_for(cc: (i32, i32)) -> bool {
+    cc == (8, 0)
+}
+
+/// `src` with the conversion `fast_i2f_for` chose.
+pub fn with_i2f(src: String, fast: bool) -> String {
+    if fast {
+        format!("#define FX_FAST_I2F 1\n{src}")
+    } else {
+        src
+    }
 }
 /// Threads per block: 8 warps.
 pub const THREADS: usize = 256;
@@ -39,13 +75,21 @@ __device__ __forceinline__ float frink_mmq_f16(unsigned short bits) {
     asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(bits));
     return f;
 }
-// (float)c for |c| <= 2^22, exactly: c added to the bits of 1.5 * 2^23,
-// whose ulp is 1, then 1.5 * 2^23 taken away. An integer add and an f32
-// add, where cvt.rn.f32.s32 runs at a quarter of the f32 rate on sm_80
-// to sm_90 and bounds the GEMM: it converts every mma result. Every
-// kind's run dot is far inside the range (`I2F_LIMIT`).
+// (float)c. Under FX_FAST_I2F, for |c| <= 2^22 and exactly: c added to
+// the bits of 1.5 * 2^23, whose ulp is 1, then 1.5 * 2^23 taken away.
+// An integer add and an f32 add in place of cvt.rn.f32.s32, which runs
+// at a quarter of the f32 rate and converts every mma result. Every
+// kind's run dot is far inside the range (`I2F_LIMIT`). Faster on sm_80
+// only (`fast_i2f_for`).
+#ifndef FX_FAST_I2F
+#define FX_FAST_I2F 0
+#endif
 __device__ __forceinline__ float frink_mmq_i2f(int c) {
+#if FX_FAST_I2F
     return __int_as_float(c + 0x4B400000) - 12582912.0f;
+#else
+    return (float)c;
+#endif
 }
 "#;
 
@@ -624,6 +668,31 @@ mod tests {
             assert!(!src.contains("(float)(c"), "{k:?} converts with cvt");
         }
         assert!(PRELUDE_SRC.contains("__int_as_float(c + 0x4B400000) - 12582912.0f"));
+        assert!(with_i2f("x".into(), true).starts_with("#define FX_FAST_I2F 1\n"));
+        assert_eq!(with_i2f("x".into(), false), "x");
+        assert!(fast_i2f_for((8, 0)));
+        assert!(!fast_i2f_for((8, 6)) && !fast_i2f_for((8, 9)) && !fast_i2f_for((9, 0)));
+    }
+
+    /// Q8_0 goes wide only where the wide grid fills the device once;
+    /// the other kinds stay narrow. (Not under `FRINK_CUDA_MMQ_COLS`.)
+    #[test]
+    fn the_dense_tile_is_wide_only_for_q8_0_grids_that_fill_the_device() {
+        if std::env::var_os("FRINK_CUDA_MMQ_COLS").is_some() {
+            return;
+        }
+        // An A10G (80 SMs) and an A100 (108) at pp512, Llama-3.1-8B shapes.
+        for n_sm in [80, 108] {
+            assert_eq!(dense_cols_for(MmqKind::Q8_0, 4096, 512, n_sm), WIDE_COLS);
+            assert_eq!(dense_cols_for(MmqKind::Q8_0, 14336, 512, n_sm), WIDE_COLS);
+            assert_eq!(dense_cols_for(MmqKind::Q8_0, 1024, 512, n_sm), COLS);
+            assert_eq!(dense_cols_for(MmqKind::Q4_K, 14336, 512, n_sm), COLS);
+            assert_eq!(dense_cols_for(MmqKind::MXFP4, 14336, 512, n_sm), COLS);
+        }
+        // 96 wide tiles fill an A10G and not an A100; a short batch is narrow.
+        assert_eq!(dense_cols_for(MmqKind::Q8_0, 3072, 512, 80), WIDE_COLS);
+        assert_eq!(dense_cols_for(MmqKind::Q8_0, 3072, 512, 108), COLS);
+        assert_eq!(dense_cols_for(MmqKind::Q8_0, 4096, 64, 80), COLS);
     }
 
     /// The tile constants the Rust side launches with are the ones the

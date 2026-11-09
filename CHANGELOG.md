@@ -27,6 +27,16 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **The CUDA int8 prefill GEMM is tuned per card.** On an A100 it
+  converts each `mma` result to f32 with an exact integer add instead
+  of `cvt`, which runs at a quarter of the f32 rate there: the Q4_K
+  14336 x 4096 x 512 GEMM went from 1.16 to 0.84 ms and Llama-3.1-8B
+  Q4_K_M `pp512` from 2141 to 2402 tokens/s. On an A10G the same change
+  measured 15% slower, so other cards keep `cvt`. Q8_0 GEMMs whose
+  128-token tiles still fill the device take them, halving the weight
+  reads: on an A10G its 4096 x 14336 x 512 GEMM went from 1.73 to
+  1.24 ms. `FRINK_CUDA_MMQ_COLS` holds the tile for an A/B (#259).
+
 - **CUDA prefill multiplies Q8_0 and Q4_K weights on the int8 tensor
   cores.** The prefill GEMM converted its activations to f16 and ran
   `mma.m16n8k16` in f16. llama.cpp's CUDA prefill quantizes them to q8_1
