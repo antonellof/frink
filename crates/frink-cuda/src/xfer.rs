@@ -195,30 +195,45 @@ mod tests {
     use super::*;
 
     /// A staged download returns what the device holds, through the
-    /// page-locked buffer; a second one while the first is held takes
-    /// the pageable path instead of waiting; and a larger one grows
-    /// the buffer.
+    /// page-locked buffer; one made while the buffer is held takes the
+    /// pageable path instead of waiting; and a larger one grows the
+    /// buffer. The buffer is the process's, and the other hardware
+    /// tests download through it in parallel, so the test holds it to
+    /// check the fallback and waits for it to be free to check the
+    /// page-locked path.
     #[test]
     #[ignore = "requires real CUDA hardware"]
     fn a_staged_download_matches_and_a_held_buffer_falls_back() {
         let dev = crate::gpu::shared_device().expect("a CUDA device");
+        let pinned = |what: &str, d: &CudaSlice<f32>| -> Download {
+            for _ in 0..400 {
+                let got = dtoh_staged(&dev, what, d).unwrap();
+                if matches!(got.inner, DownloadInner::Pinned { .. }) {
+                    return got;
+                }
+                drop(got);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("{what}: the page-locked buffer never came free");
+        };
+
         let host: Vec<f32> = (0..300_000).map(|i| i as f32 * 0.5 - 7.0).collect();
         let d = dev.htod_copy(host.clone()).unwrap();
-        let a = dtoh_staged(&dev, "a", &d).unwrap();
-        assert!(matches!(a.inner, DownloadInner::Pinned { .. }));
-        assert_eq!(a.as_slice(), &host[..]);
-        let b = dtoh_staged(&dev, "b", &d).unwrap();
-        assert!(matches!(b.inner, DownloadInner::Pageable(_)));
-        assert_eq!(b.as_slice(), &host[..]);
-        drop((a, b));
+        {
+            let _held = PINNED.lock().unwrap_or_else(|p| p.into_inner());
+            let b = dtoh_staged(&dev, "held", &d).unwrap();
+            assert!(
+                matches!(b.inner, DownloadInner::Pageable(_)),
+                "a held buffer is not waited for"
+            );
+            assert_eq!(b.as_slice(), &host[..]);
+        }
+        assert_eq!(pinned("a", &d).as_slice(), &host[..]);
 
         let big: Vec<f32> = (0..1_500_000).map(|i| (i % 977) as f32).collect();
         let d2 = dev.htod_copy(big.clone()).unwrap();
-        let c = dtoh_staged(&dev, "c", &d2).unwrap();
-        assert!(matches!(c.inner, DownloadInner::Pinned { .. }));
-        assert_eq!(c.as_slice(), &big[..]);
-        drop(c);
+        assert_eq!(pinned("big", &d2).as_slice(), &big[..]);
         // The grown buffer still serves the smaller download.
-        assert_eq!(dtoh_staged(&dev, "d", &d).unwrap().as_slice(), &host[..]);
+        assert_eq!(pinned("small", &d).as_slice(), &host[..]);
     }
 }

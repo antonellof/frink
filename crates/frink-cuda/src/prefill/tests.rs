@@ -266,16 +266,41 @@ fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors(
     }
 }
 
+/// The tile the prefill attention takes fits the limit it is handed,
+/// the widest one where it can, and a head of 256 still finds one in
+/// the 48 KiB every device gives without opting in.
+#[test]
+fn the_prefill_attention_tile_fits_its_shared_memory() {
+    use super::enqueue::{prefill_attn_smem, prefill_attn_tile};
+    for head_dim in [64usize, 96, 128, 256] {
+        for limit in [48 * 1024usize, 64 * 1024, 99 * 1024, 163 * 1024] {
+            let (rpw, bc, bytes) = prefill_attn_tile(head_dim, limit).expect("a tile fits");
+            assert_eq!(bytes, prefill_attn_smem(head_dim, rpw, bc));
+            assert!(bytes <= limit && rpw <= 8 && bc <= 32, "{head_dim} {limit}");
+        }
+    }
+    assert_eq!(
+        prefill_attn_tile(128, 99 * 1024).map(|t| (t.0, t.1)),
+        Some((8, 32))
+    );
+}
+
 #[test]
 #[ignore = "requires real CUDA hardware; not yet run"]
 fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
     let dev = shared_device().unwrap();
-    let (n_q, n_heads, n_kv_heads, head_dim) = (13, 4, 2, 64);
-    for (start_pos, window, softcap) in [
-        (0, None, None),
-        (7, None, None),
-        (7, Some(5), None),
-        (0, None, Some(50.0)),
+    // One block; several blocks of rows whose keys span tiles; a head
+    // of 256 (two float4s a lane) under GQA 2:1; and a window that
+    // starts inside a tile and leaves whole tiles out of later rows.
+    for (n_q, n_heads, n_kv_heads, head_dim, start_pos, window, softcap) in [
+        (13, 4, 2, 64, 0, None, None),
+        (13, 4, 2, 64, 7, None, None),
+        (13, 4, 2, 64, 7, Some(5), None),
+        (13, 4, 2, 64, 0, None, Some(50.0)),
+        (77, 8, 2, 128, 0, None, None),
+        (77, 8, 2, 128, 45, Some(40), None),
+        (40, 2, 1, 256, 3, None, Some(30.0)),
+        (150, 4, 4, 96, 0, Some(33), None),
     ] {
         let total = start_pos + n_q;
         let q = wave(n_q * n_heads * head_dim, 0.2);
@@ -300,7 +325,10 @@ fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
             &got,
             &want,
             1e-4,
-            &format!("attn start={start_pos} window={window:?} softcap={softcap:?}"),
+            &format!(
+                "attn n_q={n_q} hd={head_dim} start={start_pos} window={window:?} \
+                 softcap={softcap:?}"
+            ),
         );
     }
 }
