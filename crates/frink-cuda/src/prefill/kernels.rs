@@ -188,7 +188,9 @@ __device__ __forceinline__ float frink_inf_pf() {
 // Llama-3.1-8B layer at pp512.
 //
 // Dynamic shared memory: Q [4 * rpw][head_dim], K [bc][head_dim + 4],
-// V [bc][head_dim], P [4][32] floats.
+// V [bc][head_dim] floats. A row's probabilities stay in its lanes and
+// reach the accumulation by shuffle, so nothing needs a warp barrier
+// (which `hiprtc` does not have).
 extern "C" __global__ void causal_gqa_prefill_f32(
     const float* __restrict__ q,
     const float* __restrict__ k_all,
@@ -222,7 +224,6 @@ extern "C" __global__ void causal_gqa_prefill_f32(
     float* q_s = fx_smem;
     float* k_s = q_s + rows_per_block * head_dim;
     float* v_s = k_s + bc * ks;
-    float* p_s = v_s + bc * head_dim;
 
     // The block's rows into shared memory; a row past n_q is zeros and
     // is never stored.
@@ -305,23 +306,25 @@ extern "C" __global__ void causal_gqa_prefill_f32(
             for (int off = 16; off > 0; off >>= 1) psum += __shfl_xor_sync(mask, psum, off);
             l[i] = l[i] * alpha + psum;
             m[i] = m2;
-            p_s[warp * 32 + lane] = p;
-            __syncwarp();
 #pragma unroll
             for (int s = 0; s < 2; s++) {
-                const int c = lane + 32 * s;
-                if (s < n_slices && c < d4) {
-                    float4 a4 = acc[i][s];
-                    a4.x *= alpha; a4.y *= alpha; a4.z *= alpha; a4.w *= alpha;
-                    for (int j = 0; j < n_t; j++) {
-                        const float pj = p_s[warp * 32 + j];
+                acc[i][s].x *= alpha; acc[i][s].y *= alpha;
+                acc[i][s].z *= alpha; acc[i][s].w *= alpha;
+            }
+            // Key j's probability from lane j, every lane taking part:
+            // the shuffle is outside the lanes' channel condition.
+            for (int j = 0; j < n_t; j++) {
+                const float pj = __shfl_sync(mask, p, j);
+#pragma unroll
+                for (int s = 0; s < 2; s++) {
+                    const int c = lane + 32 * s;
+                    if (s < n_slices && c < d4) {
                         const float4 vv = ((const float4*)(v_s + j * head_dim))[c];
-                        a4.x += pj * vv.x; a4.y += pj * vv.y; a4.z += pj * vv.z; a4.w += pj * vv.w;
+                        acc[i][s].x += pj * vv.x; acc[i][s].y += pj * vv.y;
+                        acc[i][s].z += pj * vv.z; acc[i][s].w += pj * vv.w;
                     }
-                    acc[i][s] = a4;
                 }
             }
-            __syncwarp();
         }
     }
 

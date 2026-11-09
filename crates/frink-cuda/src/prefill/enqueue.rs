@@ -194,10 +194,9 @@ pub struct AttnArgs {
 
 /// Dynamic shared bytes the tiled prefill attention needs at `rpw`
 /// rows per warp and `bc` keys per tile, for a head of `head_dim`: the
-/// block's Q rows, the K tile (rows padded by 4 floats), the V tile,
-/// and each warp's 32 probabilities.
+/// block's Q rows, the K tile (rows padded by 4 floats) and the V tile.
 pub(crate) fn prefill_attn_smem(head_dim: usize, rpw: usize, bc: usize) -> usize {
-    4 * (4 * rpw * head_dim + bc * (head_dim + 4) + bc * head_dim + 4 * 32)
+    4 * (4 * rpw * head_dim + bc * (head_dim + 4) + bc * head_dim)
 }
 
 /// The largest tile that fits `limit` bytes, in the order a wider tile
