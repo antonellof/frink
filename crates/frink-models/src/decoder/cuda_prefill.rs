@@ -120,6 +120,7 @@ impl Decoder {
         // Describe the run first, borrowing each cache's rows for the
         // prefix and its mirror slot for the decode; both borrows end
         // before the pushes below.
+        let describe = frink_cuda::phases::phase("describe");
         let mut described = Vec::new();
         let mut slots: Vec<&mut Option<CudaKvMirror>> = Vec::new();
         for (li, cache) in kv_caches.iter_mut().enumerate().skip(l) {
@@ -228,6 +229,8 @@ impl Decoder {
                     })
                     .collect()
             };
+        drop(describe);
+        let launched = frink_cuda::phases::phase("launch");
         let out = match launch_stack(input, &launch, batch_size, kv, Some(&mut route)) {
             Ok(out) => out,
             Err(e) => {
@@ -238,6 +241,8 @@ impl Decoder {
                 return None;
             }
         };
+        drop(launched);
+        let _push = frink_cuda::phases::phase("kv push");
         drop(launch);
         drop(described);
         drop(slots);
