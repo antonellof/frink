@@ -46,8 +46,8 @@ use crate::xfer;
 use cudarc::driver::{CudaDevice, CudaSlice};
 use enqueue::{
     enqueue_add_bias_rows, enqueue_add_rows, enqueue_axpy, enqueue_causal_gqa_prefill,
-    enqueue_decode_attn, enqueue_rmsnorm_rows, enqueue_rope_rows, enqueue_router_f32, AttnArgs,
-    RopeArgs,
+    enqueue_decode_attn, enqueue_moe_combine, enqueue_rmsnorm_rows, enqueue_rope_rows,
+    enqueue_router_f32, AttnArgs, RopeArgs,
 };
 pub use kv_mirror::CudaKvMirror;
 pub use proj::ProjWeights;
@@ -894,18 +894,29 @@ fn run_layer_resident<'e>(
                 CudaError::Unsupported("resident stack: an MoE layer with no routing".to_string())
             })?;
             let picks = route(index, &logits)?;
+            for (ex, _) in &picks {
+                check_expert_shapes(ex, hidden_dim, ffn_dim)?;
+            }
             // The routed outputs summed from zero in the routing's order
             // and only then added to the residual, as the host's
-            // `combine_expert_outputs` and `residual_add` do.
-            let mut sum = dev
-                .alloc_zeros::<f32>(hidden_dim)
-                .map_err(|e| CudaError::Launch(format!("MoE sum alloc: {e:?}")))?;
-            for (ex, w) in &picks {
-                check_expert_shapes(ex, hidden_dim, ffn_dim)?;
-                let y = run_expert(dev, held, ex, layer.glu, &normed2, 1, ffn_dim)?;
-                enqueue_axpy(dev, &mut sum, &y, *w, hidden_dim)?;
+            // `combine_expert_outputs` and `residual_add` do. All the
+            // experts' gate, up and down in one launch each when their
+            // kinds have a coalesced matvec; one expert at a time
+            // otherwise.
+            match run_experts_together(dev, held, &picks, layer.glu, &normed2, hidden_dim, ffn_dim)?
+            {
+                Some(sum) => sum,
+                None => {
+                    let mut sum = dev
+                        .alloc_zeros::<f32>(hidden_dim)
+                        .map_err(|e| CudaError::Launch(format!("MoE sum alloc: {e:?}")))?;
+                    for (ex, w) in &picks {
+                        let y = run_expert(dev, held, ex, layer.glu, &normed2, 1, ffn_dim)?;
+                        enqueue_axpy(dev, &mut sum, &y, *w, hidden_dim)?;
+                    }
+                    sum
+                }
             }
-            sum
         }
     };
     drop(normed2);
@@ -934,6 +945,46 @@ fn run_expert(
     let act = glu_mul_device(dev, glu, &gate, &up, batch * ffn_dim)?;
     drop((gate, up));
     held.proj(dev, &ex.down, &act, batch)
+}
+
+/// A token's routed experts as five launches: every expert's gate, every
+/// expert's up, the gated activation over all of them, every expert's
+/// down, and the weighted combine. `None`, before any launch, when the
+/// experts' projections do not share a coalesced kind
+/// (`gpu::enqueue_matvec_multi`), and the caller runs them one by one.
+fn run_experts_together(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    picks: &[(ExpertProjCuda<'_>, f32)],
+    glu: GluCuda,
+    x: &CudaSlice<f32>,
+    hidden_dim: usize,
+    ffn_dim: usize,
+) -> Result<Option<CudaSlice<f32>>, CudaError> {
+    let k = picks.len();
+    let gate: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.gate.matvec).collect();
+    let up: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.up.matvec).collect();
+    let down: Option<Vec<_>> = picks.iter().map(|(ex, _)| ex.down.matvec).collect();
+    let (Some(gate), Some(up), Some(down)) = (gate, up, down) else {
+        return Ok(None);
+    };
+    let same = |ls: &[crate::gpu::MatvecLaunch<'_>]| {
+        ls.windows(2).all(|w| w[0].fn_name == w[1].fn_name)
+            && crate::matvec_kinds::coalesced::coalesced_kind(ls[0].fn_name).is_some()
+    };
+    if k == 0 || !same(&gate) || !same(&up) || !same(&down) {
+        return Ok(None);
+    }
+    let (g, wg) = crate::gpu::enqueue_matvec_multi(dev, &gate, x, 0)?;
+    let (u, wu) = crate::gpu::enqueue_matvec_multi(dev, &up, x, 0)?;
+    let act = glu_mul_device(dev, glu, &g, &u, k * ffn_dim)?;
+    drop((g, u));
+    let (d, wd) = crate::gpu::enqueue_matvec_multi(dev, &down, &act, ffn_dim)?;
+    drop(act);
+    held.weights.extend(wg.into_iter().chain(wu).chain(wd));
+    let weights: Vec<f32> = picks.iter().map(|(_, w)| *w).collect();
+    let d_w = xfer::htod(dev, "routed weights", &weights)?;
+    Ok(Some(enqueue_moe_combine(dev, &d, &d_w, k, hidden_dim)?))
 }
 
 /// A routed expert's shapes against its layer, and the one-row view

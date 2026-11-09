@@ -5,8 +5,9 @@
 
 use super::kernels::{
     ADD_BIAS_ROWS, ADD_BIAS_ROWS_KERNEL_SRC, ADD_ROWS, ADD_ROWS_KERNEL_SRC, AXPY, AXPY_KERNEL_SRC,
-    CAUSAL_GQA_PREFILL, CAUSAL_GQA_PREFILL_KERNEL_SRC, RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC,
-    ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32, ROUTER_F32_KERNEL_SRC,
+    CAUSAL_GQA_PREFILL, CAUSAL_GQA_PREFILL_KERNEL_SRC, MOE_COMBINE, MOE_COMBINE_KERNEL_SRC,
+    RMSNORM_ROWS, RMSNORM_ROWS_KERNEL_SRC, ROPE_ROWS, ROPE_ROWS_KERNEL_SRC, ROUTER_F32,
+    ROUTER_F32_KERNEL_SRC,
 };
 use crate::decode_attn;
 use crate::gpu::{ensure_module_loaded, CudaError};
@@ -146,6 +147,28 @@ pub(crate) fn enqueue_axpy(
             .map_err(|e| launch_err("axpy", e))?;
     }
     Ok(())
+}
+
+/// `sum_j w[j] * y[j * n ..]`, the layer's routed experts combined.
+pub(crate) fn enqueue_moe_combine(
+    dev: &Arc<CudaDevice>,
+    y: &CudaSlice<f32>,
+    w: &CudaSlice<f32>,
+    k: usize,
+    n: usize,
+) -> Result<CudaSlice<f32>, CudaError> {
+    debug_assert!(y.len() >= k * n && w.len() >= k);
+    let func = func_for(dev, MOE_COMBINE_KERNEL_SRC, MOE_COMBINE)?;
+    // SAFETY: thread `i < n` writes `out[i]`, and the grid covers `n`.
+    let mut out = unsafe { crate::gpu::alloc_out(dev, n, "moe combine") }?;
+    let cfg = elementwise_cfg(n);
+    // SAFETY: (const float*, const float*, float*, int, int) matched
+    // positionally; `y` holds `k * n`, `w` `k`, `out` `n`.
+    unsafe {
+        func.launch(cfg, (y, w, &mut out, k as i32, n as i32))
+            .map_err(|e| launch_err("moe_combine", e))?;
+    }
+    Ok(out)
 }
 
 /// `w[rows][cols] . x`, f32, the router's logits.

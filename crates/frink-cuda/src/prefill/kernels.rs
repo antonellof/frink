@@ -114,6 +114,26 @@ extern "C" __global__ void axpy_f32(
 }
 "#;
 
+/// `out[i] = sum_j w[j] * y[j][i]` over a layer's `k` routed experts,
+/// from zero in the routing's order, the order and the expression
+/// `frink_moe::combine_expert_outputs` adds them in.
+pub const MOE_COMBINE_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_combine_f32(
+    const float* y,
+    const float* w,
+    float* out,
+    int k,
+    int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float acc = 0.0f;
+        for (int j = 0; j < k; j++) acc += y[(size_t)j * n + i] * w[j];
+        out[i] = acc;
+    }
+}
+"#;
+
 /// `out[r] = w[r] . x` for an f32 matrix, one warp per row: an MoE
 /// router, which a GGUF keeps in f32 (`llama-quantize` leaves
 /// `ffn_gate_inp` alone).
@@ -400,6 +420,7 @@ pub const RMSNORM_ROWS: (&str, &str) = ("frink_prefill_rmsnorm_rows", "rmsnorm_r
 pub const ADD_BIAS_ROWS: (&str, &str) = ("frink_prefill_add_bias_rows", "add_bias_rows_f32");
 pub const ADD_ROWS: (&str, &str) = ("frink_prefill_add_rows", "add_rows_f32");
 pub const AXPY: (&str, &str) = ("frink_prefill_axpy", "axpy_f32");
+pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine_f32");
 pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
 pub const ROPE_ROWS: (&str, &str) = ("frink_prefill_rope_rows", "rope_rows_f32");
 pub const CAUSAL_GQA_PREFILL: (&str, &str) = ("frink_prefill_causal_gqa", "causal_gqa_prefill_f32");
