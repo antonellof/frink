@@ -51,4 +51,7 @@ cuda = ["dep:cudarc"]
 # Times the batched GEMM on a real device; needs the `cuda` feature.
 [[example]]
 name = "mul_mm_bench"
+# Times the decode matvecs on a real device; needs the `cuda` feature.
+[[example]]
+name = "matvec_bench"
 required-features = ["cuda"]

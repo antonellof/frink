@@ -317,17 +317,18 @@ fn matvec_launch_plan(
     module_name: &'static str,
     rows: usize,
     width: MatvecWidth,
+    wpr: usize,
 ) -> MatvecPlan {
     match coalesced_kind(fn_name) {
         Some(kind) => MatvecPlan {
-            source: PlanSource::Coalesced(kind, width),
-            module: kind.module(width),
+            source: PlanSource::Coalesced(kind, width, wpr),
+            module: kind.module_for(width, wpr),
             entry: kind.entry,
-            // The same grid at both widths: one row per warp. Width
+            // The same grid at both widths: `wpr` warps per row. Width
             // changes what a warp does inside its row, not which row
             // it owns, so the A/B varies exactly one thing.
             cfg: cudarc::driver::LaunchConfig {
-                grid_dim: (rows.div_ceil(COALESCED_WARPS_PER_BLOCK) as u32, 1, 1),
+                grid_dim: (rows.div_ceil(COALESCED_WARPS_PER_BLOCK / wpr) as u32, 1, 1),
                 block_dim: ((COALESCED_WARPS_PER_BLOCK * 32) as u32, 1, 1),
                 shared_mem_bytes: 0,
             },
@@ -359,14 +360,14 @@ struct MatvecPlan {
 /// miss.
 enum PlanSource {
     Static(&'static str),
-    Coalesced(&'static CoalescedKind, MatvecWidth),
+    Coalesced(&'static CoalescedKind, MatvecWidth, usize),
 }
 
 impl MatvecPlan {
     fn text(&self) -> String {
         match self.source {
             PlanSource::Static(src) => src.to_string(),
-            PlanSource::Coalesced(kind, width) => kind.source(width),
+            PlanSource::Coalesced(kind, width, wpr) => kind.source(width, wpr),
         }
     }
 }
@@ -395,16 +396,41 @@ pub(crate) fn enqueue_matvec(
     CudaError,
 > {
     // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
-    enqueue_matvec_at(dev, launch, d_x, MatvecWidth::from_env())
+    enqueue_matvec_at(
+        dev,
+        launch,
+        d_x,
+        MatvecWidth::from_env(),
+        crate::matvec_kinds::coalesced::matvec_wpr(),
+    )
 }
 
-/// [`enqueue_matvec`] at an explicit width, so the hardware test can
-/// hold both widths against their twins whatever the environment says.
+/// Seconds per launch of the matvec the plan picks for `launch`, over
+/// `iters` launches on an activation already on the device, after one
+/// warm-up launch that also compiles the kernel. For the
+/// `matvec_bench` example; nothing on a serving path calls it.
+pub fn time_matvec(launch: &MatvecLaunch<'_>, x: &[f32], iters: usize) -> Result<f64, CudaError> {
+    let dev = shared_device()?;
+    let d_x = crate::xfer::htod(&dev, "matvec bench activation", x)?;
+    drop(enqueue_matvec(&dev, launch, &d_x)?);
+    crate::xfer::sync(&dev, "matvec bench warm-up")?;
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters.max(1) {
+        drop(enqueue_matvec(&dev, launch, &d_x)?);
+    }
+    crate::xfer::sync(&dev, "matvec bench")?;
+    Ok(t0.elapsed().as_secs_f64() / iters.max(1) as f64)
+}
+
+/// [`enqueue_matvec`] at an explicit width and warps per row, so the
+/// hardware test can hold every geometry against the twins whatever
+/// the environment says.
 fn enqueue_matvec_at(
     dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
     launch: &MatvecLaunch<'_>,
     d_x: &cudarc::driver::CudaSlice<f32>,
     width: MatvecWidth,
+    wpr: usize,
 ) -> Result<
     (
         cudarc::driver::CudaSlice<f32>,
@@ -420,6 +446,7 @@ fn enqueue_matvec_at(
         launch.module_name,
         launch.rows,
         width,
+        wpr,
     );
     let (module, entry, cfg) = (plan.module, plan.entry, plan.cfg);
 
@@ -1339,7 +1366,13 @@ mod tests {
                 .find(|m| m.fn_name == kind.base_fn)
                 .expect("routed from a MatvecKind");
             let mm = crate::mul_mm::kind_by_name(mv.name).expect("geometry");
-            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+            for (width, wpr) in [
+                (MatvecWidth::Narrow, 1),
+                (MatvecWidth::Wide, 1),
+                (MatvecWidth::Wide, 2),
+                (MatvecWidth::Wide, 4),
+                (MatvecWidth::Narrow, 8),
+            ] {
                 for (n_blocks_per_row, seed) in [(3usize, 7u32), (12, 23)] {
                     let row_bytes = n_blocks_per_row * mm.block_bytes;
                     let cols = n_blocks_per_row * mm.block_elems;
@@ -1357,8 +1390,8 @@ mod tests {
                         n_blocks_per_row,
                     };
                     let d_x = dev.htod_copy(x.clone()).expect("upload");
-                    let (d_out, _w) = super::enqueue_matvec_at(&dev, &launch, &d_x, width)
-                        .unwrap_or_else(|e| panic!("{} {width:?}: {e:?}", mv.name));
+                    let (d_out, _w) = super::enqueue_matvec_at(&dev, &launch, &d_x, width, wpr)
+                        .unwrap_or_else(|e| panic!("{} {width:?} x{wpr}: {e:?}", mv.name));
                     let got = dev.dtoh_sync_copy(&d_out).expect("download");
                     assert_eq!(got.len(), rows, "{}", mv.name);
                     let lanes = kind.lanes(width);
@@ -1367,7 +1400,7 @@ mod tests {
                         let want = twin(row, &x, n_blocks_per_row, lanes);
                         assert!(
                             !(want.is_nan() ^ got[r].is_nan()),
-                            "{} {width:?} row {r}: GPU={} twin={want}",
+                            "{} {width:?} x{wpr} row {r}: GPU={} twin={want}",
                             mv.name,
                             got[r]
                         );
@@ -1390,8 +1423,11 @@ mod tests {
 
         for kind in ["Q4_K", "Q5_K", "Q6_K", "Q8_0"] {
             let (src, module, fn_name) = super::matvec_launch_meta(kind).expect("kernel");
-            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
-                let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+            for (width, wpr) in [MatvecWidth::Narrow, MatvecWidth::Wide]
+                .into_iter()
+                .flat_map(|w| [1usize, 2, 4, 8].map(|r| (w, r)))
+            {
+                let plan = super::matvec_launch_plan(fn_name, src, module, rows, width, wpr);
                 let ck = super::coalesced_kind(fn_name).expect("coalesced");
                 assert!(
                     plan.entry.ends_with("_coalesced"),
@@ -1400,8 +1436,13 @@ mod tests {
                 );
                 assert_eq!(
                     plan.module,
-                    ck.module(width),
-                    "{kind} {width:?}: module key"
+                    ck.module_for(width, wpr),
+                    "{kind} {width:?} x{wpr}: module key"
+                );
+                assert_eq!(
+                    wpr == 1,
+                    plan.module == ck.module(width),
+                    "{kind}: one key per wpr"
                 );
                 let text = plan.text();
                 assert!(
@@ -1410,12 +1451,20 @@ mod tests {
                     plan.entry
                 );
                 assert!(
-                    text.starts_with(&format!("#define FX_LANES {}\n", ck.lanes(width))),
-                    "{kind} {width:?}: source compiled for the wrong width"
+                    text.starts_with(&format!(
+                        "#define FX_LANES {}\n#define FX_WPR {wpr}\n",
+                        ck.lanes(width)
+                    )),
+                    "{kind} {width:?} x{wpr}: source compiled for the wrong geometry"
                 );
                 let cfg = plan.cfg;
-                let warps = super::COALESCED_WARPS_PER_BLOCK as u32;
-                assert_eq!(cfg.block_dim, (warps * 32, 1, 1), "{kind}: block_dim");
+                // Rows per block: the block's warps over the row's warps.
+                let warps = (super::COALESCED_WARPS_PER_BLOCK / wpr) as u32;
+                assert_eq!(
+                    cfg.block_dim,
+                    (super::COALESCED_WARPS_PER_BLOCK as u32 * 32, 1, 1),
+                    "{kind}: block_dim"
+                );
                 assert_eq!(cfg.shared_mem_bytes, 0, "{kind}: needs no shared memory");
                 // Every row must land in some warp, including the tail.
                 assert!(
@@ -1436,7 +1485,7 @@ mod tests {
         // whatever the width.
         let (src, module, fn_name) = super::matvec_launch_meta("Q4_0").expect("kernel");
         for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
-            let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+            let plan = super::matvec_launch_plan(fn_name, src, module, rows, width, 4);
             assert_eq!(plan.entry, fn_name);
             assert!(std::ptr::eq(plan.module, module));
             assert_eq!(plan.text(), src);

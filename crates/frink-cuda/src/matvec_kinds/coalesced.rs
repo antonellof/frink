@@ -72,6 +72,33 @@ impl MatvecWidth {
     }
 }
 
+/// The environment switch for warps per row (`1`, `2`, `4` or `8`).
+pub const MATVEC_WPR_ENV: &str = "FRINK_CUDA_MATVEC_WPR";
+
+/// Warps per output row the coalesced kernels run with: the
+/// `FRINK_CUDA_MATVEC_WPR` value when it is 1, 2, 4 or 8, else
+/// [`DEFAULT_WPR`]. A warp walks every `wpr`-th trip of its row's
+/// blocks and the row's warps add their sums in order, so more warps
+/// per row put more of a row's loads in flight at once. Read once.
+pub fn matvec_wpr() -> usize {
+    static WPR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WPR.get_or_init(|| parse_wpr(std::env::var(MATVEC_WPR_ENV).ok().as_deref()))
+}
+
+/// Warps per row when the switch is unset.
+pub const DEFAULT_WPR: usize = 1;
+
+/// The rule [`matvec_wpr`] applies, without the environment.
+pub fn parse_wpr(value: Option<&str>) -> usize {
+    match value.map(str::trim) {
+        Some("1") => 1,
+        Some("2") => 2,
+        Some("4") => 4,
+        Some("8") => 8,
+        _ => DEFAULT_WPR,
+    }
+}
+
 /// One coalesced kernel and what it takes to compile it at each width.
 #[derive(Debug, Clone, Copy)]
 pub struct CoalescedKind {
@@ -114,13 +141,33 @@ impl CoalescedKind {
 
     /// The complete translation unit for `width`: `FX_LANES`, the
     /// shared prelude, then the kernel.
-    pub fn source(&self, width: MatvecWidth) -> String {
+    pub fn source(&self, width: MatvecWidth, wpr: usize) -> String {
         format!(
-            "#define FX_LANES {}\n{}{}",
+            "#define FX_LANES {}\n#define FX_WPR {wpr}\n{}{}",
             self.lanes(width),
             COALESCED_PRELUDE,
             self.src
         )
+    }
+
+    /// The NVRTC module key for `width` at `wpr` warps per row: the
+    /// width's key at one warp per row, a suffixed one otherwise, leaked
+    /// once so the load-once cache keys on `&'static str`.
+    pub fn module_for(&self, width: MatvecWidth, wpr: usize) -> &'static str {
+        if wpr == 1 {
+            return self.module(width);
+        }
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static NAMES: OnceLock<Mutex<HashMap<(&'static str, usize), &'static str>>> =
+            OnceLock::new();
+        let base = self.module(width);
+        NAMES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry((base, wpr))
+            .or_insert_with(|| Box::leak(format!("{base}_wpr{wpr}").into_boxed_str()))
     }
 }
 
@@ -200,6 +247,12 @@ pub const COALESCED_PRELUDE: &str = r#"
 #error "FX_LANES must divide the warp"
 #endif
 #define FX_BLOCKS_PER_TRIP (32 / FX_LANES)
+#ifndef FX_WPR
+#error "FX_WPR (warps per row) must be defined by the launcher"
+#endif
+#if FX_WPR != 1 && FX_WPR != 2 && FX_WPR != 4 && FX_WPR != 8
+#error "FX_WPR must be 1, 2, 4 or 8"
+#endif
 
 __device__ __forceinline__ float fx_f16_to_f32(unsigned short bits) {
     unsigned int sign = (bits >> 15) & 0x1u;
@@ -294,6 +347,33 @@ __device__ __forceinline__ float fx_warp_sum(float acc) {
     }
     return acc;
 }
+
+// The row warp `warp` of this block works on: FX_WPR warps per row,
+// each walking every FX_WPR-th trip of the row's blocks.
+__device__ __forceinline__ int fx_row_of_warp(int warp) {
+    return (int)blockIdx.x * ((int)blockDim.x / 32 / FX_WPR) + warp / FX_WPR;
+}
+
+// Reduces a lane's partial sum over its warp and, when a row has more
+// than one warp, over the row's warps in order, and stores the row.
+// Every thread of the block calls it, past-the-end rows included.
+__device__ __forceinline__ void fx_store_row(float acc, float* out, int row, int rows) {
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    acc = fx_warp_sum(acc);
+#if FX_WPR > 1
+    __shared__ float fx_red[32];
+    if (lane == 0) fx_red[warp] = acc;
+    __syncthreads();
+    if (lane == 0 && warp % FX_WPR == 0 && row < rows) {
+        float sum = fx_red[warp];
+        for (int i = 1; i < FX_WPR; ++i) sum += fx_red[warp + i];
+        out[row] = sum;
+    }
+#else
+    if (lane == 0 && row < rows) out[row] = acc;
+#endif
+}
 "#;
 
 /// CUDA C for the coalesced Q5_K matvec.
@@ -320,18 +400,19 @@ extern "C" __global__ void q5_k_matvec_coalesced(
     int row_bytes,
     int n_blocks_per_row
 ) {
-    const int warps = blockDim.x / 32;
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
+    const int row = fx_row_of_warp(warp);
+    // A warp past the last row still reaches the block's reduction.
+    const int n_live = row < rows ? n_blocks_per_row : 0;
 
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
+    const unsigned char* row_ptr = weights + (size_t)(row < rows ? row : 0) * row_bytes;
     const int sub = lane % FX_LANES;
     const int l0 = sub * FX_RUN;
     float acc = 0.0f;
 
-    for (int blk = lane / FX_LANES; blk < n_blocks_per_row; blk += FX_BLOCKS_PER_TRIP) {
+    for (int blk = (warp % FX_WPR) * FX_BLOCKS_PER_TRIP + lane / FX_LANES; blk < n_live;
+         blk += FX_BLOCKS_PER_TRIP * FX_WPR) {
         const unsigned char* block = row_ptr + (size_t)blk * 176;
         const float d = fx_f16_at(block);
         const float dmin = fx_f16_at(block + 2);
@@ -364,8 +445,7 @@ extern "C" __global__ void q5_k_matvec_coalesced(
         }
     }
 
-    acc = fx_warp_sum(acc);
-    if (lane == 0) out[row] = acc;
+    fx_store_row(acc, out, row, rows);
 }
 "#;
 
@@ -392,17 +472,18 @@ extern "C" __global__ void q8_0_matvec_coalesced(
     int row_bytes,
     int n_blocks_per_row
 ) {
-    const int warps = blockDim.x / 32;
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
+    const int row = fx_row_of_warp(warp);
+    // A warp past the last row still reaches the block's reduction.
+    const int n_live = row < rows ? n_blocks_per_row : 0;
 
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
+    const unsigned char* row_ptr = weights + (size_t)(row < rows ? row : 0) * row_bytes;
     const int l0 = (lane % FX_LANES) * FX_RUN;
     float acc = 0.0f;
 
-    for (int blk = lane / FX_LANES; blk < n_blocks_per_row; blk += FX_BLOCKS_PER_TRIP) {
+    for (int blk = (warp % FX_WPR) * FX_BLOCKS_PER_TRIP + lane / FX_LANES; blk < n_live;
+         blk += FX_BLOCKS_PER_TRIP * FX_WPR) {
         const unsigned char* block = row_ptr + (size_t)blk * 34;
         const float d = fx_f16_at(block);
         unsigned char q[FX_RUN];
@@ -415,8 +496,7 @@ extern "C" __global__ void q8_0_matvec_coalesced(
         }
     }
 
-    acc = fx_warp_sum(acc);
-    if (lane == 0) out[row] = acc;
+    fx_store_row(acc, out, row, rows);
 }
 "#;
 
@@ -449,18 +529,19 @@ extern "C" __global__ void q6_k_matvec_coalesced(
     int row_bytes,
     int n_blocks_per_row
 ) {
-    const int warps = blockDim.x / 32;
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
+    const int row = fx_row_of_warp(warp);
+    // A warp past the last row still reaches the block's reduction.
+    const int n_live = row < rows ? n_blocks_per_row : 0;
 
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
+    const unsigned char* row_ptr = weights + (size_t)(row < rows ? row : 0) * row_bytes;
     const int l0 = (lane % FX_LANES) * FX_RUN;
     const int is = l0 / 16;
     float acc = 0.0f;
 
-    for (int blk = lane / FX_LANES; blk < n_blocks_per_row; blk += FX_BLOCKS_PER_TRIP) {
+    for (int blk = (warp % FX_WPR) * FX_BLOCKS_PER_TRIP + lane / FX_LANES; blk < n_live;
+         blk += FX_BLOCKS_PER_TRIP * FX_WPR) {
         const unsigned char* block = row_ptr + (size_t)blk * 210;
         const float d = fx_f16_at(block + 208);
         const int x_base = blk * 256;
@@ -495,8 +576,7 @@ extern "C" __global__ void q6_k_matvec_coalesced(
         }
     }
 
-    acc = fx_warp_sum(acc);
-    if (lane == 0) out[row] = acc;
+    fx_store_row(acc, out, row, rows);
 }
 "#;
 
@@ -541,19 +621,20 @@ extern "C" __global__ void q4_k_matvec_coalesced(
     int row_bytes,
     int n_blocks_per_row
 ) {
-    const int warps = blockDim.x / 32;
     const int warp = threadIdx.x / 32;
     const int lane = threadIdx.x % 32;
-    const int row = blockIdx.x * warps + warp;
-    if (row >= rows) return;
+    const int row = fx_row_of_warp(warp);
+    // A warp past the last row still reaches the block's reduction.
+    const int n_live = row < rows ? n_blocks_per_row : 0;
 
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
+    const unsigned char* row_ptr = weights + (size_t)(row < rows ? row : 0) * row_bytes;
     const int off = (lane % FX_LANES) * FX_RUN;
     const int oi = off / 32;
     const int within = off % 32;
 
     float acc = 0.0f;
-    for (int blk = lane / FX_LANES; blk < n_blocks_per_row; blk += FX_BLOCKS_PER_TRIP) {
+    for (int blk = (warp % FX_WPR) * FX_BLOCKS_PER_TRIP + lane / FX_LANES; blk < n_live;
+         blk += FX_BLOCKS_PER_TRIP * FX_WPR) {
         const unsigned char* block = row_ptr + (size_t)blk * 144;
         const float d = fx_f16_at(block);
         const float dmin = fx_f16_at(block + 2);
@@ -578,8 +659,7 @@ extern "C" __global__ void q4_k_matvec_coalesced(
         }
     }
 
-    acc = fx_warp_sum(acc);
-    if (lane == 0) out[row] = acc;
+    fx_store_row(acc, out, row, rows);
 }
 "#;
 
@@ -685,7 +765,7 @@ mod tests {
     fn the_source_defines_the_width_it_was_asked_for() {
         for k in COALESCED {
             for w in [MatvecWidth::Narrow, MatvecWidth::Wide] {
-                let src = k.source(w);
+                let src = k.source(w, 1);
                 let first = src.lines().next().unwrap_or("");
                 assert_eq!(first, format!("#define FX_LANES {}", k.lanes(w)));
                 assert!(src.contains(COALESCED_PRELUDE) && src.contains(k.src));

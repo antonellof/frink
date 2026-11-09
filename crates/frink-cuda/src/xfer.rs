@@ -171,6 +171,10 @@ pub(crate) fn dtoh_staged(
     Ok(Download {
         inner: DownloadInner::Pinned { guard, len },
     })
+/// Waits for everything enqueued on the shared stream: one sync.
+pub(crate) fn sync(dev: &Arc<CudaDevice>, what: &str) -> Result<(), CudaError> {
+    counters::record_sync();
+    dev.synchronize().map_err(|e| err(what, e))
 }
 
 /// Device-to-device copy of equal-length ranges. Enqueued; no wait.

@@ -58,7 +58,7 @@ fn main() {
         for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
             let lanes = ck.lanes(width);
             let unit = format!("{}_{lanes}", mv.name);
-            std::fs::write(format!("{dir}/{unit}.cu"), ck.source(width)).unwrap();
+            std::fs::write(format!("{dir}/{unit}.cu"), ck.source(width, 1)).unwrap();
             for &n_blocks in BLOCKS {
                 let row_bytes = n_blocks * mm.block_bytes;
                 let cols = n_blocks * mm.block_elems;
