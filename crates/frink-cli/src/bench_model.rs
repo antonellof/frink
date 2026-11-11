@@ -118,17 +118,10 @@ pub fn apply_env(threads: usize, n_gpu_layers: usize, model: Option<&str>) -> an
             std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
             std::env::set_var("FRINK_CPU_THREADS", threads.to_string());
         }
-        if n_gpu_layers == 0 {
-            std::env::set_var("FRINK_METAL", "0");
-            std::env::set_var("FRINK_METAL_ATTN", "0");
-            std::env::set_var("FRINK_CUDA", "0");
-        } else {
-            std::env::set_var("FRINK_METAL", "auto");
-            if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                std::env::set_var("FRINK_METAL_ATTN", "1");
-            }
-            std::env::set_var("FRINK_CUDA", "auto");
-        }
+        frink_models::offload::select(frink_models::offload::OffloadDevice::with_offload(
+            None,
+            n_gpu_layers != 0,
+        ))?;
         frink_core::weight_matrix::default_cpu_int_dot_on();
     }
     frink_core::threads::init_cpu_pool();

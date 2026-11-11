@@ -9,9 +9,11 @@
 //! hardware exists.
 //!
 //! Vulkan is listed by a `--features vulkan` build, which can load the
-//! Vulkan loader and ask it (`frink_vulkan::device::probe`). A build
-//! without the feature has no loader to ask, so it lists nothing for
-//! Vulkan rather than guessing.
+//! Vulkan loader and ask it (`frink_vulkan::device::list`): one row per
+//! device llama.cpp's rule makes visible, named `Vulkan<i>` as llama.cpp
+//! names them, so `GGML_VK_VISIBLE_DEVICES` reads the same on both. A
+//! build without the feature has no loader to ask, so it lists nothing
+//! for Vulkan rather than guessing.
 
 /// Print the detected devices, one per line, after a header.
 pub fn print_available_devices() {
@@ -33,7 +35,9 @@ pub fn print_available_devices() {
     }
 
     #[cfg(feature = "vulkan")]
-    println!("  {}", vulkan_line(frink_vulkan::device::probe()));
+    for line in vulkan_lines(frink_vulkan::device::list()) {
+        println!("  {line}");
+    }
 
     // Listed so a Ryzen AI machine is not silent about its NPU, and says
     // plainly that frink does not use it yet.
@@ -42,14 +46,29 @@ pub fn print_available_devices() {
     }
 }
 
-/// The `--list-devices` row for what the Vulkan loader answered: the
-/// device it would run on, or why there is none, so a Vulkan build on a
-/// machine without a driver says so rather than printing nothing.
+/// The `--list-devices` rows for what the Vulkan loader answered: each
+/// visible device, or why there is none, so a Vulkan build on a machine
+/// without a driver says so rather than printing nothing. frink runs on
+/// `Vulkan0`.
 #[cfg(feature = "vulkan")]
-fn vulkan_line(probe: Result<String, frink_vulkan::device::VulkanError>) -> String {
-    match probe {
-        Ok(device) => format!("Vulkan: {device}"),
-        Err(e) => format!("Vulkan: none usable ({e})"),
+fn vulkan_lines(
+    list: Result<Vec<frink_vulkan::device::Listed>, frink_vulkan::device::VulkanError>,
+) -> Vec<String> {
+    match list {
+        Ok(devices) => devices
+            .iter()
+            .map(|d| {
+                let (major, minor, patch) = d.api_version;
+                let used = if d.index == 0 { ", used" } else { "" };
+                format!(
+                    "Vulkan{}: {} ({}, Vulkan {major}.{minor}.{patch}{used})",
+                    d.index,
+                    d.name,
+                    d.kind.name()
+                )
+            })
+            .collect(),
+        Err(e) => vec![format!("Vulkan: none usable ({e})")],
     }
 }
 
@@ -58,12 +77,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_vulkan_row_names_the_device_or_why_there_is_none() {
+    fn every_visible_vulkan_device_is_a_row_named_as_llama_cpp_names_it() {
+        use frink_vulkan::device::Listed;
+        use frink_vulkan::select::DeviceKind;
+        let rows = vulkan_lines(Ok(vec![
+            Listed {
+                index: 0,
+                name: "AMD Radeon RX 7900 XTX".into(),
+                kind: DeviceKind::Discrete,
+                api_version: (1, 3, 287),
+            },
+            Listed {
+                index: 1,
+                name: "Intel(R) Graphics".into(),
+                kind: DeviceKind::Integrated,
+                api_version: (1, 3, 0),
+            },
+        ]));
         assert_eq!(
-            vulkan_line(Ok("Apple M2 Pro (Vulkan 1.2.3)".into())),
-            "Vulkan: Apple M2 Pro (Vulkan 1.2.3)"
+            rows,
+            [
+                "Vulkan0: AMD Radeon RX 7900 XTX (discrete GPU, Vulkan 1.3.287, used)",
+                "Vulkan1: Intel(R) Graphics (integrated GPU, Vulkan 1.3.0)",
+            ]
         );
-        let none = vulkan_line(Err(frink_vulkan::device::VulkanError::NoPhysicalDevice));
-        assert!(none.starts_with("Vulkan: none usable ("), "{none}");
+        let none = vulkan_lines(Err(frink_vulkan::device::VulkanError::NoPhysicalDevice));
+        assert_eq!(none.len(), 1);
+        assert!(none[0].starts_with("Vulkan: none usable ("), "{}", none[0]);
     }
 }
