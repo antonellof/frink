@@ -41,7 +41,7 @@ to name a real flag of its tool.
 |---|---|---|---|
 | cli | `-n` | Default `128`; llama.cpp's is `-1` (to EOS) | A bare `frink -m x -p hi` should end. `-n -1` is accepted and fills the context |
 | cli | `--repeat-penalty` | Default `1.1`; llama.cpp's is `1.0` (off) | A deliberate default (`docs/FEATURES.md`), so a run left to defaults is not token-identical; `--repeat-penalty 1.0` gives upstream's |
-| cli, server | `-dev` | One of `auto`, `none`, `cpu`, `metal`, `cuda`; llama.cpp takes a device list (`CUDA0,CUDA1`) | frink places a model on one backend, not on named devices |
+| cli, server | `-dev` | One of `auto`, `none`, `cpu`, `metal`, `cuda`, `vulkan`; llama.cpp takes a device list (`CUDA0,Vulkan1`) | frink places a model on one backend, not on named devices. `vulkan` runs on `Vulkan0`; pick another with `GGML_VK_VISIBLE_DEVICES`, read as llama.cpp reads it (unset is every discrete and integrated GPU, so a CPU driver such as lavapipe must be named). Three differences there: a token that is not an index is an error where llama.cpp stops reading at it; frink does not drop a device without 16-bit storage buffers, which its shaders do not need; and it does not merge one GPU exposed by two drivers (RADV and AMDVLK), which needs a Vulkan 1.1 instance |
 | cli, server, bench | `-ngl` | `0`, `auto`, `all`, or a count at or above the layer count. A PARTIAL count is refused | frink has no partial layer placement. It used to offload everything and run out of memory on the machine the flag was meant for |
 | cli, server | `-ctk` | llama.cpp's types are accepted; `f16`, `q8_0`, `q4_0` and frink's `fp8` are served, the rest fall back and the banner says so. The quantized wires are Metal's device store only | The host store keeps `f16` or `f32`, CUDA's is `f32`, and only Metal's device store takes a quantized type |
 | server | `-c` | `0` is refused. Unset derives the ceiling from the device budget, capped at the trained context | llama.cpp's `-c 0` means "the trained context", which may not fit; omit the flag instead |
@@ -269,8 +269,10 @@ plug in through the `Drafter` trait in `frink_models::speculative`.
 `--mtp` is reserved for MiniMax/GLM MTP draft heads
 (`num_nextn_predict_layers`) and errors today.
 
-`--device none` (or `cpu`) and `-ngl 0` force CPU. Default is
-`--device auto -ngl auto`. `auto`, `all`, or a count at or above the
+`--device none` (or `cpu`) and `-ngl 0` force CPU, Vulkan included.
+`--device vulkan` runs on Vulkan (a build with cargo's `vulkan` feature). Default
+is `--device auto -ngl auto`, under which Vulkan stays opt-in
+(`FRINK_VULKAN=1`). `auto`, `all`, or a count at or above the
 model's layer count enable all supported ops on the selected backend.
 
 A partial `-ngl` is refused on purpose. llama.cpp's `-ngl N` puts
@@ -1586,7 +1588,7 @@ line up.
 | `-t/--threads` | CPU threads (`0` = performance-core default) |
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
 | `-fa/--flash-attn` | `on` or `auto` (the default); `off` and sweeps are refused |
-| `--list-devices` | Print the devices this build can run on and exit. A build with cargo's `vulkan` feature asks the Vulkan loader and prints the device it found, or why there is none |
+| `--list-devices` | Print the devices this build can run on and exit. A build with cargo's `vulkan` feature asks the Vulkan loader and prints one `Vulkan<i>` row per visible device, as llama.cpp numbers them (frink uses `Vulkan0`), or why there is none |
 | `--no-warmup` | Time every repetition, with no discarded warmup first. Refused with `--receipt` |
 | `--delay` | Seconds to sleep before each test, to let the host cool off |
 | `--prio` | Process priority: `-1` low, `0` normal, `1` medium, `2` high, `3` realtime (`nice` 5, 0, -5, -10, -20, as llama.cpp sets it). A priority the OS refuses is an error |
