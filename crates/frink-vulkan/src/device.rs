@@ -273,7 +273,10 @@ fn create_device(
 }
 
 /// A `[c_char; N]` fixed-size Vulkan name field as a Rust `String`.
-fn cstr_name(raw: &[i8]) -> String {
+///
+/// `c_char`, not `i8`: it is `u8` on aarch64 Linux, where an `&[i8]`
+/// signature did not compile.
+fn cstr_name(raw: &[std::ffi::c_char]) -> String {
     let bytes: Vec<u8> = raw
         .iter()
         .take_while(|c| **c != 0)

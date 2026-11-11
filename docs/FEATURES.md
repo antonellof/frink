@@ -82,7 +82,7 @@ so a token pays about four queue round trips per layer: that decode ran
 at 30 tok/s against the CPU's 113 on the same machine (one laptop run,
 not a benchmark). Running a whole layer on the device is the next step
 (#409). It exists to give every AMD and Intel GPU a
-path, including the ones ROCm does not support. `docs/plans/vulkan-beachhead-verdict.md` has the
+path, including the ones ROCm does not support. `docs/plans/archive/vulkan-beachhead-verdict.md` has the
 sizing: a full Vulkan backend is 15 to 25k lines.
 
 The CUDA GEMM has run on hardware and is now the limit. Its hardware test

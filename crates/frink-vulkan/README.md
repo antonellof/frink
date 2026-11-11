@@ -1,28 +1,32 @@
 # frink-vulkan
 
-The Vulkan beachhead: an early backend, one kernel wide. It answers
-one question end to end: *can frink reach a Vulkan device from Rust, upload a quantized
-weight verbatim, run one compute shader, and read back a correct
-answer?*
+Decode matvecs on any Vulkan device (#409): Q8_0, Q4_0, Q4_K, Q5_K and
+Q6_K, written in GLSL and committed as SPIR-V. Weights are uploaded once
+and stay resident. There is no GEMM (prefill runs on the host) and no
+attention yet. `frink-core` reaches it behind its `vulkan` feature, and
+only when `FRINK_VULKAN=1` is set.
 
-It can. See [`docs/plans/vulkan-beachhead-verdict.md`](../../docs/plans/vulkan-beachhead-verdict.md)
-for the verdict, the costs, and what it does not establish.
+It began as a GO/NO-GO beachhead; the verdict, its costs and what it did
+not establish are in
+[`docs/plans/archive/vulkan-beachhead-verdict.md`](../../docs/plans/archive/vulkan-beachhead-verdict.md).
 
 ```bash
 cargo test -p frink-vulkan                      # SPIR-V half, no GPU needed
 cargo run  -p frink-vulkan --features vulkan --example probe
-cargo test -p frink-vulkan --features vulkan    # runs the shader on a real device
+cargo test -p frink-vulkan --features vulkan    # runs every shader on a real device
+FRINK_REQUIRE_VULKAN=1 cargo test -p frink-vulkan --features vulkan  # a skip is a failure
 ```
 
-The GPU test is not `#[ignore]`d: it skips loudly when there is no
-device, so it is free on a driverless machine and automatic everywhere
-else.
+The device tests are not `#[ignore]`d: they skip loudly when there is no
+device, so they are free on a driverless machine and automatic
+everywhere else. With `FRINK_REQUIRE_VULKAN=1`, as CI's lavapipe job
+sets, a missing device or a missing `spirv-val` fails the test instead.
 
 ## Why a separate crate
 
 `CLAUDE.md` says "no new crate for something one crate uses", and
 `frink-core` is this crate's one caller (behind its optional `vulkan`
-feature, in `weight_matrix/gpu_backend.rs`, for the Q8_0 matvec alone),
+feature, in `weight_matrix/gpu_backend.rs`),
 so the rule deserves an answer rather than a precedent.
 
 - `frink-metal` and `frink-cuda` are both separate crates for the same
@@ -51,12 +55,14 @@ enough, and after them the loader finds the ICD with no environment
 variable:
 
 ```bash
-brew install molten-vk vulkan-loader glslang
+brew install molten-vk vulkan-loader glslang spirv-tools
 ```
 
-`glslang` is not used to build anything. It supplies `spirv-val`, which
-the shader tests use as an external authority on whether the emitted
-module is legal SPIR-V. When it is absent that test says so and passes.
+`glslang` rebuilds the SPIR-V (`shaders/build.sh`), and a test checks
+the committed modules against it when its version matches
+`spv/GENERATOR`. `spirv-tools` supplies `spirv-val`, which the shader
+tests use as an outside authority on whether a module is legal SPIR-V.
+When either is absent the test says so and passes.
 
 If `libvulkan` is installed somewhere the dynamic linker does not look,
 set `FRINK_VULKAN_LOADER` to its full path.
@@ -65,11 +71,20 @@ set `FRINK_VULKAN_LOADER` to its full path.
 
 | File | What |
 |---|---|
-| `spirv.rs` | a minimal SPIR-V word emitter; no build script, no shader compiler |
-| `q8_0_shader.rs` | the Q8_0 matvec compute shader, emitted from Rust |
-| `q8_0_reference.rs` | its scalar twin, checked against `frink_quant` and `half` |
-| `device.rs` | `ash` instance/device acquisition, incl. MoltenVK portability |
-| `dispatch.rs` | buffers, descriptors, pipeline, dispatch, readback |
+| `shaders/*.comp`, `shaders/matvec_common.glsl` | GLSL source, one matvec per kind |
+| `shaders/spv/` | committed SPIR-V, rebuilt by `shaders/build.sh`; `GENERATOR` pins the glslang version |
+| `src/shaders.rs` | the one table (`MATVEC`); validated and drift-checked with no GPU |
+| `src/device.rs` | `ash` loader, instance, device and compute queue, incl. MoltenVK portability |
+| `src/runtime.rs` | `Runtime`: cached pipelines, resident weights, `matvec`, `matvec_many` |
+| `src/dispatch.rs` | one typed entry point per kind, tested against its `frink_quant` scalar twin |
 
-The first three compile and are tested unconditionally, with no
-Vulkan driver present.
+`shaders.rs` compiles and is tested unconditionally, with no Vulkan
+driver present.
+
+## Getting a Vulkan device on Linux without a GPU
+
+Mesa's lavapipe is a CPU Vulkan driver, and CI uses it:
+
+```bash
+sudo apt-get install libvulkan1 mesa-vulkan-drivers spirv-tools glslang-tools
+```
