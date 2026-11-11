@@ -1,0 +1,24 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q4_1, 20 bytes per 32 values: f16 d, f16 m, 16 nibble bytes; low
+// nibble is element i, high nibble element i+16; value q*d + m
+// (frink_quant::dot_q4_1_f32_scalar). One unit per block.
+#include "matvec_common.glsl"
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint b = gl_LocalInvocationID.x; b < p.n_blocks_per_row; b += WG) {
+        uint blk = base + b * 20u;
+        uint xb = b * 32u;
+        float d = f16_at(blk), m = f16_at(blk + 2u);
+        for (uint i = 0u; i < 16u; ++i) {
+            uint q = byte_at(blk + 4u + i);
+            acc += (float(q & 0x0fu) * d + m) * x[xb + i];
+            acc += (float(q >> 4) * d + m) * x[xb + 16u + i];
+        }
+    }
+    finish(row, acc);
+}

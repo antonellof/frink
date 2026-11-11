@@ -285,6 +285,14 @@ fn vulkan_matvec_launch(kind: QuantKind) -> Option<VulkanMatvecLaunchFn> {
         QuantKind::Q4K => Some(d::q4_k_matvec),
         QuantKind::Q5K => Some(d::q5_k_matvec),
         QuantKind::Q6K => Some(d::q6_k_matvec),
+        QuantKind::Q4_1 => Some(d::q4_1_matvec),
+        QuantKind::Q5_0 => Some(d::q5_0_matvec),
+        QuantKind::Q5_1 => Some(d::q5_1_matvec),
+        QuantKind::Q2K => Some(d::q2_k_matvec),
+        QuantKind::Q3K => Some(d::q3_k_matvec),
+        QuantKind::IQ4NL => Some(d::iq4_nl_matvec),
+        QuantKind::IQ4XS => Some(d::iq4_xs_matvec),
+        QuantKind::Mxfp4Gguf => Some(d::mxfp4_matvec),
         _ => None,
     }
 }
@@ -492,9 +500,10 @@ impl BackendCaps for Vulkan {
     /// this names the host path rather than inventing a GPU one.
     const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
-    /// The kinds with a shader in `frink_vulkan::shaders` (Q8_0, Q4_0,
-    /// Q4_K, Q5_K, Q6_K: what Q4_K_M and Q5_K_M files are made of), each
-    /// run against its `frink_quant` scalar twin on a real device.
+    /// The kinds with a shader in `frink_vulkan::shaders`: the K-quants,
+    /// the legacy 32-value kinds, IQ4_NL, IQ4_XS and MXFP4, each run
+    /// against its `frink_quant` scalar twin on a real device. The
+    /// codebook kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0 have none yet.
     ///
     /// Everything else must report `None` rather than something
     /// plausible. A capability table that over-claims is how a kind ends
@@ -1133,7 +1142,15 @@ mod tests {
                 QuantKind::Q4_0,
                 QuantKind::Q4K,
                 QuantKind::Q5K,
-                QuantKind::Q6K
+                QuantKind::Q6K,
+                QuantKind::Q2K,
+                QuantKind::Q3K,
+                QuantKind::Q4_1,
+                QuantKind::Q5_0,
+                QuantKind::Q5_1,
+                QuantKind::IQ4NL,
+                QuantKind::IQ4XS,
+                QuantKind::Mxfp4Gguf,
             ],
             "frink-vulkan has these shaders (shaders::MATVEC); the capability \
              table claims {claimed:?}"

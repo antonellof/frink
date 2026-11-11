@@ -4,7 +4,7 @@
 //!
 //! The Vulkan half of `frink_core::weight_matrix::gpu_backend::Vulkan`
 //! (#409): a matvec per quant kind for decode, behind `frink-core`'s
-//! `vulkan` feature, so a Q4_K_M, Q5_K_M, Q6_K, Q4_0 or Q8_0 model's
+//! `vulkan` feature, so a K-quant, legacy, IQ4 or MXFP4 model's
 //! matvecs can run on any Vulkan device, including the AMD and Intel
 //! GPUs that ROCm and CUDA do not reach. Weights are uploaded once and
 //! stay resident; pipelines are built once.
