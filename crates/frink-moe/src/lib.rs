@@ -978,7 +978,7 @@ pub use glu_act::{relu_sqr, ClampForm, GluAct, Ungated, XieluParams};
 ///
 /// `act` is not optional on purpose -- see [`GluAct`].
 pub fn run_expert(hidden: &[f32], expert: &ExpertWeights, act: GluAct) -> Vec<f32> {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     if act.is_swiglu() {
         // Full SwiGLU on-device (1× upload + 1× download) when dense GPU
         // is on. SwiGLU-only kernel: a GeGLU expert must not take it.
@@ -1043,7 +1043,7 @@ fn expert_activated(hidden: &[f32], expert: &ExpertWeights, act: GluAct) -> Vec<
 /// BEFORE any activation, which is where a bias lands
 /// (`dense_bias::run_expert_biased`).
 pub(crate) fn gate_up_projections(hidden: &[f32], expert: &ExpertWeights) -> (Vec<f32>, Vec<f32>) {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         // Gate and up share `hidden` — one GPU upload / multi-matvec.
         // Activation-agnostic: the combine happens on the host below.

@@ -75,11 +75,13 @@ and the staging-buffer upload. That covers a Q4_K_M or Q5_K_M model's
 matvecs: Llama-3.2-1B Q4_K_M decodes with them on Vulkan to the CPU's
 own greedy tokens. Weights are uploaded once and stay resident, and
 pipelines are built once. It reports no GEMM for any kind, so a
-prefill lands on the host. Q/K/V and gate/up each go to the device as one
-submission. It is **opt-in** (`FRINK_VULKAN=1`, unset is off) because
-the host still runs the norms, RoPE and attention between submissions,
-so a token pays about four queue round trips per layer: that decode ran
-at 30 tok/s against the CPU's 113 on the same machine (one laptop run,
+prefill lands on the host. Q/K/V go to the device as one submission,
+and a dense SwiGLU FFN as another (gate and up, the SwiGLU, and down,
+with the intermediate left on the device). It is **opt-in**
+(`FRINK_VULKAN=1`, unset is off) because the host still runs the norms,
+RoPE and attention between submissions, so a token pays about three
+queue round trips per layer. Before the fused FFN, at four, that decode
+ran at 30 tok/s against the CPU's 113 on the same machine (one laptop run,
 not a benchmark). Running a whole layer on the device is the next step
 (#409). It exists to give every AMD and Intel GPU a
 path, including the ones ROCm does not support. `docs/plans/archive/vulkan-beachhead-verdict.md` has the

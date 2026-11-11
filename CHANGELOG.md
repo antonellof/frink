@@ -15,6 +15,17 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Changed
+
+- **A dense SwiGLU FFN is one Vulkan submission** (#409). Gate and up,
+  a SwiGLU shader, and down are recorded in one command buffer with the
+  intermediate left on the device, the Vulkan twin of CUDA's and
+  Metal's `launch_dense_ffn_swiglu`, reached through
+  `WeightMatrix::apply_gpu_dense_ffn_swiglu` from every dense decode
+  layer. A layer's decode drops from four queue round trips to three.
+  On Llama-3.2-1B Q4_K_M and Q8_0, `frink parity` and the greedy tokens
+  are unchanged with `FRINK_VULKAN=1`.
+
 ### Fixed
 
 - **DRY's scan window defaults to llama.cpp's 64 tokens.** frink

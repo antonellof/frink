@@ -3637,10 +3637,11 @@ impl WeightMatrix {
 
     /// Dense SwiGLU FFN on GPU with device-resident activations:
     /// one upload of `x`, gate+up+silu×up+down on device, one download.
-    /// Tries CUDA first when enabled, then Metal. Returns `None` if
-    /// no GPU path applies — caller falls back to [`Self::apply`] /
+    /// Tries CUDA first when enabled, then Metal, then Vulkan, the
+    /// [`gpu_backend::gpu_backend_table`] order. Returns `None` if no GPU
+    /// path applies — caller falls back to [`Self::apply`] /
     /// multi-matvec.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     pub fn apply_gpu_dense_ffn_swiglu(
         gate: &WeightMatrix,
         up: &WeightMatrix,
@@ -3746,6 +3747,10 @@ impl WeightMatrix {
                     }
                 }
             }
+        }
+        #[cfg(feature = "vulkan")]
+        if let Some(out) = gpu_backend::vulkan_dense_ffn_swiglu(gate, up, down, x) {
+            return Some(out);
         }
         None
     }

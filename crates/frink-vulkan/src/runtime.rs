@@ -34,6 +34,8 @@
 //! Nothing is evicted: like `frink-cuda`'s cache, the resident set is
 //! every weight the model's matvecs have touched.
 
+mod ffn;
+
 use crate::device::{Context, VulkanError};
 use crate::shaders::MatvecShader;
 use ash::vk;
@@ -75,6 +77,15 @@ struct Kernel {
     pipeline: vk::Pipeline,
 }
 
+/// One recorded dispatch of [`Runtime::run`]: a pipeline, which of the
+/// descriptor sets it reads, its push constants and its grid.
+struct Dispatch {
+    pipeline: vk::Pipeline,
+    set: usize,
+    push: [u8; 12],
+    grid: (u32, u32),
+}
+
 /// A Vulkan device with the matvec state kept across calls. See the
 /// module docs.
 pub struct Runtime {
@@ -96,6 +107,7 @@ pub struct Runtime {
     y: Option<Buf>,
     weights: HashMap<(usize, usize), ResidentWeight>,
     staging_only: bool,
+    submissions: u64,
     ctx: Context,
 }
 
@@ -154,6 +166,7 @@ impl Runtime {
             y: None,
             weights: HashMap::new(),
             staging_only: false,
+            submissions: 0,
             ctx,
         };
         let device = &rt.ctx.device;
@@ -284,8 +297,41 @@ impl Runtime {
         for j in jobs {
             bound.push((self.kernel(j.shader)?, self.resident(j.weights)?));
         }
-        let x_buf = Self::grow(&self.ctx.device, &self.mem_props, &mut self.x, x.len() * 4)?;
+        let x_buf = self.upload_x(x)?;
         let y_buf = Self::grow(&self.ctx.device, &self.mem_props, &mut self.y, end as usize)?;
+
+        let mut dispatches = Vec::with_capacity(jobs.len());
+        for (i, ((j, &(pipeline, w_buf)), &(rows, n_blocks, row_bytes))) in
+            jobs.iter().zip(&bound).zip(&shapes).enumerate()
+        {
+            self.write_set(
+                i,
+                [
+                    (w_buf, 0, vk::WHOLE_SIZE),
+                    (x_buf, 0, vk::WHOLE_SIZE),
+                    (y_buf, offsets[i], j.rows as u64 * 4),
+                ],
+            );
+            dispatches.push(Dispatch {
+                pipeline,
+                set: i,
+                push: push_constants(rows, n_blocks, row_bytes),
+                grid: grid(rows),
+            });
+        }
+        // The dispatches only read shared inputs and write disjoint
+        // ranges, so they need no barrier between them.
+        self.run(&[&dispatches])?;
+        Ok(jobs
+            .iter()
+            .zip(&offsets)
+            .map(|(j, &off)| self.read_y(off, j.rows))
+            .collect())
+    }
+
+    /// Copy `x` into the grow-only activation buffer and return it.
+    fn upload_x(&mut self, x: &[f32]) -> Result<vk::Buffer, VulkanError> {
+        let x_buf = Self::grow(&self.ctx.device, &self.mem_props, &mut self.x, x.len() * 4)?;
         let x_ptr = self
             .x
             .as_ref()
@@ -297,40 +343,47 @@ impl Runtime {
         unsafe {
             std::ptr::copy_nonoverlapping(x.as_ptr().cast::<u8>(), x_ptr, x.len() * 4);
         }
+        Ok(x_buf)
+    }
 
-        let device = &self.ctx.device;
-        for (i, (j, &(_, w_buf))) in jobs.iter().zip(&bound).enumerate() {
-            let ranges = [
-                (w_buf, 0, vk::WHOLE_SIZE),
-                (x_buf, 0, vk::WHOLE_SIZE),
-                (y_buf, offsets[i], j.rows as u64 * 4),
-            ];
-            let infos = ranges.map(|(buffer, offset, range)| {
-                [vk::DescriptorBufferInfo::default()
-                    .buffer(buffer)
-                    .offset(offset)
-                    .range(range)]
-            });
-            let writes: Vec<_> = infos
-                .iter()
-                .enumerate()
-                .map(|(b, info)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(self.sets[i])
-                        .dst_binding(b as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(info)
-                })
-                .collect();
-            // SAFETY: `writes` borrows `infos`, alive across the call;
-            // every buffer is live and bound; each output offset is a
-            // multiple of `minStorageBufferOffsetAlignment` and its range
-            // lies inside `y` (sized to `end`); no set is in use, as
-            // every submission is waited on before returning.
-            unsafe { device.update_descriptor_sets(&writes, &[]) };
-        }
+    /// Point descriptor set `set`'s three bindings at `(buffer, offset,
+    /// range)`.
+    fn write_set(&self, set: usize, ranges: [(vk::Buffer, u64, u64); 3]) {
+        let infos = ranges.map(|(buffer, offset, range)| {
+            [vk::DescriptorBufferInfo::default()
+                .buffer(buffer)
+                .offset(offset)
+                .range(range)]
+        });
+        let writes: Vec<_> = infos
+            .iter()
+            .enumerate()
+            .map(|(b, info)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.sets[set])
+                    .dst_binding(b as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(info)
+            })
+            .collect();
+        // SAFETY: `writes` borrows `infos`, alive across the call; every
+        // buffer is live and bound; callers pass offsets that are
+        // multiples of `minStorageBufferOffsetAlignment` and ranges
+        // inside their buffers; no set is in use, as every submission is
+        // waited on before returning.
+        unsafe { self.ctx.device.update_descriptor_sets(&writes, &[]) };
+    }
 
-        let barrier = [vk::MemoryBarrier::default()
+    /// One submission of `stages`, in order: the dispatches of a stage
+    /// run unordered among themselves, and a compute-to-compute barrier
+    /// separates each stage from the next, so a stage may read what the
+    /// one before it wrote. A last barrier makes every write visible to
+    /// the host, which reads after the wait.
+    fn run(&mut self, stages: &[&[Dispatch]]) -> Result<(), VulkanError> {
+        let to_compute = [vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)];
+        let to_host = [vk::MemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE)
             .dst_access_mask(vk::AccessFlags::HOST_READ)];
         let layout = self.pipeline_layout;
@@ -338,71 +391,88 @@ impl Runtime {
         self.submit(|device, cmd| {
             // SAFETY: `cmd` is recording (see `submit`); every handle
             // was created on this device and outlives the submission,
-            // which `submit` waits on. Each grid has at least `rows`
-            // workgroups and the shader guards `row < rows`, so no
-            // invocation writes past its own output range. The
-            // dispatches only read shared inputs and write disjoint
-            // ranges, so they need no barrier between them.
+            // which `submit` waits on. Each matvec grid has at least
+            // `rows` workgroups and its shader guards `row < rows`, and
+            // each elementwise shader guards `i < n`, so no invocation
+            // writes past its own output range.
             unsafe {
-                for (i, ((pipeline, _), &(rows, n_blocks, row_bytes))) in
-                    bound.iter().zip(&shapes).enumerate()
-                {
-                    let push = push_constants(rows, n_blocks, row_bytes);
-                    let (gx, gy) = grid(rows);
-                    device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, *pipeline);
-                    device.cmd_bind_descriptor_sets(
-                        cmd,
-                        vk::PipelineBindPoint::COMPUTE,
-                        layout,
-                        0,
-                        &[sets[i]],
-                        &[],
-                    );
-                    device.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, &push);
-                    device.cmd_dispatch(cmd, gx, gy, 1);
+                for (k, stage) in stages.iter().enumerate() {
+                    if k > 0 {
+                        device.cmd_pipeline_barrier(
+                            cmd,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::PipelineStageFlags::COMPUTE_SHADER,
+                            vk::DependencyFlags::empty(),
+                            &to_compute,
+                            &[],
+                            &[],
+                        );
+                    }
+                    for d in stage.iter() {
+                        let (gx, gy) = d.grid;
+                        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, d.pipeline);
+                        device.cmd_bind_descriptor_sets(
+                            cmd,
+                            vk::PipelineBindPoint::COMPUTE,
+                            layout,
+                            0,
+                            &[sets[d.set]],
+                            &[],
+                        );
+                        device.cmd_push_constants(
+                            cmd,
+                            layout,
+                            vk::ShaderStageFlags::COMPUTE,
+                            0,
+                            &d.push,
+                        );
+                        device.cmd_dispatch(cmd, gx, gy, 1);
+                    }
                 }
                 device.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
                     vk::PipelineStageFlags::HOST,
                     vk::DependencyFlags::empty(),
-                    &barrier,
+                    &to_host,
                     &[],
                     &[],
                 );
             }
         })?;
+        self.submissions += 1;
+        Ok(())
+    }
 
+    /// `n` floats of the output buffer from byte offset `off`, after a
+    /// [`Self::run`].
+    fn read_y(&self, off: u64, n: usize) -> Vec<f32> {
         let y_ptr = self
             .y
             .as_ref()
             .and_then(|b| b.mapped)
             .expect("host-visible");
-        Ok(jobs
+        let mut bytes = vec![0u8; n * 4];
+        // SAFETY: callers read `[off, off + n * 4)` inside the mapped `y`
+        // that their own `run` sized, and the fence `submit` waited on,
+        // with the HOST_READ barrier `run` recorded, ordered the
+        // device's writes before this read. Byte-wise, as `vkMapMemory`
+        // promises only `minMemoryMapAlignment`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(y_ptr.add(off as usize), bytes.as_mut_ptr(), n * 4)
+        };
+        bytes
+            .as_chunks::<4>()
+            .0
             .iter()
-            .zip(&offsets)
-            .map(|(j, &off)| {
-                let mut bytes = vec![0u8; j.rows * 4];
-                // SAFETY: `[off, off + rows * 4)` lies inside the mapped
-                // `y`, and the fence `submit` waited on, with the
-                // HOST_READ barrier recorded above, ordered the device's
-                // writes before this read. Byte-wise, as `vkMapMemory`
-                // promises only `minMemoryMapAlignment`.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        y_ptr.add(off as usize),
-                        bytes.as_mut_ptr(),
-                        j.rows * 4,
-                    )
-                };
-                bytes
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|c| f32::from_le_bytes(*c))
-                    .collect()
-            })
-            .collect())
+            .map(|c| f32::from_le_bytes(*c))
+            .collect()
+    }
+
+    /// Compute submissions so far: the number a decode step pays a queue
+    /// round trip for. Tests hold fused paths to it.
+    pub fn submissions(&self) -> u64 {
+        self.submissions
     }
 
     /// `(rows, n_blocks_per_row, row_bytes)` for a job over an
@@ -438,11 +508,22 @@ impl Runtime {
 
     /// The pipeline for `shader`, built on first use.
     fn kernel(&mut self, shader: &'static MatvecShader) -> Result<vk::Pipeline, VulkanError> {
-        if let Some(k) = self.kernels.get(shader.kind) {
+        self.pipeline(shader.kind, shader.spv)
+    }
+
+    /// The pipeline for the module `spv`, cached under `name`, built on
+    /// first use. Every module keeps the matvec interface, so they all
+    /// share one pipeline layout.
+    fn pipeline(
+        &mut self,
+        name: &'static str,
+        spv: &'static [u8],
+    ) -> Result<vk::Pipeline, VulkanError> {
+        if let Some(k) = self.kernels.get(name) {
             return Ok(k.pipeline);
         }
         let device = &self.ctx.device;
-        let words = crate::shaders::words(shader.spv);
+        let words = crate::shaders::words(spv);
         let module_info = vk::ShaderModuleCreateInfo::default().code(&words);
         // SAFETY: `module_info` borrows `words`, alive across the call.
         // Every module is validated by `spirv-val` in its own crate's
@@ -471,8 +552,7 @@ impl Runtime {
                 });
             }
         };
-        self.kernels
-            .insert(shader.kind, Kernel { module, pipeline });
+        self.kernels.insert(name, Kernel { module, pipeline });
         Ok(pipeline)
     }
 
