@@ -6,7 +6,9 @@ SPIR-V. The codebook kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0 have no
 shader yet; `docs/KERNELS.md` is the list. Weights are uploaded once
 and stay resident. There is no GEMM (prefill runs on the host) and no
 attention yet. `frink-core` reaches it behind its `vulkan` feature, and
-only when `FRINK_VULKAN=1` is set.
+only with `--device vulkan` (or `FRINK_VULKAN=1`). The device is
+llama.cpp's `Vulkan0`: the first discrete or integrated GPU, or the
+first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).
 
 It began as a GO/NO-GO beachhead; the verdict, its costs and what it did
 not establish are in

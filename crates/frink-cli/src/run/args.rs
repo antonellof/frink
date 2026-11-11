@@ -6,7 +6,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use frink_models::{SamplerOrder, SamplingParams};
 
 /// llama.cpp-compatible completion flags.
@@ -258,12 +258,16 @@ pub struct InferArgs {
     #[arg(short = 's', long = "seed", default_value_t = -1)]
     pub seed: i64,
 
-    /// Devices used for offloading (`none` disables GPU use).
+    /// Device used for offloading (`none` disables GPU use).
     #[arg(
         long = "device",
         visible_alias = "dev",
         value_name = "DEVICE",
-        ignore_case = true
+        ignore_case = true,
+        value_parser = clap::builder::TypedValueParser::map(
+            clap::builder::PossibleValuesParser::new(OffloadDevice::ALL.map(|d| d.as_str())),
+            |s| s.parse::<OffloadDevice>().expect("a listed value parses"),
+        ),
     )]
     pub device: Option<OffloadDevice>,
 
@@ -791,14 +795,7 @@ impl InferArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OffloadDevice {
-    Auto,
-    None,
-    Cpu,
-    Metal,
-    Cuda,
-}
+pub use frink_models::offload::OffloadDevice;
 
 pub use frink_models::gpu_layers::GpuLayers;
 

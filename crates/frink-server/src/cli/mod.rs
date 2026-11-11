@@ -17,7 +17,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use frink_models::gpu_layers::GpuLayers;
 
 // `PartialEq` so frink-cli's serve tests can assert that both front
@@ -278,7 +278,11 @@ pub struct ServerArgs {
         long = "device",
         visible_alias = "dev",
         value_name = "DEVICE",
-        ignore_case = true
+        ignore_case = true,
+        value_parser = clap::builder::TypedValueParser::map(
+            clap::builder::PossibleValuesParser::new(OffloadDevice::ALL.map(|d| d.as_str())),
+            |s| s.parse::<OffloadDevice>().expect("a listed value parses"),
+        ),
     )]
     device: Option<OffloadDevice>,
 
@@ -481,14 +485,7 @@ impl ServerArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum OffloadDevice {
-    Auto,
-    None,
-    Cpu,
-    Metal,
-    Cuda,
-}
+use frink_models::offload::OffloadDevice;
 
 /// Whether this build of the server has the Metal kernels compiled in.
 ///
@@ -787,66 +784,9 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         // device overrides skipped
     } else {
         let layers = args.n_gpu_layers.unwrap_or(GpuLayers::Auto);
-        let device = if layers.offload_enabled() {
-            args.device.unwrap_or(OffloadDevice::Auto)
-        } else {
-            OffloadDevice::None
-        };
-
-        match device {
-            OffloadDevice::None | OffloadDevice::Cpu => unsafe {
-                std::env::set_var("FRINK_METAL", "0");
-                std::env::set_var("FRINK_METAL_ATTN", "0");
-                std::env::set_var("FRINK_CUDA", "0");
-            },
-            OffloadDevice::Auto => unsafe {
-                std::env::set_var("FRINK_METAL", "auto");
-                std::env::set_var("FRINK_CUDA", "auto");
-                if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                    std::env::set_var("FRINK_METAL_ATTN", "1");
-                }
-            },
-            OffloadDevice::Metal => {
-                #[cfg(not(feature = "metal"))]
-                {
-                    anyhow::bail!(
-                        "Metal requested but this binary was built without --features metal"
-                    );
-                }
-                #[cfg(feature = "metal")]
-                {
-                    if !frink_metal::MetalProfile::detect().available {
-                        anyhow::bail!("Metal requested but no Metal device is available");
-                    }
-                    unsafe {
-                        std::env::set_var("FRINK_METAL", "1");
-                        if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                            std::env::set_var("FRINK_METAL_ATTN", "1");
-                        }
-                        std::env::set_var("FRINK_CUDA", "0");
-                    }
-                }
-            }
-            OffloadDevice::Cuda => {
-                #[cfg(not(feature = "cuda"))]
-                {
-                    anyhow::bail!(
-                        "CUDA requested but this binary was built without --features cuda"
-                    );
-                }
-                #[cfg(feature = "cuda")]
-                {
-                    if !frink_cuda::HardwareProfile::detect().cuda_available {
-                        anyhow::bail!("CUDA requested but no CUDA device is available");
-                    }
-                    unsafe {
-                        std::env::set_var("FRINK_CUDA", "1");
-                        std::env::set_var("FRINK_METAL", "0");
-                        std::env::set_var("FRINK_METAL_ATTN", "0");
-                    }
-                }
-            }
-        }
+        let device = OffloadDevice::with_offload(args.device, layers.offload_enabled());
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { frink_models::offload::select(device)? };
     }
 
     if let Some(n) = args.parallel {

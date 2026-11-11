@@ -219,6 +219,7 @@ fn banner_line(args: &InferArgs, device: OffloadDevice) -> String {
             OffloadDevice::Cpu => "cpu",
             OffloadDevice::Metal => "Metal",
             OffloadDevice::Cuda => "CUDA",
+            OffloadDevice::Vulkan => "Vulkan",
         },
         gpu_layers_note(args, device),
         effective_ctk.as_str(),
@@ -377,64 +378,9 @@ fn apply_backend_env(args: &InferArgs) -> anyhow::Result<()> {
     // cores by default, as llama.cpp does) and explicit QoS.
     frink_core::threads::init_cpu_pool();
 
-    let device = if args.n_gpu_layers.offload_enabled() {
-        args.device.unwrap_or(OffloadDevice::Auto)
-    } else {
-        OffloadDevice::None
-    };
-
-    match device {
-        OffloadDevice::None | OffloadDevice::Cpu => unsafe {
-            std::env::set_var("FRINK_METAL", "0");
-            std::env::set_var("FRINK_METAL_ATTN", "0");
-            std::env::set_var("FRINK_CUDA", "0");
-        },
-        OffloadDevice::Auto => unsafe {
-            std::env::set_var("FRINK_METAL", "auto");
-            std::env::set_var("FRINK_CUDA", "auto");
-            // Honor a pre-set FRINK_METAL_ATTN so ablations like
-            // `FRINK_METAL_ATTN=0 … --ngl 99` actually disable attn.
-            if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                std::env::set_var("FRINK_METAL_ATTN", "1");
-            }
-        },
-        OffloadDevice::Metal => {
-            #[cfg(not(feature = "metal"))]
-            {
-                anyhow::bail!("Metal requested but this binary was built without --features metal");
-            }
-            #[cfg(feature = "metal")]
-            {
-                if !frink_metal::MetalProfile::detect().available {
-                    anyhow::bail!("Metal requested but no Metal device is available");
-                }
-                unsafe {
-                    std::env::set_var("FRINK_METAL", "1");
-                    if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                        std::env::set_var("FRINK_METAL_ATTN", "1");
-                    }
-                    std::env::set_var("FRINK_CUDA", "0");
-                }
-            }
-        }
-        OffloadDevice::Cuda => {
-            #[cfg(not(feature = "cuda"))]
-            {
-                anyhow::bail!("CUDA requested but this binary was built without --features cuda");
-            }
-            #[cfg(feature = "cuda")]
-            {
-                if !frink_cuda::HardwareProfile::detect().cuda_available {
-                    anyhow::bail!("CUDA requested but no CUDA device is available");
-                }
-                unsafe {
-                    std::env::set_var("FRINK_CUDA", "1");
-                    std::env::set_var("FRINK_METAL", "0");
-                    std::env::set_var("FRINK_METAL_ATTN", "0");
-                }
-            }
-        }
-    }
+    let device = OffloadDevice::with_offload(args.device, args.n_gpu_layers.offload_enabled());
+    // SAFETY: single-threaded here; the rayon pool reads none of these.
+    unsafe { frink_models::offload::select(device)? };
 
     // SAFETY: single-threaded init before Metal/CUDA workers spawn.
     unsafe {

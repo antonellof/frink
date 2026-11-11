@@ -17,6 +17,15 @@ are the ones worth reading twice.
 
 ### Added
 
+- **`--device vulkan`, and Vulkan devices numbered as llama.cpp numbers
+  them.** `frink` and `frink-server` take `-dev vulkan` (a `--features
+  vulkan` build). It runs on `Vulkan0`, chosen by llama.cpp's rule:
+  every discrete and integrated GPU in loader order, or exactly the
+  indices in `GGML_VK_VISIBLE_DEVICES`. `--list-devices` prints one
+  `Vulkan<i>` row per visible device. frink used to take the first
+  device with a compute queue, which on a machine with lavapipe
+  installed could be the CPU driver (#409).
+
 - **Vulkan decode matvecs for Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, IQ4_NL,
   IQ4_XS and MXFP4** (#409, #405). Each is a GLSL shader held to its
   `frink_quant` scalar twin on MoltenVK and on lavapipe, at shapes
@@ -26,6 +35,13 @@ are the ones worth reading twice.
   kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0.
 
 ### Fixed
+
+- **`-ngl 0` and `-dev cpu` turn Vulkan off.** Each binary set
+  `FRINK_METAL` and `FRINK_CUDA` from its own copy of the device match,
+  and none set `FRINK_VULKAN`. A run with `FRINK_VULKAN=1` and `-dev
+  cpu` did its decode matvecs on the GPU while saying `device=cpu`, and
+  a `frink bench -ngl 0` row could be labelled `cpu` for a Vulkan run.
+  The three copies are now one, `frink_models::offload` (#409).
 
 - **DRY's scan window defaults to llama.cpp's 64 tokens.** frink
   defaulted `dry_penalty_last_n` to `-1`, the whole context, from an
