@@ -26,6 +26,14 @@ are the ones worth reading twice.
   device with a compute queue, which on a machine with lavapipe
   installed could be the CPU driver (#409).
 
+- **Vulkan decode matvecs for Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, IQ4_NL,
+  IQ4_XS and MXFP4** (#409, #405). Each is a GLSL shader held to its
+  `frink_quant` scalar twin on MoltenVK and on lavapipe, at shapes
+  with unaligned row strides, idle invocations and several workgroups,
+  through both upload paths. The Vulkan matvec column of
+  `docs/KERNELS.md` falls from 17 host fallbacks to 9: the codebook
+  kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0.
+
 ### Fixed
 
 - **`-ngl 0` and `-dev cpu` turn Vulkan off.** Each binary set

@@ -45,6 +45,14 @@ shader_matvec! {
     q4_k_matvec => "Q4_K",
     q5_k_matvec => "Q5_K",
     q6_k_matvec => "Q6_K",
+    q4_1_matvec => "Q4_1",
+    q5_0_matvec => "Q5_0",
+    q5_1_matvec => "Q5_1",
+    q2_k_matvec => "Q2_K",
+    q3_k_matvec => "Q3_K",
+    iq4_nl_matvec => "IQ4_NL",
+    iq4_xs_matvec => "IQ4_XS",
+    mxfp4_matvec => "MXFP4",
 }
 
 #[cfg(test)]
@@ -81,12 +89,20 @@ mod tests {
             let d = half::f16::from_f32(0.01 + 0.002 * (b % 7) as f32).to_le_bytes();
             let dmin = half::f16::from_f32(0.005 + 0.001 * (b % 5) as f32).to_le_bytes();
             match kind {
-                "Q8_0" | "Q4_0" => blk[0..2].copy_from_slice(&d),
-                "Q4_K" | "Q5_K" => {
+                "Q8_0" | "Q4_0" | "Q5_0" | "IQ4_NL" | "IQ4_XS" => blk[0..2].copy_from_slice(&d),
+                "Q4_K" | "Q5_K" | "Q4_1" | "Q5_1" => {
                     blk[0..2].copy_from_slice(&d);
                     blk[2..4].copy_from_slice(&dmin);
                 }
                 "Q6_K" => blk[208..210].copy_from_slice(&d),
+                "Q2_K" => {
+                    blk[80..82].copy_from_slice(&d);
+                    blk[82..84].copy_from_slice(&dmin);
+                }
+                "Q3_K" => blk[108..110].copy_from_slice(&d),
+                // E8M0: 2^-9 .. 2^-2, and e = 0 (the subnormal case) on
+                // every eighth block.
+                "MXFP4" => blk[0] = if b % 8 == 7 { 0 } else { 118 + (b % 8) as u8 },
                 other => panic!("no layout for {other}"),
             }
             out.extend(blk);
@@ -101,6 +117,14 @@ mod tests {
             "Q4_K" => frink_quant::dot_q4_k_f32_scalar,
             "Q5_K" => frink_quant::dot_q5_k_f32_scalar,
             "Q6_K" => frink_quant::dot_q6_k_f32_scalar,
+            "Q4_1" => frink_quant::dot_q4_1_f32_scalar,
+            "Q5_0" => frink_quant::dot_q5_0_f32_scalar,
+            "Q5_1" => frink_quant::dot_q5_1_f32_scalar,
+            "Q2_K" => frink_quant::dot_q2_k_f32_scalar,
+            "Q3_K" => frink_quant::dot_q3_k_f32_scalar,
+            "IQ4_NL" => frink_quant::dot_iq4_nl_f32_scalar,
+            "IQ4_XS" => frink_quant::dot_iq4_xs_f32_scalar,
+            "MXFP4" => frink_quant::dot_mxfp4_gguf_f32_scalar,
             other => panic!("no twin for {other}"),
         }
     }
@@ -117,13 +141,32 @@ mod tests {
 
     type Launch =
         fn(&mut Runtime, &[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, VulkanError>;
-    const LAUNCHES: [(&str, Launch); 5] = [
+    const LAUNCHES: [(&str, Launch); 13] = [
         ("Q8_0", q8_0_matvec),
         ("Q4_0", q4_0_matvec),
         ("Q4_K", q4_k_matvec),
         ("Q5_K", q5_k_matvec),
         ("Q6_K", q6_k_matvec),
+        ("Q4_1", q4_1_matvec),
+        ("Q5_0", q5_0_matvec),
+        ("Q5_1", q5_1_matvec),
+        ("Q2_K", q2_k_matvec),
+        ("Q3_K", q3_k_matvec),
+        ("IQ4_NL", iq4_nl_matvec),
+        ("IQ4_XS", iq4_xs_matvec),
+        ("MXFP4", mxfp4_matvec),
     ];
+
+    /// Every shader in the table is exercised by [`LAUNCHES`], so a row
+    /// added without a test cannot pass.
+    #[test]
+    fn every_shader_has_a_launch_under_test() {
+        let tested: Vec<&str> = LAUNCHES.iter().map(|(k, _)| *k).collect();
+        for s in crate::shaders::MATVEC {
+            assert!(tested.contains(&s.kind), "{} has no test launch", s.kind);
+        }
+        assert_eq!(tested.len(), crate::shaders::MATVEC.len());
+    }
 
     /// `rows` rows of `kind` and an activation, deterministic per shape.
     fn case(kind: &str, rows: usize, blocks: usize) -> (Vec<u8>, Vec<f32>, usize) {

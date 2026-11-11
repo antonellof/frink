@@ -1,7 +1,9 @@
 # frink-vulkan
 
-Decode matvecs on any Vulkan device (#409): Q8_0, Q4_0, Q4_K, Q5_K and
-Q6_K, written in GLSL and committed as SPIR-V. Weights are uploaded once
+Decode matvecs on any Vulkan device (#409): every K-quant and legacy
+kind, IQ4_NL, IQ4_XS and MXFP4, written in GLSL and committed as
+SPIR-V. The codebook kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0 have no
+shader yet; `docs/KERNELS.md` is the list. Weights are uploaded once
 and stay resident. There is no GEMM (prefill runs on the host) and no
 attention yet. `frink-core` reaches it behind its `vulkan` feature, and
 only with `--device vulkan` (or `FRINK_VULKAN=1`). The device is

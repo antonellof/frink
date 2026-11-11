@@ -65,6 +65,54 @@ pub const MATVEC: &[MatvecShader] = &[
         block_bytes: 210,
         block_elems: 256,
     },
+    MatvecShader {
+        kind: "Q4_1",
+        spv: include_bytes!("../shaders/spv/q4_1_matvec.spv"),
+        block_bytes: 20,
+        block_elems: 32,
+    },
+    MatvecShader {
+        kind: "Q5_0",
+        spv: include_bytes!("../shaders/spv/q5_0_matvec.spv"),
+        block_bytes: 22,
+        block_elems: 32,
+    },
+    MatvecShader {
+        kind: "Q5_1",
+        spv: include_bytes!("../shaders/spv/q5_1_matvec.spv"),
+        block_bytes: 24,
+        block_elems: 32,
+    },
+    MatvecShader {
+        kind: "Q2_K",
+        spv: include_bytes!("../shaders/spv/q2_k_matvec.spv"),
+        block_bytes: 84,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "Q3_K",
+        spv: include_bytes!("../shaders/spv/q3_k_matvec.spv"),
+        block_bytes: 110,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ4_NL",
+        spv: include_bytes!("../shaders/spv/iq4_nl_matvec.spv"),
+        block_bytes: 18,
+        block_elems: 32,
+    },
+    MatvecShader {
+        kind: "IQ4_XS",
+        spv: include_bytes!("../shaders/spv/iq4_xs_matvec.spv"),
+        block_bytes: 136,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "MXFP4",
+        spv: include_bytes!("../shaders/spv/mxfp4_matvec.spv"),
+        block_bytes: 17,
+        block_elems: 32,
+    },
 ];
 
 /// The shader for `kind`.
@@ -164,12 +212,74 @@ mod tests {
 
     #[test]
     fn every_shader_is_one_row_with_ggml_block_sizes() {
+        // Sizes from frink_quant, the CPU's own constants, so a row
+        // typed wrong here cannot agree with itself.
         for (kind, bytes, elems) in [
-            ("Q8_0", 34, 32),
-            ("Q4_0", 18, 32),
-            ("Q4_K", 144, 256),
-            ("Q5_K", 176, 256),
-            ("Q6_K", 210, 256),
+            (
+                "Q8_0",
+                frink_quant::Q8_0_BLOCK_BYTES,
+                frink_quant::Q8_0_BLOCK_ELEMS,
+            ),
+            (
+                "Q4_0",
+                frink_quant::Q4_0_BLOCK_BYTES,
+                frink_quant::Q4_0_BLOCK_ELEMS,
+            ),
+            (
+                "Q4_K",
+                frink_quant::Q4_K_BLOCK_BYTES,
+                frink_quant::Q4_K_BLOCK_ELEMS,
+            ),
+            (
+                "Q5_K",
+                frink_quant::Q5_K_BLOCK_BYTES,
+                frink_quant::Q5_K_BLOCK_ELEMS,
+            ),
+            (
+                "Q6_K",
+                frink_quant::Q6_K_BLOCK_BYTES,
+                frink_quant::Q6_K_BLOCK_ELEMS,
+            ),
+            (
+                "Q4_1",
+                frink_quant::Q4_1_BLOCK_BYTES,
+                frink_quant::Q4_1_BLOCK_ELEMS,
+            ),
+            (
+                "Q5_0",
+                frink_quant::Q5_0_BLOCK_BYTES,
+                frink_quant::Q5_0_BLOCK_ELEMS,
+            ),
+            (
+                "Q5_1",
+                frink_quant::Q5_1_BLOCK_BYTES,
+                frink_quant::Q5_1_BLOCK_ELEMS,
+            ),
+            (
+                "Q2_K",
+                frink_quant::Q2_K_BLOCK_BYTES,
+                frink_quant::Q2_K_BLOCK_ELEMS,
+            ),
+            (
+                "Q3_K",
+                frink_quant::Q3_K_BLOCK_BYTES,
+                frink_quant::Q3_K_BLOCK_ELEMS,
+            ),
+            (
+                "IQ4_NL",
+                frink_quant::IQ4_NL_BLOCK_BYTES,
+                frink_quant::IQ4_NL_BLOCK_ELEMS,
+            ),
+            (
+                "IQ4_XS",
+                frink_quant::IQ4_XS_BLOCK_BYTES,
+                frink_quant::IQ4_XS_BLOCK_ELEMS,
+            ),
+            (
+                "MXFP4",
+                frink_quant::MXFP4_GGUF_BLOCK_BYTES,
+                frink_quant::MXFP4_GGUF_BLOCK_ELEMS,
+            ),
         ] {
             let s = matvec_shader(kind).unwrap();
             assert_eq!((s.block_bytes, s.block_elems), (bytes, elems), "{kind}");
