@@ -34,6 +34,17 @@ are the ones worth reading twice.
   `docs/KERNELS.md` falls from 17 host fallbacks to 9: the codebook
   kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0.
 
+### Changed
+
+- **A dense SwiGLU FFN is one Vulkan submission** (#409). Gate and up,
+  a SwiGLU shader, and down are recorded in one command buffer with the
+  intermediate left on the device, the Vulkan twin of CUDA's and
+  Metal's `launch_dense_ffn_swiglu`, reached through
+  `WeightMatrix::apply_gpu_dense_ffn_swiglu` from every dense decode
+  layer. A layer's decode drops from four queue round trips to three.
+  On Llama-3.2-1B Q4_K_M and Q8_0, `frink parity` and the greedy tokens
+  are unchanged with `FRINK_VULKAN=1`.
+
 ### Fixed
 
 - **`-ngl 0` and `-dev cpu` turn Vulkan off.** Each binary set

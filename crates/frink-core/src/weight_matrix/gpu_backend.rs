@@ -891,6 +891,52 @@ pub(crate) fn vulkan_matvec_many(
     }
 }
 
+/// The Vulkan arm of `WeightMatrix::apply_gpu_dense_ffn_swiglu`: gate,
+/// up, SwiGLU and down in one submission (`Runtime::dense_ffn_swiglu`).
+/// `None`, for the caller's split path, under the same conditions as
+/// [`vulkan_matvec_many`]: Vulkan off, a matrix that is not plain
+/// quantized (a fold or an adapter is arithmetic the shaders do not do),
+/// a kind with no shader, or a failed launch, which is logged.
+#[cfg(feature = "vulkan")]
+pub(crate) fn vulkan_dense_ffn_swiglu(
+    gate: &crate::weight_matrix::WeightMatrix,
+    up: &crate::weight_matrix::WeightMatrix,
+    down: &crate::weight_matrix::WeightMatrix,
+    x: &[f32],
+) -> Option<Vec<f32>> {
+    use crate::weight_matrix::WeightMatrix;
+    if !Vulkan::dense_enabled() {
+        return None;
+    }
+    fn job(m: &WeightMatrix) -> Option<frink_vulkan::runtime::MatvecJob<'_>> {
+        let WeightMatrix::Quantized {
+            data, rows, kind, ..
+        } = m
+        else {
+            return None;
+        };
+        Vulkan::matvec_kernel(*kind)?;
+        Some(frink_vulkan::runtime::MatvecJob {
+            shader: frink_vulkan::shaders::matvec_shader(kind.name())?,
+            weights: data.as_slice(),
+            rows: *rows,
+        })
+    }
+    let (g, u, d) = (job(gate)?, job(up)?, job(down)?);
+    let rt = vulkan_runtime()?;
+    let mut guard = rt.lock().ok()?;
+    match guard.dense_ffn_swiglu(g, u, d, x) {
+        Ok(out) => Some(out),
+        Err(e) => {
+            eprintln!(
+                "frink: Vulkan dense FFN failed, {}: {e}",
+                Vulkan::MATVEC_FALLBACK
+            );
+            None
+        }
+    }
+}
+
 /// **The** backend table: one row per GPU backend, in dispatch
 /// precedence order — CUDA first, then Metal, then Vulkan, then the CPU
 /// fallthrough the caller supplies.
@@ -1355,6 +1401,72 @@ mod tests {
             (&outs[0], &outs[1], &outs[2]),
             "apply_three takes the fused path"
         );
+    }
+
+    /// `WeightMatrix::apply_gpu_dense_ffn_swiglu` under `FRINK_VULKAN=1`:
+    /// a Q4_K_M layer's FFN (Q4_K gate/up, Q6_K down) in ONE Vulkan
+    /// submission, against the host's `down(swiglu(gate, up))` on
+    /// `apply_cpu`. Gate values straddle zero, so SiLU is tested where it
+    /// is neither the identity nor zero.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn the_vulkan_fused_ffn_is_one_submission_and_matches_the_cpu_ffn() {
+        use crate::weight_matrix::{WeightBytes, WeightMatrix};
+        if !Vulkan::dense_enabled() {
+            frink_vulkan::skipped(
+                "Vulkan not selected (FRINK_VULKAN=1) or no device; the fused FFN was NOT checked",
+            );
+            return;
+        }
+        let make = |kind: QuantKind, rows: usize, cols: usize, salt: usize| {
+            let mut data = Vec::new();
+            for r in 0..rows {
+                let row: Vec<f32> = (0..cols)
+                    .map(|i| ((((r + salt) * cols + i) * 37 % 101) as f32 - 50.0) / 290.0)
+                    .collect();
+                match kind {
+                    QuantKind::Q4K => frink_quant::encode_row_q4_k(&row, None, &mut data),
+                    _ => frink_quant::encode_row_q6_k(&row, None, &mut data),
+                }
+                .expect("encodes");
+            }
+            WeightMatrix::Quantized {
+                data: WeightBytes::Owned(data),
+                rows,
+                cols,
+                kind,
+            }
+        };
+        let (hidden, units) = (512usize, 768usize);
+        let x: Vec<f32> = (0..hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) / 9.0)
+            .collect();
+        let gate = make(QuantKind::Q4K, units, hidden, 0);
+        let up = make(QuantKind::Q4K, units, hidden, 3);
+        let down = make(QuantKind::Q6K, hidden, units, 7);
+
+        let g = gate.apply_cpu(&x);
+        assert!(g.iter().any(|v| *v > 0.5) && g.iter().any(|v| *v < -0.5));
+        let want = down.apply_cpu(&crate::matmul::swiglu(&g, &up.apply_cpu(&x)));
+
+        let before = vulkan_runtime().unwrap().lock().unwrap().submissions();
+        let got = WeightMatrix::apply_gpu_dense_ffn_swiglu(&gate, &up, &down, &x)
+            .expect("the Vulkan fused FFN");
+        let after = vulkan_runtime().unwrap().lock().unwrap().submissions();
+        // The weights are new, so their uploads may submit too (staging);
+        // the compute is one submission whatever the upload path.
+        assert_eq!(
+            after - before,
+            1,
+            "gate, up, SwiGLU and down in one submission"
+        );
+        assert_eq!(got.len(), want.len());
+        for (r, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+                "row {r}: vulkan {g} vs cpu {w}"
+            );
+        }
     }
 
     #[cfg(feature = "vulkan")]

@@ -56,17 +56,19 @@ shader_matvec! {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn pseudo_random(seed: u64, n: usize) -> Vec<f32> {
+    pub(crate) fn pseudo_random(seed: u64, n: usize) -> Vec<f32> {
         let mut s = seed | 1;
         (0..n)
             .map(|_| {
                 s = s
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                ((s >> 33) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
+                // The top 32 bits, so the value spans [-1, 1]. `>> 33`
+                // kept 31, and every activation was <= 0.
+                ((s >> 32) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
             })
             .collect()
     }
@@ -74,7 +76,7 @@ mod tests {
     /// A row of `blocks` blocks of `kind`: deterministic bytes, with each
     /// block's f16 scale fields set to small finite values so no block
     /// decodes to inf or NaN.
-    fn kind_row(kind: &str, blocks: usize, seed: u64) -> Vec<u8> {
+    pub(crate) fn kind_row(kind: &str, blocks: usize, seed: u64) -> Vec<u8> {
         let shader = crate::shaders::matvec_shader(kind).unwrap();
         let mut s = seed | 1;
         let mut next = || {
@@ -110,7 +112,7 @@ mod tests {
         out
     }
 
-    fn twin(kind: &str) -> fn(&[u8], &[f32]) -> f32 {
+    pub(crate) fn twin(kind: &str) -> fn(&[u8], &[f32]) -> f32 {
         match kind {
             "Q8_0" => frink_quant::dot_q8_0_f32_scalar,
             "Q4_0" => frink_quant::dot_q4_0_f32_scalar,
@@ -129,7 +131,7 @@ mod tests {
         }
     }
 
-    fn runtime() -> Option<Runtime> {
+    pub(crate) fn runtime() -> Option<Runtime> {
         match Runtime::new() {
             Ok(rt) => Some(rt),
             Err(e) => {

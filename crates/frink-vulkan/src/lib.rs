@@ -11,8 +11,10 @@
 //!
 //! What it is not, yet, is a backend in the sense Metal and CUDA are:
 //! there is no GEMM (a prefill stays on the host), no attention, and
-//! each projection (or each fused Q/K/V and gate/up set) still waits
-//! for its own result, so a layer pays several queue round trips. It began as the `vulkan-beachhead`
+//! each submission (Q/K/V together, the output projection, and a dense
+//! SwiGLU FFN as one, [`runtime::Runtime::dense_ffn_swiglu`]) still
+//! waits for its own result, so a layer pays about three queue round
+//! trips. It began as the `vulkan-beachhead`
 //! GO/NO-GO (`docs/plans/archive/vulkan-beachhead-verdict.md`), and its seam
 //! guard tests still go red if a kind is claimed without a shader.
 //!
@@ -30,7 +32,8 @@
 //! - [`device`] -- the `ash` host layer (`--features vulkan`): loader,
 //!   instance, device and compute queue.
 //! - [`runtime`] -- the matvec state kept across calls: pipelines,
-//!   resident weights, one command buffer.
+//!   resident weights, one command buffer; the fused FFN in
+//!   `runtime/ffn.rs`.
 //! - [`dispatch`] -- one typed entry point per kind, each held against
 //!   its `frink_quant` scalar twin on a real device.
 

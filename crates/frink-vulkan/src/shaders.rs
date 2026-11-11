@@ -120,6 +120,38 @@ pub fn matvec_shader(kind: &str) -> Option<&'static MatvecShader> {
     MATVEC.iter().find(|s| s.kind == kind)
 }
 
+/// A shader that is not a matvec: it keeps the matvec interface's three
+/// bindings and push-constant block, so the one pipeline layout serves
+/// it, and decodes no block layout.
+#[derive(Debug, Clone, Copy)]
+pub struct ElementwiseShader {
+    /// The name its pipeline is cached under, and its file stem.
+    pub name: &'static str,
+    pub spv: &'static [u8],
+}
+
+/// `h = silu(g) * u`, between a fused FFN's gate/up and its down.
+pub const SWIGLU: ElementwiseShader = ElementwiseShader {
+    name: "swiglu",
+    spv: include_bytes!("../shaders/spv/swiglu.spv"),
+};
+
+/// Every elementwise shader, for the tests that cover every module.
+pub const ELEMENTWISE: &[ElementwiseShader] = &[SWIGLU];
+
+/// Every committed module: its file name under `shaders/spv/` and its
+/// bytes. The one list the module tests walk, so a shader cannot be
+/// added to a table and skipped by validation.
+pub fn modules() -> Vec<(String, &'static [u8])> {
+    let matvecs = MATVEC
+        .iter()
+        .map(|s| (format!("{}_matvec.spv", s.kind.to_lowercase()), s.spv));
+    let elementwise = ELEMENTWISE
+        .iter()
+        .map(|s| (format!("{}.spv", s.name), s.spv));
+    matvecs.chain(elementwise).collect()
+}
+
 /// A module's bytes as the words `vkCreateShaderModule` takes.
 pub fn words(spv: &[u8]) -> Vec<u32> {
     assert_eq!(spv.len() % 4, 0, "SPIR-V is whole words");
@@ -144,12 +176,10 @@ mod tests {
     /// `spirv-val` is installed, valid for Vulkan 1.0.
     #[test]
     fn every_committed_module_is_valid_vulkan_spirv() {
-        for s in MATVEC {
-            let w = words(s.spv);
-            assert_eq!(w[0], 0x0723_0203, "{}: not SPIR-V", s.kind);
-            let path = shader_dir()
-                .join("spv")
-                .join(format!("{}_matvec.spv", s.kind.to_lowercase()));
+        for (name, spv) in modules() {
+            let w = words(spv);
+            assert_eq!(w[0], 0x0723_0203, "{name}: not SPIR-V");
+            let path = shader_dir().join("spv").join(&name);
             match Command::new("spirv-val")
                 .args(["--target-env", "vulkan1.0"])
                 .arg(&path)
@@ -157,8 +187,7 @@ mod tests {
             {
                 Ok(out) => assert!(
                     out.status.success(),
-                    "{}: spirv-val rejected it: {}",
-                    s.kind,
+                    "{name}: spirv-val rejected it: {}",
                     String::from_utf8_lossy(&out.stderr)
                 ),
                 Err(_) => crate::skipped("spirv-val not installed; magic checked only"),
@@ -199,11 +228,10 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "build.sh failed");
-        for s in MATVEC {
-            let name = format!("{}_matvec.spv", s.kind.to_lowercase());
+        for (name, spv) in modules() {
             let fresh = std::fs::read(out.join(&name)).unwrap();
             assert_eq!(
-                fresh, s.spv,
+                fresh, spv,
                 "{name} is not what its source compiles to: run shaders/build.sh"
             );
         }
@@ -298,8 +326,8 @@ mod tests {
             .count();
         assert_eq!(
             compiled,
-            MATVEC.len(),
-            "a .spv in shaders/spv has no MATVEC row"
+            modules().len(),
+            "a .spv in shaders/spv has no MATVEC or ELEMENTWISE row"
         );
     }
 }
