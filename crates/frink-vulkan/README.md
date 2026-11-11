@@ -80,6 +80,8 @@ set `FRINK_VULKAN_LOADER` to its full path.
 | `src/shaders.rs` | the one table (`MATVEC`); validated and drift-checked with no GPU |
 | `src/device.rs` | `ash` loader, instance, device and compute queue, incl. MoltenVK portability |
 | `src/runtime.rs` | `Runtime`: cached pipelines, resident weights, `matvec`, `matvec_many` |
+| `src/runtime/ffn.rs` | the fused dense SwiGLU FFN, one submission |
+| `src/runtime/ops.rs` | layer ops (RMSNorm, add, RoPE, f16 KV append, attention) recorded into a `Batch`, one submission |
 | `src/dispatch.rs` | one typed entry point per kind, tested against its `frink_quant` scalar twin |
 
 `shaders.rs` compiles and is tested unconditionally, with no Vulkan

@@ -136,8 +136,28 @@ pub const SWIGLU: ElementwiseShader = ElementwiseShader {
     spv: include_bytes!("../shaders/spv/swiglu.spv"),
 };
 
-/// Every elementwise shader, for the tests that cover every module.
-pub const ELEMENTWISE: &[ElementwiseShader] = &[SWIGLU];
+macro_rules! elementwise {
+    ($($konst:ident => $name:literal),* $(,)?) => {
+        $(
+            #[doc = concat!("`shaders/", $name, ".comp`.")]
+            pub const $konst: ElementwiseShader = ElementwiseShader {
+                name: $name,
+                spv: include_bytes!(concat!("../shaders/spv/", $name, ".spv")),
+            };
+        )*
+        /// Every elementwise shader, for the tests that cover every module.
+        pub const ELEMENTWISE: &[ElementwiseShader] = &[SWIGLU, $($konst),*];
+    };
+}
+
+elementwise! {
+    RMS_NORM => "rms_norm",
+    ADD => "add",
+    ROPE => "rope",
+    KV_STORE => "kv_store",
+    ATTN_SCORES => "attn_scores",
+    ATTN_VALUES => "attn_values",
+}
 
 /// Every committed module: its file name under `shaders/spv/` and its
 /// bytes. The one list the module tests walk, so a shader cannot be

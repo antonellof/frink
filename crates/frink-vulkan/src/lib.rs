@@ -33,7 +33,8 @@
 //!   instance, device and compute queue.
 //! - [`runtime`] -- the matvec state kept across calls: pipelines,
 //!   resident weights, one command buffer; the fused FFN in
-//!   `runtime/ffn.rs`.
+//!   `runtime/ffn.rs`; the layer ops a device-resident decode chains
+//!   (RMSNorm, add, RoPE, f16 KV append, attention) in [`runtime::ops`].
 //! - [`dispatch`] -- one typed entry point per kind, each held against
 //!   its `frink_quant` scalar twin on a real device.
 
