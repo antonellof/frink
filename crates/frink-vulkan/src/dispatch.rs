@@ -109,7 +109,7 @@ mod tests {
         match Runtime::new() {
             Ok(rt) => Some(rt),
             Err(e) => {
-                eprintln!("SKIPPED, no Vulkan device: {e}");
+                crate::skipped(&format!("no Vulkan device: {e}"));
                 None
             }
         }

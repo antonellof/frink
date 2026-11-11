@@ -93,5 +93,5 @@ metal = ["frink-metal/metal"]
 # The backend this enables is decode matvecs only: Q8_0, Q4_0, Q4_K,
 # Q5_K and Q6_K (`Vulkan::matvec_kernel` says which), and no GEMM for
 # any kind. The guard tests in `gpu_backend` fail if a claimed kind has
-# no launch. See `docs/plans/vulkan-beachhead-verdict.md` and #409.
+# no launch. See `docs/plans/archive/vulkan-beachhead-verdict.md` and #409.
 vulkan = ["frink-vulkan/vulkan"]

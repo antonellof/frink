@@ -34,7 +34,7 @@
 //!    enum variant, cargo feature / registry name, and seam type, once.
 //!
 //! `Vulkan` is what that recipe looks like when it is followed: a
-//! one-kernel backend (Q8_0 matvec, no GEMM, no batch path) added
+//! decode-matvec backend (a few kinds, no GEMM, no batch path) added
 //! without touching `apply_gpu` or `active_backend`.
 //!
 //! # The one list, and its three consumers
@@ -298,7 +298,7 @@ pub struct Cuda;
 /// The Vulkan backend (`frink-vulkan`): decode matvecs only.
 ///
 /// Began as the `vulkan-beachhead` GO/NO-GO slice
-/// (`docs/plans/vulkan-beachhead-verdict.md`); now one GLSL matvec per
+/// (`docs/plans/archive/vulkan-beachhead-verdict.md`); now one GLSL matvec per
 /// kind in `frink_vulkan::shaders`, with resident weights and cached
 /// pipelines (`frink_vulkan::runtime`), each shader checked against its
 /// `frink_quant` scalar twin on a real device. Deliberately no more:
@@ -1222,7 +1222,7 @@ mod tests {
     fn the_vulkan_seam_kquant_matvecs_match_the_cpu_matvecs() {
         use crate::weight_matrix::{WeightBytes, WeightMatrix};
         if !Vulkan::dense_enabled() {
-            eprintln!("Vulkan not selected (FRINK_VULKAN=1) or no device; the K-quant seam was NOT checked");
+            frink_vulkan::skipped("Vulkan not selected (FRINK_VULKAN=1) or no device; the K-quant seam was NOT checked");
             return;
         }
         let (rows, cols) = (11usize, 512usize);
@@ -1287,8 +1287,8 @@ mod tests {
     fn the_vulkan_fused_matvecs_match_the_cpu_matvecs() {
         use crate::weight_matrix::{WeightBytes, WeightMatrix};
         if !Vulkan::dense_enabled() {
-            eprintln!(
-                "Vulkan not selected (FRINK_VULKAN=1) or no device; the fused seam was NOT checked"
+            frink_vulkan::skipped(
+                "Vulkan not selected (FRINK_VULKAN=1) or no device; the fused seam was NOT checked",
             );
             return;
         }
@@ -1346,7 +1346,7 @@ mod tests {
         use crate::weight_matrix::{WeightBytes, WeightMatrix};
 
         if !Vulkan::dense_enabled() {
-            eprintln!("Vulkan not selected (FRINK_VULKAN=1) or no device; the seam matvec was NOT checked");
+            frink_vulkan::skipped("Vulkan not selected (FRINK_VULKAN=1) or no device; the seam matvec was NOT checked");
             return;
         }
 
@@ -1402,7 +1402,7 @@ mod tests {
     #[test]
     fn a_mismatched_vulkan_shape_is_an_error_not_a_panic() {
         if !Vulkan::dense_enabled() {
-            eprintln!("no Vulkan device reachable; the shape guard was NOT checked");
+            frink_vulkan::skipped("no Vulkan device reachable; the shape guard was NOT checked");
             return;
         }
         // 2 rows of 1 block each, but an activation sized for 2 blocks.
