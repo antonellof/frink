@@ -1,0 +1,34 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// IQ4_XS, 136 bytes per 256 values: f16 d, a 16-bit scales_h, 4 bytes
+// of scales_l, 128 nibble bytes (frink_quant::dot_iq4_xs_f32_scalar).
+// Eight units per block, one per 32-value sub-block ib: its 6-bit scale
+// is nibble ib of scales_l with bits 2ib..2ib+1 of scales_h on top,
+// less 32; its nibbles index kvalues_iq4nl as in IQ4_NL.
+#include "matvec_common.glsl"
+#include "iq4_values.glsl"
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint u = gl_LocalInvocationID.x; u < p.n_blocks_per_row * 8u; u += WG) {
+        uint b = u >> 3, ib = u & 7u;
+        uint blk = base + b * 136u;
+        uint scales_h = byte_at(blk + 2u) | (byte_at(blk + 3u) << 8);
+        uint ls = ((byte_at(blk + 4u + (ib >> 1)) >> (4u * (ib & 1u))) & 0x0fu)
+            | (((scales_h >> (2u * ib)) & 3u) << 4);
+        float dl = f16_at(blk) * float(int(ls) - 32);
+        uint qs = blk + 8u + ib * 16u;
+        uint xb = b * 256u + ib * 32u;
+        float s = 0.0;
+        for (uint i = 0u; i < 16u; ++i) {
+            uint q = byte_at(qs + i);
+            s += KVALUES_IQ4NL[q & 0x0fu] * x[xb + i];
+            s += KVALUES_IQ4NL[q >> 4] * x[xb + 16u + i];
+        }
+        acc += dl * s;
+    }
+    finish(row, acc);
+}
