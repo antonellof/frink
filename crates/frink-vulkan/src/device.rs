@@ -15,6 +15,7 @@
 //! path, so [`load_entry`] tries a short list of known locations and
 //! honours `FRINK_VULKAN_LOADER` for anything else.
 
+use crate::select::DeviceKind;
 use ash::vk;
 use std::ffi::CStr;
 
@@ -31,8 +32,17 @@ pub enum VulkanError {
     InstanceCreation(vk::Result),
     #[error("the Vulkan loader reported no physical devices")]
     NoPhysicalDevice,
-    #[error("no physical device exposes a queue family with COMPUTE")]
-    NoComputeQueue,
+    /// Devices exist, but llama.cpp's rule leaves none of them visible:
+    /// only CPU or virtual implementations (lavapipe, SwiftShader) and
+    /// `GGML_VK_VISIBLE_DEVICES` unset.
+    #[error(
+        "no Vulkan GPU: the loader reports only {found}; set GGML_VK_VISIBLE_DEVICES to an index to use one"
+    )]
+    NoVisibleDevice { found: String },
+    #[error(transparent)]
+    Select(#[from] crate::select::SelectError),
+    #[error("Vulkan device {0} exposes no queue family with COMPUTE")]
+    NoComputeQueue(String),
     #[error("vkCreateDevice failed: {0:?}")]
     DeviceCreation(vk::Result),
     #[error("no memory type is both HOST_VISIBLE and HOST_COHERENT")]
@@ -125,41 +135,20 @@ pub struct Context {
 }
 
 impl Context {
-    /// Create an instance, pick the first device with a compute queue,
-    /// and open it.
+    /// Create an instance and open `Vulkan0`: the first device of
+    /// llama.cpp's visible list ([`crate::select::visible`]).
     pub fn new() -> Result<Self, VulkanError> {
         let entry = load_entry()?;
         let instance = create_instance(&entry)?;
-
-        // SAFETY: `instance` was just created by this function and is
-        // live for the whole block; ash's wrapper only reads from it.
-        let devices = unsafe { instance.enumerate_physical_devices() }
-            .map_err(VulkanError::vk("vkEnumeratePhysicalDevices"))?;
-        if devices.is_empty() {
-            // SAFETY: `instance` is live and not otherwise in use.
-            unsafe { instance.destroy_instance(None) };
-            return Err(VulkanError::NoPhysicalDevice);
-        }
-
-        let chosen = devices.iter().find_map(|&pd| {
-            // SAFETY: `pd` came from this instance's enumeration and is
-            // valid for the instance's lifetime.
-            let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
-            families
-                .iter()
-                .position(|f| f.queue_flags.contains(vk::QueueFlags::COMPUTE))
-                .map(|i| (pd, i as u32))
-        });
-        let Some((physical, queue_family)) = chosen else {
-            // SAFETY: `instance` is live and not otherwise in use.
-            unsafe { instance.destroy_instance(None) };
-            return Err(VulkanError::NoComputeQueue);
+        let picked = pick_vulkan0(&instance);
+        let (physical, queue_family, device_name, api_version) = match picked {
+            Ok(p) => p,
+            Err(e) => {
+                // SAFETY: `instance` is live and not otherwise in use.
+                unsafe { instance.destroy_instance(None) };
+                return Err(e);
+            }
         };
-
-        // SAFETY: `physical` is a device of this live instance.
-        let props = unsafe { instance.get_physical_device_properties(physical) };
-        let device_name = cstr_name(&props.device_name);
-        let api_version = props.api_version;
 
         let device = match create_device(&instance, physical, queue_family) {
             Ok(d) => d,
@@ -198,6 +187,110 @@ impl Drop for Context {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+/// One enumerated device, as `--list-devices` shows it.
+#[derive(Debug, Clone)]
+struct Enumerated {
+    physical: vk::PhysicalDevice,
+    name: String,
+    kind: DeviceKind,
+    api_version: u32,
+}
+
+fn device_kind(t: vk::PhysicalDeviceType) -> DeviceKind {
+    match t {
+        vk::PhysicalDeviceType::DISCRETE_GPU => DeviceKind::Discrete,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => DeviceKind::Integrated,
+        vk::PhysicalDeviceType::VIRTUAL_GPU => DeviceKind::Virtual,
+        vk::PhysicalDeviceType::CPU => DeviceKind::Cpu,
+        _ => DeviceKind::Other,
+    }
+}
+
+fn enumerate(instance: &ash::Instance) -> Result<Vec<Enumerated>, VulkanError> {
+    // SAFETY: `instance` is live for the call; ash only reads from it.
+    let devices = unsafe { instance.enumerate_physical_devices() }
+        .map_err(VulkanError::vk("vkEnumeratePhysicalDevices"))?;
+    Ok(devices
+        .into_iter()
+        .map(|physical| {
+            // SAFETY: `physical` came from this instance's enumeration.
+            let props = unsafe { instance.get_physical_device_properties(physical) };
+            Enumerated {
+                physical,
+                name: cstr_name(&props.device_name),
+                kind: device_kind(props.device_type),
+                api_version: props.api_version,
+            }
+        })
+        .collect())
+}
+
+/// The devices llama.cpp's rule makes visible, in `VulkanN` order.
+fn visible_devices(instance: &ash::Instance) -> Result<Vec<Enumerated>, VulkanError> {
+    let all = enumerate(instance)?;
+    if all.is_empty() {
+        return Err(VulkanError::NoPhysicalDevice);
+    }
+    let kinds: Vec<DeviceKind> = all.iter().map(|d| d.kind).collect();
+    let env = std::env::var(crate::select::VISIBLE_ENV).ok();
+    let picked = crate::select::visible(&kinds, env.as_deref())?;
+    if picked.is_empty() {
+        let found = all
+            .iter()
+            .map(|d| format!("{} ({})", d.name, d.kind.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(VulkanError::NoVisibleDevice { found });
+    }
+    Ok(picked.into_iter().map(|i| all[i].clone()).collect())
+}
+
+fn pick_vulkan0(
+    instance: &ash::Instance,
+) -> Result<(vk::PhysicalDevice, u32, String, u32), VulkanError> {
+    let first = visible_devices(instance)?.swap_remove(0);
+    // SAFETY: `first.physical` came from this instance's enumeration.
+    let families = unsafe { instance.get_physical_device_queue_family_properties(first.physical) };
+    let family = families
+        .iter()
+        .position(|f| f.queue_flags.contains(vk::QueueFlags::COMPUTE))
+        .ok_or_else(|| VulkanError::NoComputeQueue(first.name.clone()))?;
+    Ok((first.physical, family as u32, first.name, first.api_version))
+}
+
+/// One row of `--list-devices`: `Vulkan<index>` and what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub index: usize,
+    pub name: String,
+    pub kind: DeviceKind,
+    pub api_version: (u32, u32, u32),
+}
+
+/// Every visible device, in llama.cpp's `VulkanN` order, without
+/// opening any of them. frink runs on index 0.
+pub fn list() -> Result<Vec<Listed>, VulkanError> {
+    let entry = load_entry()?;
+    let instance = create_instance(&entry)?;
+    let out = visible_devices(&instance);
+    // SAFETY: `instance` is live, no device was created from it.
+    unsafe { instance.destroy_instance(None) };
+    Ok(out?
+        .into_iter()
+        .enumerate()
+        .map(|(index, d)| Listed {
+            index,
+            name: d.name,
+            kind: d.kind,
+            api_version: (
+                vk::api_version_major(d.api_version),
+                vk::api_version_minor(d.api_version),
+                vk::api_version_patch(d.api_version),
+            ),
+        })
+        .collect())
 }
 
 fn create_instance(entry: &ash::Entry) -> Result<ash::Instance, VulkanError> {

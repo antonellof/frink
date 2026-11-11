@@ -37,6 +37,7 @@
 //! - [`dispatch`] -- one typed entry point per kind, each held against
 //!   its `frink_quant` scalar twin on a real device.
 
+pub mod select;
 pub mod shaders;
 
 /// The environment variable that turns a test's "no device, skipped"

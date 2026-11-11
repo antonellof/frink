@@ -4,7 +4,9 @@ Decode matvecs on any Vulkan device (#409): Q8_0, Q4_0, Q4_K, Q5_K and
 Q6_K, written in GLSL and committed as SPIR-V. Weights are uploaded once
 and stay resident. There is no GEMM (prefill runs on the host) and no
 attention yet. `frink-core` reaches it behind its `vulkan` feature, and
-only when `FRINK_VULKAN=1` is set.
+only with `--device vulkan` (or `FRINK_VULKAN=1`). The device is
+llama.cpp's `Vulkan0`: the first discrete or integrated GPU, or the
+first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).
 
 It began as a GO/NO-GO beachhead; the verdict, its costs and what it did
 not establish are in
