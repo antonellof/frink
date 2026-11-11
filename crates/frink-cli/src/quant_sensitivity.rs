@@ -179,11 +179,7 @@ pub fn run(args: QuantSensitivityArgs) -> anyhow::Result<()> {
     // point at which the choice can still be made.
     // SAFETY: single-threaded, before the model is loaded or any worker
     // thread exists.
-    unsafe {
-        std::env::set_var("FRINK_METAL", "0");
-        std::env::set_var("FRINK_METAL_ATTN", "0");
-        std::env::set_var("FRINK_CUDA", "0");
-    }
+    unsafe { frink_models::offload::select(frink_models::offload::OffloadDevice::Cpu)? };
 
     let prompt = args.prompt.clone().unwrap_or_else(|| PROMPT.to_string());
     let path = crate::pull::resolve_model_path(&args.model)?;

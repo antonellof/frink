@@ -79,6 +79,9 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       FRINK_REQUIRE_VULKAN: "1"
+      # lavapipe is a CPU device, which llama.cpp's rule (and frink's)
+      # leaves out unless it is named.
+      GGML_VK_VISIBLE_DEVICES: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -90,6 +93,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers spirv-tools
       - run: cargo run -p frink-vulkan --features vulkan --example probe
+      - run: cargo run -p frink-cli --features vulkan -- --list-devices
       - run: cargo clippy -p frink-vulkan -p frink-core -p frink-cli -p frink-server --features vulkan --all-targets -- -D warnings
       - run: cargo test -p frink-vulkan --features vulkan -- --nocapture
       # Filtered: FRINK_VULKAN=1 over the whole frink-core suite is slow.
