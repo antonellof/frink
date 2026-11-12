@@ -305,8 +305,8 @@ opposite block sizes. `/admin/stats` rows carry `acceptance_length` and
 `draft_accept_rate_per_position` for the same reason.
 
 The speculation fields are absent for a request that did not draft: a
-request the continuous-batching worker serves (the default on Metal,
-which has no speculation yet), a grammar-constrained or `json_object` request (verification draws
+recurrent target in the continuous batch (its batched state has no
+checkpoint yet), a grammar-constrained or `json_object` request (verification draws
 through the same grammar machine, and a rejected block would leave it
 advanced over tokens that were never emitted), a paged lease under a
 sliding window (a recycled page cannot be rolled back into) or a
@@ -1123,8 +1123,9 @@ there are sequences decoding or prefilling, are busy:
 
 Each seat carries the four fields llama.cpp always sends. `n_ctx` is
 the per-request context ceiling and is absent when the model could not
-be priced. `speculative` is `false` because a batched request never
-drafts. Left out, because a seat does not hold them: `id_task`,
+be priced. `speculative` is `true`: a batched row drafts, by prompt
+lookup or with `--model-draft`, unless its request has a grammar or no
+room left. Left out, because a seat does not hold them: `id_task`,
 `n_prompt_tokens`, `n_prompt_tokens_processed`,
 `n_prompt_tokens_cache`, `params` and `next_token`, which llama.cpp
 keeps per slot from the task it last served, and `prompt` and
@@ -1679,9 +1680,9 @@ nothing is called) · the embedding architectures listed above as
 refused by name · multi-GPU, tensor parallel, prefill/decode
 disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained or continuously batched
-requests, and paged ones under a sliding window, so their speculation
-fields in `usage` are absent ·
+speculative decoding for grammar-constrained requests, recurrent
+targets in the continuous batch, and paged ones under a sliding window,
+so their speculation fields in `usage` are absent ·
 `/infill` on the dedicated engines, and the FIM pad, repo and file
 separator as end-of-generation tokens (see [Infill](#infill-post-infill))
 · `GET /slots` per-task fields, which a batcher seat does not hold.

@@ -3735,6 +3735,7 @@ pub(crate) fn activate_loaded_model(
                     config,
                     Arc::clone(&ceiling),
                     paged_kv.cloned(),
+                    draft.cloned(),
                 ))
             } else {
                 None

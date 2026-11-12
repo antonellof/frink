@@ -269,6 +269,8 @@ impl Prefill {
             error: None,
             abort,
             blocks,
+            drafter: None,
+            pending: None,
         }
     }
 }

@@ -51,7 +51,7 @@ pub(crate) struct SlotsQuery {
 }
 
 /// The seats of a batcher capped at `max_seqs`, `running` of them busy.
-fn seats(max_seqs: usize, running: usize, n_ctx: Option<usize>) -> Vec<Value> {
+fn seats(max_seqs: usize, running: usize, n_ctx: Option<usize>, speculative: bool) -> Vec<Value> {
     (0..max_seqs)
         .map(|id| {
             let mut slot = Map::new();
@@ -59,9 +59,9 @@ fn seats(max_seqs: usize, running: usize, n_ctx: Option<usize>) -> Vec<Value> {
             if let Some(n_ctx) = n_ctx {
                 slot.insert("n_ctx".into(), json!(n_ctx));
             }
-            // A batched request never drafts: speculative decoding is the
-            // private decode loop's alone.
-            slot.insert("speculative".into(), json!(false));
+            // What the seat can do, as upstream's `can_speculate`: a row
+            // drafts unless its request has a grammar or no room left.
+            slot.insert("speculative".into(), json!(speculative));
             slot.insert("is_processing".into(), json!(id < running));
             Value::Object(slot)
         })
@@ -111,7 +111,12 @@ fn listing(enabled: bool, state: &AppState, query: SlotsQuery) -> Result<Json<Va
         ));
     }
     let n_ctx = active.ceiling.as_ref().and_then(|c| c.limit());
-    Ok(Json(Value::Array(seats(stats.max_seqs, running, n_ctx))))
+    Ok(Json(Value::Array(seats(
+        stats.max_seqs,
+        running,
+        n_ctx,
+        batcher.speculates(),
+    ))))
 }
 
 #[cfg(test)]
@@ -122,12 +127,12 @@ mod tests {
     /// busy seats first.
     #[test]
     fn a_seat_carries_upstreams_four_fields_and_the_busy_ones_come_first() {
-        let listed = seats(3, 2, Some(4096));
+        let listed = seats(3, 2, Some(4096), true);
         assert_eq!(listed.len(), 3);
         for (id, slot) in listed.iter().enumerate() {
             assert_eq!(slot["id"], id);
             assert_eq!(slot["n_ctx"], 4096);
-            assert_eq!(slot["speculative"], false);
+            assert_eq!(slot["speculative"], true);
             assert_eq!(slot["is_processing"], id < 2);
             assert_eq!(slot.as_object().unwrap().len(), 4, "{slot}");
         }
@@ -136,7 +141,7 @@ mod tests {
     /// No ceiling, no `n_ctx`: absent rather than a zero.
     #[test]
     fn a_seat_without_a_context_size_omits_n_ctx() {
-        let listed = seats(1, 0, None);
+        let listed = seats(1, 0, None, false);
         assert!(listed[0].get("n_ctx").is_none());
         assert_eq!(listed[0]["is_processing"], false);
     }

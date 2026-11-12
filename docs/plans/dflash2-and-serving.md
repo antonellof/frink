@@ -117,19 +117,16 @@ Each step is its own PR, CPU first, token parity before any backend work.
    ignored GPU test `metal_speculation_rewinds_the_device_kv`. CUDA: its
    mirror re-validates against complete host rows, so nothing to do;
    the same test on a CUDA host is still to run.
-9. **Batcher.** Paged block-tail truncation is done
-   (`PagedKvCache::truncate`, `PagedLease::can_roll_back`): the private
-   loop speculates on the paged store unless a sliding window recycles
-   its pages. The batched verify forward is done too:
-   `Decoder::forward_multi_seq_lanes` gives a sequence several rows, at
-   consecutive positions, with layer taps, through the one
-   multi-sequence body. What is left: drafting inside
-   `serving/batch/worker.rs`: one drafter pass per
-   lane, one batched verify through `forward_multi_seq_kv`, per-lane accept and
-   truncate. Paged KV needs block-tail truncation in
-   `frink-core/src/cache/paged.rs` and the radix tree must not publish
-   unverified rows; drafter KV is salted in the prefix signature. Until this
-   lands, speculation with continuous batching refuses by name.
+9. **Batcher.** Done for prompt lookup and autoregressive drafts:
+   `serving/batch/speculate.rs` drafts per row after it samples, one
+   `Decoder::forward_multi_seq_lanes` verifies every row's block, and
+   each row settles by agreement, its last draw held as `Slot::pending`
+   and fed next tick so no token is drawn twice. Paged rows roll back by
+   `PagedKvCache::truncate`; a finished or preempted row publishes only
+   the rows it wrote. Recurrent targets do not draft in the batch yet
+   (no batched checkpoint). Left: a DFlash draft in the batch (tapped
+   batched prefill, per-row `observe_target`), refused by name until
+   then.
 
 Evidence for Phase 1: a synthetic draft fixture plus a libllama golden of the
 drafter's lattice for a fixed target-hidden input (extend the dumper in

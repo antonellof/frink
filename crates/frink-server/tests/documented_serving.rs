@@ -109,12 +109,12 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/frink-server/src/serving/batch/preempt.rs",
-        111,
+        113,
         "fn make_room",
     ),
     (
         "crates/frink-server/src/serving/batch/row.rs",
-        285,
+        300,
         "fn into_parts",
     ),
 ];
