@@ -67,6 +67,12 @@ pub(super) struct Answer {
     /// [`super::preempt::MAX_PREEMPTIONS`], which is what makes the
     /// policy terminate.
     pub(super) preemptions: u32,
+    /// Forwards this row took part in, and the tokens its drafter
+    /// proposed and had accepted: `usage`'s speculation fields, which
+    /// the private loop reports from the same three counts.
+    pub(super) forwards: usize,
+    pub(super) drafted: usize,
+    pub(super) accepted: usize,
 }
 
 impl Answer {
@@ -87,6 +93,9 @@ impl Answer {
             prompt_tokens,
             cached_tokens,
             preemptions: 0,
+            forwards: 0,
+            drafted: 0,
+            accepted: 0,
         }
     }
 
@@ -123,11 +132,16 @@ impl Answer {
             self.visible.push_str(&tail);
             let _ = reply.send(BatcherEvent::Chunk(tail));
         }
-        let usage = self.clock.usage(
+        let mut usage = self.clock.usage(
             self.prompt_tokens,
             self.generated_ids.len(),
             self.cached_tokens,
         );
+        // Absent for a row that never drafted, as on the private loop: a
+        // zero would read as "the drafter was useless".
+        if self.drafted > 0 {
+            usage = usage.with_speculation(self.forwards, self.accepted, self.drafted, Vec::new());
+        }
         send_finished(reply, Ok((finish, self.generated_ids, self.visible, usage)));
     }
 }

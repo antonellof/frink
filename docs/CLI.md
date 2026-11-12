@@ -1483,14 +1483,15 @@ Notes that are frink's own:
 - `-md` loads a draft model once, and every request on the private
   decode loop drafts with it, in place of prompt lookup. Its KV is the
   request's own, and the output is the output without it
-  ([`API.md`](API.md#usage-timings)). It is refused at startup, naming why, with
-  continuous batching (on by default on Metal: add `--no-cont-batching`),
+  ([`API.md`](API.md#usage-timings)). Rows of the continuous batch draft
+  with it too. It is refused at startup, naming why, with
   a dedicated-engine model, a draft with recurrent
   layers, a drafter of another vocabulary size, and a drafter whose KV
   lands on the device (`--device cpu`). A TARGET with recurrent layers
   is served: its state is checkpointed around each verify batch. A
-  DFlash draft is also refused beside the prefix cache and the paged KV
-  store. A model
+  DFlash draft is also refused with continuous batching (on by default
+  on Metal: add `--no-cont-batching`), beside the prefix cache and the
+  paged KV store. A model
   swapped in through `/admin/models/load` is held to the same drafter.
   `--draft-max` (default 3) and `--draft-p-min` (default 0) are
   `frink run`'s, which are llama.cpp's.

@@ -179,8 +179,12 @@ impl Rows {
             .iter()
             .copied()
             .filter(|uid| {
+                // A row with a pending token is ready whatever its count:
+                // that token is committed and still has to be fed, and
+                // the budget is checked after its forward.
                 self.state.get(uid).is_some_and(|s| {
-                    s.finish.is_none() && s.answer.generated_ids.len() < s.max_tokens
+                    s.finish.is_none()
+                        && (s.pending.is_some() || s.answer.generated_ids.len() < s.max_tokens)
                 })
             })
             .collect()
@@ -210,7 +214,12 @@ impl Rows {
                 // after it. The private generate loop published all
                 // along; only the batcher did not, because the prompt
                 // ids were dropped at the prefill-to-decode handover.
-                publish_row(&mut slot.kv, &slot.prompt_ids, &slot.answer.generated_ids);
+                publish_row(
+                    &mut slot.kv,
+                    &slot.prompt_ids,
+                    &slot.answer.generated_ids,
+                    slot.pos,
+                );
                 reply_finished(slot);
             }
         }
@@ -246,6 +255,12 @@ pub(super) struct Slot {
     pub(super) abort: AbortId,
     /// KV blocks this row reserved at admission, returned when it ends.
     pub(super) blocks: usize,
+    /// What drafts this row's speculative blocks; `None` when it does
+    /// not draft (`super::speculate::RowDrafter::for_row`).
+    pub(super) drafter: Option<super::speculate::RowDrafter>,
+    /// A token a speculative block drew and committed, not yet fed: the
+    /// next tick feeds it instead of drawing one.
+    pub(super) pending: Option<usize>,
 }
 
 /// A row taken apart at the seam preemption cuts along.
@@ -301,6 +316,11 @@ impl Slot {
             error,
             abort,
             blocks,
+            // Rebuilt at re-admission: a draft model's KV belongs to the
+            // KV this split throws away.
+            drafter: _,
+            // Fed by the re-prefill, which runs every generated token.
+            pending: _,
         } = self;
         SlotParts {
             kv,
@@ -327,11 +347,22 @@ impl Slot {
 ///
 /// One function for both callers. It must run before the lease drops:
 /// the lease is what holds the pages until the tree has retained them.
-pub(super) fn publish_row(kv: &mut RowKv, prompt_ids: &[usize], generated_ids: &[usize]) {
+///
+/// `written` is how many positions the KV holds, and only those are
+/// published: a row can end on a token it never fed (a stop string
+/// matched on it, or a speculative block's last draw), and a page
+/// naming that token would hand the tree a row that was never written.
+pub(super) fn publish_row(
+    kv: &mut RowKv,
+    prompt_ids: &[usize],
+    generated_ids: &[usize],
+    written: usize,
+) {
     if let RowKv::Paged(lease) = kv {
         let mut seq = Vec::with_capacity(prompt_ids.len() + generated_ids.len());
         seq.extend_from_slice(prompt_ids);
         seq.extend_from_slice(generated_ids);
+        seq.truncate(written);
         let bs = lease.block_size();
         crate::generate::publish_to_radix(lease, &seq, bs);
     }

@@ -59,7 +59,7 @@ followed by every token it had generated, then carries on.
   request's whole life before it runs. What can happen is a job
   waiting behind rows that hold large reservations, so the trigger is
   the job admission would take next having waited that many admission
-  passes. `make_room` (`preempt.rs:111`) then evicts the most recently
+  passes. `make_room` (`preempt.rs:113`) then evicts the most recently
   admitted decoding rows, as few as make that job fit under BOTH caps,
   or none if every eligible row together would not.
 - **What survives is one type.** Everything a row has produced that a
@@ -67,7 +67,7 @@ followed by every token it had generated, then carries on.
   sampler's RNG position, the grammar parse, the reasoning budget, the
   stop matcher's withheld tail, the UTF-8 tail, the text already
   streamed, and the clock. The row is split by `Slot::into_parts`
-  (`row.rs:285`), whose destructure has no `..`, so a field added to
+  (`row.rs:300`), whose destructure has no `..`, so a field added to
   `Slot` does not compile until it is classified as carried or
   recomputed. New and resumed jobs go through the same `admit` and
   `accept`; a resumed one differs only in what its prefill runs.

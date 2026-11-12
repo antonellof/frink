@@ -510,7 +510,7 @@ impl PagedLease {
     /// and the rows a rollback frees may be another position's), and
     /// not for a recurrent target, whose paged state has no checkpoint
     /// yet.
-    fn can_roll_back(&self, decoder: &Decoder) -> bool {
+    pub(crate) fn can_roll_back(&self, decoder: &Decoder) -> bool {
         !self.slides() && !decoder.config.has_recurrent_layers()
     }
 

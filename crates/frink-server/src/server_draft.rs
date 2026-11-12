@@ -15,10 +15,11 @@
 //! it commits, starting with the prompt's; a prefix-cache hit has none
 //! to give, and the two are refused together.
 //!
-//! Speculation runs on the private decode loop. Where the server could
+//! Speculation runs on the private decode loop and in the continuous
+//! batch, where every row's block is verified in one forward
+//! (`crate::serving::batch` and its `speculate`). Where the server could
 //! not honour the flag, it refuses at startup rather than accepting it
-//! and serving without it: continuous batching does not speculate yet.
-//! The paged store rolls a rejected draft back by rewinding its tables,
+//! and serving without it. The paged store rolls a rejected draft back by rewinding its tables,
 //! except under a sliding window, where that request decodes without
 //! drafting. A recurrent target is served: its caches are checkpointed
 //! before each verify batch and restored and replayed on a rejection.
@@ -206,12 +207,6 @@ pub(crate) fn configure(
     let Some(path) = path else {
         return Ok(None);
     };
-    if deployment.continuous_batching {
-        bail!(
-            "--model-draft speculates on the private decode loop, and continuous batching does \
-             not speculate yet. On Metal it is on by default: add --no-cont-batching"
-        );
-    }
     let Some(target) = target else {
         bail!(
             "--model-draft drafts for the generic GGUF decoder, and the loaded model runs on \
@@ -246,8 +241,15 @@ pub(crate) fn configure(
     let kind = if is_dflash {
         // A restored prefix brings K/V and no layer inputs, so the draft
         // would have nothing to read for the cached positions.
-        // The target's layer inputs are tapped on the contiguous
-        // store's forwards only.
+        // The target's layer inputs are tapped on the private loop's
+        // forwards only.
+        if deployment.continuous_batching {
+            bail!(
+                "a DFlash --model-draft reads the target's layer inputs, which the continuous \
+                 batcher does not tap yet. On Metal it is on by default: add --no-cont-batching, \
+                 or use an autoregressive draft"
+            );
+        }
         if deployment.paged_kv {
             bail!(
                 "a DFlash --model-draft reads the target's layer inputs, which the paged KV \
@@ -339,7 +341,8 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        assert!(refusal(None, None, Some(&t), true, false).contains("continuous batching"));
+        // Continuous batching speculates: what fails is the missing file.
+        assert!(refusal(None, None, Some(&t), true, false).contains("/no/such/draft.gguf"));
         // The paged store speculates: what fails is the missing file.
         assert!(refusal(None, None, Some(&t), false, true).contains("/no/such/draft.gguf"));
         assert!(refusal(None, None, None, false, false).contains("dedicated engine"));
@@ -392,6 +395,22 @@ mod tests {
         assert!(refused.contains("FRINK_PREFIX_CACHE_ENTRIES"), "{refused}");
         let refused = format!("{:#}", configured(false, true).err().expect("refused"));
         assert!(refused.contains("FRINK_PAGED_KV_BLOCKS"), "{refused}");
+        let refused = format!(
+            "{:#}",
+            configure(
+                Some(fixture("dflash2_draft")),
+                None,
+                None,
+                Some(&t),
+                Deployment {
+                    continuous_batching: true,
+                    ..Deployment::default()
+                },
+            )
+            .err()
+            .expect("refused")
+        );
+        assert!(refused.contains("--no-cont-batching"), "{refused}");
 
         // A target of another width is refused, at startup and on a swap.
         let other = target();
