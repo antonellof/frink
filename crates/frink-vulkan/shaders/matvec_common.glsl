@@ -34,18 +34,44 @@ layout(push_constant) uniform Push {
     uint n_blocks_per_row;
     uint row_bytes;
     uint x_stride;
+    uint n_cols;
 } p;
 
+shared float partial[WG];
+
+#ifdef GATHER
+// THE EMBEDDING GATHER IS THE SAME SHADER WITH A ONE-HOT ACTIVATION
+// (build.sh compiles every matvec a second time with -DGATHER). One
+// workgroup per output column c: row `x_stride` of the table against
+// e_c is that row's value at c, exactly, because every other term is a
+// product with 0.0. So each kind's decode is written once, and a gather
+// cannot disagree with its matvec. `rows` is the table's row count and
+// `n_cols` the row's width.
+uint gather_col;
+#define X(i) (((i) == gather_col) ? 1.0 : 0.0)
+
+uint matvec_row() {
+    gather_col = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    return p.x_stride;
+}
+
+void matvec_write(uint row, float v) {
+    if (gather_col < p.n_cols) y[gather_col] = v;
+}
+#else
 // Activation `i` of this workgroup's batch position.
 uint x_base;
 #define X(i) x[x_base + (i)]
-
-shared float partial[WG];
 
 uint matvec_row() {
     x_base = gl_WorkGroupID.z * p.x_stride;
     return gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
 }
+
+void matvec_write(uint row, float v) {
+    y[gl_WorkGroupID.z * p.rows + row] = v;
+}
+#endif
 
 // Reduce every invocation's `acc` and write the row. Called by all 64
 // invocations, in uniform control flow (a whole workgroup shares its
@@ -58,7 +84,7 @@ void finish(uint row, float acc) {
         if (tid < s) partial[tid] += partial[tid + s];
         barrier();
     }
-    if (tid == 0u) y[gl_WorkGroupID.z * p.rows + row] = partial[0];
+    if (tid == 0u) matvec_write(row, partial[0]);
 }
 
 uint byte_at(uint k) {

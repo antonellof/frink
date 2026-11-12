@@ -17,6 +17,17 @@ are the ones worth reading twice.
 
 ### Added
 
+- **A Vulkan embedding gather, from the matvec shaders** (#409,
+  #405). Every matvec shader is compiled a second time with a one-hot
+  activation (`-DGATHER`): a row of the table against `e_c` is that
+  row's value at column `c`, exactly, so each kind's decode is still
+  written once and a gather cannot disagree with its matvec. The decode
+  stack's first op gathers the token's row on the device when the
+  embedding row is the first hidden state (no embedding scale, norm or
+  position table). It costs a square matvec a token, left to tune on
+  hardware. The Vulkan row of `docs/KERNELS.md` is now 0 host fallbacks
+  in all three columns.
+
 - **A Vulkan prefill stack: the layers of a prompt batch in one
   submission** (#409, step 6). The decode stack takes a batch of
   positions: the same ops recorded over the batch

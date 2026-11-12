@@ -89,7 +89,7 @@ pub struct AttnShape {
 /// f32 length)` views, one per binding.
 type Views = [(DeviceBuf, usize, usize); 3];
 
-enum Op<'w> {
+pub(super) enum Op<'w> {
     Shader {
         shader: ElementwiseShader,
         views: Views,
@@ -105,6 +105,12 @@ enum Op<'w> {
         y: (DeviceBuf, usize, usize),
         /// Batch positions: a GEMM when above 1.
         depth: usize,
+    },
+    /// One row of a table, dequantized (`runtime::gather`).
+    Gather {
+        table: MatvecJob<'w>,
+        row: usize,
+        out: (DeviceBuf, usize, usize),
     },
 }
 
@@ -150,6 +156,14 @@ impl<'w> Batch<'w> {
             ops: Vec::new(),
             positions,
         }
+    }
+
+    pub(super) fn push_op(&mut self, op: Op<'w>) {
+        assert_eq!(
+            self.positions, 1,
+            "this op is for the batch of one position"
+        );
+        self.ops.push(op);
     }
 
     /// Dispatches this batch will record.
@@ -505,12 +519,21 @@ impl Runtime {
                         self.view(views[2])?,
                     ];
                     (
-                        self.pipeline(shader.name, shader.spv)?,
+                        self.pipeline(shader.spv)?,
                         ranges,
                         push_words(push),
                         *grid,
                         *depth,
                     )
+                }
+                Op::Gather { table, row, out } => {
+                    let (_, dispatch_of) = self.gather_shape(table, *row)?;
+                    let w = self.resident(table.weights)?;
+                    let o = self.view(*out)?;
+                    // Binding 1 is not read by a gather.
+                    let ranges = [(w, 0, vk::WHOLE_SIZE), o, o];
+                    let d = dispatch_of(self.pipeline(table.shader.gather)?, set);
+                    (d.pipeline, ranges, d.push, d.grid, d.depth)
                 }
                 Op::Matvec { job, x, y, depth } => {
                     let shape = self.check(job, x.2 / depth)?;

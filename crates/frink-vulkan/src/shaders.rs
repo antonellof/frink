@@ -26,6 +26,9 @@ pub struct MatvecShader {
     pub kind: &'static str,
     /// The compiled module, as committed.
     pub spv: &'static [u8],
+    /// The same source compiled with `-DGATHER`: one row of the table,
+    /// dequantized (`shaders/matvec_common.glsl`).
+    pub gather: &'static [u8],
     pub block_bytes: usize,
     pub block_elems: usize,
 }
@@ -38,132 +41,154 @@ pub const MATVEC: &[MatvecShader] = &[
     MatvecShader {
         kind: "Q8_0",
         spv: include_bytes!("../shaders/spv/q8_0_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q8_0_gather.spv"),
         block_bytes: 34,
         block_elems: 32,
     },
     MatvecShader {
         kind: "Q4_0",
         spv: include_bytes!("../shaders/spv/q4_0_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q4_0_gather.spv"),
         block_bytes: 18,
         block_elems: 32,
     },
     MatvecShader {
         kind: "Q4_K",
         spv: include_bytes!("../shaders/spv/q4_k_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q4_k_gather.spv"),
         block_bytes: 144,
         block_elems: 256,
     },
     MatvecShader {
         kind: "Q5_K",
         spv: include_bytes!("../shaders/spv/q5_k_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q5_k_gather.spv"),
         block_bytes: 176,
         block_elems: 256,
     },
     MatvecShader {
         kind: "Q6_K",
         spv: include_bytes!("../shaders/spv/q6_k_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q6_k_gather.spv"),
         block_bytes: 210,
         block_elems: 256,
     },
     MatvecShader {
         kind: "Q4_1",
         spv: include_bytes!("../shaders/spv/q4_1_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q4_1_gather.spv"),
         block_bytes: 20,
         block_elems: 32,
     },
     MatvecShader {
         kind: "Q5_0",
         spv: include_bytes!("../shaders/spv/q5_0_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q5_0_gather.spv"),
         block_bytes: 22,
         block_elems: 32,
     },
     MatvecShader {
         kind: "Q5_1",
         spv: include_bytes!("../shaders/spv/q5_1_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q5_1_gather.spv"),
         block_bytes: 24,
         block_elems: 32,
     },
     MatvecShader {
         kind: "Q2_K",
         spv: include_bytes!("../shaders/spv/q2_k_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q2_k_gather.spv"),
         block_bytes: 84,
         block_elems: 256,
     },
     MatvecShader {
         kind: "Q3_K",
         spv: include_bytes!("../shaders/spv/q3_k_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/q3_k_gather.spv"),
         block_bytes: 110,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ4_NL",
         spv: include_bytes!("../shaders/spv/iq4_nl_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq4_nl_gather.spv"),
         block_bytes: 18,
         block_elems: 32,
     },
     MatvecShader {
         kind: "IQ4_XS",
         spv: include_bytes!("../shaders/spv/iq4_xs_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq4_xs_gather.spv"),
         block_bytes: 136,
         block_elems: 256,
     },
     MatvecShader {
         kind: "MXFP4",
         spv: include_bytes!("../shaders/spv/mxfp4_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/mxfp4_gather.spv"),
         block_bytes: 17,
         block_elems: 32,
     },
     MatvecShader {
         kind: "TQ1_0",
         spv: include_bytes!("../shaders/spv/tq1_0_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/tq1_0_gather.spv"),
         block_bytes: 54,
         block_elems: 256,
     },
     MatvecShader {
         kind: "PTQ1_0",
         spv: include_bytes!("../shaders/spv/ptq1_0_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/ptq1_0_gather.spv"),
         block_bytes: 28,
         block_elems: 128,
     },
     MatvecShader {
         kind: "IQ2_XXS",
         spv: include_bytes!("../shaders/spv/iq2_xxs_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq2_xxs_gather.spv"),
         block_bytes: 66,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ2_XS",
         spv: include_bytes!("../shaders/spv/iq2_xs_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq2_xs_gather.spv"),
         block_bytes: 74,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ2_S",
         spv: include_bytes!("../shaders/spv/iq2_s_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq2_s_gather.spv"),
         block_bytes: 82,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ3_XXS",
         spv: include_bytes!("../shaders/spv/iq3_xxs_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq3_xxs_gather.spv"),
         block_bytes: 98,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ3_S",
         spv: include_bytes!("../shaders/spv/iq3_s_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq3_s_gather.spv"),
         block_bytes: 110,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ1_S",
         spv: include_bytes!("../shaders/spv/iq1_s_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq1_s_gather.spv"),
         block_bytes: 50,
         block_elems: 256,
     },
     MatvecShader {
         kind: "IQ1_M",
         spv: include_bytes!("../shaders/spv/iq1_m_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/iq1_m_gather.spv"),
         block_bytes: 56,
         block_elems: 256,
     },
@@ -173,6 +198,7 @@ pub const MATVEC: &[MatvecShader] = &[
     MatvecShader {
         kind: "F32",
         spv: include_bytes!("../shaders/spv/f32_matvec.spv"),
+        gather: include_bytes!("../shaders/spv/f32_gather.spv"),
         block_bytes: 4,
         block_elems: 1,
     },
@@ -262,9 +288,13 @@ elementwise! {
 /// bytes. The one list the module tests walk, so a shader cannot be
 /// added to a table and skipped by validation.
 pub fn modules() -> Vec<(String, &'static [u8])> {
-    let matvecs = MATVEC
-        .iter()
-        .map(|s| (format!("{}_matvec.spv", s.kind.to_lowercase()), s.spv));
+    let matvecs = MATVEC.iter().flat_map(|s| {
+        let stem = s.kind.to_lowercase();
+        [
+            (format!("{stem}_matvec.spv"), s.spv),
+            (format!("{stem}_gather.spv"), s.gather),
+        ]
+    });
     let elementwise = ELEMENTWISE
         .iter()
         .map(|s| (format!("{}.spv", s.name), s.spv));
