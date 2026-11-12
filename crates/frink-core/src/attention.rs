@@ -1050,6 +1050,7 @@ pub fn causal_gqa_attention_row<'a>(
         v_head_dim,
         start..seq_len,
         per_task,
+        Spread::Workers,
     );
     out
 }
@@ -2334,7 +2335,9 @@ pub fn causal_gqa_attention_paged_sinks(
         sinks,
         attn_softcap,
         alibi,
-        heads_per_task(group_size, n_kv_heads, crate::par::num_threads()),
+        // The whole group per run, one read of each row for all of it,
+        // on this thread: see `Spread::ThisThread`.
+        group_size,
     )
 }
 
@@ -2425,6 +2428,7 @@ fn paged_sinks_in_runs(
         v_head_dim,
         start..seq_len,
         per_task,
+        Spread::ThisThread,
     );
     out
 }
@@ -2524,11 +2528,12 @@ struct HeadTerms<'a> {
 /// an f16 store that widening was the largest single cost of a decode
 /// token at long context (Qwen3-8B, 32 heads over 8 KV heads, ~8k
 /// tokens: more host time than the dot products and the V sums
-/// together), and the paged kernel did all of it on one core.
+/// together).
 ///
 /// Each head still sees the same rows, in the same order, through the
 /// same [`OnlineSoftmax`] as [`online_attn_accumulate`], so the result
 /// is bit-identical whatever `per_task` is (tests pin 1, 2 and 4).
+#[allow(clippy::too_many_arguments)]
 fn attend_in_head_runs(
     rows: &impl KvRowSource,
     head: &HeadTerms<'_>,
@@ -2537,6 +2542,7 @@ fn attend_in_head_runs(
     v_head_dim: usize,
     keys: std::ops::Range<usize>,
     per_task: usize,
+    spread: Spread,
 ) {
     let group_size = group_size.max(1);
     assert!(
@@ -2544,7 +2550,7 @@ fn attend_in_head_runs(
         "a run of {per_task} heads must not straddle a KV head (group of {group_size})"
     );
     let hd = head.head_dim;
-    crate::par::chunks_mut(out, per_task * v_head_dim, 1, |task, out_run| {
+    let attend_run = |task: usize, out_run: &mut [f32]| {
         let h0 = task * per_task;
         let kv_h = h0 / group_size;
         let mut states: Vec<OnlineSoftmax> = out_run
@@ -2579,7 +2585,28 @@ fn attend_in_head_runs(
         {
             state.finish(out_h, head.sinks.map(|s| s[h0 + j]));
         }
-    });
+    };
+    match spread {
+        Spread::Workers => crate::par::chunks_mut(out, per_task * v_head_dim, 1, attend_run),
+        Spread::ThisThread => {
+            for (task, out_run) in out.chunks_mut(per_task * v_head_dim).enumerate() {
+                attend_run(task, out_run);
+            }
+        }
+    }
+}
+
+/// Where [`attend_in_head_runs`] runs its tasks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spread {
+    /// Across the worker pool.
+    Workers,
+    /// On the calling thread. The paged kernel's: it runs under the
+    /// store's read guard, inside a decode step that is itself a pool
+    /// job (`par::decode_step`). A worker waiting on a nested join
+    /// steals other jobs, and another request's decode step taking that
+    /// layer's write guard on top of this guard deadlocks the worker.
+    ThisThread,
 }
 
 /// How many query heads one task of [`attend_in_head_runs`] takes: a
@@ -4450,6 +4477,7 @@ mod tests {
                                     head_dim,
                                     start..seq_len,
                                     per_task,
+                                    super::Spread::Workers,
                                 );
                                 assert_bits_eq(
                                     &want,
@@ -4486,7 +4514,7 @@ mod tests {
     /// A task never spans two KV heads, and the run shrinks only until
     /// there are about two tasks per thread.
     #[test]
-    fn paged_head_runs_split_a_group_only_to_fill_the_threads() {
+    fn head_runs_split_a_group_only_to_fill_the_threads() {
         // Qwen3-8B on 6 cores: 8 groups of 4 is under 12 tasks, so halve.
         assert_eq!(super::heads_per_task(4, 8, 6), 2);
         // Enough KV heads already: keep the whole group.

@@ -46,9 +46,9 @@ are the ones worth reading twice.
   does the same). `-cb`, `-np N` or `FRINK_CONTINUOUS_BATCHING=1` turn
   it on for many clients; without them concurrent requests serialize.
 - **Host GQA decode attention reads each K/V row once per head group**,
-  not once per query head, and the paged kernel spreads its heads over
-  the cores. Bit-identical; the batched decode above goes from 2.52 to
-  3.65 tok/s.
+  not once per query head, and the contiguous kernel spreads its head
+  groups over the cores. Bit-identical; the batched decode above goes
+  from 2.52 to 3.65 tok/s.
 
 ### Fixed
 
