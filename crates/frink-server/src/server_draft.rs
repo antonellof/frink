@@ -18,8 +18,9 @@
 //! Speculation runs on the private decode loop. Where the server could
 //! not honour the flag, it refuses at startup rather than accepting it
 //! and serving without it: continuous batching does not speculate yet,
-//! and neither the paged store nor a recurrent model can roll a
-//! rejected draft back.
+//! and the paged store cannot roll a rejected draft back. A recurrent
+//! target is served: its caches are checkpointed before each verify
+//! batch and restored and replayed on a rejection.
 
 use std::sync::Arc;
 
@@ -101,16 +102,6 @@ impl ServerDraft {
         use frink_models::speculative::Drafter;
         let weights = match &self.kind {
             DraftKind::DFlash(draft) => {
-                // As `frink run -md` refuses it: the verify batch would
-                // be refused at every round and the request would decode
-                // without the speculation it was started for.
-                if target.config.has_recurrent_layers() {
-                    bail!(
-                        "a DFlash --model-draft cannot be used with a target model that has \
-                         recurrent layers yet: a rejected block rolls the target's caches back, \
-                         and a recurrent state cannot be rolled back to a middle position"
-                    );
-                }
                 frink_models::dflash::DFlashDrafter::new(Arc::clone(draft), target, 1, 0.0)?;
                 return Ok(());
             }
@@ -391,11 +382,6 @@ mod tests {
         assert!(draft.speculator(&t.config, Default::default(), 0).is_none());
         let refused = format!("{:#}", configured(true).err().expect("refused"));
         assert!(refused.contains("FRINK_PREFIX_CACHE_ENTRIES"), "{refused}");
-
-        // A recurrent target is refused by name, before its width is.
-        let recurrent = fixture_decoder("mamba2");
-        assert!(recurrent.config.has_recurrent_layers());
-        assert!(format!("{:#}", draft.check(&recurrent).unwrap_err()).contains("recurrent"));
 
         // A target of another width is refused, at startup and on a swap.
         let other = target();

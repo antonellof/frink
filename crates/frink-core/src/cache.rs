@@ -846,6 +846,9 @@ impl KvCache {
     }
 }
 
+mod checkpoint;
+pub use checkpoint::KvCheckpoint;
+
 mod paged;
 pub use paged::*;
 

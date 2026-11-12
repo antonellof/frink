@@ -849,13 +849,6 @@ fn run_infer_speculative(
     let model_weights;
     let mut model_drafter;
     let inner: &mut dyn Drafter = if is_dflash {
-        if decoder.config.has_recurrent_layers() {
-            anyhow::bail!(
-                "a DFlash draft cannot be used with a target model that has recurrent layers yet: \
-                 a rejected block rolls the target's caches back, and a recurrent state cannot \
-                 be rolled back to a middle position"
-            );
-        }
         let draft =
             frink_models::dflash::DFlashDraft::load(&frink_gguf::GgufFile::open(draft_path)?)?;
         // Refused at construction when the draft does not fit the
