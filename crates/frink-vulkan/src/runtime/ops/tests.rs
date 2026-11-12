@@ -337,6 +337,7 @@ fn gpu_attention_over_the_f16_cache_matches_its_twin() {
             k_off: 0,
             v_off: half_words,
             scale: 1.0 / (head_dim as f32).sqrt(),
+            window: None,
         };
         let mut batch = Batch::new();
         batch.kv_store(kb, cache, seq_len * row, 0, cache_words);
@@ -568,6 +569,7 @@ fn gpu_a_batch_of_positions_is_each_position_alone() {
                 k_off: 0,
                 v_off: half_words,
                 scale: 1.0 / (hd as f32).sqrt(),
+                window: None,
             },
         );
         batch.rms_norm(wb, out, normed, hd, n_heads, 1e-5);
@@ -610,4 +612,88 @@ fn gpu_a_batch_of_positions_is_each_position_alone() {
     );
     // And a later position did not just repeat the first.
     assert_ne!(out[..qn], out[qn..2 * qn]);
+}
+
+/// A sliding window: the query attends over its own position and the
+/// `window - 1` before it, which is the unwindowed attention over just
+/// those rows. Windows of one, of 70 (past a workgroup) and of more
+/// than the cache holds, then a batch whose positions each slide.
+#[test]
+fn gpu_windowed_attention_is_attention_over_the_last_rows() {
+    let Some(mut rt) = runtime() else { return };
+    let (n_heads, n_kv_heads, head_dim, seq_len) = (4usize, 2usize, 16usize, 130usize);
+    let row = n_kv_heads * head_dim;
+    let k = pseudo_random(101, seq_len * row);
+    let v = pseudo_random(103, seq_len * row);
+    let half_words = seq_len * row / 2;
+    let cache_words = 2 * half_words;
+    let cache = rt.alloc_f32(cache_words).unwrap();
+    let (kb, vb) = (upload(&mut rt, &k), upload(&mut rt, &v));
+    let mut fill = Batch::new();
+    fill.kv_store(kb, cache, seq_len * row, 0, cache_words);
+    fill.kv_store(vb, cache, seq_len * row, half_words, cache_words);
+    rt.submit_batch(&fill).unwrap();
+    let (kr, vr) = (f16_round(&k), f16_round(&v));
+    let shape = |seq: usize, window: Option<usize>| AttnShape {
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        seq_len: seq,
+        k_off: 0,
+        v_off: half_words,
+        scale: 1.0 / (head_dim as f32).sqrt(),
+        window,
+    };
+    // What a query at the end of `seq` positions sees through `window`.
+    let twin = |q: &[f32], seq: usize, window: usize| {
+        let from = seq.saturating_sub(window);
+        attention_twin(
+            q,
+            &kr[from * row..seq * row],
+            &vr[from * row..seq * row],
+            shape(seq - from, None),
+        )
+    };
+    let qn = n_heads * head_dim;
+    let q = pseudo_random(107, qn);
+    let qb = upload(&mut rt, &q);
+    for window in [1usize, 70, 130, 500] {
+        let scores = rt.alloc_f32(n_heads * seq_len).unwrap();
+        let out = rt.alloc_f32(qn).unwrap();
+        let mut batch = Batch::new();
+        batch.attention(
+            cache,
+            cache_words,
+            qb,
+            scores,
+            out,
+            shape(seq_len, Some(window)),
+        );
+        rt.submit_batch(&batch).unwrap();
+        close(
+            &format!("window {window}"),
+            &rt.read_f32(out, 0, qn).unwrap(),
+            &twin(&q, seq_len, window),
+            1e-4,
+        );
+    }
+    // Five positions ending at 126..=130, each with its own window of 3.
+    let positions = 5;
+    let first = seq_len - positions + 1;
+    let qs = pseudo_random(109, positions * qn);
+    let qsb = upload(&mut rt, &qs);
+    let scores = rt.alloc_f32(positions * n_heads * seq_len).unwrap();
+    let out = rt.alloc_f32(positions * qn).unwrap();
+    let mut batch = Batch::for_positions(positions);
+    batch.attention(cache, cache_words, qsb, scores, out, shape(first, Some(3)));
+    rt.submit_batch(&batch).unwrap();
+    let got = rt.read_f32(out, 0, positions * qn).unwrap();
+    for z in 0..positions {
+        close(
+            &format!("position {z} of the windowed batch"),
+            &got[z * qn..(z + 1) * qn],
+            &twin(&qs[z * qn..(z + 1) * qn], first + z, 3),
+            1e-4,
+        );
+    }
 }

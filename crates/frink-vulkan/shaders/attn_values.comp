@@ -11,13 +11,13 @@ layout(std430, binding = 2) writeonly buffer O { float o[]; };
 
 void main() {
     uint h = attn_head();
-    if (h >= p.n_heads) return;
+    if (h >= N_HEADS) return;
     uint tid = gl_LocalInvocationID.x;
-    uint kvh = h / (p.n_heads / p.n_kv_heads);
-    uint row = attn_row(h) * p.seq_stride, seq = attn_seq();
+    uint kvh = h / (N_HEADS / N_KV_HEADS);
+    uint row = attn_row(h) * p.seq_stride, seq = attn_seq(), start = attn_start();
 
     float m = -1.0 / 0.0;
-    for (uint t = tid; t < seq; t += 64u) m = max(m, scores[row + t]);
+    for (uint t = start + tid; t < seq; t += 64u) m = max(m, scores[row + t]);
     red[tid] = m;
     barrier();
     for (uint s = 32u; s > 0u; s >>= 1) {
@@ -28,7 +28,7 @@ void main() {
     barrier();
 
     float l = 0.0;
-    for (uint t = tid; t < seq; t += 64u) l += exp(scores[row + t] - m);
+    for (uint t = start + tid; t < seq; t += 64u) l += exp(scores[row + t] - m);
     red[tid] = l;
     barrier();
     for (uint s = 32u; s > 0u; s >>= 1) {
@@ -39,7 +39,7 @@ void main() {
 
     for (uint d = tid; d < p.head_dim; d += 64u) {
         float acc = 0.0;
-        for (uint t = 0u; t < seq; ++t) acc += exp(scores[row + t] - m) * kv_at(p.v_off, t, kvh, d);
+        for (uint t = start; t < seq; ++t) acc += exp(scores[row + t] - m) * kv_at(p.v_off, t, kvh, d);
         o[attn_row(h) * p.head_dim + d] = acc / l;
     }
 }
