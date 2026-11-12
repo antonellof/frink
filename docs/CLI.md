@@ -124,8 +124,9 @@ These have llama.cpp's meaning (differences above): `-m` / `--model`,
 `--grammar-file`, `-j` / `--json-schema`, `-dev` / `--device`,
 `--list-devices`, `-ngl` / `--gpu-layers` / `--n-gpu-layers`, `-ctk` /
 `--ctk` / `--cache-type-k`, `-md` / `-d` / `--model-draft` /
-`--spec-draft-model`, `--draft-max` / `--draft` / `--draft-n`,
-`--draft-p-min` / `--spec-draft-p-min`, `--lora`, `--lora-scaled`,
+`--spec-draft-model`, `--spec-draft-n-max` (old spellings `--draft-max` /
+`--draft` / `--draft-n` kept), `--spec-draft-n-min`, `--spec-type`,
+`--spec-draft-p-min` / `--draft-p-min`, `--lora`, `--lora-scaled`,
 `-sys` / `--system` / `--system-prompt`, `-sysf` /
 `--system-prompt-file` (one trailing newline dropped, as upstream),
 `-jf` / `--json-schema-file`, `-hft` / `--hf-token` (sets `HF_TOKEN`),
@@ -226,13 +227,25 @@ The text is exactly what the target would have written alone: the
 rejection rule is lossless at every temperature, and the drafter can
 only ever save a forward pass.
 
-`--draft-max` (default 5) sets how many tokens the drafter proposes
-per verification step, and `--draft-p-min` (default 0.75) stops it
-early once its own confidence drops. The second setting has a large
-effect: a guessing drafter is worse than no drafter, because the target
-pays for the position either way and a rejection also discards every
-position after it, so proposing a token the drafter does not believe
-in costs twice.
+`--spec-draft-n-max` (default 3, as upstream) sets how many tokens the
+drafter proposes per verification step, `--spec-draft-n-min` (default
+0) drops a draft shorter than that, and `--spec-draft-p-min` (default
+0, never) stops it early once its own confidence drops. A guessing
+drafter is worse than no drafter, because the target pays for the
+position either way and a rejection also discards every position after
+it, so proposing a token the drafter does not believe in costs twice.
+The pre-rename spellings (`--draft-max`, `--draft-p-min`) still work.
+
+A DFlash or DFlash2 draft (a GGUF whose `general.architecture` is
+`dflash`, as llama.cpp's converter writes one) is picked up from the
+file, as upstream picks it: `--spec-type draft-dflash` says so
+explicitly, `draft-simple` asks for an autoregressive draft, `none`
+turns speculation off, and every other upstream type is refused by
+name. A DFlash draft reads the target's residual stream at the layers
+it names and drafts a whole block in one pass;
+`--spec-draft-n-max` is clamped to its trained block minus one. It
+refuses a draft whose widths, token table or target layers do not fit
+the target, and the DSpark, LiLiCorr and reduced-vocabulary variants.
 
 It refuses to run in five cases:
 

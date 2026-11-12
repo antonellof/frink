@@ -5,12 +5,13 @@
 //!
 //! Two halves, deliberately separated:
 //!
-//! * **Drafting** is the [`Drafter`] trait. The only implementation in
-//!   the tree is [`PromptLookupSpeculator`], an n-gram match over the
-//!   history with no model at all (prompt-lookup drafting), chosen
-//!   because it needs no GPU, no second set
-//!   of weights and no checkpoint to be useful. A model-based drafter
-//!   (MTP head, EAGLE, dFlash) is a second impl of the same trait.
+//! * **Drafting** is the [`Drafter`] trait. [`PromptLookupSpeculator`]
+//!   is an n-gram match over the history with no model at all
+//!   (prompt-lookup drafting), which needs no GPU, no second set of
+//!   weights and no checkpoint to be useful.
+//!   `crate::draft_model::DraftModelSpeculator` drafts autoregressively
+//!   with a second GGUF. A block drafter conditioned on the target's
+//!   hidden states (DFlash2, #600) is another impl of the same trait.
 //! * **Verification** is [`speculative_decode_with`], and it does not
 //!   know or care which drafter proposed the block.
 //!
@@ -209,6 +210,50 @@ pub trait Drafter {
     /// mutability would put a runtime borrow check on the hot path to
     /// buy nothing. A stateless drafter simply ignores it.
     fn propose(&mut self, history: &[usize], target_hidden: &[f32], max_len: usize) -> DraftBlock;
+
+    /// Target layers whose INPUT residual this drafter reads, ascending
+    /// (llama.cpp's `llama_set_embeddings_layer_inp` indices). Empty,
+    /// the default, for a drafter that reads none, and then the loop
+    /// runs the target exactly as it would without one.
+    fn target_layers(&self) -> &[usize] {
+        &[]
+    }
+
+    /// The target's features at `features.len()` positions starting at
+    /// `start_pos`, one row per position with [`Self::target_layers`]'
+    /// inputs concatenated. Called after every target forward with the
+    /// positions that forward COMMITTED, so a position the drafter saw
+    /// before and the target has since rolled back arrives again with
+    /// its new value; positions at and after `start_pos` replace
+    /// whatever the drafter held there.
+    fn observe_target(&mut self, start_pos: usize, features: &[Vec<f32>]) {
+        let _ = (start_pos, features);
+    }
+}
+
+/// A drafter whose blocks shorter than `n_min` are dropped, llama.cpp's
+/// `--spec-draft-n-min` (`result.clear()` when `result.size() <
+/// n_min`, `speculative.cpp`). Everything else passes through.
+pub struct MinDraft<'d, D: Drafter + ?Sized> {
+    pub inner: &'d mut D,
+    pub n_min: usize,
+}
+
+impl<D: Drafter + ?Sized> Drafter for MinDraft<'_, D> {
+    fn propose(&mut self, history: &[usize], target_hidden: &[f32], max_len: usize) -> DraftBlock {
+        let block = self.inner.propose(history, target_hidden, max_len);
+        if block.len() < self.n_min {
+            DraftBlock::empty()
+        } else {
+            block
+        }
+    }
+    fn target_layers(&self) -> &[usize] {
+        self.inner.target_layers()
+    }
+    fn observe_target(&mut self, start_pos: usize, features: &[Vec<f32>]) {
+        self.inner.observe_target(start_pos, features);
+    }
 }
 
 /// Proposes candidate continuation tokens by looking for the longest
@@ -573,9 +618,30 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
     let mut history: Vec<usize> = prompt_tokens.to_vec();
     let mut generated: Vec<usize> = Vec::with_capacity(options.max_new_tokens);
 
+    // A drafter that reads the target's intermediate layers gets them
+    // from the same forward that verifies; the pairing was checked
+    // when the drafter was built (`Decoder::check_layer_taps`).
+    let taps = drafter.target_layers().to_vec();
+    let forward = |batch: &[usize], start: usize, caches: &mut [KvCache]| {
+        if taps.is_empty() {
+            let (logits, hidden) = decoder.forward_batch_with_hidden(batch, start, caches);
+            (logits, hidden, Vec::new())
+        } else {
+            let t = decoder
+                .forward_batch_with_taps(batch, start, caches, &taps)
+                .expect(
+                    "the drafter's target layers are checked when it is paired with the target",
+                );
+            (t.logits, t.hidden, t.features)
+        }
+    };
+
     // Prefill: one batched call over the whole prompt.
-    let (prefill_logits, prefill_hidden) =
-        decoder.forward_batch_with_hidden(prompt_tokens, options.start_pos, kv_caches);
+    let (prefill_logits, prefill_hidden, prefill_features) =
+        forward(prompt_tokens, options.start_pos, kv_caches);
+    if !taps.is_empty() {
+        drafter.observe_target(options.start_pos, &prefill_features);
+    }
     result.forward_calls += 1;
     let last = prefill_logits
         .last()
@@ -649,8 +715,7 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
         batch.push(pending);
         batch.extend_from_slice(draft.tokens());
 
-        let (batch_logits, batch_hidden) =
-            decoder.forward_batch_with_hidden(&batch, pos, kv_caches);
+        let (batch_logits, batch_hidden, batch_features) = forward(&batch, pos, kv_caches);
         result.forward_calls += 1;
         result.verification_steps += 1;
 
@@ -696,14 +761,17 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
         // already offset by start_pos.
         let committed_len = pos + 1 + accepted;
         if accepted < draft.len() {
-            for cache in kv_caches.iter_mut() {
-                cache.truncate(committed_len);
-            }
+            decoder.truncate_kv(kv_caches, committed_len);
         }
         // POSITIONS: `committed_len` is absolute, offset by start_pos.
         debug_assert!(kv_caches.iter().all(|c| c.positions() == committed_len));
 
         target_hidden = batch_hidden[accepted].clone();
+        if !taps.is_empty() {
+            // The anchor and the accepted drafts are committed; the
+            // rejected rows' features are of tokens that never were.
+            drafter.observe_target(pos, &batch_features[..=accepted]);
+        }
         pending = match replacement {
             // A rejected position was resampled from the residual; that
             // token is committed and becomes the next anchor.

@@ -25,6 +25,13 @@ become ADRs and the plan moves to `archive/`
   exceeds memory have not.
 - **[`amd.md`](amd.md)**, ROCm on RDNA and CDNA, the Ryzen AI NPU spike,
   and Vulkan for every Radeon (#494).
+- **[`dflash2-and-serving.md`](dflash2-and-serving.md)**, DFlash2
+  speculative decoding end to end on every backend, then automatic
+  memory planning, prefix reuse and batching by default, Qwen-family
+  vision and the embedded chat page (#600).
+- **[`dflash-speculative-decoding.md`](dflash-speculative-decoding.md)**,
+  the DFlash2 drafter itself, back from `on-hold/` now that published
+  GGUF drafts exist (#600).
 
 ## Audits
 
@@ -51,8 +58,7 @@ become ADRs and the plan moves to `archive/`
   audits, each with where its open items went.
 - **[`done/`](done/README.md)** holds plans that finished.
 - **[`on-hold/`](on-hold/)** holds work ranked below the goal, each with
-  the condition that brings it back: `dflash-speculative-decoding.md`
-  and `frink-ui.md`.
+  the condition that brings it back: `frink-ui.md`.
 
 The counts in the `done/` index are derived from the files by
 `crates/frink-models/tests/documented_counts.rs`, because two of them

@@ -16,6 +16,7 @@ use rayon::prelude::*;
 use crate::scalar_multipliers::residual_add;
 
 use super::ffn_block;
+use super::layer_taps::LayerTaps;
 use super::{Decoder, KvStep};
 
 impl Decoder {
@@ -72,6 +73,27 @@ impl Decoder {
         start_pos: usize,
         kv_caches: &mut [KvCache],
         host_kv_authoritative: bool,
+    ) -> Vec<Vec<f32>> {
+        let mut no_taps = LayerTaps::new(&[]);
+        self.forward_hidden_batch_tapped(
+            tokens,
+            start_pos,
+            kv_caches,
+            host_kv_authoritative,
+            &mut no_taps,
+        )
+    }
+
+    /// [`Self::forward_hidden_batch_inner`] that records the residual
+    /// entering each layer `taps` names (`super::layer_taps`). The ONE
+    /// batch body: with no taps it is the forward every caller runs.
+    pub(super) fn forward_hidden_batch_tapped(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [KvCache],
+        host_kv_authoritative: bool,
+        taps: &mut LayerTaps,
     ) -> Vec<Vec<f32>> {
         // Read only by the Metal arms below; a CPU-only build fills the
         // host cache with real rows on every path and has nothing to
@@ -182,6 +204,11 @@ impl Decoder {
         #[allow(unused_labels)]
         'layers: while l < n_layers {
             self.hrm_stack_input(hrm.as_ref(), l, &mut hidden_batch);
+            taps.capture(l, &hidden_batch);
+            // A fused multi-layer run below may not step over the next
+            // tap: the stream entering it has to exist on the host.
+            #[cfg(any(feature = "metal", feature = "cuda"))]
+            let run_end = taps.run_end(l, n_layers);
             let layer = self.layer_for(l);
             // THIS layer's head counts. Zero for the two attention-less
             // shapes, which leave the loop below before a width is used;
@@ -200,13 +227,17 @@ impl Decoder {
             if use_metal_attn && batch_size >= 4 {
                 if let Some(guard) = metal_kv_guard.as_mut() {
                     if let Some(metal_kvs) = guard.as_mut() {
-                        if let Some(run_len) = self.metal_prefill_dense_stack_run_len(
-                            l,
-                            start_pos,
-                            batch_size,
-                            kv_caches,
-                            Some(metal_kvs.as_slice()),
-                        ) {
+                        if let Some(run_len) = self
+                            .metal_prefill_dense_stack_run_len(
+                                l,
+                                start_pos,
+                                batch_size,
+                                kv_caches,
+                                Some(metal_kvs.as_slice()),
+                            )
+                            .map(|run| run.min(run_end - l))
+                            .filter(|&run| run >= 2)
+                        {
                             if let Some(h_out) = self.try_metal_prefill_dense_stack(
                                 l,
                                 run_len,
@@ -237,7 +268,9 @@ impl Decoder {
                 frink_cuda::prefill::StackInput::Hidden(&hidden_batch),
                 start_pos,
                 batch_size,
-                kv_caches,
+                // The run walks the slice it is given, so a shorter one
+                // ends it at the next tap.
+                &mut kv_caches[..run_end],
             ) {
                 hidden_batch = h_out;
                 l += run_len;
@@ -791,6 +824,9 @@ impl Decoder {
             self.hrm_store(hrm.as_mut(), l, &hidden_batch);
             l += 1;
         }
+        // `nemotron-h.cpp:252`: index `n_layers` is the stream after
+        // the stack, before the final norm.
+        taps.capture(n_layers, &hidden_batch);
 
         let normed: Vec<Vec<f32>> = hidden_batch
             .chunks(hidden_dim)

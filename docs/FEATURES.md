@@ -201,6 +201,18 @@ and the dedicated engines refuse by name; on Metal an adapted model runs
 on the per-matrix path rather than the fused stacks. See
 [`CLI.md`](CLI.md#lora-adapters) and [`API.md`](API.md#lora-adapters).
 
+Speculative decoding on the CLI takes a draft model with `-md`: an
+autoregressive GGUF of the same family, or a DFlash / DFlash2 block
+draft (llama.cpp's `dflash` architecture, picked from the file as
+`--spec-type draft-dflash`). A DFlash draft reads the target's residual
+stream at the layers it names and proposes a whole block in one pass;
+its drafted tokens and lattice scores match libllama on the fixtures
+(`tests/dflash_graphs.rs`), and the target's greedy output with it is
+token for token the output without it, on the CPU and on Metal. The
+server takes the same draft with `--model-draft` and feeds it the
+target's layer inputs from the prompt on. See [`CLI.md`](CLI.md) and
+[`CONFIG.md`](CONFIG.md).
+
 `frink perplexity` is the quality axis: corpus evaluation using
 llama.cpp's method, agreeing with `llama-perplexity` to within a fifth
 of one standard error on five checkpoints. Where the two differ, the gap

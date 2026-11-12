@@ -992,6 +992,10 @@ pub(crate) enum Kv {
     Paged(PagedLease),
 }
 
+/// Logit rows, and for each position the layer inputs a DFlash draft
+/// reads, in the order of its `target_layers`.
+type TappedRows = (Vec<Vec<f32>>, Vec<Vec<f32>>);
+
 impl Kv {
     /// Prefill, returning the last position's logits.
     ///
@@ -1033,6 +1037,79 @@ impl Kv {
                     .ok()
             }
         }
+    }
+
+    /// [`Self::prefill`] (or [`Self::prefill_scored`] when `scored`)
+    /// that also returns the inputs of `layers` at every prompt
+    /// position, for a DFlash draft. Contiguous only: a DFlash draft is
+    /// refused beside the paged store at startup, so `None` here is a
+    /// drift between the two.
+    fn prefill_tapped(
+        &mut self,
+        decoder: &Decoder,
+        tokens: &[usize],
+        layers: &[usize],
+        scored: bool,
+    ) -> Option<TappedRows> {
+        let Kv::Contiguous(caches) = self else {
+            return None;
+        };
+        if scored {
+            let t = decoder
+                .forward_batch_with_taps(tokens, 0, caches, layers)
+                .ok()?;
+            return Some((t.logits, t.features));
+        }
+        // `FRINK_CHUNKED_PREFILL` chunks as `forward_prompt_batch` does.
+        let chunk = chunked_prefill_tokens().unwrap_or(tokens.len().max(1));
+        let (mut last, mut features) = (Vec::new(), Vec::with_capacity(tokens.len()));
+        let mut pos = 0;
+        for part in tokens.chunks(chunk) {
+            let (l, f) = decoder
+                .forward_batch_last_with_taps(part, pos, caches, layers, false)
+                .ok()?;
+            last = l;
+            features.extend(f);
+            pos += part.len();
+        }
+        Some((vec![last], features))
+    }
+
+    /// [`Self::step`] for a DFlash draft: the batch body over one
+    /// token, which also hands back that position's layer inputs.
+    fn step_tapped(
+        &mut self,
+        decoder: &Decoder,
+        token: usize,
+        pos: usize,
+        layers: &[usize],
+    ) -> Option<(Vec<f32>, Vec<Vec<f32>>)> {
+        let Kv::Contiguous(caches) = self else {
+            return None;
+        };
+        decoder
+            .forward_batch_last_with_taps(&[token], pos, caches, layers, false)
+            .ok()
+    }
+
+    /// [`Self::step_batch`] that also returns each row's layer inputs.
+    fn step_batch_tapped(
+        &mut self,
+        decoder: &Decoder,
+        tokens: &[usize],
+        pos: usize,
+        layers: &[usize],
+    ) -> Option<TappedRows> {
+        let Kv::Contiguous(caches) = self else {
+            return None;
+        };
+        if !caches.iter().all(|c| c.rollback_limit() >= tokens.len()) {
+            return None;
+        }
+        let t = decoder
+            .forward_batch_with_taps(tokens, pos, caches, layers)
+            .ok()?;
+        Some((t.logits, t.features))
     }
 
     fn prefill(&mut self, decoder: &Decoder, tokens: &[usize], host_kv: bool) -> Vec<f32> {
@@ -1116,15 +1193,17 @@ impl Kv {
         dead_code,
         reason = "called by the speculative loop; see sampling_loop::verify_block"
     )]
-    fn truncate_to(&mut self, pos: usize) -> bool {
+    /// Through `Decoder::truncate_kv`, so the Metal arena rewinds with
+    /// the host rows: rolling back only the host left the arena longer
+    /// than the cache, and the next batch rebuilt it from the host's
+    /// placeholder rows.
+    fn truncate_to(&mut self, decoder: &Decoder, pos: usize) -> bool {
         match self {
             Kv::Contiguous(caches) => {
                 if !caches.iter().all(|c| c.can_truncate_to(pos)) {
                     return false;
                 }
-                for c in caches.iter_mut() {
-                    c.truncate(pos);
-                }
+                decoder.truncate_kv(caches, pos);
                 true
             }
             Kv::Paged(_) => false,
@@ -1707,13 +1786,16 @@ pub(crate) fn forward_prompt_batch(
 /// server's `--model-draft` checkpoint. Either way it is another
 /// drafter, not another engine.
 /// What drafts for one request's speculation.
-enum ServerDrafter {
+enum ServerDrafter<'t> {
     /// An n-gram match over the request's own output: no second
     /// checkpoint, no memory, no load time, and useful exactly where a
     /// coding agent lives, output that quotes its input.
     Lookup(frink_models::speculative::PromptLookupSpeculator),
     /// The server's `--model-draft`, with KV of this request's own.
     Model(Box<frink_models::DraftModelSpeculator>),
+    /// A DFlash `--model-draft`, fed the target's layer inputs at every
+    /// position the engine writes.
+    DFlash(Box<frink_models::dflash::DFlashDrafter<'t>>),
 }
 
 struct ServerEngine<'a> {
@@ -1725,7 +1807,7 @@ struct ServerEngine<'a> {
     first_token_at: &'a std::cell::Cell<Option<std::time::Instant>>,
     #[cfg(feature = "metal")]
     kv_offload: bool,
-    drafter: Option<ServerDrafter>,
+    drafter: Option<ServerDrafter<'a>>,
     accepted: usize,
     drafted: usize,
     /// FORWARD PASSES, not speculative rounds.
@@ -1765,6 +1847,15 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
             lease.observe_sampled(next, pos + 1, false);
         }
         self.forwards += 1;
+        if let Some(ServerDrafter::DFlash(d)) = self.drafter.as_mut() {
+            let layers = d.config().target_layers.clone();
+            if let Some((l, features)) = self.kv.step_tapped(self.decoder, next, pos, &layers) {
+                use frink_models::speculative::Drafter;
+                d.observe_target(pos, &features);
+                self.sync_after_step();
+                return l;
+            }
+        }
         let l = self.kv.step(self.decoder, next, pos);
         self.sync_after_step();
         l
@@ -1783,12 +1874,37 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
                 sequence.extend_from_slice(history);
                 d.propose(&sequence, &[], max).tokens().to_vec()
             }
+            // The anchor is the last committed token, already fed: the
+            // draft reads the context BEFORE it, as llama.cpp's does.
+            Some(ServerDrafter::DFlash(d)) => {
+                let len = prompt.len() + history.len();
+                let Some(&anchor) = history.last().or(prompt.last()) else {
+                    return Vec::new();
+                };
+                d.draft_after(anchor, len - 1, max)
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .collect()
+            }
         };
         proposal.truncate(max);
         proposal
     }
 
     fn batch(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>> {
+        if let Some(ServerDrafter::DFlash(d)) = self.drafter.as_mut() {
+            use frink_models::speculative::Drafter;
+            let layers = d.config().target_layers.clone();
+            let (rows, features) = self
+                .kv
+                .step_batch_tapped(self.decoder, tokens, pos, &layers)?;
+            // Rows a rejection undoes are rolled back with the target
+            // (`truncate`).
+            d.observe_target(pos, &features);
+            self.forwards += 1;
+            self.sync_after_step();
+            return Some(rows);
+        }
         let rows = self.kv.step_batch(self.decoder, tokens, pos)?;
         self.forwards += 1;
         self.sync_after_step();
@@ -1805,11 +1921,14 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
         // release server left its rows in the cache, and the next token
         // was answered over a history that never happened. A hard
         // `assert!` because the alternative to stopping is exactly that.
-        let rolled_back = self.kv.truncate_to(pos);
+        let rolled_back = self.kv.truncate_to(self.decoder, pos);
         assert!(
             rolled_back,
             "a store that accepted a speculative batch must be able to roll it back"
         );
+        if let Some(ServerDrafter::DFlash(d)) = self.drafter.as_mut() {
+            d.rollback(pos);
+        }
         self.sync_after_step();
     }
 
@@ -2087,6 +2206,16 @@ pub fn generate<'p>(
         .map(|m| m.matched_len)
         .or_else(|| (prefix_cache.is_some() && kv_pool.is_none()).then_some(0));
 
+    // A DFlash draft reads the target's layer inputs at every prompt
+    // position, which only a fresh prefill computes: a restored prefix
+    // brings K/V without them (the prefix cache is refused beside a
+    // DFlash draft at startup, so that is a drift), and a grammar turns
+    // speculation off below. `None` otherwise, and for every other
+    // drafter.
+    let mut dflash_base = (restored.is_none() && params.grammar.is_none() && !params.json_object)
+        .then(|| draft.and_then(|d| d.dflash(decoder)))
+        .flatten();
+
     // One logit row per prompt position, only when the request asked
     // to score the prompt.
     let mut prompt_rows: Vec<Vec<f32>> = Vec::new();
@@ -2185,12 +2314,27 @@ pub fn generate<'p>(
             // When `FRINK_CHUNKED_PREFILL` is set, split long prompts
             // into chunks that reuse the same KV caches.
             pos = tokens.len();
+            let tapped = dflash_base.as_mut().and_then(|d| {
+                use frink_models::speculative::Drafter;
+                let layers = d.config().target_layers.clone();
+                let scored = params.prompt_logprobs.is_some();
+                let (rows, features) = kv.prefill_tapped(decoder, &tokens, &layers, scored)?;
+                d.observe_target(0, &features);
+                Some((rows, scored))
+            });
             // Scoring the prompt needs a logit row per POSITION, which
             // is a separate entry point because it projects the
             // lm_head at every one instead of once
             // (`Kv::prefill_scored`). A request that did not ask keeps
             // the cheap path exactly as it was.
-            if params.prompt_logprobs.is_some() {
+            if let Some((rows, scored)) = tapped {
+                let last = rows.last().cloned().unwrap_or_default();
+                if scored {
+                    tokens_for_scoring = tokens.clone();
+                    prompt_rows = rows;
+                }
+                last
+            } else if params.prompt_logprobs.is_some() {
                 let Some(rows) = kv.prefill_scored(decoder, &tokens) else {
                     // The paged store ran out of pages between
                     // admission and here. Typed rather than a panic:
@@ -2393,6 +2537,9 @@ pub fn generate<'p>(
                 kv_offload,
                 drafter: (draft_max > 0)
                     .then(|| match draft {
+                        Some(_) if dflash_base.is_some() => dflash_base
+                            .as_ref()
+                            .map(|base| ServerDrafter::DFlash(Box::new(base.clone()))),
                         Some(d) => d
                             .speculator(
                                 &decoder.config,
@@ -2948,10 +3095,6 @@ mod tests {
         }
     }
 
-    /// Rejecting a draft means the rows it wrote are gone, and the
-    /// store continues as if they never happened. Checked by walking
-    /// the same tokens again after the rollback and demanding the same
-    /// logits: a stale row left behind would change them.
     /// `--model-draft`: a drafter changes how many forwards an answer
     /// costs and not the answer. The control is the same request drafted
     /// by prompt lookup, which is lossless too, over a prompt it finds no
@@ -2962,7 +3105,9 @@ mod tests {
     fn a_draft_model_changes_the_forward_count_and_not_the_answer() {
         let decoder = small_decoder();
         let draft = crate::server_draft::ServerDraft {
-            weights: frink_models::DraftWeights::new(small_decoder()),
+            kind: crate::server_draft::DraftKind::Model(frink_models::DraftWeights::new(
+                small_decoder(),
+            )),
             max: 4,
             p_min: 0.0,
         };
@@ -3001,6 +3146,75 @@ mod tests {
         }
     }
 
+    /// A DFlash `--model-draft` on the server: fed the target's layer
+    /// inputs from the prompt on, it changes how many forwards an
+    /// answer costs and not the answer, greedy or sampled. The fixtures
+    /// are the pair `tests/dflash_graphs.rs` holds to libllama.
+    #[test]
+    fn a_dflash_draft_changes_the_forward_count_and_not_the_answer() {
+        let fixture = |name: &str| {
+            format!(
+                "{}/../frink-models/tests/fixtures/{name}_tiny.gguf",
+                env!("CARGO_MANIFEST_DIR")
+            )
+        };
+        let path = fixture("dflash_target");
+        let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+        let mut cfg = frink_models::ModelConfig::from_gguf(&file).expect("fixture config");
+        cfg.kv_dtype = frink_core::kv_store::KvDtype::F32;
+        let decoder = Decoder::from_gguf(&path, cfg).expect("fixture loads");
+        // Byte ids are token ids, so this is `dflash_graphs.rs`'s
+        // ACCEPTING_PROMPT, inside the fixture's 48 tokens: one on which
+        // the random draft is right at least once.
+        let tokenizer = ServerTokenizer::Byte;
+        let prompt = "\u{15}\u{16}\u{b}\u{10}\u{2f}\u{14}";
+        let draft = crate::server_draft::configure(
+            Some(fixture("dflash2_draft")),
+            Some("4".into()),
+            None,
+            Some(&decoder),
+            crate::server_draft::Deployment::default(),
+        )
+        .expect("loads")
+        .expect("configured");
+        let run = |params: &GenerationParams, draft: Option<&crate::server_draft::ServerDraft>| {
+            let mut text = String::new();
+            let (finish, _rows, _ids, _truncated, usage) = generate(
+                &decoder,
+                &tokenizer,
+                &StopTokens::default(),
+                None,
+                prompt,
+                params,
+                None,
+                None,
+                None,
+                None,
+                draft,
+                |_, s| text.push_str(s),
+            )
+            .expect("generates");
+            (text, finish[0].0.clone(), usage)
+        };
+        let mut sampled = greedy_params(40);
+        sampled.sampling.temperature = 0.8;
+        sampled.seed = 7;
+        for params in [greedy_params(40), sampled] {
+            let (plain, plain_finish, plain_usage) = run(&params, None);
+            let (drafted, drafted_finish, usage) = run(&params, Some(&draft));
+            assert_eq!(drafted, plain, "a DFlash draft changed the answer");
+            assert_eq!(drafted_finish, plain_finish);
+            assert!(
+                usage.accepted_draft_tokens.is_some_and(|a| a > 0),
+                "no DFlash draft was accepted, so this proves nothing: {usage:?} vs {plain_usage:?}"
+            );
+        }
+    }
+
+    /// Rejecting a draft means the rows it wrote are gone, and the
+    /// store continues as if they never happened. Checked by walking
+    /// the same tokens again after the rollback and demanding the same
+    /// logits: a stale row left behind would change them.
     #[test]
     fn truncate_to_undoes_the_rows_a_rejected_draft_wrote() {
         let decoder = small_decoder();
@@ -3015,7 +3229,7 @@ mod tests {
 
         // Reject the whole draft.
         assert!(
-            kv.truncate_to(committed.len()),
+            kv.truncate_to(&decoder, committed.len()),
             "a contiguous store rolls back"
         );
 
@@ -3047,7 +3261,7 @@ mod tests {
             kv.step_batch(&decoder, &[1], 0).is_some(),
             "the contiguous arm serves speculation"
         );
-        assert!(kv.truncate_to(0), "and can undo it");
+        assert!(kv.truncate_to(&decoder, 0), "and can undo it");
     }
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {

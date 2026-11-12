@@ -26,6 +26,7 @@ pub mod decoder;
 pub mod deepseek_v4_budget;
 pub mod deepseek_v4_decoder;
 pub mod device_budget;
+pub mod dflash;
 pub mod draft_model;
 pub mod dry;
 pub mod embedding_model;
