@@ -14,7 +14,19 @@ layout(push_constant) uniform Push {
     uint k_off;
     uint v_off;
     uint scale_bits;
+    uint seq_stride;
 } p;
+
+// THE GRID'S z IS THE BATCH POSITION (a prefill; a decode token is
+// z = 0). Position z's query is the z-th [n_heads, head_dim] of q, it
+// attends over seq_len + z cached positions (its own K and V are
+// already stored), and its scores are rows of `seq_stride`.
+uint attn_seq() {
+    return p.seq_len + gl_WorkGroupID.z;
+}
+uint attn_row(uint h) {
+    return gl_WorkGroupID.z * p.n_heads + h;
+}
 shared float red[64];
 
 uint attn_head() {

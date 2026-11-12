@@ -14,10 +14,10 @@ void main() {
     if (h >= p.n_heads) return;
     uint tid = gl_LocalInvocationID.x;
     uint kvh = h / (p.n_heads / p.n_kv_heads);
-    uint row = h * p.seq_len;
+    uint row = attn_row(h) * p.seq_stride, seq = attn_seq();
 
     float m = -1.0 / 0.0;
-    for (uint t = tid; t < p.seq_len; t += 64u) m = max(m, scores[row + t]);
+    for (uint t = tid; t < seq; t += 64u) m = max(m, scores[row + t]);
     red[tid] = m;
     barrier();
     for (uint s = 32u; s > 0u; s >>= 1) {
@@ -28,7 +28,7 @@ void main() {
     barrier();
 
     float l = 0.0;
-    for (uint t = tid; t < p.seq_len; t += 64u) l += exp(scores[row + t] - m);
+    for (uint t = tid; t < seq; t += 64u) l += exp(scores[row + t] - m);
     red[tid] = l;
     barrier();
     for (uint s = 32u; s > 0u; s >>= 1) {
@@ -39,7 +39,7 @@ void main() {
 
     for (uint d = tid; d < p.head_dim; d += 64u) {
         float acc = 0.0;
-        for (uint t = 0u; t < p.seq_len; ++t) acc += exp(scores[row + t] - m) * kv_at(p.v_off, t, kvh, d);
-        o[h * p.head_dim + d] = acc / l;
+        for (uint t = 0u; t < seq; ++t) acc += exp(scores[row + t] - m) * kv_at(p.v_off, t, kvh, d);
+        o[attn_row(h) * p.head_dim + d] = acc / l;
     }
 }

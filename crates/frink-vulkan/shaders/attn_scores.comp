@@ -12,12 +12,13 @@ void main() {
     if (h >= p.n_heads) return;
     uint kvh = h / (p.n_heads / p.n_kv_heads);
     float scale = uintBitsToFloat(p.scale_bits);
-    for (uint t = gl_LocalInvocationID.x; t < p.seq_len; t += 64u) {
+    uint seq = attn_seq(), qh = attn_row(h) * p.head_dim, row = attn_row(h) * p.seq_stride;
+    for (uint t = gl_LocalInvocationID.x; t < seq; t += 64u) {
         float s = 0.0;
         for (uint d = 0u; d < p.head_dim; d += 2u) {
             vec2 k2 = unpackHalf2x16(kv[kv_word(p.k_off, t, kvh, d)]);
-            s += q[h * p.head_dim + d] * k2.x + q[h * p.head_dim + d + 1u] * k2.y;
+            s += q[qh + d] * k2.x + q[qh + d + 1u] * k2.y;
         }
-        scores[h * p.seq_len + t] = s * scale;
+        scores[row + t] = s * scale;
     }
 }

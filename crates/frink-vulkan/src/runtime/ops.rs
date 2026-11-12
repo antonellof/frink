@@ -13,7 +13,7 @@
 //! seam tests, to the CPU function it replaces.
 
 use super::memory::{alloc, free, write_padded, Buf};
-use super::{grid, push_constants, push_words, Dispatch, MatvecJob, Runtime, MAX_DISPATCHES};
+use super::{grid, push_words, Dispatch, MatvecJob, Runtime, MAX_DISPATCHES};
 use crate::device::VulkanError;
 use crate::shaders::{
     ElementwiseShader, ADD, ATTN_SCORES, ATTN_VALUES, KV_STORE, RMS_NORM, ROPE, SWIGLU,
@@ -95,19 +95,36 @@ enum Op<'w> {
         views: Views,
         push: [u32; 8],
         grid: (u32, u32),
+        /// The grid's z: 1, or the batch positions of a shader that
+        /// reads one from it (RoPE, attention).
+        depth: u32,
     },
     Matvec {
         job: MatvecJob<'w>,
         x: (DeviceBuf, usize, usize),
         y: (DeviceBuf, usize, usize),
+        /// Batch positions: a GEMM when above 1.
+        depth: usize,
     },
 }
 
 /// Ops for one submission, in order. Build with the methods, run with
 /// [`Runtime::submit_batch`].
-#[derive(Default)]
+///
+/// A batch is recorded for a number of POSITIONS, one by default (a
+/// decode token). [`Batch::for_positions`] records the same ops over
+/// `p` consecutive positions (a prefill): every buffer then holds `p`
+/// rows, position after position, and each op's sizes below are per
+/// position.
 pub struct Batch<'w> {
     ops: Vec<Op<'w>>,
+    positions: usize,
+}
+
+impl Default for Batch<'_> {
+    fn default() -> Self {
+        Self::for_positions(1)
+    }
 }
 
 /// The grid for one invocation per value, 64 to a workgroup.
@@ -124,6 +141,15 @@ fn words(w: &[u32]) -> [u32; 8] {
 impl<'w> Batch<'w> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A batch whose ops each cover `positions` consecutive positions.
+    pub fn for_positions(positions: usize) -> Self {
+        assert!(positions >= 1, "a batch of no positions");
+        Self {
+            ops: Vec::new(),
+            positions,
+        }
     }
 
     /// Dispatches this batch will record.
@@ -146,37 +172,44 @@ impl<'w> Batch<'w> {
         rows: usize,
         eps: f32,
     ) {
+        let rows = rows * self.positions;
         self.ops.push(Op::Shader {
             shader: RMS_NORM,
             views: [(w, 0, n), (x, 0, n * rows), (out, 0, n * rows)],
             push: words(&[n as u32, rows as u32, eps.to_bits()]),
             grid: grid(rows),
+            depth: 1,
         });
     }
 
     /// `h = silu(g) * u` over `n` values (the SwiGLU combine).
     pub fn swiglu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize) {
+        let n = n * self.positions;
         self.ops.push(Op::Shader {
             shader: SWIGLU,
             views: [(g, 0, n), (u, 0, n), (out, 0, n)],
             push: words(&[n as u32]),
             grid: per_value(n),
+            depth: 1,
         });
     }
 
     /// `out = a + b` over `n` values.
     pub fn add(&mut self, a: DeviceBuf, b: DeviceBuf, out: DeviceBuf, n: usize) {
+        let n = n * self.positions;
         self.ops.push(Op::Shader {
             shader: ADD,
             views: [(a, 0, n), (b, 0, n), (out, 0, n)],
             push: words(&[n as u32]),
             grid: per_value(n),
+            depth: 1,
         });
     }
 
     /// RoPE over `n_heads` heads of `head_dim`, the first `rot_dim`
     /// channels rotated by the `rot_dim / 2` `(cos, sin)` pairs in `tab`
-    /// (see `shaders/rope.comp`); `neox` picks split-half pairing.
+    /// (see `shaders/rope.comp`); `neox` picks split-half pairing. Each
+    /// position has its own `rot_dim` values of `tab`, one after another.
     #[allow(clippy::too_many_arguments)]
     pub fn rope(
         &mut self,
@@ -188,12 +221,19 @@ impl<'w> Batch<'w> {
         rot_dim: usize,
         neox: bool,
     ) {
-        let n = n_heads * head_dim;
+        let (n, p) = (n_heads * head_dim, self.positions);
         self.ops.push(Op::Shader {
             shader: ROPE,
-            views: [(tab, 0, rot_dim), (x, 0, n), (out, 0, n)],
-            push: words(&[n_heads as u32, head_dim as u32, rot_dim as u32, neox as u32]),
+            views: [(tab, 0, rot_dim * p), (x, 0, n * p), (out, 0, n * p)],
+            push: words(&[
+                n_heads as u32,
+                head_dim as u32,
+                rot_dim as u32,
+                neox as u32,
+                rot_dim as u32,
+            ]),
             grid: per_value(n),
+            depth: p as u32,
         });
     }
 
@@ -206,17 +246,21 @@ impl<'w> Batch<'w> {
         dst: usize,
         cache_words: usize,
     ) {
+        let n = n * self.positions;
         self.ops.push(Op::Shader {
             shader: KV_STORE,
             views: [(src, 0, n), (src, 0, n), (cache, 0, cache_words)],
             push: words(&[n as u32, dst as u32]),
             grid: per_value(n / 2),
+            depth: 1,
         });
     }
 
-    /// Decode attention: `out[h] = softmax(scale * q_h . K) . V` over
-    /// `shape.seq_len` cached positions. `scores` is scratch for
-    /// `n_heads * seq_len` values.
+    /// Causal attention: `out[h] = softmax(scale * q_h . K) . V`. The
+    /// first position attends over `shape.seq_len` cached positions and
+    /// each later one over one more, so the batch's own K and V must be
+    /// in the cache already. `scores` is scratch for
+    /// `n_heads * (seq_len + positions - 1)` values per position.
     pub fn attention(
         &mut self,
         cache: DeviceBuf,
@@ -226,6 +270,8 @@ impl<'w> Batch<'w> {
         out: DeviceBuf,
         s: AttnShape,
     ) {
+        let p = self.positions;
+        let stride = s.seq_len + p - 1;
         let push = words(&[
             s.n_heads as u32,
             s.n_kv_heads as u32,
@@ -234,20 +280,23 @@ impl<'w> Batch<'w> {
             s.k_off as u32,
             s.v_off as u32,
             s.scale.to_bits(),
+            stride as u32,
         ]);
-        let n_scores = s.n_heads * s.seq_len;
-        let qn = s.n_heads * s.head_dim;
+        let n_scores = s.n_heads * stride * p;
+        let qn = s.n_heads * s.head_dim * p;
         self.ops.push(Op::Shader {
             shader: ATTN_SCORES,
             views: [(cache, 0, cache_words), (q, 0, qn), (scores, 0, n_scores)],
             push,
             grid: grid(s.n_heads),
+            depth: p as u32,
         });
         self.ops.push(Op::Shader {
             shader: ATTN_VALUES,
             views: [(cache, 0, cache_words), (scores, 0, n_scores), (out, 0, qn)],
             push,
             grid: grid(s.n_heads),
+            depth: p as u32,
         });
     }
 
@@ -255,10 +304,12 @@ impl<'w> Batch<'w> {
     /// weights resident as in [`Runtime::matvec_many`].
     pub fn matvec(&mut self, job: MatvecJob<'w>, x: (DeviceBuf, usize), y: (DeviceBuf, usize)) {
         let cols = job.weights.len() / job.rows / job.shader.block_bytes * job.shader.block_elems;
+        let p = self.positions;
         self.ops.push(Op::Matvec {
             job,
-            x: (x.0, x.1, cols),
-            y: (y.0, y.1, job.rows),
+            x: (x.0, x.1, cols * p),
+            y: (y.0, y.1, job.rows * p),
+            depth: p,
         });
     }
 }
@@ -440,12 +491,13 @@ impl Runtime {
         let align = self.min_offset_align / 4;
         let mut dispatches = Vec::with_capacity(batch.ops.len());
         for (set, op) in batch.ops.iter().enumerate() {
-            let (pipeline, ranges, push, grid) = match op {
+            let (pipeline, ranges, push, grid, depth) = match op {
                 Op::Shader {
                     shader,
                     views,
                     push,
                     grid,
+                    depth,
                 } => {
                     let ranges = [
                         self.view(views[0])?,
@@ -457,18 +509,25 @@ impl Runtime {
                         ranges,
                         push_words(push),
                         *grid,
+                        *depth,
                     )
                 }
-                Op::Matvec { job, x, y } => {
-                    let shape = self.check(job, x.2)?;
+                Op::Matvec { job, x, y, depth } => {
+                    let shape = self.check(job, x.2 / depth)?;
                     let w = self.resident(job.weights)?;
                     let ranges = [(w, 0, vk::WHOLE_SIZE), self.view(*x)?, self.view(*y)?];
                     let (rows, n_blocks, row_bytes) = shape;
                     (
                         self.kernel(job.shader)?,
                         ranges,
-                        push_constants(rows, n_blocks, row_bytes),
+                        push_words(&[
+                            rows as u32,
+                            n_blocks as u32,
+                            row_bytes as u32,
+                            (x.2 / depth) as u32,
+                        ]),
                         grid(rows),
+                        *depth as u32,
                     )
                 }
             };
@@ -486,7 +545,7 @@ impl Runtime {
                 set,
                 push,
                 grid,
-                depth: 1,
+                depth,
             });
         }
         let stages: Vec<&[Dispatch]> = dispatches.chunks(1).collect();
