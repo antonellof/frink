@@ -339,7 +339,7 @@ impl<'a> KvRows<'a> {
                     scratch.resize(src.len(), 0.0);
                 }
                 let dst = &mut scratch[..src.len()];
-                src.convert_to_f32_slice(dst);
+                widen_f16(src, dst);
                 dst
             }
         }
@@ -349,7 +349,7 @@ impl<'a> KvRows<'a> {
     pub fn copy_to_f32(self, dst: &mut [f32]) {
         match self {
             KvRows::F32(s) => dst.copy_from_slice(s),
-            KvRows::F16(s) => s.convert_to_f32_slice(dst),
+            KvRows::F16(s) => widen_f16(s, dst),
         }
     }
 
@@ -371,9 +371,83 @@ impl<'a> KvRows<'a> {
     }
 }
 
+/// `src` widened into `dst` (same length). Exact: every f16 is an f32.
+///
+/// `half`'s `convert_to_f32_slice` reaches the same `fcvtl` on aarch64,
+/// but four lanes per call through a function pointer it cannot inline.
+/// The attention kernels widen one K and one V row per key per head
+/// group, so at long context that call overhead was the largest single
+/// host cost of a decode token (more than the dot products and the V
+/// sums together, Qwen3-8B at ~8k tokens on an M2 Pro). Here it is
+/// eight lanes per step, inline.
+#[inline]
+pub(crate) fn widen_f16(src: &[f16], dst: &mut [f32]) {
+    assert_eq!(src.len(), dst.len(), "widen_f16: length mismatch");
+    #[cfg(target_arch = "aarch64")]
+    {
+        let body = src.len() / 8 * 8;
+        // SAFETY: `body <= len` for both slices (asserted equal above),
+        // so every 16-byte load and 32-byte store below is in bounds.
+        // `f16` is `repr(transparent)` over `u16`. `fcvtl`/`fcvtl2`
+        // from half precision are base ARMv8 Advanced SIMD, present on
+        // every aarch64 core.
+        unsafe { widen_f16_neon(src.as_ptr().cast::<u16>(), dst.as_mut_ptr(), body) };
+        src[body..].convert_to_f32_slice(&mut dst[body..]);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    src.convert_to_f32_slice(dst);
+}
+
+/// Widens the first `n` (a multiple of 8) halves at `src` into `dst`.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn widen_f16_neon(src: *const u16, dst: *mut f32, n: usize) {
+    let mut i = 0;
+    while i < n {
+        // SAFETY: the caller guarantees `i + 8 <= n` elements on both
+        // sides; the asm reads 16 bytes at `src + i` and writes 32 at
+        // `dst + i`, and touches nothing else.
+        unsafe {
+            std::arch::asm!(
+                "ldr {h:q}, [{s}]",
+                "fcvtl {a:v}.4s, {h:v}.4h",
+                "fcvtl2 {b:v}.4s, {h:v}.8h",
+                "stp {a:q}, {b:q}, [{d}]",
+                s = in(reg) src.add(i),
+                d = in(reg) dst.add(i),
+                h = out(vreg) _,
+                a = out(vreg) _,
+                b = out(vreg) _,
+                options(nostack, preserves_flags),
+            );
+        }
+        i += 8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every f16 bit pattern, at every alignment of the 8-lane body and
+    /// its tail, widens to exactly what `half` gives (NaN to a NaN).
+    #[test]
+    fn widen_f16_matches_half_on_every_bit_pattern() {
+        let all: Vec<f16> = (0..=u16::MAX).map(f16::from_bits).collect();
+        for skip in 0..9 {
+            let src = &all[skip..];
+            let mut got = vec![0f32; src.len()];
+            widen_f16(src, &mut got);
+            for (h, g) in src.iter().zip(&got) {
+                let want = h.to_f32();
+                if want.is_nan() {
+                    assert!(g.is_nan(), "{:#06x} widened to {g}", h.to_bits());
+                } else {
+                    assert_eq!(want.to_bits(), g.to_bits(), "{:#06x}", h.to_bits());
+                }
+            }
+        }
+    }
 
     #[test]
     fn f16_rounds_at_write_and_every_read_sees_the_rounded_value() {

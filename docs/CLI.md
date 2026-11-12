@@ -1516,10 +1516,13 @@ cargo build --release -p frink-cli --features "serve metal"
   --host 127.0.0.1 --port 8383 -dev metal -ngl all -cb -np 4
 ```
 
-On Metal, continuous batching turns on by default when compatible; use
-`-cb` / `--cont-batching` and `-np` / `--parallel N` (llama.cpp slot
-cap) to set it explicitly. `--no-cont-batching` keeps the private
-decode loop (Metal serializes concurrent requests on that path).
+Continuous batching is off unless `-cb` / `--cont-batching` or
+`-np` / `--parallel N` (llama.cpp's slot cap) asks for it. Without it
+Metal decodes on the private loop, attention on the device, and
+serializes concurrent requests; the batched decode attends on the
+host, which at long context is several times slower for one client
+(Qwen3-8B at 7.4k tokens on an M2 Pro: 24.6 tok/s private, 3.6
+batched).
 
 Without the feature, `frink serve` still exists and explains itself
 rather than reporting an unknown subcommand, since a compiled-out

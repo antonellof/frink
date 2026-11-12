@@ -77,7 +77,7 @@ library or overriding the CLI.
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_CONTINUOUS_BATCHING` | `1` enables, `0` disables. When unset on Metal builds with fused attention, continuous batching is on by default for safe parallel serving. Also: `frink serve --cont-batching` / `-cb`, `--no-cont-batching`. |
+| `FRINK_CONTINUOUS_BATCHING` | `1` enables, `0` disables; unset is off. Also: `frink serve --cont-batching` / `-cb`, `--parallel N` (implies it), `--no-cont-batching`. |
 | `FRINK_MODEL_DRAFT` | A draft GGUF for speculative decoding, on the server's private decode loop and in the continuous batch: an autoregressive model of the target's family and tokenizer, or a DFlash / DFlash2 draft (picked from the file, as `-md` picks it). CLI: `-md` / `--model-draft`. Refused at startup for a drafter that cannot serve the model (see `docs/CLI.md`); a DFlash draft is also refused beside `FRINK_PREFIX_CACHE_ENTRIES`, since a cached prefix brings no layer inputs for it to read, and beside the paged store, whose forwards do not tap them. A grammar or `json_object` request does not speculate |
 | `FRINK_DRAFT_MAX` | Tokens the draft proposes per verification step. CLI: `--draft-max`. Default: `3`, llama.cpp's |
 | `FRINK_DRAFT_P_MIN` | The draft stops a block at a token whose own probability is below this, between 0 and 1. CLI: `--draft-p-min`. Default: `0`, llama.cpp's |
