@@ -597,7 +597,7 @@ impl ExpertSlots {
         for (&dst, &src) in plan.dst_slots.iter().zip(plan.src_slots.iter()) {
             let carried = self.occupant(src);
             self.occupant[dst as usize] = None;
-            for bank in 0..self.geometry.banks() {
+            for (bank, &row_bytes) in self.geometry.row_bytes.iter().enumerate() {
                 device
                     .copy_slot(bank, dst, src)
                     .map_err(|detail| SlotFault::Device {
@@ -606,7 +606,7 @@ impl ExpertSlots {
                         detail,
                     })?;
                 applied.rows += 1;
-                applied.bytes += self.geometry.row_bytes[bank] as u64;
+                applied.bytes += row_bytes as u64;
             }
             self.occupant[dst as usize] = carried;
         }
