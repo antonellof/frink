@@ -1,5 +1,5 @@
 # libllama's DFlash rounds: scripts/dflash_reference.cpp crates/frink-models/tests/fixtures/dflash_target_tiny.gguf dflash2_swa_draft_tiny.gguf 4 4 @GRAPH
-round 0 anchor 11 draft 35 37 18 44 scores 4.48937321 9.33388519 3.616822 2.04754496
-round 1 anchor 13 draft 7 24 35 27 scores 3.54327607 3.99769497 6.90750885 2.64473867
-round 2 anchor 29 draft 15 12 22 35 scores 9.70388126 2.65291929 5.57783031 8.77031803
-round 3 anchor 28 draft 29 13 18 35 scores 19.1562672 0.202344656 3.52324462 6.63189173
+round 0 anchor 11 draft 35 37 18 44 scores 4.48937368 9.33388615 3.61681962 2.04754543
+round 1 anchor 13 draft 7 24 35 27 scores 3.54327774 3.99769664 6.90751171 2.64473796
+round 2 anchor 29 draft 15 12 22 35 scores 9.70387745 2.65292168 5.57783699 8.77031136
+round 3 anchor 28 draft 29 13 18 35 scores 19.156271 0.202346563 3.52324677 6.6318903
