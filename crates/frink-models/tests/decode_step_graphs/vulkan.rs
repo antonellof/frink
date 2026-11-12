@@ -12,14 +12,22 @@ use frink_core::kv_store::KvDtype;
 /// host cache that is not, and the CPU child is given the same dtype. So
 /// what is left is the order a device kernel accumulates in.
 ///
-/// Measured (2026-11-12, M2 Pro through MoltenVK, the 21 fixtures the
-/// stack serves): min 1.2e-7, p50 1.7e-6, p90 3.4e-5, max 3.2e-4
-/// (`exaone_moe_array_flipped`, a QK-norm, whose sum of squares is an
-/// f32 tree on the device and an f64 loop on the CPU). The bound is 3x
-/// the worst. With an f32 KV on the CPU side the same run
-/// showed 8.7e-2 on `lora_base`, which is the KV's rounding and not the
-/// stack's, and is why the comparison is f16 against f16.
-pub const VULKAN_DECODE_TOL: f32 = 1e-3;
+/// Measured (2026-11-12, M2 Pro through MoltenVK, the 28 fixtures the
+/// stack serves): min 1.2e-7, p50 3.1e-6, p90 4.3e-4, then the 64-layer
+/// `exaone4_32b` pair at 9.0e-4 and `glm4` at 1.1e-3. The tail is where
+/// a norm sits on a block's output: its sum of squares is an f32 tree on
+/// the device and an f64 loop on the CPU.
+///
+/// `glm4` (pre-norms and post-norms) is the fixture's own sensitivity
+/// and not the device's error: against llama.cpp's decode golden the
+/// device is at 7.3e-4 and the CPU with the same f16 KV at 1.2e-3, so
+/// the device is the closer of the two to the oracle. The bound is 2.7x
+/// that distance.
+///
+/// With an f32 KV on the CPU side an earlier run showed 8.7e-2 on
+/// `lora_base`, which is the KV's rounding and not the stack's, and is
+/// why the comparison is f16 against f16.
+pub const VULKAN_DECODE_TOL: f32 = 3e-3;
 
 /// The bound against llama.cpp's decode goldens, which keep an f32 KV:
 /// the Metal gate's, for the same f16 rounding. Measured at 1.8e-4 on
@@ -29,7 +37,7 @@ const VULKAN_GOLDEN_TOL: f32 = 0.2;
 /// Fixtures the stack served, and agreed, at the measurement above. The
 /// gate fails below it: fewer means a refusal moved and a fixture now
 /// runs on the host, which this gate would otherwise pass in silence.
-const MIN_SERVED: usize = 21;
+const MIN_SERVED: usize = 28;
 
 /// Fixtures whose Vulkan decode is not within rounding of the CPU's,
 /// each with what was measured. The gate fails if this set and the
@@ -120,15 +128,22 @@ pub fn run() {
         // prefill batch and each decode token wait once per run of
         // layers, never once per op. `STEPS` forward passes: the
         // prefill, then `STEPS - 1` tokens.
+        //
+        // A layer with a sliding window stays on the host, so it cuts
+        // the run on either side of it: each one allows a run more.
+        let windowed = (0..d.layers.len())
+            .filter(|&li| d.config.layer_sliding_window(li).is_some())
+            .count();
         let per_pass = submitted as usize / STEPS;
         if !(submitted as usize).is_multiple_of(STEPS)
-            || per_pass > d.layers.len().div_ceil(MAX_RUN)
+            || per_pass > d.layers.len().div_ceil(MAX_RUN) + windowed
         {
             failures.push((
                 name.clone(),
                 format!(
-                    "{submitted} submissions over a prefill and {} tokens of {} layers; \
-                     the stack is one per {MAX_RUN} layers",
+                    "{submitted} submissions over a prefill and {} tokens of {} layers, \
+                     {windowed} of them windowed; the stack is one per {MAX_RUN} layers \
+                     and per run between windowed layers",
                     STEPS - 1,
                     d.layers.len()
                 ),

@@ -19,7 +19,7 @@
 //! Which layers it may take is `fused_view`'s decision, shared with the
 //! Metal and CUDA stacks. The stack declines what its ops do not
 //! compute, so a layer it cannot serve runs on the host body unchanged:
-//! post-norms, sinks, `wo` bias, a sliding window,
+//! a norm that is not RMS, sinks, `wo` bias, a sliding window,
 //! an attention softcap, RoPE `mscale`, routed experts, a GeGLU FFN, and
 //! a host cache that is not f16 (`--ctk f32`).
 //!
@@ -44,7 +44,8 @@ use super::{Decoder, ExpertBacking, LayerWeights};
 
 /// Dispatches a plain layer records in `run_vulkan_stack`: norm, Q, K,
 /// V, two RoPEs, two KV appends, attention (two), `wo`, add, norm, gate,
-/// up, SwiGLU, down, add. A QKV bias or a QK-norm is one more each
+/// up, SwiGLU, down, add. A QKV bias, a QK-norm or a post-norm is one
+/// more each, and a layer with no pre-norm one fewer
 /// ([`StackLayer::ops`]).
 const OPS_PER_LAYER: usize = 19;
 
@@ -55,8 +56,14 @@ const MAX_SCORE_BYTES: usize = 256 << 20;
 
 /// One layer as the stack runs it: borrowed weights and its RoPE.
 struct StackLayer<'a> {
-    attn_norm: &'a [f32],
-    ffn_norm: &'a [f32],
+    /// The pre-norms' RMS weights; `None` for a layer with no norm
+    /// before the block (the post-norm architectures).
+    attn_norm: Option<&'a [f32]>,
+    ffn_norm: Option<&'a [f32]>,
+    /// RMS weights applied to the block's output before the residual
+    /// add, at `post_norm_eps`.
+    post_attn_norm: Option<&'a [f32]>,
+    post_ffn_norm: Option<&'a [f32]>,
     q: MatvecJob<'a>,
     k: MatvecJob<'a>,
     v: MatvecJob<'a>,
@@ -82,8 +89,13 @@ struct StackLayer<'a> {
 impl StackLayer<'_> {
     /// The dispatches this layer records.
     fn ops(&self) -> usize {
-        OPS_PER_LAYER
+        // The 19 count both pre-norms.
+        OPS_PER_LAYER - 2
             + [
+                self.attn_norm,
+                self.ffn_norm,
+                self.post_attn_norm,
+                self.post_ffn_norm,
                 self.q_bias,
                 self.k_bias,
                 self.v_bias,
@@ -163,13 +175,17 @@ impl Decoder {
             sinks,
             o_bias,
         } = Self::fused_attn_extras(layer, FusedAttnCaps::VULKAN)?;
-        if sinks.is_some()
-            || o_bias.is_some()
-            || layer.attn.post_attn_norm.is_some()
-            || layer.attn.post_ffn_norm.is_some()
-        {
+        if sinks.is_some() || o_bias.is_some() {
             return None;
         }
+        // A pre-norm is RMS with weights or absent; any other kind is
+        // arithmetic the norm op does not do.
+        let pre = |n: &'a crate::norm::NormOp| match n {
+            crate::norm::NormOp::None => Some(None),
+            other => other.rms_weights().map(Some),
+        };
+        let attn_norm = pre(&layer.attn.norm_weight)?;
+        let ffn_norm = pre(&layer.moe.norm_weight)?;
         // SwiGLU is the one activation the stack's FFN has.
         if c.model_ffn_act()
             .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)
@@ -211,8 +227,10 @@ impl Decoder {
             (tables, rot)
         });
         Some(StackLayer {
-            attn_norm: layer.attn.norm_weight.rms_weights()?,
-            ffn_norm: layer.moe.norm_weight.rms_weights()?,
+            attn_norm,
+            ffn_norm,
+            post_attn_norm: layer.attn.post_attn_norm.as_deref(),
+            post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
             q: job(&layer.attn.q_proj)?,
             k: job(&layer.attn.k_proj)?,
             v: job(&layer.attn.v_proj)?,
@@ -352,6 +370,7 @@ impl Decoder {
         let qr = rt.scratch("qr", 0, batch * q_dim)?;
         let attn = rt.scratch("attn", 0, batch * q_dim)?;
         let proj = rt.scratch("proj", 0, batch * dim)?;
+        let post = rt.scratch("post", 0, batch * dim)?;
         let gate = rt.scratch("gate", 0, batch * ffn_dim)?;
         let up = rt.scratch("up", 0, batch * ffn_dim)?;
         let act = rt.scratch("act", 0, batch * ffn_dim)?;
@@ -364,8 +383,9 @@ impl Decoder {
         // and after rotation and its V (read back for the host cache),
         // and its mirror.
         struct Bound {
-            attn_norm: DeviceBuf,
-            ffn_norm: DeviceBuf,
+            /// Pre-attention, pre-FFN, post-attention and post-FFN norm
+            /// weights, where the layer has them.
+            norms: [Option<DeviceBuf>; 4],
             tab: Option<(DeviceBuf, usize)>,
             /// K and V each move between two buffers, an op at a time.
             k: [DeviceBuf; 2],
@@ -382,8 +402,13 @@ impl Decoder {
         let mut bound = Vec::with_capacity(layers.len());
         for (i, s) in layers.iter().enumerate() {
             let li = l + i;
-            let attn_norm = rt.constant_f32(s.attn_norm)?;
-            let ffn_norm = rt.constant_f32(s.ffn_norm)?;
+            let mut norm = |w: Option<&[f32]>| w.map(|w| rt.constant_f32(w)).transpose();
+            let norms = [
+                norm(s.attn_norm)?,
+                norm(s.ffn_norm)?,
+                norm(s.post_attn_norm)?,
+                norm(s.post_ffn_norm)?,
+            ];
             let tab = match &s.rope {
                 Some((t, rot)) => {
                     let b = rt.scratch("rope", i, t.len())?;
@@ -417,8 +442,7 @@ impl Decoder {
             } = cache;
             let m = VulkanKvMirror::sync(vulkan_attn, rt, hk, hv, rows, kv_dim, need)?;
             bound.push(Bound {
-                attn_norm,
-                ffn_norm,
+                norms,
                 tab,
                 k,
                 v,
@@ -432,7 +456,7 @@ impl Decoder {
             });
         }
 
-        let eps = c.rms_norm_eps;
+        let (eps, post_eps) = (c.rms_norm_eps, c.post_norm_eps());
         let mut ops = Batch::for_positions(batch);
         if let StackInput::Token(t) = input {
             let table = self
@@ -443,13 +467,21 @@ impl Decoder {
         let mut finals = Vec::with_capacity(layers.len());
         for (s, b) in layers.iter().zip(&bound) {
             // --- attention ---
-            ops.rms_norm(b.attn_norm, h, normed, dim, 1, eps);
+            let [pre_attn, pre_ffn, post_attn, post_ffn] = b.norms;
+            // The block's input: normed, or the residual stream itself.
+            let x_attn = match pre_attn {
+                Some(w) => {
+                    ops.rms_norm(w, h, normed, dim, 1, eps);
+                    normed
+                }
+                None => h,
+            };
             // Q, K and V each start in the first buffer of a pair, and
             // every op that follows writes the other one.
             let (mut qs, mut ks, mut vs) = ([q, qr], b.k, b.v);
-            ops.matvec(s.q, (normed, 0), (qs[0], 0));
-            ops.matvec(s.k, (normed, 0), (ks[0], 0));
-            ops.matvec(s.v, (normed, 0), (vs[0], 0));
+            ops.matvec(s.q, (x_attn, 0), (qs[0], 0));
+            ops.matvec(s.k, (x_attn, 0), (ks[0], 0));
+            ops.matvec(s.v, (x_attn, 0), (vs[0], 0));
             for (pair, bias, width) in [
                 (&mut qs, b.bias[0], q_dim),
                 (&mut ks, b.bias[1], kv_dim),
@@ -504,14 +536,35 @@ impl Decoder {
                 },
             );
             ops.matvec(s.o, (attn, 0), (proj, 0));
-            ops.add(h, proj, h_mid, dim);
+            // A post-norm is on the block's output, before the add.
+            let attn_out = match post_attn {
+                Some(w) => {
+                    ops.rms_norm(w, proj, post, dim, 1, post_eps);
+                    post
+                }
+                None => proj,
+            };
+            ops.add(h, attn_out, h_mid, dim);
             // --- FFN ---
-            ops.rms_norm(b.ffn_norm, h_mid, normed, dim, 1, eps);
-            ops.matvec(s.gate, (normed, 0), (gate, 0));
-            ops.matvec(s.up, (normed, 0), (up, 0));
+            let x_ffn = match pre_ffn {
+                Some(w) => {
+                    ops.rms_norm(w, h_mid, normed, dim, 1, eps);
+                    normed
+                }
+                None => h_mid,
+            };
+            ops.matvec(s.gate, (x_ffn, 0), (gate, 0));
+            ops.matvec(s.up, (x_ffn, 0), (up, 0));
             ops.swiglu(gate, up, act, ffn_dim);
             ops.matvec(s.down, (act, 0), (proj, 0));
-            ops.add(h_mid, proj, h, dim);
+            let ffn_out = match post_ffn {
+                Some(w) => {
+                    ops.rms_norm(w, proj, post, dim, 1, post_eps);
+                    post
+                }
+                None => proj,
+            };
+            ops.add(h_mid, ffn_out, h, dim);
         }
         assert!(ops.len() <= layers.iter().map(StackLayer::ops).sum::<usize>() + 1);
         rt.submit_batch(&ops)?;

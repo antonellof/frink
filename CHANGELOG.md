@@ -15,6 +15,19 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **The Vulkan stack serves post-norms and layers with no pre-norm**
+  (#409). A norm on a block's output, before the residual add, is the
+  RMSNorm op at `post_norm_eps`; a layer whose pre-norm is absent reads
+  the residual stream directly (GLM-4, EXAONE-4, OLMo-2 shapes). A
+  pre-norm that is not RMS still keeps the host body. A model that mixes
+  windowed and plain layers now has its plain runs on the device, one
+  submission a run. The graph fixtures the stack serves go from 21 to
+  28. The gate's bound against the CPU is 3e-3: on `glm4` the device is
+  at 7.3e-4 from llama.cpp's golden where the CPU with the same f16 KV
+  is at 1.2e-3.
+
 ## [0.62.0] - 2026-11-12
 
 ### Added
