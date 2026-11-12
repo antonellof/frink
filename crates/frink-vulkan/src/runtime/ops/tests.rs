@@ -321,3 +321,78 @@ fn gpu_a_view_past_its_buffer_is_an_error_not_a_dispatch() {
     assert!(rt.submit_batch(&Batch::new()).is_err(), "an empty batch");
     assert!(rt.write_f32(a, 4, &[0.0; 5]).is_err());
 }
+
+#[test]
+fn gpu_a_batched_swiglu_is_silu_gate_times_up() {
+    let Some(mut rt) = runtime() else { return };
+    let n = 300;
+    let g: Vec<f32> = (0..n).map(|i| (i as f32 - 150.0) * 0.07).collect();
+    let u: Vec<f32> = (0..n).map(|i| ((i * 7 % 31) as f32 - 15.0) * 0.3).collect();
+    let (gb, ub, out) = (
+        rt.alloc_f32(n).unwrap(),
+        rt.alloc_f32(n).unwrap(),
+        rt.alloc_f32(n).unwrap(),
+    );
+    rt.write_f32(gb, 0, &g).unwrap();
+    rt.write_f32(ub, 0, &u).unwrap();
+    let mut batch = Batch::new();
+    batch.swiglu(gb, ub, out, n);
+    rt.submit_batch(&batch).unwrap();
+    let got = rt.read_f32(out, 0, n).unwrap();
+    for i in 0..n {
+        let want = g[i] / (1.0 + (-g[i]).exp()) * u[i];
+        assert!(
+            (got[i] - want).abs() <= 1e-5 * want.abs().max(1.0),
+            "{i}: {} vs {want}",
+            got[i]
+        );
+    }
+}
+
+#[test]
+fn gpu_scratch_is_reused_until_it_is_too_small() {
+    let Some(mut rt) = runtime() else { return };
+    let a = rt.scratch("a", 0, 100).unwrap();
+    assert_eq!(rt.scratch("a", 0, 100).unwrap(), a);
+    assert_eq!(rt.scratch("a", 0, 128).unwrap(), a, "100 rounds up to 128");
+    assert_ne!(rt.scratch("a", 1, 100).unwrap(), a, "another index");
+    assert_ne!(rt.scratch("b", 0, 100).unwrap(), a, "another name");
+    let grown = rt.scratch("a", 0, 129).unwrap();
+    assert_ne!(grown, a);
+    assert!(rt.capacity_f32(grown) >= 129);
+    assert!(rt.write_f32(grown, 0, &[1.0; 129]).is_ok());
+}
+
+#[test]
+fn gpu_a_constant_is_uploaded_once_and_again_when_its_bytes_change() {
+    let Some(mut rt) = runtime() else { return };
+    let mut data = vec![1.0f32, 2.0, 3.0, 4.0];
+    let first = rt.constant_f32(&data).unwrap();
+    assert_eq!(rt.constant_f32(&data).unwrap(), first);
+    assert_eq!(rt.read_f32(first, 0, 4).unwrap(), data);
+    // The same address with other bytes is another constant.
+    data[2] = -3.0;
+    let second = rt.constant_f32(&data).unwrap();
+    assert_eq!(rt.read_f32(second, 0, 4).unwrap(), data);
+}
+
+#[test]
+fn gpu_a_queued_free_reaches_only_the_runtime_that_owns_the_buffer() {
+    let (Some(mut a), Some(mut b)) = (runtime(), runtime()) else {
+        return;
+    };
+    assert_ne!(a.id(), b.id());
+    // The same index in both runtimes.
+    let (in_a, in_b) = (a.alloc_f32(8).unwrap(), b.alloc_f32(8).unwrap());
+    assert_eq!(in_a, in_b);
+    b.write_f32(in_b, 0, &[7.0; 8]).unwrap();
+    free_later(a.id(), in_a);
+    // `b` drains the queue and must leave `a`'s entry on it.
+    let _ = b.submit_batch(&Batch::new());
+    assert_eq!(b.read_f32(in_b, 0, 8).unwrap(), [7.0; 8]);
+    assert!(a.write_f32(in_a, 0, &[1.0; 8]).is_ok(), "not freed yet");
+    // `a` frees it at its own next submission.
+    let _ = a.submit_batch(&Batch::new());
+    let freed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.read_f32(in_a, 0, 8)));
+    assert!(freed.is_err(), "a's buffer was not freed by a's submission");
+}

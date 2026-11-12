@@ -76,15 +76,24 @@ and the staging-buffer upload. That covers a Q4_K_M or Q5_K_M model's
 matvecs: Llama-3.2-1B Q4_K_M decodes with them on Vulkan to the CPU's
 own greedy tokens. Weights are uploaded once and stay resident, and
 pipelines are built once. It reports no GEMM for any kind, so a
-prefill lands on the host. Q/K/V go to the device as one submission,
-and a dense SwiGLU FFN as another (gate and up, the SwiGLU, and down,
-with the intermediate left on the device). It is **opt-in**
-(`--device vulkan` or `FRINK_VULKAN=1`; unset is off) because the host still runs the norms,
-RoPE and attention between submissions, so a token pays about three
-queue round trips per layer. Before the fused FFN, at four, that decode
-ran at 30 tok/s against the CPU's 113 on the same machine (one laptop run,
-not a benchmark). Running a whole layer on the device is the next step
-(#409). It exists to give every AMD and Intel GPU a
+prefill lands on the host. A decode token of a plain llama-family
+dense model runs every layer in ONE submission, or one per 26 layers
+on a deeper model (the decode stack:
+norm, Q/K/V, RoPE, an f16 KV mirror, attention, `wo`, residual, norm,
+SwiGLU FFN, residual), with each layer's K and V rows returned to the
+host cache, which stays the authority. A layer the stack does not
+serve (QKV bias, QK-norm, post-norms, a window, a softcap, RoPE
+`mscale`, routed experts, GeGLU, or any layer under `--ctk f32`,
+since the device KV is f16) runs on the host with its matvecs
+offloaded: Q/K/V as one submission and a dense SwiGLU FFN as another.
+The stack is held to the CPU and to llama.cpp's decode goldens over
+every graph fixture in CI on lavapipe
+(`decode_step_graphs::vulkan_decode_matches_cpu_and_llama_cpp`), and
+`frink parity` is MATCH with it on Llama-3.2-3B Q4_K_M at a 300-token
+prompt. It is still **opt-in** (`--device vulkan` or `FRINK_VULKAN=1`; unset is off) until
+it is measured against the CPU on rented hardware (ADR 0006); the
+last laptop run, before the stack, was 30 tok/s against the CPU's 113.
+(#409) It exists to give every AMD and Intel GPU a
 path, including the ones ROCm does not support. `docs/plans/archive/vulkan-beachhead-verdict.md` has the
 sizing: a full Vulkan backend is 15 to 25k lines.
 

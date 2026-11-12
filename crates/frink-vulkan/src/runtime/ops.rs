@@ -14,7 +14,56 @@
 
 use super::{grid, push_constants, push_words, Buf, Dispatch, MatvecJob, Runtime, MAX_DISPATCHES};
 use crate::device::VulkanError;
-use crate::shaders::{ElementwiseShader, ADD, ATTN_SCORES, ATTN_VALUES, KV_STORE, RMS_NORM, ROPE};
+use crate::shaders::{
+    ElementwiseShader, ADD, ATTN_SCORES, ATTN_VALUES, KV_STORE, RMS_NORM, ROPE, SWIGLU,
+};
+use frink_quant::fingerprint::WeightFingerprint;
+use std::sync::Mutex;
+
+/// Buffers dropped while the runtime may be locked, freed at the next
+/// [`Runtime::submit_batch`]. A KV mirror is dropped with its sequence's
+/// cache, which can happen on a thread that holds the runtime's lock, so
+/// its `Drop` queues the buffer here instead of locking.
+///
+/// Each entry names the runtime that allocated it ([`Runtime::id`]): a
+/// [`DeviceBuf`] is an index, and freeing it in another runtime would
+/// free an unrelated buffer.
+static PENDING_FREE: Mutex<Vec<(u64, DeviceBuf)>> = Mutex::new(Vec::new());
+
+/// Free `b`, which runtime `owner` allocated, at that runtime's next
+/// submission. Safe to call from a `Drop` on any thread.
+pub fn free_later(owner: u64, b: DeviceBuf) {
+    if let Ok(mut v) = PENDING_FREE.lock() {
+        v.push((owner, b));
+    }
+}
+
+pub(super) fn next_runtime_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A runtime is going away and frees all its buffers itself.
+pub(super) fn forget_pending(owner: u64) {
+    if let Ok(mut v) = PENDING_FREE.lock() {
+        v.retain(|(o, _)| *o != owner);
+    }
+}
+
+/// The buffers queued for runtime `owner`, taken off the queue.
+fn take_pending(owner: u64) -> Vec<DeviceBuf> {
+    let Ok(mut v) = PENDING_FREE.lock() else {
+        return Vec::new();
+    };
+    let mut mine = Vec::new();
+    v.retain(|(o, b)| {
+        if *o == owner {
+            mine.push(*b);
+        }
+        *o != owner
+    });
+    mine
+}
 use ash::vk;
 
 /// A buffer the runtime allocated with [`Runtime::alloc_f32`], by index.
@@ -101,6 +150,16 @@ impl<'w> Batch<'w> {
             views: [(w, 0, n), (x, 0, n * rows), (out, 0, n * rows)],
             push: words(&[n as u32, rows as u32, eps.to_bits()]),
             grid: grid(rows),
+        });
+    }
+
+    /// `h = silu(g) * u` over `n` values (the SwiGLU combine).
+    pub fn swiglu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize) {
+        self.ops.push(Op::Shader {
+            shader: SWIGLU,
+            views: [(g, 0, n), (u, 0, n), (out, 0, n)],
+            push: words(&[n as u32]),
+            grid: per_value(n),
         });
     }
 
@@ -215,12 +274,108 @@ impl Runtime {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
         super::write_padded(&buf, &[]);
-        self.bufs.push(buf);
+        self.bufs.push(Some(buf));
         Ok(DeviceBuf(self.bufs.len() - 1))
     }
 
     fn buf(&self, b: DeviceBuf) -> &Buf {
-        &self.bufs[b.0]
+        self.bufs[b.0]
+            .as_ref()
+            .expect("a DeviceBuf used after it was freed")
+    }
+
+    /// This runtime's id, the owner [`free_later`] takes.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The f32 capacity of `b`.
+    pub fn capacity_f32(&self, b: DeviceBuf) -> usize {
+        self.buf(b).size / 4
+    }
+
+    /// A buffer of at least `n` f32 values kept under `(name, index)`
+    /// and reused by every later call: a decode token's activations
+    /// allocate nothing. Grown (and its contents lost) when too small.
+    pub fn scratch(
+        &mut self,
+        name: &'static str,
+        index: usize,
+        n: usize,
+    ) -> Result<DeviceBuf, VulkanError> {
+        if let Some(&b) = self.scratch.get(&(name, index)) {
+            if self.capacity_f32(b) >= n {
+                return Ok(b);
+            }
+            self.free_now(b);
+        }
+        let b = self.alloc_f32(n.next_power_of_two())?;
+        self.scratch.insert((name, index), b);
+        Ok(b)
+    }
+
+    /// `data` on the device, uploaded on first use and served by address
+    /// after, checked against its fingerprint on every hit as resident
+    /// weights are. For model constants such as norm weights.
+    pub fn constant_f32(&mut self, data: &[f32]) -> Result<DeviceBuf, VulkanError> {
+        let key = (data.as_ptr() as usize, data.len());
+        // SAFETY: an f32 slice is plain bytes, 4 per value, alive for
+        // this call.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4) };
+        let fp = WeightFingerprint::of(bytes);
+        if let Some((b, seen)) = self.constants.get(&key) {
+            let b = *b;
+            if *seen == fp {
+                return Ok(b);
+            }
+            self.free_now(b);
+        }
+        let b = self.alloc_f32(data.len())?;
+        self.write_f32(b, 0, data)?;
+        self.constants.insert(key, (b, fp));
+        Ok(b)
+    }
+
+    /// Free `b` now. Every submission has been waited on, so it is idle.
+    fn free_now(&mut self, b: DeviceBuf) {
+        if let Some(buf) = self.bufs.get_mut(b.0).and_then(Option::take) {
+            // SAFETY: every submission is waited on before its call
+            // returns, so no command buffer references `buf`.
+            unsafe { super::free(&self.ctx.device, buf) };
+        }
+    }
+
+    /// Write raw u32 words (f16 pairs) at word offset `at`.
+    pub fn write_u32(&mut self, b: DeviceBuf, at: usize, data: &[u32]) -> Result<(), VulkanError> {
+        let buf = self.buf(b);
+        if (at + data.len()) * 4 > buf.size {
+            return Err(VulkanError::Shape(format!(
+                "write of {} words at {at} into a {}-byte buffer",
+                data.len(),
+                buf.size
+            )));
+        }
+        let ptr = buf.mapped.expect("host-visible");
+        // SAFETY: bounds checked above; the device is idle between
+        // submissions; `data` is a distinct host allocation.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr().cast::<u8>(),
+                ptr.add(at * 4),
+                data.len() * 4,
+            )
+        };
+        Ok(())
+    }
+
+    /// Raw u32 words from word offset `at`.
+    pub fn read_u32(&self, b: DeviceBuf, at: usize, n: usize) -> Result<Vec<u32>, VulkanError> {
+        Ok(self
+            .read_f32(b, at, n)?
+            .into_iter()
+            .map(f32::to_bits)
+            .collect())
     }
 
     /// Write `data` at f32 offset `at`. Between submissions only.
@@ -272,6 +427,9 @@ impl Runtime {
     /// Run every op of `batch` in order as ONE submission: one stage per
     /// op, a barrier between each, one wait.
     pub fn submit_batch(&mut self, batch: &Batch<'_>) -> Result<(), VulkanError> {
+        for b in take_pending(self.id) {
+            self.free_now(b);
+        }
         if batch.ops.is_empty() || batch.ops.len() > MAX_DISPATCHES {
             return Err(VulkanError::Shape(format!(
                 "{} ops in one submission (1..={MAX_DISPATCHES})",

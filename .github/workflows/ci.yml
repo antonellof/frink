@@ -100,6 +100,12 @@ jobs:
       - run: cargo test -p frink-core --features vulkan vulkan -- --test-threads 1 --nocapture
         env:
           FRINK_VULKAN: "1"
+      # The decode stack against the CPU and llama.cpp's decode goldens,
+      # every graph fixture, 32 greedy steps (decode_step_graphs). Release:
+      # the host side of 200 fixtures in debug is most of the run.
+      - run: cargo test --release -p frink-models --features vulkan --test decode_step_graphs -- --ignored --exact vulkan_decode_matches_cpu_and_llama_cpp --nocapture
+        env:
+          FRINK_VULKAN: "1"
 
   # CONTRIBUTING.md: the cuda feature must keep compiling without a GPU
   # or CUDA toolkit present through the full CLI/server dependency chain.

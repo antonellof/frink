@@ -113,10 +113,18 @@ pub struct Runtime {
     x: Option<Buf>,
     y: Option<Buf>,
     weights: HashMap<(usize, usize), ResidentWeight>,
-    /// Buffers handed out by [`Runtime::alloc_f32`], freed in `Drop`.
-    bufs: Vec<Buf>,
+    /// Buffers handed out by [`Runtime::alloc_f32`]; `None` once freed.
+    /// Freed in `Drop`.
+    bufs: Vec<Option<Buf>>,
+    /// Grow-only buffers by name ([`Runtime::scratch`]).
+    scratch: HashMap<(&'static str, usize), ops::DeviceBuf>,
+    /// Host f32 slices uploaded once ([`Runtime::constant_f32`]).
+    constants: HashMap<(usize, usize), (ops::DeviceBuf, WeightFingerprint)>,
     staging_only: bool,
     submissions: u64,
+    /// Unique per runtime: a [`ops::DeviceBuf`] is an index into this
+    /// runtime's buffers and means nothing to another one.
+    id: u64,
     ctx: Context,
 }
 
@@ -175,8 +183,11 @@ impl Runtime {
             y: None,
             weights: HashMap::new(),
             bufs: Vec::new(),
+            scratch: HashMap::new(),
+            constants: HashMap::new(),
             staging_only: false,
             submissions: 0,
+            id: ops::next_runtime_id(),
             ctx,
         };
         let device = &rt.ctx.device;
@@ -757,7 +768,8 @@ impl Drop for Runtime {
             for (_, w) in self.weights.drain() {
                 free(device, w.buf);
             }
-            for b in self.bufs.drain(..) {
+            ops::forget_pending(self.id);
+            for b in self.bufs.drain(..).flatten() {
                 free(device, b);
             }
             for b in [self.x.take(), self.y.take()].into_iter().flatten() {

@@ -474,21 +474,7 @@ fn decode_equals_prefill_over_the_generated_sequence() {
 #[test]
 #[ignore = "needs Apple Metal GPU"]
 fn metal_decode_matches_cpu_and_llama_cpp() {
-    if let Ok(name) = std::env::var("FRINK_DECODE_STEP_CHILD") {
-        // The CPU child: print one body's rows and stop.
-        common::pin_backend(common::Backend::Cpu);
-        let d = match common::try_load_graph_fixture(&name) {
-            Ok(d) => d,
-            Err(why) => {
-                println!("FRINK-ROWS refused {why}");
-                return;
-            }
-        };
-        let rows = prefill_then_row(&d, &common::GRAPH_PROMPT);
-        for row in rows {
-            let vals: Vec<String> = row.iter().map(|v| format!("{v:e}")).collect();
-            println!("FRINK-ROWS logits {}", vals.join(" "));
-        }
+    if cpu_child() {
         return;
     }
     #[cfg(not(feature = "metal"))]
@@ -496,6 +482,61 @@ fn metal_decode_matches_cpu_and_llama_cpp() {
     #[cfg(feature = "metal")]
     metal::run();
 }
+
+/// The CPU child of a device gate: when this process was spawned for
+/// one fixture, print that fixture's host rows and answer `true`.
+fn cpu_child() -> bool {
+    let Ok(name) = std::env::var("FRINK_DECODE_STEP_CHILD") else {
+        return false;
+    };
+    common::pin_backend(common::Backend::Cpu);
+    let mut d = match common::try_load_graph_fixture(&name) {
+        Ok(d) => d,
+        Err(why) => {
+            println!("FRINK-ROWS refused {why}");
+            return true;
+        }
+    };
+    // The Vulkan gate compares f16 KV with f16 KV (`device_gate`).
+    if std::env::var("FRINK_DECODE_STEP_KV").as_deref() == Ok("f16") {
+        d.config.kv_dtype = frink_core::kv_store::KvDtype::F16;
+    }
+    let rows = prefill_then_row(&d, &common::GRAPH_PROMPT);
+    for row in rows {
+        let vals: Vec<String> = row.iter().map(|v| format!("{v:e}")).collect();
+        println!("FRINK-ROWS logits {}", vals.join(" "));
+    }
+    true
+}
+
+#[cfg(any(feature = "metal", feature = "vulkan"))]
+#[path = "decode_step_graphs/device_gate.rs"]
+mod device_gate;
+
+/// The Vulkan decode gate: every graph fixture, 32 greedy steps on
+/// Vulkan against the CPU child and against llama.cpp's decode goldens,
+/// by the Metal gate's rules (`device_gate`). It needs a Vulkan device,
+/// and with none it skips through `frink_vulkan::skipped`, which CI's
+/// lavapipe job turns red. It pins its process to Vulkan, so it is
+/// ignored in a plain run, where the other tests pin the CPU, and CI's
+/// lavapipe job runs it alone:
+///
+/// `FRINK_VULKAN=1 FRINK_REQUIRE_VULKAN=1 cargo test --release -p frink-models --features vulkan --test decode_step_graphs -- --ignored --exact vulkan_decode_matches_cpu_and_llama_cpp --nocapture`
+#[test]
+#[ignore = "pins the process to Vulkan; run alone with --ignored --exact"]
+fn vulkan_decode_matches_cpu_and_llama_cpp() {
+    if cpu_child() {
+        return;
+    }
+    #[cfg(not(feature = "vulkan"))]
+    eprintln!("skip: built without --features vulkan");
+    #[cfg(feature = "vulkan")]
+    vulkan::run();
+}
+
+#[cfg(feature = "vulkan")]
+#[path = "decode_step_graphs/vulkan.rs"]
+mod vulkan;
 
 #[cfg(feature = "metal")]
 mod metal {
@@ -577,78 +618,6 @@ mod metal {
         "step35_noclamp",
     ];
 
-    /// The CPU's rows for `name`, or `None` for a fixture the loader
-    /// refuses (it never decodes, on any backend).
-    fn cpu_rows_from_child(name: &str) -> Option<Vec<Vec<f32>>> {
-        let exe = std::env::current_exe().expect("test binary path");
-        let out = std::process::Command::new(exe)
-            .args([
-                "--ignored",
-                "--exact",
-                "--nocapture",
-                "metal_decode_matches_cpu_and_llama_cpp",
-            ])
-            .env("FRINK_DECODE_STEP_CHILD", name)
-            .env("FRINK_GOLDEN_BACKEND", "cpu")
-            .env("FRINK_METAL", "0")
-            .env("FRINK_METAL_ATTN", "0")
-            .output()
-            .expect("spawning the CPU child");
-        assert!(
-            out.status.success(),
-            "{name}: CPU child failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if stdout.lines().any(|l| l.starts_with("FRINK-ROWS refused ")) {
-            return None;
-        }
-        Some(
-            stdout
-                .lines()
-                .filter_map(|l| l.strip_prefix("FRINK-ROWS logits "))
-                .map(|l| l.split_whitespace().map(|w| w.parse().unwrap()).collect())
-                .collect(),
-        )
-    }
-
-    /// How one fixture's Metal decode compared with its CPU decode.
-    struct Agreement {
-        /// Worst |Metal - CPU| over the steps where both decoded the
-        /// same sequence.
-        worst: f32,
-        /// Steps compared before the sequences parted (or all of them).
-        steps: usize,
-        /// `Some(lead)` when the tokens parted: the CPU's top-1 lead over
-        /// the token Metal picked at that step.
-        parted: Option<f32>,
-    }
-
-    fn agreement(gpu: &[Vec<f32>], cpu: &[Vec<f32>]) -> Agreement {
-        let mut worst = 0f32;
-        for (i, (g, c)) in gpu.iter().zip(cpu).enumerate() {
-            let delta = common::worst_vs(g, c);
-            worst = if delta.is_nan() {
-                f32::NAN
-            } else {
-                worst.max(delta)
-            };
-            let (picked, want) = (argmax(g), argmax(c));
-            if picked != want {
-                return Agreement {
-                    worst,
-                    steps: i + 1,
-                    parted: Some(c[want] - c[picked]),
-                };
-            }
-        }
-        Agreement {
-            worst,
-            steps: gpu.len(),
-            parted: None,
-        }
-    }
-
     pub fn run() {
         if frink_metal::gpu::probe().is_none() {
             eprintln!("skip: no Metal GPU detected");
@@ -663,7 +632,11 @@ mod metal {
         let mut on_host = Vec::new();
         let mut spread = Vec::new();
         for name in common::graph_fixture_names() {
-            let Some(cpu) = cpu_rows_from_child(&name) else {
+            let Some(cpu) = device_gate::cpu_rows_from_child(
+                &name,
+                "metal_decode_matches_cpu_and_llama_cpp",
+                "f32",
+            ) else {
                 refused.push(name);
                 continue;
             };
@@ -692,7 +665,7 @@ mod metal {
                 on_host.push(name);
                 continue;
             }
-            let a = agreement(&gpu, &cpu);
+            let a = device_gate::agreement(&gpu, &cpu);
             let vs_llama = GOLDENS.iter().find(|(g, _)| *g == name).map(|_| {
                 let golden = read_golden(&name);
                 (

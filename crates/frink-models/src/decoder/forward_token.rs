@@ -694,6 +694,23 @@ impl Decoder {
                         hidden = self.embed_token(token_id, pos);
                     }
                 }
+                // A run of dense layers in one Vulkan submission, the
+                // residual on the device across them (#409). It declines
+                // before touching any cache, and the body below then runs
+                // the layer.
+                #[cfg(feature = "vulkan")]
+                {
+                    if hidden.is_empty() {
+                        hidden = self.embed_token(token_id, pos);
+                    }
+                    if let Some((h_out, run_len)) =
+                        self.try_vulkan_dense_stack(l, &hidden, pos, kv_caches)
+                    {
+                        hidden = h_out;
+                        fused_through = l + run_len;
+                        continue;
+                    }
+                }
                 let cache = &mut kv_caches[l];
                 let layer = self.layer_for(l);
                 // --- attention block ---

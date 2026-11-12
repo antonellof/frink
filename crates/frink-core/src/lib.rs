@@ -71,6 +71,8 @@ pub mod summary_stats;
 pub mod tensor;
 pub mod threads;
 pub mod vexp;
+#[cfg(feature = "vulkan")]
+pub mod vulkan_kv;
 pub mod weight_matrix;
 
 pub use attention::{
