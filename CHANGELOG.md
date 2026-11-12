@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.62.0] - 2026-11-12
+
 ### Added
 
 - **The Vulkan stack serves QKV bias and QK-norm** (#409). A bias is
@@ -134,6 +136,41 @@ are the ones worth reading twice.
   `frink-core`'s `vulkan_ops_seam` tests. No model uses them yet; the
   decoder wiring is the next step.
 
+- **llama-server's `/props`, `GET /slots` and `/infill`, and slot
+  erase.** A client written for llama-server no longer gets a 404 on
+  them (#534).
+  - `GET /props` answers in llama.cpp's shape with every field frink can
+    state: `/completion`'s defaults, the context ceiling, the `-np`
+    slots, the served name, path and file type, the template and its
+    BOS and EOS, and the endpoint switches. Asleep it answers from the
+    snapshot the sleep took. A field frink has no value for (`seed`,
+    the knobs of samplers it does not have, llama.cpp's template caps)
+    is left out, and `docs/API.md` lists each. `POST /props` is
+    llama.cpp's 501 without `--props`.
+  - `GET /slots` lists the continuous batcher's `-np` seats, the busy
+    ones first, with llama.cpp's four always-present fields, and
+    honours `?fail_on_no_slot`. `--slots` / `--no-slots` and
+    `LLAMA_ARG_ENDPOINT_SLOTS` gate it as upstream. A deployment
+    without seats says so by name.
+  - `POST /infill` reads the vocabulary's FIM tokens as llama.cpp does
+    (the GGUF keys, then the token texts), refuses a model without them
+    in llama.cpp's words, validates the body with its messages,
+    assembles the prompt as `format_prompt_infill` does (the repo-level
+    `input_extra` pattern, the `-b` budgets, `--spm-infill`) and serves
+    it through `/completion`'s path, prefilling the assembled ids as
+    they are.
+  - `POST /slots/{id}?action=erase` empties one slot and answers
+    `n_erased`, dropping the prefix cache entry the slot's save or
+    restore stored unless another slot holds the same prompt.
+
+- **`frink parity --dump-tensors DIR`.** Both engines write the
+  prompt's per-layer intermediates under llama.cpp's tensor names (the
+  dumper through llama.cpp's own eval callback,
+  `LLAMA_LOGITS_DUMP_TENSORS`), and `parity` prints each tensor's
+  relative L2 distance over all rows, for the worst row and for the
+  output row. It says at which layer and op two engines part, which a
+  first-token KL cannot.
+
 ### Changed
 
 - **A dense SwiGLU FFN is one Vulkan submission** (#409). Gate and up,
@@ -144,6 +181,38 @@ are the ones worth reading twice.
   layer. A layer's decode drops from four queue round trips to three.
   On Llama-3.2-1B Q4_K_M and Q8_0, `frink parity` and the greedy tokens
   are unchanged with `FRINK_VULKAN=1`.
+
+- **CPU activation quantization and the RMS norm are ggml's, bit for
+  bit (#476).** The `Q8_K` quantizer in front of every K-quant integer
+  dot now takes ggml's `iscale = 127/amax`, `d = 1/iscale` and rounds
+  half to even; the `Q8_0` one (Q8_0, Q4_0, IQ4_NL, MXFP4) stores its
+  scale as f16 and follows the host ISA's `quantize_row_q8_0` (NEON
+  `1/d`, AVX `127/amax`, both half to even). The RMS norm sums its
+  squares in order in f64, as `ggml_compute_forward_rms_norm_f32` does,
+  where it summed in f32 lanes. Fed llama.cpp's own dumped inputs,
+  frink's Q8_0 and MXFP4-model matmuls were up to 2e-3 and 3e-3 off
+  libllama's per op; they are now identical, and on Llama-3.2-1B Q8_0
+  and gpt-oss-20b everything before layer 0's attention is
+  bit-identical. This changes tokens on every CPU int-dot path.
+  gpt-oss-20b's first-token KL against llama.cpp on a 64-token prompt
+  goes from 3.4e-3 to 4.6e-4, below the 3.4e-3 between two llama.cpp
+  builds.
+
+- **The CUDA decode matvecs run as llama.cpp's do, by default.** The
+  dp4a matvecs of 0.61.0 (the activation quantized once to q8_1, Q4_K,
+  Q6_K, Q8_0 and MXFP4 rows dotted against it with `dp4a`, llama.cpp's
+  `mmvq`) are now what CUDA decode runs, which moves the decode default
+  to llama.cpp CUDA's rounding (ADR 0009). On an A100 they are
+  token-identical to the CPU under `frink verify` on Llama-3.1-8B
+  Q4_K_M and Q8_0, gpt-oss-20b and Qwen3-30B-A3B, and `tg128` goes from
+  83.2 to 128.4 tokens/s on Llama-3.1-8B Q4_K_M (llama.cpp at the pin:
+  161.3), 83.7 to 100.7 on its Q8_0, 104.1 to 146.5 on gpt-oss-20b and
+  83.7 to 90.1 on Qwen3-30B-A3B. `FRINK_CUDA_MATVEC=wide` (or `narrow`)
+  keeps every kind on the f32 kernels for an A/B; the other kinds stay
+  on them either way. The decode tests' references now dot what the
+  matvec reads, the activation's q8_1 rounding by default and its f32
+  values under `wide` and `narrow`, by the same once-read switch
+  (#133).
 
 ### Fixed
 
@@ -178,79 +247,6 @@ are the ones worth reading twice.
   The table, the gap and the receipt (schema 4, `frink_stat`) now take
   the mean and the sample stddev, and `--render` takes the mean of every
   receipt's samples, so the published rows moved by under 2% (#481).
-
-### Added
-
-- **llama-server's `/props`, `GET /slots` and `/infill`, and slot
-  erase.** A client written for llama-server no longer gets a 404 on
-  them (#534).
-  - `GET /props` answers in llama.cpp's shape with every field frink can
-    state: `/completion`'s defaults, the context ceiling, the `-np`
-    slots, the served name, path and file type, the template and its
-    BOS and EOS, and the endpoint switches. Asleep it answers from the
-    snapshot the sleep took. A field frink has no value for (`seed`,
-    the knobs of samplers it does not have, llama.cpp's template caps)
-    is left out, and `docs/API.md` lists each. `POST /props` is
-    llama.cpp's 501 without `--props`.
-  - `GET /slots` lists the continuous batcher's `-np` seats, the busy
-    ones first, with llama.cpp's four always-present fields, and
-    honours `?fail_on_no_slot`. `--slots` / `--no-slots` and
-    `LLAMA_ARG_ENDPOINT_SLOTS` gate it as upstream. A deployment
-    without seats says so by name.
-  - `POST /infill` reads the vocabulary's FIM tokens as llama.cpp does
-    (the GGUF keys, then the token texts), refuses a model without them
-    in llama.cpp's words, validates the body with its messages,
-    assembles the prompt as `format_prompt_infill` does (the repo-level
-    `input_extra` pattern, the `-b` budgets, `--spm-infill`) and serves
-    it through `/completion`'s path, prefilling the assembled ids as
-    they are.
-  - `POST /slots/{id}?action=erase` empties one slot and answers
-    `n_erased`, dropping the prefix cache entry the slot's save or
-    restore stored unless another slot holds the same prompt.
-
-### Changed
-
-- **CPU activation quantization and the RMS norm are ggml's, bit for
-  bit (#476).** The `Q8_K` quantizer in front of every K-quant integer
-  dot now takes ggml's `iscale = 127/amax`, `d = 1/iscale` and rounds
-  half to even; the `Q8_0` one (Q8_0, Q4_0, IQ4_NL, MXFP4) stores its
-  scale as f16 and follows the host ISA's `quantize_row_q8_0` (NEON
-  `1/d`, AVX `127/amax`, both half to even). The RMS norm sums its
-  squares in order in f64, as `ggml_compute_forward_rms_norm_f32` does,
-  where it summed in f32 lanes. Fed llama.cpp's own dumped inputs,
-  frink's Q8_0 and MXFP4-model matmuls were up to 2e-3 and 3e-3 off
-  libllama's per op; they are now identical, and on Llama-3.2-1B Q8_0
-  and gpt-oss-20b everything before layer 0's attention is
-  bit-identical. This changes tokens on every CPU int-dot path.
-  gpt-oss-20b's first-token KL against llama.cpp on a 64-token prompt
-  goes from 3.4e-3 to 4.6e-4, below the 3.4e-3 between two llama.cpp
-  builds.
-
-- **The CUDA decode matvecs run as llama.cpp's do, by default.** The
-  dp4a matvecs of 0.61.0 (the activation quantized once to q8_1, Q4_K,
-  Q6_K, Q8_0 and MXFP4 rows dotted against it with `dp4a`, llama.cpp's
-  `mmvq`) are now what CUDA decode runs, which moves the decode default
-  to llama.cpp CUDA's rounding (ADR 0009). On an A100 they are
-  token-identical to the CPU under `frink verify` on Llama-3.1-8B
-  Q4_K_M and Q8_0, gpt-oss-20b and Qwen3-30B-A3B, and `tg128` goes from
-  83.2 to 128.4 tokens/s on Llama-3.1-8B Q4_K_M (llama.cpp at the pin:
-  161.3), 83.7 to 100.7 on its Q8_0, 104.1 to 146.5 on gpt-oss-20b and
-  83.7 to 90.1 on Qwen3-30B-A3B. `FRINK_CUDA_MATVEC=wide` (or `narrow`)
-  keeps every kind on the f32 kernels for an A/B; the other kinds stay
-  on them either way. The decode tests' references now dot what the
-  matvec reads, the activation's q8_1 rounding by default and its f32
-  values under `wide` and `narrow`, by the same once-read switch
-  (#133).
-
-### Added
-
-- **`frink parity --dump-tensors DIR`.** Both engines write the
-  prompt's per-layer intermediates under llama.cpp's tensor names (the
-  dumper through llama.cpp's own eval callback,
-  `LLAMA_LOGITS_DUMP_TENSORS`), and `parity` prints each tensor's
-  relative L2 distance over all rows, for the worst row and for the
-  output row. It says at which layer and op two engines part, which a
-  first-token KL cannot.
 
 ## [0.61.0] - 2026-11-09
 
