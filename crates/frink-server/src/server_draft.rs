@@ -410,7 +410,7 @@ mod tests {
             .err()
             .expect("refused")
         );
-        assert!(refused.contains("--no-cont-batching"), "{refused}");
+        assert!(refused.contains("--cont-batching"), "{refused}");
 
         // A target of another width is refused, at startup and on a swap.
         let other = target();
