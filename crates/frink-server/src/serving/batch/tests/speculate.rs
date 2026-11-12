@@ -155,3 +155,90 @@ fn a_batched_row_reports_its_speculation_only_when_it_drafted() {
     assert_eq!(usage.draft_tokens, None, "{usage:?}");
     assert_eq!(ids.len(), 24);
 }
+
+fn fixture(name: &str) -> String {
+    format!(
+        "{}/../frink-models/tests/fixtures/{name}_tiny.gguf",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// A DFlash draft in the continuous batch: each row taps the target's
+/// layer inputs on its prompt and on every verify forward, and drafts
+/// from the context before its newest token. The answers are each
+/// request's alone, greedy and seeded, on the pair `dflash_graphs.rs`
+/// holds to libllama.
+#[test]
+fn a_dflash_draft_in_the_batch_answers_as_each_request_alone() {
+    let path = fixture("dflash_target");
+    let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+    let mut cfg = frink_models::ModelConfig::from_gguf(&file).expect("fixture config");
+    cfg.kv_dtype = frink_core::kv_store::KvDtype::F32;
+    let decoder = Arc::new(Decoder::from_gguf(&path, cfg).expect("fixture loads"));
+    let draft = crate::server_draft::configure(
+        Some(fixture("dflash2_draft")),
+        Some("4".into()),
+        None,
+        Some(&decoder),
+        crate::server_draft::Deployment::default(),
+    )
+    .expect("loads")
+    .expect("configured");
+    assert!(matches!(draft.kind, DraftKind::DFlash(_)));
+
+    // `dflash_graphs.rs`'s ACCEPTING_PROMPT first: the random fixture
+    // draft is right on it at least once.
+    let jobs: Vec<(Vec<usize>, GenerationParams)> = vec![
+        (vec![21, 22, 11, 16, 47, 20], greedy_params(40, 7)),
+        (vec![3, 7, 11, 19, 23, 5], sampled_params(24, 11)),
+        (vec![9, 8, 9, 8, 9], greedy_params(30, 3)),
+    ];
+    let reference: Vec<Vec<usize>> = jobs
+        .iter()
+        .map(|(p, par)| sequential_ids(&decoder, p, par))
+        .collect();
+
+    let config = BatcherConfig {
+        prefill_chunk: 2,
+        ..BatcherConfig::default()
+    };
+    let ceiling = Arc::new(ContextCeiling::new(
+        config.max_context,
+        frink_models::KvShape::host(&decoder.config),
+    ));
+    let batcher = ContinuousBatcher::spawn_with_ceiling(
+        Arc::clone(&decoder),
+        identity_decode(),
+        config,
+        ceiling,
+        None,
+        Some(draft),
+    );
+    let barrier = Arc::new(Barrier::new(jobs.len()));
+    let threads: Vec<_> = jobs
+        .iter()
+        .cloned()
+        .map(|(prompt, par)| {
+            let batcher = batcher.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                batcher
+                    .generate(prompt, par, StopTokens::default())
+                    .expect("batch generate")
+            })
+        })
+        .collect();
+    let mut cut = false;
+    for (i, t) in threads.into_iter().enumerate() {
+        let (_, ids, _, usage) = t.join().unwrap();
+        assert_eq!(ids, reference[i], "request {i} changed by the DFlash draft");
+        let drafted = usage.draft_tokens.unwrap_or(0);
+        let accepted = usage.accepted_draft_tokens.unwrap_or(0);
+        cut |= accepted > 0 && drafted > accepted;
+    }
+    assert!(
+        cut,
+        "no request both accepted and rejected a DFlash draft, so this proves nothing"
+    );
+}

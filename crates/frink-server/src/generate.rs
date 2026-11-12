@@ -1877,7 +1877,7 @@ enum ServerDrafter<'t> {
     Model(Box<frink_models::DraftModelSpeculator>),
     /// A DFlash `--model-draft`, fed the target's layer inputs at every
     /// position the engine writes.
-    DFlash(Box<frink_models::dflash::DFlashDrafter<'t>>),
+    DFlash(Box<frink_models::dflash::DFlashDrafter<&'t Decoder>>),
 }
 
 struct ServerEngine<'a> {

@@ -16,6 +16,9 @@
 //! sampling included, is the answer without a drafter; a drafter only
 //! saves forwards.
 
+use std::sync::Arc;
+
+use frink_models::dflash::DFlashDrafter;
 use frink_models::speculative::{Drafter, PromptLookupSpeculator};
 use frink_models::{Decoder, DraftModelSpeculator};
 
@@ -34,20 +37,26 @@ pub(super) enum RowDrafter {
     Lookup(PromptLookupSpeculator),
     /// The server's `--model-draft`, with KV of this row's own.
     Model(Box<DraftModelSpeculator>, usize),
+    /// A DFlash `--model-draft`, fed the target's layer inputs at every
+    /// position the row writes: the prompt's at the prefill handover,
+    /// then every verify forward's.
+    DFlash(Box<DFlashDrafter<Arc<Decoder>>>),
 }
 
 impl RowDrafter {
     /// The drafter for a row, or `None` where the row must not draft:
     /// a grammar or `json_object` request (as on the private loop), a
-    /// recurrent target (whose batched state has no checkpoint), and a
-    /// draft this path does not serve yet (DFlash, #600).
+    /// recurrent target (whose batched state has no checkpoint).
     pub(super) fn for_row(
         draft: Option<&ServerDraft>,
-        decoder: &Decoder,
+        decoder: &Arc<Decoder>,
         params: &GenerationParams,
     ) -> Option<Self> {
         if params.grammar.is_some() || params.json_object || decoder.config.has_recurrent_layers() {
             return None;
+        }
+        if let Some(d) = draft.and_then(|d| d.dflash(Arc::clone(decoder))) {
+            return Some(RowDrafter::DFlash(Box::new(d)));
         }
         match draft {
             Some(d) => d
@@ -64,11 +73,45 @@ impl RowDrafter {
         match self {
             RowDrafter::Lookup(_) => DEFAULT_DRAFT_MAX,
             RowDrafter::Model(_, max) => *max,
+            RowDrafter::DFlash(d) => d.n_max(),
         }
     }
 
-    fn propose(&mut self, prompt: &[usize], generated: &[usize], max: usize) -> Vec<usize> {
+    /// The target layers whose inputs this drafter reads, for a DFlash
+    /// draft; `None` for every drafter that reads only tokens.
+    pub(super) fn target_layers(&self) -> Option<&[usize]> {
+        match self {
+            RowDrafter::DFlash(d) => Some(d.target_layers()),
+            RowDrafter::Lookup(_) | RowDrafter::Model(..) => None,
+        }
+    }
+
+    /// The prompt's layer inputs, from the tapped prefill.
+    pub(super) fn observe_prompt(&mut self, features: &[Vec<f32>]) {
+        if let RowDrafter::DFlash(d) = self {
+            d.observe_target(0, features);
+        }
+    }
+
+    /// `anchor_pos` is where the row's newest token goes: it is not fed
+    /// yet, and a DFlash draft reads the context before it, as
+    /// llama.cpp's loop drafts from `id_last` at `pos0`.
+    fn propose(
+        &mut self,
+        prompt: &[usize],
+        generated: &[usize],
+        anchor_pos: usize,
+        max: usize,
+    ) -> Vec<usize> {
         let mut block = match self {
+            RowDrafter::DFlash(d) => match generated.last() {
+                Some(&anchor) => d
+                    .draft_after(anchor, anchor_pos, max)
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .collect(),
+                None => Vec::new(),
+            },
             RowDrafter::Lookup(d) => d.propose_tokens(generated),
             // The draft model continues the whole sequence and rolls its
             // own KV back to it each round.
@@ -112,7 +155,23 @@ pub(super) fn draft_block(slot: &mut Slot, decoder: &Decoder) -> Vec<usize> {
     if max == 0 {
         return Vec::new();
     }
-    drafter.propose(&slot.prompt_ids, &slot.answer.generated_ids, max)
+    drafter.propose(&slot.prompt_ids, &slot.answer.generated_ids, slot.pos, max)
+}
+
+/// Hands a DFlash row's drafter the layer inputs of the rows this
+/// forward wrote at `pos`. A no-op for every other drafter.
+pub(super) fn observe_verify(slot: &mut Slot, pos: usize, features: &[Vec<f32>]) {
+    if let Some(RowDrafter::DFlash(d)) = slot.drafter.as_mut() {
+        d.observe_target(pos, features);
+    }
+}
+
+/// Once the row has settled, forgets the layer inputs of rows a
+/// rejection undid. A no-op for every other drafter.
+pub(super) fn forget_rejected(slot: &mut Slot) {
+    if let Some(RowDrafter::DFlash(d)) = slot.drafter.as_mut() {
+        d.rollback(slot.pos);
+    }
 }
 
 /// Settles a row after the forward that fed its newest token and

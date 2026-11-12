@@ -124,9 +124,9 @@ Each step is its own PR, CPU first, token parity before any backend work.
    and fed next tick so no token is drawn twice. Paged rows roll back by
    `PagedKvCache::truncate`; a finished or preempted row publishes only
    the rows it wrote. Recurrent targets do not draft in the batch yet
-   (no batched checkpoint). Left: a DFlash draft in the batch (tapped
-   batched prefill, per-row `observe_target`), refused by name until
-   then.
+   (no batched checkpoint). A DFlash draft drafts in the batch too: a
+   row taps the target on its prefill chunks and on every verify
+   forward, and drafts from the context before its newest token.
 
 Evidence for Phase 1: a synthetic draft fixture plus a libllama golden of the
 drafter's lattice for a fixed target-hidden input (extend the dumper in

@@ -83,10 +83,10 @@ impl ServerDraft {
     /// One request's DFlash drafter, empty until the prompt's features
     /// reach it. `None` for an autoregressive draft, or a target this
     /// draft was not checked against.
-    pub(crate) fn dflash<'t>(
+    pub(crate) fn dflash<T: std::ops::Deref<Target = Decoder>>(
         &self,
-        target: &'t Decoder,
-    ) -> Option<frink_models::dflash::DFlashDrafter<'t>> {
+        target: T,
+    ) -> Option<frink_models::dflash::DFlashDrafter<T>> {
         let DraftKind::DFlash(draft) = &self.kind else {
             return None;
         };
@@ -135,7 +135,6 @@ impl ServerDraft {
 /// `None` when no draft is configured. See [`configure`].
 pub(crate) fn from_env(
     target: &LoadedModel,
-    continuous_batching: bool,
     paged_kv: bool,
     prefix_cache: bool,
 ) -> anyhow::Result<Option<ServerDraft>> {
@@ -146,7 +145,6 @@ pub(crate) fn from_env(
         std::env::var(DRAFT_P_MIN_ENV).ok(),
         target,
         Deployment {
-            continuous_batching,
             paged_kv,
             prefix_cache,
         },
@@ -165,7 +163,6 @@ pub(crate) fn generic_decoder(loaded: &LoadedModel) -> Option<&Decoder> {
 /// The parts of the deployment a drafter can be refused for.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Deployment {
-    pub(crate) continuous_batching: bool,
     pub(crate) paged_kv: bool,
     pub(crate) prefix_cache: bool,
 }
@@ -194,9 +191,9 @@ pub(crate) fn check_swap(
 }
 
 /// Refuses, naming the conflict, every deployment that would accept
-/// the flag and not draft: continuous batching, the paged store, and a
-/// model that runs on a dedicated engine (`target` is `None`). Then
-/// loads and checks the drafter.
+/// the flag and not draft: a model that runs on a dedicated engine
+/// (`target` is `None`), and for a DFlash draft the paged store and the
+/// prefix cache. Then loads and checks the drafter.
 pub(crate) fn configure(
     path: Option<String>,
     max: Option<String>,
@@ -241,15 +238,7 @@ pub(crate) fn configure(
     let kind = if is_dflash {
         // A restored prefix brings K/V and no layer inputs, so the draft
         // would have nothing to read for the cached positions.
-        // The target's layer inputs are tapped on the private loop's
-        // forwards only.
-        if deployment.continuous_batching {
-            bail!(
-                "a DFlash --model-draft reads the target's layer inputs, which the continuous \
-                 batcher does not tap yet. On Metal it is on by default: add --no-cont-batching, \
-                 or use an autoregressive draft"
-            );
-        }
+        // The target's layer inputs are tapped on contiguous KV only.
         if deployment.paged_kv {
             bail!(
                 "a DFlash --model-draft reads the target's layer inputs, which the paged KV \
@@ -303,7 +292,6 @@ mod tests {
         max: Option<&str>,
         p_min: Option<&str>,
         target: Option<&Decoder>,
-        cb: bool,
         paged: bool,
     ) -> String {
         configure(
@@ -312,7 +300,6 @@ mod tests {
             p_min.map(str::to_string),
             target,
             Deployment {
-                continuous_batching: cb,
                 paged_kv: paged,
                 prefix_cache: false,
             },
@@ -334,7 +321,6 @@ mod tests {
             None,
             Some(&t),
             Deployment {
-                continuous_batching: true,
                 paged_kv: true,
                 prefix_cache: true
             }
@@ -342,13 +328,13 @@ mod tests {
         .unwrap()
         .is_none());
         // Continuous batching speculates: what fails is the missing file.
-        assert!(refusal(None, None, Some(&t), true, false).contains("/no/such/draft.gguf"));
+        assert!(refusal(None, None, Some(&t), false).contains("/no/such/draft.gguf"));
         // The paged store speculates: what fails is the missing file.
-        assert!(refusal(None, None, Some(&t), false, true).contains("/no/such/draft.gguf"));
-        assert!(refusal(None, None, None, false, false).contains("dedicated engine"));
-        assert!(refusal(Some("0"), None, Some(&t), false, false).contains("--draft-max"));
-        assert!(refusal(None, Some("1.5"), Some(&t), false, false).contains("--draft-p-min"));
-        assert!(refusal(None, None, Some(&t), false, false).contains("/no/such/draft.gguf"));
+        assert!(refusal(None, None, Some(&t), true).contains("/no/such/draft.gguf"));
+        assert!(refusal(None, None, None, false).contains("dedicated engine"));
+        assert!(refusal(Some("0"), None, Some(&t), false).contains("--draft-max"));
+        assert!(refusal(None, Some("1.5"), Some(&t), false).contains("--draft-p-min"));
+        assert!(refusal(None, None, Some(&t), false).contains("/no/such/draft.gguf"));
     }
 
     fn fixture(name: &str) -> String {
@@ -381,7 +367,6 @@ mod tests {
                 Deployment {
                     prefix_cache,
                     paged_kv,
-                    ..Deployment::default()
                 },
             )
         };
@@ -395,22 +380,16 @@ mod tests {
         assert!(refused.contains("FRINK_PREFIX_CACHE_ENTRIES"), "{refused}");
         let refused = format!("{:#}", configured(false, true).err().expect("refused"));
         assert!(refused.contains("FRINK_PAGED_KV_BLOCKS"), "{refused}");
-        let refused = format!(
-            "{:#}",
-            configure(
-                Some(fixture("dflash2_draft")),
-                None,
-                None,
-                Some(&t),
-                Deployment {
-                    continuous_batching: true,
-                    ..Deployment::default()
-                },
-            )
-            .err()
-            .expect("refused")
-        );
-        assert!(refused.contains("--no-cont-batching"), "{refused}");
+        // The continuous batch taps the target for it.
+        assert!(configure(
+            Some(fixture("dflash2_draft")),
+            None,
+            None,
+            Some(&t),
+            Deployment::default(),
+        )
+        .expect("loads")
+        .is_some());
 
         // A target of another width is refused, at startup and on a swap.
         let other = target();

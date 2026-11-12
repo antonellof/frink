@@ -1,5 +1,6 @@
 //! [`DFlashDrafter`]: a DFlash draft behind [`crate::speculative::Drafter`].
 
+use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::decoder::Decoder;
@@ -20,10 +21,15 @@ use super::selector::read_out;
 ///
 /// `Clone` copies the context, which is how `n` completions of one
 /// prompt each get a drafter that has seen it; the weights are shared.
+///
+/// `T` is how the target is held: a borrow (`&Decoder`) for a caller
+/// whose decoder outlives the drafter on its stack, or an
+/// `Arc<Decoder>` for one that keeps the drafter in a longer-lived
+/// structure, such as a row of the server's continuous batch.
 #[derive(Clone)]
-pub struct DFlashDrafter<'t> {
+pub struct DFlashDrafter<T: Deref<Target = Decoder>> {
     draft: Arc<DFlashDraft>,
-    target: &'t Decoder,
+    target: T,
     ctx: Vec<ContextKv>,
     /// Positions the context holds: `0..ctx_len`.
     ctx_len: usize,
@@ -35,19 +41,19 @@ pub struct DFlashDrafter<'t> {
     p_min: f32,
 }
 
-impl<'t> DFlashDrafter<'t> {
+impl<T: Deref<Target = Decoder>> DFlashDrafter<T> {
     /// Pairs `draft` with `target`, refusing a pair that does not fit
     /// (widths, vocabulary, the layers it reads). `n_max` is clamped to
     /// the trained block, as `common_speculative` clamps it
     /// (`speculative.cpp:1099-1105`).
     pub fn new(
         draft: impl Into<Arc<DFlashDraft>>,
-        target: &'t Decoder,
+        target: T,
         n_max: usize,
         p_min: f32,
     ) -> Result<Self, DFlashError> {
         let draft = draft.into();
-        draft.check_target(target)?;
+        draft.check_target(&target)?;
         let n_max = n_max.min(draft.config().max_draft());
         let layers = draft.config().n_layer;
         Ok(Self {
@@ -111,9 +117,9 @@ impl<'t> DFlashDrafter<'t> {
         if n_draft == 0 || self.gapped || anchor_pos == 0 || anchor_pos > self.ctx_len {
             return Vec::new();
         }
-        let out = self
-            .draft
-            .block_forward(self.target, anchor, n_draft + 1, anchor_pos, &self.ctx);
+        let out =
+            self.draft
+                .block_forward(&self.target, anchor, n_draft + 1, anchor_pos, &self.ctx);
         match &self.draft.selector {
             Some(sel) => sel.walk(&out, anchor, self.p_min),
             None => read_out(&out, self.p_min),
@@ -121,7 +127,7 @@ impl<'t> DFlashDrafter<'t> {
     }
 }
 
-impl Drafter for DFlashDrafter<'_> {
+impl<T: Deref<Target = Decoder>> Drafter for DFlashDrafter<T> {
     fn propose(&mut self, history: &[usize], _target_hidden: &[f32], max_len: usize) -> DraftBlock {
         let Some(&anchor) = history.last() else {
             return DraftBlock::default();

@@ -55,7 +55,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ("crates/frink-server/src/generate.rs", 415, "fn fork"),
     (
         "crates/frink-server/src/serving/batch/prefill.rs",
-        156,
+        178,
         "fn step_chunk",
     ),
     // Per-step token budget.

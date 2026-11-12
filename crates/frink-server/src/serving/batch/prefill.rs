@@ -41,6 +41,10 @@ pub struct PrefillState {
     tokens_processed: usize,
     logits: Vec<f32>,
     chunk_size: usize,
+    /// Layers whose inputs a DFlash draft reads, empty for every other
+    /// row; and those inputs at every position run so far.
+    taps: Vec<usize>,
+    features: Vec<Vec<f32>>,
 }
 
 impl PrefillState {
@@ -110,6 +114,8 @@ impl PrefillState {
             tokens,
             tokens_processed,
             logits: Vec::new(),
+            taps: Vec::new(),
+            features: Vec::new(),
             chunk_size,
         }
     }
@@ -129,6 +135,22 @@ impl PrefillState {
 
     pub fn is_done(&self) -> bool {
         self.tokens_remaining() == 0
+    }
+
+    /// Has every chunk from here on also return the inputs of `layers`
+    /// at each position, for a DFlash draft (`super::speculate`). Only
+    /// before the first chunk: a draft must see every prompt position.
+    /// Contiguous only; a DFlash draft is refused beside the paged
+    /// store.
+    pub(super) fn tap(&mut self, layers: &[usize]) {
+        debug_assert_eq!(self.tokens_processed, 0, "tapped after a chunk ran");
+        debug_assert!(matches!(self.kv, RowKv::Contiguous(_)));
+        self.taps = layers.to_vec();
+    }
+
+    /// The tapped layer inputs of every position run, handed over once.
+    pub(super) fn take_features(&mut self) -> Vec<Vec<f32>> {
+        std::mem::take(&mut self.features)
     }
 
     /// The ceiling this prompt was admitted under (`prefill_chunk`).
@@ -172,6 +194,14 @@ impl PrefillState {
             // `forward_token` leaves host rows length-advanced but zero-filled;
             // `sync_metal_attn_kv_to_host` cannot repair that once lengths
             // match. Same contract as `forward_prompt_batch(..., host_kv: true)`.
+            RowKv::Contiguous(caches) if !self.taps.is_empty() => {
+                let (logits, features) = self
+                    .decoder
+                    .forward_batch_last_with_taps(chunk, pos, caches, &self.taps, true)
+                    .expect("the draft's layers were checked against the target at startup");
+                self.features.extend(features);
+                logits
+            }
             RowKv::Contiguous(caches) => {
                 self.decoder.forward_batch_last_host_kv(chunk, pos, caches)
             }
@@ -225,6 +255,10 @@ pub(super) struct Prefill {
     /// decode. Two clocks handed over at this seam would be two things
     /// that must agree about when prefill ended.
     pub(super) answer: Answer,
+    /// What will draft this row's speculative blocks, built at its
+    /// first chunk so a DFlash draft can tap the prompt (`None` inside
+    /// means the row does not draft).
+    pub(super) drafter: Option<Option<super::speculate::RowDrafter>>,
 }
 
 impl Prefill {
@@ -237,6 +271,7 @@ impl Prefill {
             abort,
             blocks,
             mut answer,
+            drafter,
         } = self;
         let (kv, logits, pos, mut prompt_ids) = state.into_decode_start();
         // A resumed prefill ran the prompt AND what the row had already
@@ -269,7 +304,7 @@ impl Prefill {
             error: None,
             abort,
             blocks,
-            drafter: None,
+            drafter: drafter.flatten(),
             pending: None,
         }
     }
