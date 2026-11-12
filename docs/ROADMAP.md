@@ -183,8 +183,9 @@ frink's.
   decoder, and the image preprocessing to feed it. It is the largest
   single item on this list and the one llama.cpp also has, so it comes
   first.
-- **Speculative decoding over HTTP.** The engine half is built,
-  lossless and tested, but the server cannot reach it; see
+- **Speculative decoding with a draft model over HTTP.** Prompt-lookup
+  speculation ships on the server; a draft model, including a DFlash2
+  block drafter (#600), reaches only `frink run` so far; see
   [`plans/server-speculative-decoding.md`](plans/server-speculative-decoding.md).
   A multi-token-prediction drafter is a second `Drafter` impl for the
   architectures whose MTP blocks frink already skips by name

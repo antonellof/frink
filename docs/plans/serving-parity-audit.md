@@ -257,7 +257,8 @@ the one number in this document that did not come off a socket.
 | Multi-device expert residency | Policy only. `frink-core`'s expert-residency stack decides and nothing executes it except a compile-only CUDA pool whose hardware test is `#[ignore]`d. |
 
 Present and worth naming because they are usually listed beside the
-above: speculative decoding with a draft model (`--model-draft`),
+above: speculative decoding (prompt lookup on the server; a draft
+model, `--model-draft`, on `frink run` only, #600),
 grammar- and schema-constrained decoding, LoRA adapters
 (`frink-models/src/lora.rs`), and an OpenAI- plus Anthropic-compatible
 API surface.

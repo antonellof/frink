@@ -31,9 +31,16 @@ become ADRs and the plan moves to `archive/`
   decode item that raises throughput without buying hardware. The
   lossless rejection rule, a second GGUF as the drafter and the `frink
   run -d` flags have landed.
+- **[`dflash-speculative-decoding.md`](dflash-speculative-decoding.md)**,
+  the DFlash2 drafter itself, back from `on-hold/` now that published
+  GGUF drafts exist (#600).
 - **[`server-speculative-decoding.md`](server-speculative-decoding.md)**,
   the server half. Prompt-lookup speculation ships on the server; a
   draft model does not reach it yet.
+- **[`dflash2-and-serving.md`](dflash2-and-serving.md)**, DFlash2
+  speculative decoding end to end on every backend, then automatic
+  memory planning, prefix reuse and batching by default, Qwen-family
+  vision and the embedded chat page (#600).
 - **[`gdn-resident-state.md`](gdn-resident-state.md)**, a recurrent
   layer that does not come back to the host. Bonsai-2-27B decode went
   from 7.2 to 11.17 tok/s against the PrismML fork's 11.46, flat with
@@ -91,8 +98,7 @@ become ADRs and the plan moves to `archive/`
   `several-completions-per-request.md` (`n` > 1 as a KV fork, not as a
   loop that re-prefills).
 - **[`on-hold/`](on-hold/)** holds work ranked below the goal, each with
-  the condition that brings it back: `dflash-speculative-decoding.md`
-  and `frink-ui.md`.
+  the condition that brings it back: `frink-ui.md`.
 
 The counts in each of those READMEs are derived from the files by
 `crates/frink-models/tests/documented_counts.rs`, because two of them

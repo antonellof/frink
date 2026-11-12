@@ -3,8 +3,8 @@ name: dFlash / dFlash2, block-diffusion speculative decoding
 overview: "GOAL: give frink a real speculative drafter. When this was written `frink-models::speculative` was prompt-lookup only (an n-gram match over the history, no model). Since then `draft_model.rs` added a second GGUF as an autoregressive drafter (`frink run -d`), and the server speculates with prompt-lookup (0.28.0); `--mtp` still errors, and no trained block drafter exists. dFlash is a block-diffusion drafter: it predicts a whole K-token block in ONE forward pass instead of autoregressively, conditioned on the target model's own hidden states, sharing the target's embedding and LM head, and the target verifies the block in one batched pass. Published numbers: mean acceptance length 4.80 tok and 2.7-3.4x throughput on the drafter's own benchmark table, 3.3x vs EAGLE-3's 2.1x on GSM8K at equal acceptance length. THE HONEST CONSTRAINT, stated up front: dFlash is a TRAINED drafter and frink does not train. Everything here is worthless without a published drafter checkpoint in a format frink can load, so `dflash-checkpoint-reality` is the first todo and it is a GO/NO-GO, if no loadable checkpoint exists, the useful subset of this plan is the engine-side work (lossless verification, the drafter trait, cache resume, acceptance metrics), which is worth doing on its own and is written to stand alone."
 todos:
   - id: dflash-checkpoint-reality
-    content: "GO/NO-GO, do this before writing any kernel. Establish whether a dFlash drafter can be loaded by frink AT ALL. Answer three questions with evidence, not inference: (1) does a published checkpoint exist and under what licence (search names the HF repo `incoai/Qwen3.8-27B-DFlash2`, and claims 3.5M downloads and integrations across the major serving stacks including llama.cpp); (2) since llama.cpp is claimed as an integration, is there a GGUF convert path and what tensor names + metadata keys does it emit, read llama.cpp's converter and its dFlash graph, that is this repo's default method and it settles the format question by reading rather than guessing; (3) does the checkpoint ship the drafter ALONE (sharing the target's embedding + LM head) or a standalone model. If the answer to (1) is no, STOP and record that; the engine-side todos below still stand"
-    status: pending
+    content: "GO/NO-GO, do this before writing any kernel. Establish whether a dFlash drafter can be loaded by frink AT ALL. Answer three questions with evidence, not inference: (1) does a published checkpoint exist and under what licence (search names the HF repo `incoai/Qwen3.8-27B-DFlash2`, and claims 3.5M downloads and integrations across the major serving stacks including llama.cpp); (2) since llama.cpp is claimed as an integration, is there a GGUF convert path and what tensor names + metadata keys does it emit, read llama.cpp's converter and its dFlash graph, that is this repo's default method and it settles the format question by reading rather than guessing; (3) does the checkpoint ship the drafter ALONE (sharing the target's embedding + LM head) or a standalone model. If the answer to (1) is no, STOP and record that; the engine-side todos below still stand. RESOLVED 2026-11-12, GO: (1) Apache-2.0 checkpoints are published, GGUF included (`z-lab/Qwen3.8-27B-DFlash2-GGUF`, and drafts for Qwen3-4B, Qwen3.6-35B-A3B and others); (2) llama.cpp merged DFlash2 in ggml-org/llama.cpp#27342 and the `604cc430` pin has `src/models/dflash.cpp`, the converter in `conversion/qwen.py` and `--spec-type draft-dflash`; (3) the draft ships alone, `token_embd` is optional and the LM head is the target's. The work continues under #600 and docs/plans/dflash2-and-serving.md"
+    status: completed
   - id: spec-lossless-verify
     content: "LANDED (branch wf/spec-engine-lossless). `accept_or_resample` in frink-models/src/speculative.rs implements the rejection rule: accept with min(1, p_target(x)/p_draft(x)), else resample from the normalised residual max(0, p_target - p_draft). p_target comes from `sampling::sampling_distribution`, a new function publishing the EXACT distribution `Sampler::sample` draws from (penalties, temperature, top-k, top-p) -- verifying against a raw softmax while the caller sampled with top_p=0.9 would be lossless with respect to a model nobody is running, so `sample_with_mask` and `sampling_distribution` now share one filter/normalise tail. Proof, not assertion: `resampling_reproduces_the_target_distribution` pushes 200k tokens through the rule with four draft distributions (including one whose support misses the target's mode) and asserts total variation from the target < 0.01; `speculative_decode_at_temperature_matches_plain_sampling` runs a real decode at temperature 1.0 against the target's EXACTLY enumerated per-position marginals (vocab 6, horizon 3, every prefix walked) rather than against a second noisy Monte Carlo. Mutation-checked: restoring the argmax accept rule leaves all 21 other tests in the module green and fails exactly those two -- which is also the cleanest statement of what the old rule was, the temperature-0 special case. Dropping the residual subtraction fails the first. TWO BUGS FOUND ON THE WAY, both fixed with their own tests: (1) `Sampler::next_u64` implemented plain xorshift64, not the xorshift64* its doc claimed; its state IS its output, so for every seed below ~4000 the first draw landed in the bottom eighth of [0,1) -- a request asking for seed:42 always got its first token off the bottom of the CDF, and batch_scheduler.rs seeds one Sampler per request. Restored the output multiply. (2) the drafter was asked to continue a history that stopped one token short of the anchor, shifting every proposal by one position."
     status: completed
@@ -104,7 +104,7 @@ Not here:
 - **Serving integration with a model drafter.** Since 0.28.0 `frink-server`
   speculates with prompt lookup and fills the acceptance metrics when it
   does. It cannot load a draft model; that is `spec-server-integration` and
-  [`../server-speculative-decoding.md`](../server-speculative-decoding.md).
+  [`server-speculative-decoding.md`](server-speculative-decoding.md).
 
 ## The constraint that decides whether this plan is real
 
@@ -131,10 +131,16 @@ items, `spec-lossless-verify`, `spec-drafter-trait`, `spec-cache-resume`,
 temp > 0, and they are the prerequisites for MTP heads, EAGLE, or dFlash
 whenever a checkpoint does appear.
 
-**Where the go/no-go stands, 2026-10-28.** Question (2) has moved:
+**Resolved 2026-11-12: GO.** Published GGUF drafts exist and the pin's
+`dflash.cpp` is the oracle; the plan left `on-hold/` and continues under
+[#600](https://github.com/antonellof/frink/issues/600) and
+[`dflash2-and-serving.md`](dflash2-and-serving.md). The paragraph below is
+the state before that.
+
+**Where the go/no-go stood, 2026-10-28.** Question (2) has moved:
 llama.cpp at the `604cc430` pin names a `dflash` architecture and has a
 `src/models/dflash.cpp` graph
-([`../parity-audit-2026-10-28.md`](../parity-audit-2026-10-28.md) lists it
+([`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md) lists it
 among the callers of several builder changes), so a GGUF representation
 exists and its tensor names and keys can be settled by reading. frink
 catalogs `dflash` as enum-only ("speculative draft head; not a standalone

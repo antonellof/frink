@@ -78,8 +78,11 @@ verification is batched into one rental once the code is ready.
 8. **Multimodal** (#407). The largest group of models llama.cpp serves
    and frink does not.
 9. **Vulkan** (#409), for AMD and Intel GPUs.
+10. **Trained drafters** (#600): DFlash2 block drafts on every backend,
+    then in the continuous batch (#533). Plan:
+    [`dflash2-and-serving.md`](dflash2-and-serving.md).
 
-Not now: speculative decoding with trained drafters, a desktop shell,
+Not now: a desktop shell,
 the 2023 architecture tail beyond what the generic path covers. Each
 comes back when the items above are done, or when someone argues it
 ahead of one.
