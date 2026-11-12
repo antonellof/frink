@@ -235,10 +235,10 @@ impl GgufPlamo2Tokenizer {
                 }
             }
             // Relax every scored piece at that suffix, sentinel last.
-            for p in (suffix_id as usize)..self.table.len() {
-                let score = self.table[p][TABLE_SCORE];
+            for entry in &self.table[suffix_id as usize..] {
+                let score = entry[TABLE_SCORE];
                 if score > INVALID_SCORE {
-                    let len = self.table[p][TABLE_PIECE_LENGTH];
+                    let len = entry[TABLE_PIECE_LENGTH];
                     let s = scores[i + len as usize] - score as i64;
                     if s < scores[i] {
                         scores[i] = s;
@@ -246,7 +246,7 @@ impl GgufPlamo2Tokenizer {
                         if score == UNKNOWN_SCORE {
                             count += utf8_extra_bytes(c);
                         }
-                        path[i] = (len, self.table[p][TABLE_TOKEN_ID], count);
+                        path[i] = (len, entry[TABLE_TOKEN_ID], count);
                     }
                 }
                 if score == UNKNOWN_SCORE {
