@@ -68,13 +68,15 @@ impl Slot {
     /// that continues it.
     pub(super) fn preempt(self, budget: &BlockBudget) -> Job {
         // Every token this row generated has been through a forward, so
-        // its KV covers exactly `prompt ++ generated`. That is what lets
-        // the re-prefill end on the logits this row would have sampled
-        // from next.
+        // its KV covers exactly `prompt ++ generated` -- but for a token
+        // a speculative block drew and has not fed yet. The re-prefill
+        // runs every generated token, that one included, so it ends on
+        // the logits this row would have sampled from next either way.
+        let written = self.pos;
         debug_assert_eq!(
-            self.pos,
+            written + usize::from(self.pending.is_some()),
             self.prompt_ids.len() + self.answer.generated_ids.len(),
-            "a preempted row's KV must cover its prompt and every token it generated"
+            "a preempted row's KV must cover its prompt and every token it fed"
         );
         let SlotParts {
             mut kv,
@@ -91,7 +93,7 @@ impl Slot {
             .answer
             .as_mut()
             .expect("an admitted row always carries its answer");
-        publish_row(&mut kv, &job.prompt_tokens, &answer.generated_ids);
+        publish_row(&mut kv, &job.prompt_tokens, &answer.generated_ids, written);
         // The lease returns its pages here, after the tree has retained
         // the ones it kept.
         drop(kv);

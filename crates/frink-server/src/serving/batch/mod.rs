@@ -161,6 +161,7 @@ mod preempt;
 mod prefill;
 mod queue;
 mod row;
+mod speculate;
 /// Wired: `BatchStatus`, `PoolUsage`, `PrefillSnapshot`,
 /// `StatusReporter` and the decode log interval, all from [`worker`].
 /// Unwired: `PrefillSnapshot::from_chunks` and

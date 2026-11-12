@@ -91,7 +91,7 @@ impl ContinuousBatcher {
             // needs `window + 1 - 1` positions live: chunk = 1.
             frink_models::KvShape::host(&decoder.config),
         ));
-        Self::spawn_with_ceiling(decoder, decode, config, ceiling, paged)
+        Self::spawn_with_ceiling(decoder, decode, config, ceiling, paged, None)
     }
 
     /// `spawn_with_config` with the per-request context ceiling handed
@@ -108,6 +108,7 @@ impl ContinuousBatcher {
         config: BatcherConfig,
         ceiling: Arc<ContextCeiling>,
         paged: Option<PagedKvConfig>,
+        draft: Option<crate::server_draft::ServerDraft>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         let counters = Arc::new(Counters::default());
@@ -139,6 +140,7 @@ impl ContinuousBatcher {
                     worker_budget,
                     worker_aborts,
                     worker_paged,
+                    draft,
                 )
             })
             .expect("spawn continuous-batch worker");
@@ -156,6 +158,12 @@ impl ContinuousBatcher {
             paged_window,
             config,
         }
+    }
+
+    /// Whether this batcher's rows draft speculative blocks: what
+    /// `GET /slots` reports per seat, as llama.cpp's `can_speculate`.
+    pub fn speculates(&self) -> bool {
+        self.config.speculate
     }
 
     /// Live scheduler counters. Cheap (a handful of relaxed atomic

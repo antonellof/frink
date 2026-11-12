@@ -83,6 +83,10 @@ pub struct BatcherConfig {
     /// make room for it, or `None` for no preemption (the default).
     /// See [`super::preempt`].
     pub preempt_after_ticks: Option<u32>,
+    /// Whether rows draft speculative blocks (`super::speculate`). On
+    /// in production; off for the scheduling tests that count one
+    /// token per decode step.
+    pub speculate: bool,
 }
 
 impl Default for BatcherConfig {
@@ -96,6 +100,7 @@ impl Default for BatcherConfig {
             kv_blocks: None,
             max_context: None,
             preempt_after_ticks: None,
+            speculate: true,
         }
     }
 }
@@ -115,6 +120,7 @@ impl BatcherConfig {
             kv_blocks: env_positive("FRINK_CB_KV_BLOCKS"),
             max_context: env_positive("FRINK_CB_MAX_CONTEXT"),
             preempt_after_ticks: env_ticks("FRINK_CB_PREEMPT_AFTER_TICKS"),
+            speculate: true,
         }
     }
 }
