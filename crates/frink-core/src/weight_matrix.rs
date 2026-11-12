@@ -489,6 +489,14 @@ pub fn cuda_dense_enabled() -> bool {
     Cuda::dense_enabled()
 }
 
+/// Whether Vulkan was selected (`FRINK_VULKAN=1`, which `--device
+/// vulkan` sets) and a device opened: the switch every Vulkan path,
+/// including the decode stack, reads.
+#[cfg(feature = "vulkan")]
+pub fn vulkan_dense_enabled() -> bool {
+    gpu_backend::Vulkan::dense_enabled()
+}
+
 /// Whether CPU Q8_0 / Q4_0 / Q4_K / Q5_K / Q6_K matvec should quantize the
 /// activation to int8 and use the integer `vec_dot` path. Q4_K
 /// additionally lazy-repacks into interleaved `block_q4_Kx8` for 8-wide

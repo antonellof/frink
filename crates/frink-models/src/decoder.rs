@@ -28,7 +28,7 @@ mod forward_token;
 mod fused_attention;
 #[cfg(feature = "metal")]
 mod fused_recurrent;
-#[cfg(any(feature = "metal", feature = "cuda"))]
+#[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
 mod fused_view;
 mod host_attention;
 mod hrm_streams;
@@ -49,6 +49,8 @@ mod qk_norm;
 mod qkv_bias;
 mod recurrent_block;
 mod rope;
+#[cfg(feature = "vulkan")]
+mod vulkan_stack;
 mod weights;
 
 use frink_core::weight_matrix::WeightMatrix;

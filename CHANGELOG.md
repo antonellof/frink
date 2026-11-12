@@ -17,6 +17,29 @@ are the ones worth reading twice.
 
 ### Added
 
+- **A Vulkan decode stack: every layer of a token in one submission**
+  (#409, step 5). For a plain llama-family dense model the device runs
+  norm, Q/K/V, RoPE, the KV append, attention, `wo`, the residual, norm,
+  the SwiGLU FFN and the residual for every layer, and the token waits
+  once (once per 26 layers on a deeper model: a submission holds 512
+  dispatches). The host cache stays the authority. Each layer's K and V rows
+  come back after that wait and are pushed to it, and the device KV is
+  a mirror (`frink_core::vulkan_kv`) that is checked against the host
+  rows by row count and newest K row, and rebuilt when they disagree.
+  Which layers it serves is `fused_view`'s shared decision; it declines
+  QKV bias, QK-norm, post-norms, windows, softcaps, RoPE `mscale`,
+  routed experts and GeGLU, which keep the host body, and so does a
+  run with `--ctk f32`: the device KV is f16, llama.cpp's default. F32 projections
+  ride it through an F32 matvec shader the offload paths do not use.
+  `decode_step_graphs::vulkan_decode_matches_cpu_and_llama_cpp` holds
+  it to the CPU, f16 KV against f16 KV, within 1e-3 (4.2e-5 measured
+  through MoltenVK), and to llama.cpp's decode goldens, over every
+  graph fixture. It also fails on more than one submission per 26
+  layers, and it runs in CI on lavapipe. On Llama-3.2-3B Q4_K_M (28
+  layers, so two submissions a token) `frink parity` is MATCH with it
+  at a 300-token prompt over 48 decode steps (worst KL 4.938e-4
+  against the CPU's 4.941e-4), and the greedy tokens are the CPU's.
+
 - **`--device vulkan`, and Vulkan devices numbered as llama.cpp numbers
   them.** `frink` and `frink-server` take `-dev vulkan` (a `--features
   vulkan` build). It runs on `Vulkan0`, chosen by llama.cpp's rule:

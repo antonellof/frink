@@ -5,7 +5,7 @@
 
 #[cfg(feature = "metal")]
 use frink_core::weight_matrix::WeightMatrix;
-#[cfg(any(feature = "metal", feature = "cuda"))]
+#[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
 use frink_moe::GluAct;
 
 use crate::config::ModelConfig;
@@ -86,7 +86,7 @@ impl Decoder {
     /// resident prefill layer (`decoder/cuda_prefill.rs`, #259) asks the
     /// same question through `fused_view`, because the facts are
     /// properties of the model and not of the kernel language.
-    #[cfg(any(feature = "metal", feature = "cuda"))]
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
     pub(super) fn metal_can_serve_model(config: &ModelConfig, lora_attached: bool) -> bool {
         !lora_attached
             && config.residual_scale.is_none()

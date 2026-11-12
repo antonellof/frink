@@ -728,7 +728,7 @@ impl BackendDispatch for Cuda {
 /// `None` means the device could not be opened. That is reported once,
 /// here, rather than once per matvec.
 #[cfg(feature = "vulkan")]
-fn vulkan_runtime() -> Option<&'static std::sync::Mutex<frink_vulkan::runtime::Runtime>> {
+pub fn vulkan_runtime() -> Option<&'static std::sync::Mutex<frink_vulkan::runtime::Runtime>> {
     use std::sync::{Mutex, OnceLock};
     static RT: OnceLock<Option<Mutex<frink_vulkan::runtime::Runtime>>> = OnceLock::new();
     RT.get_or_init(|| match frink_vulkan::runtime::Runtime::new() {
@@ -856,26 +856,12 @@ pub(crate) fn vulkan_matvec_many(
     mats: &[&crate::weight_matrix::WeightMatrix],
     x: &[f32],
 ) -> Option<Vec<Vec<f32>>> {
-    use crate::weight_matrix::WeightMatrix;
     if !Vulkan::dense_enabled() || mats.len() > frink_vulkan::runtime::MAX_FUSED {
         return None;
     }
     let mut jobs = Vec::with_capacity(mats.len());
     for m in mats {
-        let WeightMatrix::Quantized {
-            data, rows, kind, ..
-        } = m
-        else {
-            return None;
-        };
-        // The claim table, so this arm cannot launch a kind the seam
-        // reports as having no kernel.
-        Vulkan::matvec_kernel(*kind)?;
-        jobs.push(frink_vulkan::runtime::MatvecJob {
-            shader: frink_vulkan::shaders::matvec_shader(kind.name())?,
-            weights: data.as_slice(),
-            rows: *rows,
-        });
+        jobs.push(m.vulkan_matvec_job()?);
     }
     let rt = vulkan_runtime()?;
     let mut guard = rt.lock().ok()?;
@@ -904,25 +890,14 @@ pub(crate) fn vulkan_dense_ffn_swiglu(
     down: &crate::weight_matrix::WeightMatrix,
     x: &[f32],
 ) -> Option<Vec<f32>> {
-    use crate::weight_matrix::WeightMatrix;
     if !Vulkan::dense_enabled() {
         return None;
     }
-    fn job(m: &WeightMatrix) -> Option<frink_vulkan::runtime::MatvecJob<'_>> {
-        let WeightMatrix::Quantized {
-            data, rows, kind, ..
-        } = m
-        else {
-            return None;
-        };
-        Vulkan::matvec_kernel(*kind)?;
-        Some(frink_vulkan::runtime::MatvecJob {
-            shader: frink_vulkan::shaders::matvec_shader(kind.name())?,
-            weights: data.as_slice(),
-            rows: *rows,
-        })
-    }
-    let (g, u, d) = (job(gate)?, job(up)?, job(down)?);
+    let (g, u, d) = (
+        gate.vulkan_matvec_job()?,
+        up.vulkan_matvec_job()?,
+        down.vulkan_matvec_job()?,
+    );
     let rt = vulkan_runtime()?;
     let mut guard = rt.lock().ok()?;
     match guard.dense_ffn_swiglu(g, u, d, x) {
@@ -934,6 +909,53 @@ pub(crate) fn vulkan_dense_ffn_swiglu(
             );
             None
         }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl crate::weight_matrix::WeightMatrix {
+    /// This matrix as a Vulkan matvec, or `None` when it is not plain
+    /// quantized bytes of a kind with a shader. A fold or an adapter is
+    /// arithmetic the shaders do not do; the caller unwraps it or takes
+    /// the host path. The ONE mapping from a weight to a Vulkan launch,
+    /// so the matvecs, the fused FFN and the decode stack cannot
+    /// disagree about which kinds the device serves.
+    pub fn vulkan_matvec_job(&self) -> Option<frink_vulkan::runtime::MatvecJob<'_>> {
+        let crate::weight_matrix::WeightMatrix::Quantized {
+            data, rows, kind, ..
+        } = self
+        else {
+            return None;
+        };
+        // The claim table, so no path can launch a kind the seam reports
+        // as having no kernel.
+        Vulkan::matvec_kernel(*kind)?;
+        Some(frink_vulkan::runtime::MatvecJob {
+            shader: frink_vulkan::shaders::matvec_shader(kind.name())?,
+            weights: data.as_slice(),
+            rows: *rows,
+        })
+    }
+
+    /// [`Self::vulkan_matvec_job`], and an F32 matrix too: the decode
+    /// stack's operands. F32 is served there and nowhere else. The
+    /// matvec offload (`apply`, `apply_three`, the fused FFN) keeps to
+    /// the quantized kinds the kernel matrix lists, so turning Vulkan on
+    /// does not move an F32 projection that ran on the host before.
+    pub fn vulkan_stack_job(&self) -> Option<frink_vulkan::runtime::MatvecJob<'_>> {
+        if let crate::weight_matrix::WeightMatrix::F32(t) = self {
+            // SAFETY: an f32 slice is 4 initialised bytes per value,
+            // borrowed for as long as `self` is.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(t.data.as_ptr().cast::<u8>(), t.data.len() * 4)
+            };
+            return Some(frink_vulkan::runtime::MatvecJob {
+                shader: frink_vulkan::shaders::matvec_shader("F32")?,
+                weights: bytes,
+                rows: t.rows(),
+            });
+        }
+        self.vulkan_matvec_job()
     }
 }
 

@@ -53,6 +53,7 @@ shader_matvec! {
     iq4_nl_matvec => "IQ4_NL",
     iq4_xs_matvec => "IQ4_XS",
     mxfp4_matvec => "MXFP4",
+    f32_matvec => "F32",
 }
 
 #[cfg(test)]
@@ -86,6 +87,14 @@ pub(crate) mod tests {
             (s >> 33) as u8
         };
         let mut out = Vec::new();
+        if kind == "F32" {
+            // Values, not bytes: random bytes are NaN as often as not.
+            for _ in 0..blocks {
+                let v = (next() as f32 - 127.5) / 128.0;
+                out.extend(v.to_le_bytes());
+            }
+            return out;
+        }
         for b in 0..blocks {
             let mut blk: Vec<u8> = (0..shader.block_bytes).map(|_| next()).collect();
             let d = half::f16::from_f32(0.01 + 0.002 * (b % 7) as f32).to_le_bytes();
@@ -127,6 +136,14 @@ pub(crate) mod tests {
             "IQ4_NL" => frink_quant::dot_iq4_nl_f32_scalar,
             "IQ4_XS" => frink_quant::dot_iq4_xs_f32_scalar,
             "MXFP4" => frink_quant::dot_mxfp4_gguf_f32_scalar,
+            "F32" => |w, x| {
+                w.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(x)
+                    .map(|(b, x)| f32::from_le_bytes(*b) * x)
+                    .sum()
+            },
             other => panic!("no twin for {other}"),
         }
     }
@@ -143,7 +160,7 @@ pub(crate) mod tests {
 
     type Launch =
         fn(&mut Runtime, &[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, VulkanError>;
-    const LAUNCHES: [(&str, Launch); 13] = [
+    const LAUNCHES: [(&str, Launch); 14] = [
         ("Q8_0", q8_0_matvec),
         ("Q4_0", q4_0_matvec),
         ("Q4_K", q4_k_matvec),
@@ -157,6 +174,7 @@ pub(crate) mod tests {
         ("IQ4_NL", iq4_nl_matvec),
         ("IQ4_XS", iq4_xs_matvec),
         ("MXFP4", mxfp4_matvec),
+        ("F32", f32_matvec),
     ];
 
     /// Every shader in the table is exercised by [`LAUNCHES`], so a row

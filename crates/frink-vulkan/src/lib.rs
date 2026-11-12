@@ -9,11 +9,15 @@
 //! GPUs that ROCm and CUDA do not reach. Weights are uploaded once and
 //! stay resident; pipelines are built once.
 //!
+//! A decode token of a plain llama-family model runs 26 layers per
+//! submission (`frink_models::decoder::vulkan_stack`, over
+//! [`runtime::ops`]): norms, RoPE, an f16 KV and attention included.
 //! What it is not, yet, is a backend in the sense Metal and CUDA are:
-//! there is no GEMM (a prefill stays on the host), no attention, and
-//! each submission (Q/K/V together, the output projection, and a dense
-//! SwiGLU FFN as one, [`runtime::Runtime::dense_ffn_swiglu`]) still
-//! waits for its own result, so a layer pays about three queue round
+//! there is no GEMM (a prefill stays on the host), and a layer the
+//! stack declines runs on the host with its matvecs offloaded, each
+//! submission (Q/K/V together, the output projection, and a dense
+//! SwiGLU FFN as one, [`runtime::Runtime::dense_ffn_swiglu`]) waiting
+//! for its own result, about three queue round
 //! trips. It began as the `vulkan-beachhead`
 //! GO/NO-GO (`docs/plans/archive/vulkan-beachhead-verdict.md`), and its seam
 //! guard tests still go red if a kind is claimed without a shader.
