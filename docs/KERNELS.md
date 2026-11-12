@@ -28,7 +28,7 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | cpu | 1 | 1 | 0 |
 | cuda | 0 | 0 | 0 |
 | metal | 0 | 0 | 0 |
-| vulkan | 7 | 7 | 22 |
+| vulkan | 0 | 0 | 22 |
 
 ## matvec (decode)
 
@@ -47,13 +47,13 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q8_1 | f32 | n/a | n/a | n/a |
 | IQ4_NL | kernel | kernel | kernel | kernel |
 | IQ4_XS | kernel | kernel | kernel | kernel |
-| IQ1_S | kernel | kernel | kernel | HOST |
-| IQ2_XXS | kernel | kernel | kernel | HOST |
-| IQ3_XXS | kernel | kernel | kernel | HOST |
-| IQ2_XS | kernel | kernel | kernel | HOST |
-| IQ2_S | kernel | kernel | kernel | HOST |
-| IQ3_S | kernel | kernel | kernel | HOST |
-| IQ1_M | kernel | kernel | kernel | HOST |
+| IQ1_S | kernel | kernel | kernel | kernel |
+| IQ2_XXS | kernel | kernel | kernel | kernel |
+| IQ3_XXS | kernel | kernel | kernel | kernel |
+| IQ2_XS | kernel | kernel | kernel | kernel |
+| IQ2_S | kernel | kernel | kernel | kernel |
+| IQ3_S | kernel | kernel | kernel | kernel |
+| IQ1_M | kernel | kernel | kernel | kernel |
 | MXFP4 | kernel | kernel | kernel | kernel |
 | TQ1_0 | kernel | kernel | kernel | kernel |
 | PTQ1_0 | kernel | kernel | kernel | kernel |
@@ -75,13 +75,13 @@ Kinds out of 23 whose op leaves the backend for the host (`f32` on CPU).
 | Q8_1 | f32 | n/a | n/a | n/a |
 | IQ4_NL | kernel | kernel | kernel | kernel |
 | IQ4_XS | kernel | kernel | kernel | kernel |
-| IQ1_S | kernel | kernel | kernel | HOST |
-| IQ2_XXS | kernel | kernel | kernel | HOST |
-| IQ3_XXS | kernel | kernel | kernel | HOST |
-| IQ2_XS | kernel | kernel | kernel | HOST |
-| IQ2_S | kernel | kernel | kernel | HOST |
-| IQ3_S | kernel | kernel | kernel | HOST |
-| IQ1_M | kernel | kernel | kernel | HOST |
+| IQ1_S | kernel | kernel | kernel | kernel |
+| IQ2_XXS | kernel | kernel | kernel | kernel |
+| IQ3_XXS | kernel | kernel | kernel | kernel |
+| IQ2_XS | kernel | kernel | kernel | kernel |
+| IQ2_S | kernel | kernel | kernel | kernel |
+| IQ3_S | kernel | kernel | kernel | kernel |
+| IQ1_M | kernel | kernel | kernel | kernel |
 | MXFP4 | kernel | kernel | kernel | kernel |
 | TQ1_0 | kernel | kernel | kernel | kernel |
 | PTQ1_0 | kernel | kernel | kernel | kernel |

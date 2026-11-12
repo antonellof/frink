@@ -125,6 +125,48 @@ pub const MATVEC: &[MatvecShader] = &[
         block_bytes: 28,
         block_elems: 128,
     },
+    MatvecShader {
+        kind: "IQ2_XXS",
+        spv: include_bytes!("../shaders/spv/iq2_xxs_matvec.spv"),
+        block_bytes: 66,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ2_XS",
+        spv: include_bytes!("../shaders/spv/iq2_xs_matvec.spv"),
+        block_bytes: 74,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ2_S",
+        spv: include_bytes!("../shaders/spv/iq2_s_matvec.spv"),
+        block_bytes: 82,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ3_XXS",
+        spv: include_bytes!("../shaders/spv/iq3_xxs_matvec.spv"),
+        block_bytes: 98,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ3_S",
+        spv: include_bytes!("../shaders/spv/iq3_s_matvec.spv"),
+        block_bytes: 110,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ1_S",
+        spv: include_bytes!("../shaders/spv/iq1_s_matvec.spv"),
+        block_bytes: 50,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "IQ1_M",
+        spv: include_bytes!("../shaders/spv/iq1_m_matvec.spv"),
+        block_bytes: 56,
+        block_elems: 256,
+    },
     // Not a quant kind: the decode stack's F32 operand
     // (`WeightMatrix::vulkan_stack_job`). No `QuantKind` is named "F32",
     // so no claim table can reach it.
@@ -135,6 +177,42 @@ pub const MATVEC: &[MatvecShader] = &[
         block_elems: 1,
     },
 ];
+
+/// Word offsets into the codebook table buffer (binding 3), the layout
+/// `shaders/iq_common.glsl` reads. A 64-bit grid row is two words, low
+/// first; a sign byte is one word.
+pub mod iq_offsets {
+    pub const KSIGNS: usize = 0;
+    pub const IQ2XXS: usize = KSIGNS + 128;
+    pub const IQ2XS: usize = IQ2XXS + 2 * 256;
+    pub const IQ2S: usize = IQ2XS + 2 * 512;
+    pub const IQ3XXS: usize = IQ2S + 2 * 1024;
+    pub const IQ3S: usize = IQ3XXS + 256;
+    pub const IQ1S: usize = IQ3S + 512;
+    pub const END: usize = IQ1S + 2 * 2048;
+}
+
+/// The codebook kinds' tables as the words of that buffer, straight from
+/// `frink_quant::iq_tables`: the one copy of each table in the tree.
+pub fn iq_table_words() -> Vec<u32> {
+    use frink_quant::iq_tables as t;
+    let mut w = Vec::with_capacity(iq_offsets::END);
+    let wide = |w: &mut Vec<u32>, rows: &[u64]| {
+        for r in rows {
+            w.push(*r as u32);
+            w.push((*r >> 32) as u32);
+        }
+    };
+    w.extend(t::KSIGNS_IQ2XS.iter().map(|&b| u32::from(b)));
+    wide(&mut w, &t::IQ2XXS_GRID);
+    wide(&mut w, &t::IQ2XS_GRID);
+    wide(&mut w, &t::IQ2S_GRID);
+    w.extend_from_slice(&t::IQ3XXS_GRID);
+    w.extend_from_slice(&t::IQ3S_GRID);
+    wide(&mut w, &t::IQ1S_GRID);
+    assert_eq!(w.len(), iq_offsets::END);
+    w
+}
 
 /// The shader for `kind`.
 pub fn matvec_shader(kind: &str) -> Option<&'static MatvecShader> {
@@ -279,6 +357,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// `iq_common.glsl` spells the table offsets as `#define`s; they are
+    /// the Rust ones, and each table sits where its offset says.
+    #[test]
+    fn the_glsl_table_offsets_are_the_rust_ones() {
+        use frink_quant::iq_tables as t;
+        let src = include_str!("../shaders/iq_common.glsl");
+        let glsl = |name: &str| -> usize {
+            let line = src
+                .lines()
+                .find(|l| l.starts_with(&format!("#define {name} ")))
+                .unwrap_or_else(|| panic!("no #define {name}"));
+            line.rsplit(' ')
+                .next()
+                .unwrap()
+                .trim_end_matches('u')
+                .parse()
+                .unwrap()
+        };
+        for (name, want) in [
+            ("IQ_KSIGNS", iq_offsets::KSIGNS),
+            ("IQ_GRID_IQ2XXS", iq_offsets::IQ2XXS),
+            ("IQ_GRID_IQ2XS", iq_offsets::IQ2XS),
+            ("IQ_GRID_IQ2S", iq_offsets::IQ2S),
+            ("IQ_GRID_IQ3XXS", iq_offsets::IQ3XXS),
+            ("IQ_GRID_IQ3S", iq_offsets::IQ3S),
+            ("IQ_GRID_IQ1S", iq_offsets::IQ1S),
+        ] {
+            assert_eq!(glsl(name), want, "{name}");
+        }
+        let w = iq_table_words();
+        let wide =
+            |at: usize, i: usize| u64::from(w[at + 2 * i]) | u64::from(w[at + 2 * i + 1]) << 32;
+        assert_eq!(w[iq_offsets::KSIGNS + 127], u32::from(t::KSIGNS_IQ2XS[127]));
+        assert_eq!(wide(iq_offsets::IQ2XXS, 255), t::IQ2XXS_GRID[255]);
+        assert_eq!(wide(iq_offsets::IQ2XS, 511), t::IQ2XS_GRID[511]);
+        assert_eq!(wide(iq_offsets::IQ2S, 1023), t::IQ2S_GRID[1023]);
+        assert_eq!(w[iq_offsets::IQ3XXS + 255], t::IQ3XXS_GRID[255]);
+        assert_eq!(w[iq_offsets::IQ3S + 511], t::IQ3S_GRID[511]);
+        assert_eq!(wide(iq_offsets::IQ1S, 2047), t::IQ1S_GRID[2047]);
+    }
+
     #[test]
     fn every_shader_is_one_row_with_ggml_block_sizes() {
         // Sizes from frink_quant, the CPU's own constants, so a row
@@ -358,6 +477,41 @@ mod tests {
                 "PTQ1_0",
                 frink_quant::ternary::PTQ1_0_BLOCK_BYTES,
                 frink_quant::ternary::PTQ1_0_BLOCK_ELEMS,
+            ),
+            (
+                "IQ2_XXS",
+                frink_quant::IQ2_XXS_BLOCK_BYTES,
+                frink_quant::IQ2_XXS_BLOCK_ELEMS,
+            ),
+            (
+                "IQ2_XS",
+                frink_quant::IQ2_XS_BLOCK_BYTES,
+                frink_quant::IQ2_XS_BLOCK_ELEMS,
+            ),
+            (
+                "IQ2_S",
+                frink_quant::IQ2_S_BLOCK_BYTES,
+                frink_quant::IQ2_S_BLOCK_ELEMS,
+            ),
+            (
+                "IQ3_XXS",
+                frink_quant::IQ3_XXS_BLOCK_BYTES,
+                frink_quant::IQ3_XXS_BLOCK_ELEMS,
+            ),
+            (
+                "IQ3_S",
+                frink_quant::IQ3_S_BLOCK_BYTES,
+                frink_quant::IQ3_S_BLOCK_ELEMS,
+            ),
+            (
+                "IQ1_S",
+                frink_quant::IQ1_S_BLOCK_BYTES,
+                frink_quant::IQ1_S_BLOCK_ELEMS,
+            ),
+            (
+                "IQ1_M",
+                frink_quant::IQ1_M_BLOCK_BYTES,
+                frink_quant::IQ1_M_BLOCK_ELEMS,
             ),
             ("F32", 4, 1),
         ] {

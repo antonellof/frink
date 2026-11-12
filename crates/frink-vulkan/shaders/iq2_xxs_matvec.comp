@@ -1,0 +1,21 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// IQ2_XXS, 66 bytes per 256 values: f16 d, then eight 8-byte groups of
+// four grid indices and a word holding four 7-bit sign codes and a
+// 4-bit scale (frink_quant::dot_iq2_xxs_f32_scalar).
+#define IQ_BLOCK_BYTES 66u
+#include "iq_common.glsl"
+
+float sub_dot(uint blk, uint il, uint xb) {
+    uint g = blk + 2u + 8u * (il >> 1);
+    uint aux32 = u32_at(g + 4u);
+    float db = f16_at(blk) * (0.5 + float(aux32 >> 28)) * 0.25;
+    float s = 0.0;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint l = 2u * (il & 1u) + k;
+        s += grid64_dot(IQ_GRID_IQ2XXS, byte_at(g + l), db,
+                        ksigns((aux32 >> (7u * l)) & 127u), xb + 8u * k);
+    }
+    return s;
+}
+#include "iq_main.glsl"

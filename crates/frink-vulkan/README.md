@@ -1,9 +1,10 @@
 # frink-vulkan
 
 Matvecs and a prefill GEMM on any Vulkan device (#409): every K-quant and legacy
-kind, IQ4_NL, IQ4_XS, MXFP4, TQ1_0 and PTQ1_0, written in GLSL and
-committed as SPIR-V. The codebook kinds (IQ1_S to IQ3_S) have no
-shader yet; `docs/KERNELS.md` is the list. Weights are uploaded once
+kind, every IQ kind, MXFP4, TQ1_0 and PTQ1_0, written in GLSL and
+committed as SPIR-V; `docs/KERNELS.md` is the list. The codebook
+kinds read their grids from one buffer filled from
+`frink_quant::iq_tables`. Weights are uploaded once
 and stay resident. A prefill batch is the same shader dispatched over the
 batch (`Runtime::gemm`), and a decode token of a plain llama-family
 model runs 26 layers per submission, attention included

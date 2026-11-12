@@ -104,6 +104,9 @@ pub struct Runtime {
     kernels: HashMap<&'static str, Kernel>,
     x: Option<Buf>,
     y: Option<Buf>,
+    /// The codebook kinds' grid and sign tables
+    /// ([`crate::shaders::iq_table_words`]), at binding 3 of every set.
+    tables: Option<Buf>,
     weights: HashMap<(usize, usize), ResidentWeight>,
     /// Buffers handed out by [`Runtime::alloc_f32`]; `None` once freed.
     /// Freed in `Drop`.
@@ -142,7 +145,7 @@ impl Runtime {
         // SAFETY: as above.
         let limits = unsafe { ctx.instance.get_physical_device_properties(ctx.physical) }.limits;
 
-        let bindings: Vec<_> = (0..3)
+        let bindings: Vec<_> = (0..4)
             .map(|i| {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(i)
@@ -173,6 +176,7 @@ impl Runtime {
             kernels: HashMap::new(),
             x: None,
             y: None,
+            tables: None,
             weights: HashMap::new(),
             bufs: Vec::new(),
             scratch: HashMap::new(),
@@ -199,7 +203,7 @@ impl Runtime {
 
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3 * MAX_DISPATCHES as u32)];
+            .descriptor_count(4 * MAX_DISPATCHES as u32)];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(MAX_DISPATCHES as u32)
             .pool_sizes(&pool_sizes);
@@ -230,6 +234,18 @@ impl Runtime {
         // SAFETY: a fresh unsignalled fence on this device.
         rt.fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
             .map_err(VulkanError::vk("vkCreateFence"))?;
+
+        let words = crate::shaders::iq_table_words();
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let tables = memory::alloc(
+            &rt.ctx.device,
+            &rt.mem_props,
+            bytes.len(),
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+        memory::write_padded(&tables, &bytes);
+        rt.tables = Some(tables);
         Ok(rt)
     }
 
@@ -360,10 +376,14 @@ impl Runtime {
         Ok(x_buf)
     }
 
-    /// Point descriptor set `set`'s three bindings at `(buffer, offset,
+    /// Point descriptor set `set`'s first three bindings at `(buffer, offset,
     /// range)`.
     fn write_set(&self, set: usize, ranges: [(vk::Buffer, u64, u64); 3]) {
-        let infos = ranges.map(|(buffer, offset, range)| {
+        // Binding 3 is the codebook tables for every set; only the
+        // codebook shaders read it.
+        let tables = self.tables.as_ref().expect("allocated in new").buffer;
+        let [w, x, y] = ranges;
+        let infos = [w, x, y, (tables, 0, vk::WHOLE_SIZE)].map(|(buffer, offset, range)| {
             [vk::DescriptorBufferInfo::default()
                 .buffer(buffer)
                 .offset(offset)
@@ -637,7 +657,10 @@ impl Drop for Runtime {
             for b in self.bufs.drain(..).flatten() {
                 free(device, b);
             }
-            for b in [self.x.take(), self.y.take()].into_iter().flatten() {
+            for b in [self.x.take(), self.y.take(), self.tables.take()]
+                .into_iter()
+                .flatten()
+            {
                 free(device, b);
             }
             for (_, k) in self.kernels.drain() {

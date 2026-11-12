@@ -1,0 +1,29 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// IQ1_M, 56 bytes per 256 values: 32 index bytes, 16 bytes of index
+// high bits and delta signs, then four u16 whose top nibbles spell the
+// f16 scale and whose low 12 bits are four 3-bit sub-scales
+// (frink_quant::dot_iq1_m_f32_scalar). No leading d.
+#define IQ_BLOCK_BYTES 56u
+#include "iq_common.glsl"
+
+float sub_dot(uint blk, uint il, uint xb) {
+    uint sc0 = u16_at(blk + 48u), sc1 = u16_at(blk + 50u);
+    uint sc2 = u16_at(blk + 52u), sc3 = u16_at(blk + 54u);
+    float d = unpackHalf2x16((sc0 >> 12) | ((sc1 >> 8) & 0x00f0u)
+                             | ((sc2 >> 4) & 0x0f00u) | (sc3 & 0xf000u)).x;
+    uint ib = il >> 1, hf = il & 1u;
+    uint pair = ib >> 1;
+    uint scp = pair == 0u ? sc0 : pair == 1u ? sc1 : pair == 2u ? sc2 : sc3;
+    float dl = d * (2.0 * float((scp >> (6u * (ib & 1u) + 3u * hf)) & 7u) + 1.0);
+    uint hb = byte_at(blk + 32u + 2u * ib + hf);
+    float s = 0.0;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint l = 2u * hf + k;
+        uint gi = byte_at(blk + 4u * ib + l) | ((hb << (k != 0u ? 4u : 8u)) & 0x700u);
+        float delta = (hb & (k != 0u ? 0x80u : 0x08u)) != 0u ? -0.125 : 0.125;
+        s += iq1_row_dot(gi, dl, delta, xb + 8u * k);
+    }
+    return s;
+}
+#include "iq_main.glsl"
