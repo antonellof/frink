@@ -27,6 +27,12 @@ are the ones worth reading twice.
   Llama 3 turn that opens with `{` is now parsed as a call (held to the
   end of the stream when streaming); one naming no offered tool is
   returned as the text it was.
+- **A Hermes/Qwen tool call ending a turn is a tool call.** With tools
+  active the server stops on `</tool_call>` and cuts the stop string,
+  and the parser then required that same closer, so the last call of
+  every Hermes/Qwen turn reached the client as text, streamed or not. An
+  unclosed block holding one complete call is now that call; one cut
+  mid-JSON stays text.
 
 ## [0.62.0] - 2026-11-12
 
