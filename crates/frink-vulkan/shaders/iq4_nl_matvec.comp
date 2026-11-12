@@ -17,8 +17,8 @@ void main() {
         float s = 0.0;
         for (uint i = 0u; i < 16u; ++i) {
             uint q = byte_at(blk + 2u + i);
-            s += KVALUES_IQ4NL[q & 0x0fu] * X(xb + i);
-            s += KVALUES_IQ4NL[q >> 4] * X(xb + 16u + i);
+            s += kvalue_iq4nl(q & 0x0fu) * X(xb + i);
+            s += kvalue_iq4nl(q >> 4) * X(xb + 16u + i);
         }
         acc += f16_at(blk) * s;
     }
