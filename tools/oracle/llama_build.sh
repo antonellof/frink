@@ -108,4 +108,9 @@ c++ -std=c++17 -O2 "$ROOT/scripts/gptoss_reference_logits.cpp" \
 c++ -std=c++17 -O2 "$ROOT/tools/oracle/chat_render.cpp" \
   -I"$SRC/common" -I"$SRC/include" -I"$SRC/ggml/include" -I"$SRC/vendor" \
   -L"$BUILD/bin" -lllama-common -lllama -Wl,-rpath,"$BUILD/bin" -o "$WORK/chat_render"
+# DFlash drafting rounds (`tools/oracle/goldens.tsv`, kind `dflash`):
+# reads `src/llama-ext.h`, the speculative extension API.
+c++ -std=c++17 -O2 "$ROOT/scripts/dflash_reference.cpp" \
+  -I"$SRC/include" -I"$SRC/ggml/include" -I"$SRC/src" \
+  -L"$BUILD/bin" -lllama -lggml -lggml-base -Wl,-rpath,"$BUILD/bin" -o "$WORK/dflash_ref"
 echo "llama.cpp $SHA built under $WORK"

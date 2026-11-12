@@ -106,14 +106,20 @@ fn golden_consts() -> BTreeSet<String> {
     out
 }
 
+/// The text goldens: `decode_steps/` (greedy decodes) and `dflash/`
+/// (DFlash drafting rounds), one file each.
 fn decode_goldens() -> BTreeSet<String> {
-    std::fs::read_dir(tests_dir().join("fixtures/decode_steps"))
-        .unwrap()
-        .map(|e| {
-            format!(
-                "fixtures/decode_steps/{}",
-                e.unwrap().file_name().to_string_lossy()
-            )
+    ["decode_steps", "dflash"]
+        .into_iter()
+        .flat_map(|dir| {
+            std::fs::read_dir(tests_dir().join("fixtures").join(dir))
+                .unwrap()
+                .map(move |e| {
+                    format!(
+                        "fixtures/{dir}/{}",
+                        e.unwrap().file_name().to_string_lossy()
+                    )
+                })
         })
         .collect()
 }

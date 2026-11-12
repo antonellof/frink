@@ -181,3 +181,6 @@ fixtures/decode_steps/lfm3.txt decode REF_DECODE_STEPS=32 $F/lfm3_tiny.gguf @GRA
 kolibri1_graphs.rs:KOLIBRI1_GOLDEN logits $F/kolibri1_tiny.gguf @GRAPH
 kolibri1_graphs.rs:KOLIBRI1_SOFTMAX_GOLDEN logits $F/kolibri1_softmax_tiny.gguf @GRAPH
 fixtures/decode_steps/kolibri1.txt decode REF_DECODE_STEPS=32 $F/kolibri1_tiny.gguf @GRAPH
+fixtures/dflash/dflash2_draft.txt dflash $F/dflash_target_tiny.gguf $F/dflash2_draft_tiny.gguf 4 4 @GRAPH
+fixtures/dflash/dflash1_draft.txt dflash $F/dflash_target_tiny.gguf $F/dflash1_draft_tiny.gguf 4 4 @GRAPH
+fixtures/dflash/dflash2_swa_draft.txt dflash $F/dflash_target_tiny.gguf $F/dflash2_swa_draft_tiny.gguf 4 4 @GRAPH

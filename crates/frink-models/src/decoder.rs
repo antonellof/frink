@@ -33,6 +33,7 @@ mod fused_view;
 mod host_attention;
 mod hrm_streams;
 pub mod kv_window;
+mod layer_taps;
 mod lm_head;
 mod metal_eligibility;
 #[cfg(feature = "metal")]
@@ -48,6 +49,7 @@ mod pre_norm;
 mod qk_norm;
 mod qkv_bias;
 mod recurrent_block;
+mod rollback;
 mod rope;
 #[cfg(feature = "vulkan")]
 mod vulkan_stack;
@@ -60,6 +62,7 @@ use crate::norm::NormOp;
 
 pub(crate) use attn_block::KvStep;
 pub use kv_window::{KvWindowPolicy, KV_WINDOW_ENV};
+pub use layer_taps::{LayerTapError, TappedBatch};
 pub use multi_seq::MultiSeqKv;
 #[cfg(feature = "metal")]
 pub use weights::MoePackedQ4Planes;

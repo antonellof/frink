@@ -1116,15 +1116,17 @@ impl Kv {
         dead_code,
         reason = "called by the speculative loop; see sampling_loop::verify_block"
     )]
-    fn truncate_to(&mut self, pos: usize) -> bool {
+    /// Through `Decoder::truncate_kv`, so the Metal arena rewinds with
+    /// the host rows: rolling back only the host left the arena longer
+    /// than the cache, and the next batch rebuilt it from the host's
+    /// placeholder rows.
+    fn truncate_to(&mut self, decoder: &Decoder, pos: usize) -> bool {
         match self {
             Kv::Contiguous(caches) => {
                 if !caches.iter().all(|c| c.can_truncate_to(pos)) {
                     return false;
                 }
-                for c in caches.iter_mut() {
-                    c.truncate(pos);
-                }
+                decoder.truncate_kv(caches, pos);
                 true
             }
             Kv::Paged(_) => false,
@@ -1805,7 +1807,7 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
         // release server left its rows in the cache, and the next token
         // was answered over a history that never happened. A hard
         // `assert!` because the alternative to stopping is exactly that.
-        let rolled_back = self.kv.truncate_to(pos);
+        let rolled_back = self.kv.truncate_to(self.decoder, pos);
         assert!(
             rolled_back,
             "a store that accepted a speculative batch must be able to roll it back"
@@ -3015,7 +3017,7 @@ mod tests {
 
         // Reject the whole draft.
         assert!(
-            kv.truncate_to(committed.len()),
+            kv.truncate_to(&decoder, committed.len()),
             "a contiguous store rolls back"
         );
 
@@ -3047,7 +3049,7 @@ mod tests {
             kv.step_batch(&decoder, &[1], 0).is_some(),
             "the contiguous arm serves speculation"
         );
-        assert!(kv.truncate_to(0), "and can undo it");
+        assert!(kv.truncate_to(&decoder, 0), "and can undo it");
     }
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {

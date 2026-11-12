@@ -72,6 +72,8 @@ def run(work, words):
     args = [a for w in rest for a in expand(w)]
     if kind == "logits" or kind == "decode":
         cmd = [os.path.join(work, "ref_logits")] + args
+    elif kind == "dflash":
+        cmd = [os.path.join(work, "dflash_ref")] + args
     elif kind == "embed":
         cmd = [os.path.join(work, "llama_logits"), "--embed"] + args
     else:
@@ -126,6 +128,19 @@ def parse_decode(text):
     return tokens, logits
 
 
+def parse_dflash(text):
+    """`round <r> anchor <a> draft <ids...> scores <f32...>` lines:
+    the token ids of every round, and every score."""
+    ids, scores = [], []
+    for line in text.splitlines():
+        if not line.startswith("round"):
+            continue
+        head, tail = line.split(" scores", 1)
+        ids.append(head)
+        scores.extend(float(v) for v in tail.split())
+    return ids, scores
+
+
 def check(work, words, tol):
     """Returns (label, verdict, max_delta, note)."""
     target, kind = words[0], words[1]
@@ -134,6 +149,19 @@ def check(work, words, tol):
     out, err = run(work, words[1:])
     if out is None:
         return target, "FAIL", None, "dumper: " + " ".join(err)
+    if kind == "dflash":
+        path = os.path.join(TESTS, target)
+        with open(path) as f:
+            old = f.read()
+        header = "".join(line + "\n" for line in old.splitlines() if line.startswith("#"))
+        t0, s0 = parse_dflash(old)
+        t1, s1 = parse_dflash(out)
+        delta = max(abs(a - b) for a, b in zip(s0, s1)) if len(s0) == len(s1) else float("inf")
+        if t0 != t1 or delta > tol:
+            with open(path, "w") as f:
+                f.write(header + out)
+            return target, "REWRITTEN", delta, "tokens differ" if t0 != t1 else ""
+        return target, "SAME", delta, ""
     if kind == "decode":
         path = os.path.join(TESTS, target)
         with open(path) as f:
