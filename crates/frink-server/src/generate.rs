@@ -5513,10 +5513,11 @@ mod tests {
             // What attention sees once this position is written.
             let seq_len = pos + 1;
             let first = seq_len.saturating_sub(window) / block_size;
-            for i in first..=pos / block_size {
+            for (i, group) in lease.groups[first..=pos / block_size].iter().enumerate() {
+                let page = first + i;
                 assert!(
-                    lease.groups[i].is_some(),
-                    "at position {pos} the window reaches page {i}, which was recycled"
+                    group.is_some(),
+                    "at position {pos} the window reaches page {page}, which was recycled"
                 );
             }
         }
@@ -5577,9 +5578,9 @@ mod tests {
         }
         let released = lease.window.as_ref().unwrap().released;
         assert!(released >= locked, "the slide must have passed the prefix");
-        for i in 0..locked / block_size {
+        for (i, group) in lease.groups[..locked / block_size].iter().enumerate() {
             assert!(
-                lease.groups[i].is_some(),
+                group.is_some(),
                 "page {i} of the shared prefix was recycled out from under the tree"
             );
         }
