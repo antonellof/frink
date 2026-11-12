@@ -1177,7 +1177,18 @@ impl Kv {
                 // Asked BEFORE the forward, not after: a store that
                 // cannot roll back must not be written speculatively
                 // in the first place.
-                if !caches.iter().all(|c| c.rollback_limit() >= tokens.len()) {
+                //
+                // And only when the host rows ARE the history the batch
+                // continues: with Metal attention the KV lives on the
+                // device and the host caches stop at the prompt, so a
+                // rollback to `pos` would name positions they never
+                // held. That store was let through, and every rejected
+                // draft on the Metal private path then hit the
+                // `truncate` assert. Plain stepping is the answer there.
+                if !caches
+                    .iter()
+                    .all(|c| c.positions() == pos && c.rollback_limit() >= tokens.len())
+                {
                     return None;
                 }
                 Some(decoder.forward_batch(tokens, pos, caches))
@@ -3215,6 +3226,18 @@ mod tests {
     /// store continues as if they never happened. Checked by walking
     /// the same tokens again after the rollback and demanding the same
     /// logits: a stale row left behind would change them.
+    #[test]
+    fn a_store_behind_the_position_refuses_a_speculative_batch() {
+        // The Metal private path keeps KV on the device, so the host
+        // caches can trail `pos`. A batch there could not be rolled
+        // back, so it must not be written at all.
+        let decoder = small_decoder();
+        let mut kv = Kv::Contiguous(decoder.config.new_kv_caches());
+        kv.step_batch(&decoder, &[1, 5], 0).expect("in step");
+        assert!(kv.step_batch(&decoder, &[9, 2], 3).is_none());
+        assert!(kv.step_batch(&decoder, &[9, 2], 2).is_some());
+    }
+
     #[test]
     fn truncate_to_undoes_the_rows_a_rejected_draft_wrote() {
         let decoder = small_decoder();
