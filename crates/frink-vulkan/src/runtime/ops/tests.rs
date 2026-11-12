@@ -124,6 +124,36 @@ fn gpu_layer_norm_and_the_weightless_norms_match_their_twins() {
     }
 }
 
+/// The GeGLU combine against the tanh GELU it is an identity of, over
+/// gates from deep in the negative tail to large positives.
+#[test]
+fn gpu_a_batched_geglu_is_gelu_gate_times_up() {
+    let Some(mut rt) = runtime() else { return };
+    let n = 400;
+    let g: Vec<f32> = (0..n).map(|i| (i as f32 - 200.0) * 0.06).collect();
+    let u: Vec<f32> = (0..n).map(|i| ((i * 7 % 31) as f32 - 15.0) * 0.3).collect();
+    let (gb, ub, out) = (
+        upload(&mut rt, &g),
+        upload(&mut rt, &u),
+        rt.alloc_f32(n).unwrap(),
+    );
+    let mut batch = Batch::new();
+    batch.glu(gb, ub, out, n, true);
+    rt.submit_batch(&batch).unwrap();
+    let got = rt.read_f32(out, 0, n).unwrap();
+    for i in 0..n {
+        let x = g[i] as f64;
+        let gelu = 0.5 * x * (1.0 + (0.7978846f64 * (x + 0.044715 * x * x * x)).tanh());
+        let want = (gelu * u[i] as f64) as f32;
+        assert!(
+            (got[i] - want).abs() <= 2e-6 * want.abs().max(1.0),
+            "{i} (gate {}): {} vs {want}",
+            g[i],
+            got[i]
+        );
+    }
+}
+
 /// A bias is added to every position's row, and the add is exact.
 #[test]
 fn gpu_a_bias_is_added_to_every_position() {

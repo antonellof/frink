@@ -227,11 +227,17 @@ impl<'w> Batch<'w> {
 
     /// `h = silu(g) * u` over `n` values (the SwiGLU combine).
     pub fn swiglu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize) {
+        self.glu(g, u, out, n, false);
+    }
+
+    /// The gated combine `h = act(g) * u` over `n` values: SiLU, or the
+    /// tanh-approximation GELU of a GeGLU FFN when `gelu`.
+    pub fn glu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize, gelu: bool) {
         let n = n * self.positions;
         self.ops.push(Op::Shader {
             shader: SWIGLU,
             views: [(g, 0, n), (u, 0, n), (out, 0, n)],
-            push: words(&[n as u32]),
+            push: words(&[n as u32, gelu as u32]),
             grid: per_value(n),
             depth: 1,
         });

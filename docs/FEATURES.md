@@ -85,7 +85,7 @@ norm, Q/K/V, RoPE, an f16 KV mirror, attention, `wo`, residual, norm,
 SwiGLU FFN, residual), with each layer's K and V rows returned to the
 host cache, which stays the authority. A layer the stack does not
 serve (a window, a softcap, RoPE
-`mscale`, routed experts, GeGLU, or any layer under `--ctk f32`,
+`mscale`, routed experts, or any layer under `--ctk f32`,
 since the device KV is f16) runs on the host with its matvecs
 offloaded: Q/K/V as one submission and a dense SwiGLU FFN as another.
 The stack is held to the CPU and to llama.cpp's decode goldens over

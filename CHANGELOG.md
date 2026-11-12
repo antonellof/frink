@@ -17,6 +17,11 @@ are the ones worth reading twice.
 
 ### Added
 
+- **The Vulkan stack serves GeGLU** (#409). The gated-combine shader
+  takes a GELU mode, the tanh approximation in the cancellation-free
+  form the CPU uses (`x / (1 + exp(-2u))`), so a Gemma-style FFN runs
+  on the device. 33 graph fixtures reach the stack.
+
 - **The Vulkan stack serves every pre-norm kind** (#409). The norm
   shader gains a LayerNorm mode (the mean subtracted, the divisor the
   variance, as `ggml_norm`) and a weightless mode, and a norm's bias is

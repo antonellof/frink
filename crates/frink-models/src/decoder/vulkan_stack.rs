@@ -20,7 +20,7 @@
 //! Metal and CUDA stacks. The stack declines what its ops do not
 //! compute, so a layer it cannot serve runs on the host body unchanged:
 //! sinks, `wo` bias, a sliding window,
-//! an attention softcap, RoPE `mscale`, routed experts, a GeGLU FFN, and
+//! an attention softcap, RoPE `mscale`, routed experts, and
 //! a host cache that is not f16 (`--ctk f32`).
 //!
 //! One submission holds 26 plain layers (`MAX_DISPATCHES`, at 19
@@ -84,6 +84,8 @@ struct StackLayer<'a> {
     /// projection (`layer_supports_fused_attn` admits only those two).
     q_norm: Option<&'a [f32]>,
     k_norm: Option<&'a [f32]>,
+    /// The FFN's gate activation: GELU (a GeGLU FFN) or SiLU.
+    gelu: bool,
 }
 
 /// A pre-norm's kind, weight and bias once on the device.
@@ -220,13 +222,11 @@ impl Decoder {
         }
         let attn_norm = PreNorm::of(&layer.attn.norm_weight);
         let ffn_norm = PreNorm::of(&layer.moe.norm_weight);
-        // SwiGLU is the one activation the stack's FFN has.
-        if c.model_ffn_act()
-            .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)
-            != Some(false)
-        {
-            return None;
-        }
+        // The gated activations the combine has: SwiGLU, and GeGLU
+        // (`Some(true)`, Gemma). Every other one is the host's.
+        let gelu = c
+            .model_ffn_act()
+            .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)?;
         if c.attn_logit_softcap.is_some()
             || c.layer_sliding_window(li).is_some()
             || c.rope_attn_factor != 1.0
@@ -278,6 +278,7 @@ impl Decoder {
             v_bias,
             q_norm,
             k_norm,
+            gelu,
         })
     }
 
@@ -600,7 +601,7 @@ impl Decoder {
             let x_ffn = pre_norm(&mut ops, pre_ffn, h_mid);
             ops.matvec(s.gate, (x_ffn, 0), (gate, 0));
             ops.matvec(s.up, (x_ffn, 0), (up, 0));
-            ops.swiglu(gate, up, act, ffn_dim);
+            ops.glu(gate, up, act, ffn_dim, s.gelu);
             ops.matvec(s.down, (act, 0), (proj, 0));
             let ffn_out = match post_ffn {
                 Some(w) => {
