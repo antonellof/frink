@@ -17,6 +17,13 @@ are the ones worth reading twice.
 
 ### Added
 
+- **Vulkan shaders for the trit formats, TQ1_0 and PTQ1_0** (#409,
+  #405). One GLSL body (`trit_common.glsl`) for both block geometries,
+  a unit per packed byte, held to `frink_quant::ternary::dot_trits_f32`
+  as a matvec and as a GEMM. The Vulkan matvec and GEMM columns of
+  `docs/KERNELS.md` each fall from 9 host fallbacks to 7: the codebook
+  kinds (IQ1_S to IQ3_S).
+
 - **A Vulkan GEMM: a prefill batch is one dispatch** (#409, step 6;
   #405). The matvec shaders read a batch position from the dispatch
   grid's depth, so one shader per kind serves decode and prefill and

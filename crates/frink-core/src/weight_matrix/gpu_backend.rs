@@ -293,6 +293,8 @@ fn vulkan_matvec_launch(kind: QuantKind) -> Option<VulkanMatvecLaunchFn> {
         QuantKind::IQ4NL => Some(d::iq4_nl_matvec),
         QuantKind::IQ4XS => Some(d::iq4_xs_matvec),
         QuantKind::Mxfp4Gguf => Some(d::mxfp4_matvec),
+        QuantKind::Tq1_0 => Some(d::tq1_0_matvec),
+        QuantKind::Ptq1_0 => Some(d::ptq1_0_matvec),
         _ => None,
     }
 }
@@ -500,9 +502,9 @@ impl BackendCaps for Vulkan {
     const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
     /// The kinds with a shader in `frink_vulkan::shaders`: the K-quants,
-    /// the legacy 32-value kinds, IQ4_NL, IQ4_XS and MXFP4, each run
-    /// against its `frink_quant` scalar twin on a real device. The
-    /// codebook kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0 have none yet.
+    /// the legacy 32-value kinds, IQ4_NL, IQ4_XS, MXFP4, TQ1_0 and
+    /// PTQ1_0, each run against its `frink_quant` scalar twin on a real
+    /// device. The codebook kinds (IQ1_S to IQ3_S) have none yet.
     ///
     /// Everything else must report `None` rather than something
     /// plausible. A capability table that over-claims is how a kind ends
@@ -1189,6 +1191,8 @@ mod tests {
                 QuantKind::IQ4NL,
                 QuantKind::IQ4XS,
                 QuantKind::Mxfp4Gguf,
+                QuantKind::Tq1_0,
+                QuantKind::Ptq1_0,
             ],
             "frink-vulkan has these shaders (shaders::MATVEC); the capability \
              table claims {claimed:?}"

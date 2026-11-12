@@ -113,6 +113,18 @@ pub const MATVEC: &[MatvecShader] = &[
         block_bytes: 17,
         block_elems: 32,
     },
+    MatvecShader {
+        kind: "TQ1_0",
+        spv: include_bytes!("../shaders/spv/tq1_0_matvec.spv"),
+        block_bytes: 54,
+        block_elems: 256,
+    },
+    MatvecShader {
+        kind: "PTQ1_0",
+        spv: include_bytes!("../shaders/spv/ptq1_0_matvec.spv"),
+        block_bytes: 28,
+        block_elems: 128,
+    },
     // Not a quant kind: the decode stack's F32 operand
     // (`WeightMatrix::vulkan_stack_job`). No `QuantKind` is named "F32",
     // so no claim table can reach it.
@@ -336,6 +348,16 @@ mod tests {
                 "MXFP4",
                 frink_quant::MXFP4_GGUF_BLOCK_BYTES,
                 frink_quant::MXFP4_GGUF_BLOCK_ELEMS,
+            ),
+            (
+                "TQ1_0",
+                frink_quant::ternary::TQ1_0_BLOCK_BYTES,
+                frink_quant::ternary::TQ1_0_BLOCK_ELEMS,
+            ),
+            (
+                "PTQ1_0",
+                frink_quant::ternary::PTQ1_0_BLOCK_BYTES,
+                frink_quant::ternary::PTQ1_0_BLOCK_ELEMS,
             ),
             ("F32", 4, 1),
         ] {
