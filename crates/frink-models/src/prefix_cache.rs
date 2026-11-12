@@ -253,8 +253,7 @@ impl PrefixCache {
     /// a Mamba layer's) is refused for the same reason from the other
     /// side: the state is a reduction over the whole prefix, and
     /// `truncate` to the common length of a partial match has no
-    /// answer for it (`KvCache::can_truncate_to`). llama.cpp's server
-    /// re-prefills such models too.
+    /// answer for it (`KvCache::can_truncate_to`).
     pub fn store(&mut self, tokens: Vec<usize>, kv_caches: Vec<KvCache>, pending_logits: Vec<f32>) {
         self.store_salted(tokens, kv_caches, pending_logits, None)
     }

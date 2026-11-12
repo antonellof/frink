@@ -54,7 +54,7 @@
 use crate::decoder::Decoder;
 use crate::penalty_window::PenaltyWindow;
 use crate::sampling::{sampling_distribution, Sampler, SamplingParams};
-use frink_core::cache::KvCache;
+use frink_core::cache::{KvCache, KvCheckpoint};
 
 /// The distribution one drafted position was sampled from, as its
 /// complete support: `(token id, probability)` pairs summing to 1.
@@ -408,7 +408,8 @@ pub struct SpeculativeDecodeResult {
     /// `tokens_generated / forward_calls` (the actual speedup metric)
     /// is easy to read directly off this struct.
     pub tokens_generated: usize,
-    /// Verification rounds: `forward_calls` minus the prefill call.
+    /// Verification rounds: `forward_calls` minus the prefill call, and
+    /// minus the replays a recurrent target runs after a partial accept.
     /// This is the denominator of the published *acceptance length*
     /// metric.
     pub verification_steps: usize,
@@ -592,14 +593,12 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
 ) -> SpeculativeDecodeResult {
     assert!(!prompt_tokens.is_empty(), "prompt must not be empty");
     // A rejected draft rolls every cache back to the last accepted
-    // position, which a Mamba layer's state cannot do
-    // (`frink_core::recurrent_state`); the CLI refuses `--model-draft`
-    // on such a model before reaching here, and this is the backstop.
-    assert!(
-        !decoder.config.has_recurrent_layers(),
-        "speculative decoding rolls the KV caches back on a rejected draft, and a recurrent \
-         layer's state cannot be rolled back to a middle position"
-    );
+    // position, which a recurrent layer's state cannot do
+    // (`frink_core::recurrent_state`). On such a target the caches are
+    // checkpointed before each verify batch, and a partial accept
+    // restores them and replays the committed tokens, as llama.cpp's
+    // server does (`frink_core::cache::KvCheckpoint`).
+    let recurrent = decoder.config.has_recurrent_layers();
     for cache in kv_caches.iter() {
         assert_eq!(
             cache.positions(),
@@ -699,9 +698,18 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
         // (#61), so a longer draft could be drained before it is
         // rejected and leave the next query reading across a hole.
         // Shortening the draft costs speed, never the answer.
+        //
+        // A recurrent target's checkpoint holds the state, so only the
+        // window bounds its block.
         let rollback = kv_caches
             .iter()
-            .map(|c| c.rollback_limit())
+            .map(|c| {
+                if recurrent {
+                    c.rollback_limit_with_checkpoint()
+                } else {
+                    c.rollback_limit()
+                }
+            })
             .min()
             .unwrap_or(usize::MAX);
         let draft_budget = (options.max_new_tokens - generated.len() - 1).min(rollback);
@@ -715,6 +723,11 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
         batch.push(pending);
         batch.extend_from_slice(draft.tokens());
 
+        let checkpoints: Vec<KvCheckpoint> = if recurrent && !draft.is_empty() {
+            kv_caches.iter().map(KvCache::checkpoint).collect()
+        } else {
+            Vec::new()
+        };
         let (batch_logits, batch_hidden, batch_features) = forward(&batch, pos, kv_caches);
         result.forward_calls += 1;
         result.verification_steps += 1;
@@ -761,7 +774,18 @@ pub fn speculative_decode_observed<D: Drafter + ?Sized>(
         // already offset by start_pos.
         let committed_len = pos + 1 + accepted;
         if accepted < draft.len() {
-            decoder.truncate_kv(kv_caches, committed_len);
+            if recurrent {
+                // The state has run past the rejection and holds no
+                // "one token ago": back to before the block, then the
+                // committed tokens again. Their logits, hidden states
+                // and features are the verify batch's, computed from
+                // the same prefix, so the replay is only for the caches.
+                decoder.restore_kv(kv_caches, &checkpoints);
+                decoder.forward_batch_last(&batch[..=accepted], pos, kv_caches);
+                result.forward_calls += 1;
+            } else {
+                decoder.truncate_kv(kv_caches, committed_len);
+            }
         }
         // POSITIONS: `committed_len` is absolute, offset by start_pos.
         debug_assert!(kv_caches.iter().all(|c| c.positions() == committed_len));

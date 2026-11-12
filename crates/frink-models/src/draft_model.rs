@@ -111,20 +111,15 @@ impl DraftWeights {
     }
 }
 
-/// Opens `path` as a drafter for `target`, refusing what a rolled-back
-/// draft cache cannot be: a recurrent target, whose state cannot be
-/// rolled back to the last accepted position, and a recurrent draft.
-/// The draft's KV takes the target's dtype, one `--ctk` for the run.
-/// `frink run -md` and `frink-server -md` both load through here.
+/// Opens `path` as a drafter for `target`, refusing a recurrent draft:
+/// the draft's own cache is rolled back after every verification block,
+/// and llama.cpp gives a draft context no recurrent checkpoints either
+/// (`n_rs_seq = 0`, `common/speculative.cpp:2726` at the pin). A
+/// recurrent TARGET is served: its caches are checkpointed around each
+/// verify batch (`frink_core::cache::KvCheckpoint`). The draft's KV
+/// takes the target's dtype, one `--ctk` for the run. `frink run -md`
+/// and `frink-server -md` both load through here.
 pub fn load(path: &str, target: &ModelConfig) -> anyhow::Result<DraftWeights> {
-    if target.has_recurrent_layers() {
-        anyhow::bail!(
-            "--model-draft cannot be used with a target model that has recurrent (Mamba) \
-             layers: a rejected draft rolls the KV caches back to the last accepted position, \
-             and a Mamba layer's state is a reduction over the whole prefix that cannot be \
-             rolled back (llama.cpp's server re-prefills such models for the same reason)"
-        );
-    }
     let mut config = ModelConfig::from_gguf(&frink_gguf::ShardedGguf::open(path)?)?;
     config.kv_dtype = target.kv_dtype;
     if config.has_recurrent_layers() {
