@@ -100,7 +100,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
         287,
         "fn evict",
     ),
-    ("crates/frink-server/src/generate.rs", 866, "tree.evict("),
+    ("crates/frink-server/src/generate.rs", 876, "tree.evict("),
     // Preemption.
     (
         "crates/frink-server/src/serving/batch/preempt.rs",
