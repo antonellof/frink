@@ -12,7 +12,8 @@
 //! Every op is held to a scalar twin here and, through `frink-core`'s
 //! seam tests, to the CPU function it replaces.
 
-use super::{grid, push_constants, push_words, Buf, Dispatch, MatvecJob, Runtime, MAX_DISPATCHES};
+use super::memory::{alloc, free, write_padded, Buf};
+use super::{grid, push_constants, push_words, Dispatch, MatvecJob, Runtime, MAX_DISPATCHES};
 use crate::device::VulkanError;
 use crate::shaders::{
     ElementwiseShader, ADD, ATTN_SCORES, ATTN_VALUES, KV_STORE, RMS_NORM, ROPE, SWIGLU,
@@ -266,14 +267,14 @@ impl Runtime {
     /// A host-visible buffer of `n` f32 values (zeroed), owned by the
     /// runtime for its lifetime.
     pub fn alloc_f32(&mut self, n: usize) -> Result<DeviceBuf, VulkanError> {
-        let buf = super::alloc(
+        let buf = alloc(
             &self.ctx.device,
             &self.mem_props,
             (n * 4).max(4),
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
-        super::write_padded(&buf, &[]);
+        write_padded(&buf, &[]);
         self.bufs.push(Some(buf));
         Ok(DeviceBuf(self.bufs.len() - 1))
     }
@@ -342,7 +343,7 @@ impl Runtime {
         if let Some(buf) = self.bufs.get_mut(b.0).and_then(Option::take) {
             // SAFETY: every submission is waited on before its call
             // returns, so no command buffer references `buf`.
-            unsafe { super::free(&self.ctx.device, buf) };
+            unsafe { free(&self.ctx.device, buf) };
         }
     }
 
