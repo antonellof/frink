@@ -12,9 +12,11 @@ use frink_core::kv_store::KvDtype;
 /// host cache that is not, and the CPU child is given the same dtype. So
 /// what is left is the order a device kernel accumulates in.
 ///
-/// Measured (2026-11-12, M2 Pro through MoltenVK, the 12 fixtures the
-/// stack serves): min 1.2e-7, p50 1.8e-5, max 4.2e-5 (`smollm3`). The
-/// bound is 24x the worst. With an f32 KV on the CPU side the same run
+/// Measured (2026-11-12, M2 Pro through MoltenVK, the 21 fixtures the
+/// stack serves): min 1.2e-7, p50 1.7e-6, p90 3.4e-5, max 3.2e-4
+/// (`exaone_moe_array_flipped`, a QK-norm, whose sum of squares is an
+/// f32 tree on the device and an f64 loop on the CPU). The bound is 3x
+/// the worst. With an f32 KV on the CPU side the same run
 /// showed 8.7e-2 on `lora_base`, which is the KV's rounding and not the
 /// stack's, and is why the comparison is f16 against f16.
 pub const VULKAN_DECODE_TOL: f32 = 1e-3;
@@ -27,7 +29,7 @@ const VULKAN_GOLDEN_TOL: f32 = 0.2;
 /// Fixtures the stack served, and agreed, at the measurement above. The
 /// gate fails below it: fewer means a refusal moved and a fixture now
 /// runs on the host, which this gate would otherwise pass in silence.
-const MIN_SERVED: usize = 12;
+const MIN_SERVED: usize = 21;
 
 /// Fixtures whose Vulkan decode is not within rounding of the CPU's,
 /// each with what was measured. The gate fails if this set and the

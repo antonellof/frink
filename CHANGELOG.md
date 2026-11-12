@@ -17,6 +17,15 @@ are the ones worth reading twice.
 
 ### Added
 
+- **The Vulkan stack serves QKV bias and QK-norm** (#409). A bias is
+  one broadcast add after its projection (Qwen2 and the GLM family); a
+  QK-norm is the RMSNorm op per head or over the whole projection,
+  after the bias and before RoPE (Qwen3, OLMoE). The graph fixtures the
+  stack serves go from 12 to 21, each held to the CPU within 1e-3 (worst
+  3.2e-4, a QK-norm, whose sum of squares is an f32 tree on the device).
+  A layer with either records up to five more dispatches, so a
+  submission holds a few fewer than 26 of them.
+
 - **A Vulkan embedding gather, from the matvec shaders** (#409,
   #405). Every matvec shader is compiled a second time with a one-hot
   activation (`-DGATHER`): a row of the table against `e_c` is that

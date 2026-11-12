@@ -76,6 +76,25 @@ fn gpu_add_matches_its_twin() {
     assert_eq!(rt.read_f32(ob, 0, n).unwrap(), want, "an add is exact");
 }
 
+/// A bias is added to every position's row, and the add is exact.
+#[test]
+fn gpu_a_bias_is_added_to_every_position() {
+    let Some(mut rt) = runtime() else { return };
+    let (n, positions) = (130usize, 7usize);
+    let a = pseudo_random(3, n * positions);
+    let bias = pseudo_random(4, n);
+    let (ab, bb, ob) = (
+        upload(&mut rt, &a),
+        upload(&mut rt, &bias),
+        rt.alloc_f32(n * positions).unwrap(),
+    );
+    let mut batch = Batch::for_positions(positions);
+    batch.add_bias(ab, bb, ob, n);
+    rt.submit_batch(&batch).unwrap();
+    let want: Vec<f32> = a.iter().enumerate().map(|(i, a)| a + bias[i % n]).collect();
+    assert_eq!(rt.read_f32(ob, 0, n * positions).unwrap(), want);
+}
+
 /// `frink_core::attention::apply_rope_interleaved` and `apply_rope`
 /// (NeoX) over the first `rot_dim` channels, from the same table.
 fn rope_twin(x: &[f32], head_dim: usize, rot_dim: usize, tab: &[f32], neox: bool) -> Vec<f32> {

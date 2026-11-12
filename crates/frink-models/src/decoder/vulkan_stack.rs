@@ -19,12 +19,13 @@
 //! Which layers it may take is `fused_view`'s decision, shared with the
 //! Metal and CUDA stacks. The stack declines what its ops do not
 //! compute, so a layer it cannot serve runs on the host body unchanged:
-//! QKV biases, QK-norms, post-norms, sinks, `wo` bias, a sliding window,
+//! post-norms, sinks, `wo` bias, a sliding window,
 //! an attention softcap, RoPE `mscale`, routed experts, a GeGLU FFN, and
 //! a host cache that is not f16 (`--ctk f32`).
 //!
-//! One submission holds [`MAX_RUN`] layers, so a deeper model waits once
-//! per that many.
+//! One submission holds 26 plain layers (`MAX_DISPATCHES`, at 19
+//! dispatches each, a few fewer with a bias or a QK-norm), so a deeper
+//! model waits once per that many.
 //!
 //! A prefill batch is the same recording over `batch` positions
 //! (`Batch::for_positions`): every buffer holds a row per position, the
@@ -41,18 +42,16 @@ use frink_vulkan::runtime::{MatvecJob, Runtime, MAX_DISPATCHES};
 use super::fused_view::{FusedAttnCaps, FusedAttnExtras};
 use super::{Decoder, ExpertBacking, LayerWeights};
 
-/// Dispatches one layer records in `run_vulkan_stack`: norm, Q, K, V,
-/// two RoPEs, two KV appends, attention (two), `wo`, add, norm, gate,
-/// up, SwiGLU, down, add.
+/// Dispatches a plain layer records in `run_vulkan_stack`: norm, Q, K,
+/// V, two RoPEs, two KV appends, attention (two), `wo`, add, norm, gate,
+/// up, SwiGLU, down, add. A QKV bias or a QK-norm is one more each
+/// ([`StackLayer::ops`]).
 const OPS_PER_LAYER: usize = 19;
 
 /// The most score scratch one prefill batch may ask for: `batch *
 /// n_heads * (start_pos + batch)` f32. Above it the host body runs the
 /// batch, which is a refusal by size and not a different answer.
 const MAX_SCORE_BYTES: usize = 256 << 20;
-
-/// Layers one submission holds, with a dispatch left for the gather.
-const MAX_RUN: usize = (MAX_DISPATCHES - 1) / OPS_PER_LAYER;
 
 /// One layer as the stack runs it: borrowed weights and its RoPE.
 struct StackLayer<'a> {
@@ -69,6 +68,32 @@ struct StackLayer<'a> {
     /// after another, and the rotated width; `None` for a layer
     /// llama.cpp does not rotate.
     rope: Option<(Vec<f32>, usize)>,
+    /// Added to the projection for every position (Qwen2's QKV bias).
+    q_bias: Option<&'a [f32]>,
+    k_bias: Option<&'a [f32]>,
+    v_bias: Option<&'a [f32]>,
+    /// QK-norm weights, applied after the bias and before RoPE: one
+    /// `head_dim` weight shared by every head, or one over the whole
+    /// projection (`layer_supports_fused_attn` admits only those two).
+    q_norm: Option<&'a [f32]>,
+    k_norm: Option<&'a [f32]>,
+}
+
+impl StackLayer<'_> {
+    /// The dispatches this layer records.
+    fn ops(&self) -> usize {
+        OPS_PER_LAYER
+            + [
+                self.q_bias,
+                self.k_bias,
+                self.v_bias,
+                self.q_norm,
+                self.k_norm,
+            ]
+            .iter()
+            .flatten()
+            .count()
+    }
 }
 
 /// What the first layer of a run starts from.
@@ -127,8 +152,8 @@ impl Decoder {
         {
             return None;
         }
-        // Everything the extras carry is arithmetic the stack's ops do
-        // not do yet; `None` in each is the plain llama layer.
+        // Sinks and a bias on `wo` are arithmetic the stack's ops do
+        // not do; the QKV biases and the QK-norms are.
         let FusedAttnExtras {
             q_bias,
             k_bias,
@@ -138,12 +163,7 @@ impl Decoder {
             sinks,
             o_bias,
         } = Self::fused_attn_extras(layer, FusedAttnCaps::VULKAN)?;
-        if q_bias.is_some()
-            || k_bias.is_some()
-            || v_bias.is_some()
-            || q_norm.is_some()
-            || k_norm.is_some()
-            || sinks.is_some()
+        if sinks.is_some()
             || o_bias.is_some()
             || layer.attn.post_attn_norm.is_some()
             || layer.attn.post_ffn_norm.is_some()
@@ -201,6 +221,11 @@ impl Decoder {
             up: job(&ex.up)?,
             down: job(&ex.down)?,
             rope,
+            q_bias,
+            k_bias,
+            v_bias,
+            q_norm,
+            k_norm,
         })
     }
 
@@ -247,10 +272,15 @@ impl Decoder {
             return None;
         }
         let mut layers = Vec::new();
-        for (li, cache) in kv_caches.iter().enumerate().skip(l).take(MAX_RUN) {
+        // One dispatch is kept for the gather.
+        let mut budget = MAX_DISPATCHES - 1;
+        for (li, cache) in kv_caches.iter().enumerate().skip(l) {
             match self.vulkan_stack_layer(li, self.layer_for(li), cache, pos, batch) {
-                Some(s) => layers.push(s),
-                None => break,
+                Some(s) if s.ops() <= budget => {
+                    budget -= s.ops();
+                    layers.push(s);
+                }
+                _ => break,
             }
         }
         if layers.is_empty() {
@@ -337,9 +367,12 @@ impl Decoder {
             attn_norm: DeviceBuf,
             ffn_norm: DeviceBuf,
             tab: Option<(DeviceBuf, usize)>,
-            k: DeviceBuf,
-            kr: DeviceBuf,
-            v: DeviceBuf,
+            /// K and V each move between two buffers, an op at a time.
+            k: [DeviceBuf; 2],
+            v: [DeviceBuf; 2],
+            /// The QKV biases and QK-norm weights on the device.
+            bias: [Option<DeviceBuf>; 3],
+            qk_norm: [Option<DeviceBuf>; 2],
             cache: DeviceBuf,
             cache_words: usize,
             k_word: usize,
@@ -359,9 +392,21 @@ impl Decoder {
                 }
                 None => None,
             };
-            let k = rt.scratch("k", i, batch * kv_dim)?;
-            let kr = rt.scratch("kr", i, batch * kv_dim)?;
-            let v = rt.scratch("v", i, batch * kv_dim)?;
+            let k = [
+                rt.scratch("k", i, batch * kv_dim)?,
+                rt.scratch("kr", i, batch * kv_dim)?,
+            ];
+            let v = [
+                rt.scratch("v", i, batch * kv_dim)?,
+                rt.scratch("v2", i, batch * kv_dim)?,
+            ];
+            let mut constant = |w: Option<&[f32]>| w.map(|w| rt.constant_f32(w)).transpose();
+            let bias = [
+                constant(s.q_bias)?,
+                constant(s.k_bias)?,
+                constant(s.v_bias)?,
+            ];
+            let qk_norm = [constant(s.q_norm)?, constant(s.k_norm)?];
             let cache = &mut kv_caches[li];
             let rows = cache.rows();
             let KvCache {
@@ -376,8 +421,9 @@ impl Decoder {
                 ffn_norm,
                 tab,
                 k,
-                kr,
                 v,
+                bias,
+                qk_norm,
                 cache: m.buf(),
                 cache_words: m.words(),
                 k_word: m.k_word(pos),
@@ -394,23 +440,53 @@ impl Decoder {
                 .expect("checked at admission");
             ops.gather(table, t, h);
         }
+        let mut finals = Vec::with_capacity(layers.len());
         for (s, b) in layers.iter().zip(&bound) {
             // --- attention ---
             ops.rms_norm(b.attn_norm, h, normed, dim, 1, eps);
-            ops.matvec(s.q, (normed, 0), (q, 0));
-            ops.matvec(s.k, (normed, 0), (b.k, 0));
-            ops.matvec(s.v, (normed, 0), (b.v, 0));
-            let (q_in, k_in) = match b.tab {
-                Some((tab, rot)) => {
-                    ops.rope(tab, q, qr, n_heads, hd, rot, self.rope_is_neox());
-                    ops.rope(tab, b.k, b.kr, n_kv, hd, rot, self.rope_is_neox());
-                    (qr, b.kr)
+            // Q, K and V each start in the first buffer of a pair, and
+            // every op that follows writes the other one.
+            let (mut qs, mut ks, mut vs) = ([q, qr], b.k, b.v);
+            ops.matvec(s.q, (normed, 0), (qs[0], 0));
+            ops.matvec(s.k, (normed, 0), (ks[0], 0));
+            ops.matvec(s.v, (normed, 0), (vs[0], 0));
+            for (pair, bias, width) in [
+                (&mut qs, b.bias[0], q_dim),
+                (&mut ks, b.bias[1], kv_dim),
+                (&mut vs, b.bias[2], kv_dim),
+            ] {
+                if let Some(bias) = bias {
+                    ops.add_bias(pair[0], bias, pair[1], width);
+                    pair.swap(0, 1);
                 }
-                // An unrotated layer's K is its rotated K.
-                None => (q, b.k),
-            };
+            }
+            for (pair, w, heads, norm) in [
+                (&mut qs, b.qk_norm[0], n_heads, s.q_norm),
+                (&mut ks, b.qk_norm[1], n_kv, s.k_norm),
+            ] {
+                if let (Some(w), Some(norm)) = (w, norm) {
+                    // One `head_dim` weight per head, or one weight over
+                    // the whole projection.
+                    let (n, rows) = if norm.len() == hd {
+                        (hd, heads)
+                    } else {
+                        (heads * hd, 1)
+                    };
+                    ops.rms_norm(w, pair[0], pair[1], n, rows, eps);
+                    pair.swap(0, 1);
+                }
+            }
+            if let Some((tab, rot)) = b.tab {
+                ops.rope(tab, qs[0], qs[1], n_heads, hd, rot, self.rope_is_neox());
+                ops.rope(tab, ks[0], ks[1], n_kv, hd, rot, self.rope_is_neox());
+                qs.swap(0, 1);
+                ks.swap(0, 1);
+            }
+            // What the host cache takes back: K as attention reads it.
+            let (q_in, k_in, v_in) = (qs[0], ks[0], vs[0]);
+            finals.push((k_in, v_in));
             ops.kv_store(k_in, b.cache, kv_dim, b.k_word, b.cache_words);
-            ops.kv_store(b.v, b.cache, kv_dim, b.v_word, b.cache_words);
+            ops.kv_store(v_in, b.cache, kv_dim, b.v_word, b.cache_words);
             ops.attention(
                 b.cache,
                 b.cache_words,
@@ -437,16 +513,15 @@ impl Decoder {
             ops.matvec(s.down, (act, 0), (proj, 0));
             ops.add(h_mid, proj, h, dim);
         }
-        assert!(ops.len() <= OPS_PER_LAYER * layers.len() + 1);
+        assert!(ops.len() <= layers.iter().map(StackLayer::ops).sum::<usize>() + 1);
         rt.submit_batch(&ops)?;
 
         let new_hidden = rt.read_f32(h, 0, batch * dim)?;
         let mut rows = Vec::with_capacity(layers.len());
-        for (s, b) in layers.iter().zip(&bound) {
-            let k_src = if s.rope.is_some() { b.kr } else { b.k };
+        for (k, v) in finals {
             rows.push((
-                rt.read_f32(k_src, 0, batch * kv_dim)?,
-                rt.read_f32(b.v, 0, batch * kv_dim)?,
+                rt.read_f32(k, 0, batch * kv_dim)?,
+                rt.read_f32(v, 0, batch * kv_dim)?,
             ));
         }
         Ok((new_hidden, rows))
