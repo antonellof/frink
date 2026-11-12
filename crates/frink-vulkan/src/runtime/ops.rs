@@ -220,6 +220,19 @@ impl<'w> Batch<'w> {
         });
     }
 
+    /// `out = a + bias` for every position: `bias` is `n` values, added
+    /// to each position's `n` values of `a`.
+    pub fn add_bias(&mut self, a: DeviceBuf, bias: DeviceBuf, out: DeviceBuf, n: usize) {
+        let total = n * self.positions;
+        self.ops.push(Op::Shader {
+            shader: ADD,
+            views: [(a, 0, total), (bias, 0, n), (out, 0, total)],
+            push: words(&[total as u32, n as u32]),
+            grid: per_value(total),
+            depth: 1,
+        });
+    }
+
     /// RoPE over `n_heads` heads of `head_dim`, the first `rot_dim`
     /// channels rotated by the `rot_dim / 2` `(cos, sin)` pairs in `tab`
     /// (see `shaders/rope.comp`); `neox` picks split-half pairing. Each
