@@ -193,7 +193,7 @@ matched unlocked leaf and cascading into a newly childless parent.
 - Namespaces: `salted.rs` is one tree per caller salt over one page
   pool, with round-robin eviction across namespaces. Two callers with
   byte-identical prompts share nothing.
-- Reclamation is wired on both decode paths: `generate.rs:866` calls
+- Reclamation is wired on both decode paths: `generate.rs:876` calls
   `evict` from `acquire_paged_caches`, which the private loop and the
   batched worker both go through, and the caller retries immediately
   rather than charging reclamation against its deadline.

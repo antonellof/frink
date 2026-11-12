@@ -117,7 +117,10 @@ Each step is its own PR, CPU first, token parity before any backend work.
    ignored GPU test `metal_speculation_rewinds_the_device_kv`. CUDA: its
    mirror re-validates against complete host rows, so nothing to do;
    the same test on a CUDA host is still to run.
-9. **Batcher.** Drafting inside `serving/batch/worker.rs`: one drafter pass per
+9. **Batcher.** Paged block-tail truncation is done
+   (`PagedKvCache::truncate`, `PagedLease::can_roll_back`): the private
+   loop speculates on the paged store unless a sliding window recycles
+   its pages. What is left: drafting inside `serving/batch/worker.rs`: one drafter pass per
    lane, one batched verify through `forward_multi_seq_kv`, per-lane accept and
    truncate. Paged KV needs block-tail truncation in
    `frink-core/src/cache/paged.rs` and the radix tree must not publish

@@ -504,6 +504,16 @@ impl PagedLease {
     /// prefix is exactly the part that is gone -- what it still holds is
     /// a suffix. Publishing anyway would hand the next request a page
     /// whose contents belong to a position a thousand tokens later.
+    /// Whether a speculative block written into this lease can be
+    /// rolled back by truncation. Not when a sliding window recycles
+    /// pages behind it (a recycled page backs two indices of the table,
+    /// and the rows a rollback frees may be another position's), and
+    /// not for a recurrent target, whose paged state has no checkpoint
+    /// yet.
+    fn can_roll_back(&self, decoder: &Decoder) -> bool {
+        !self.slides() && !decoder.config.has_recurrent_layers()
+    }
+
     pub fn has_slid(&self) -> bool {
         self.window.as_ref().is_some_and(|w| w.released > 0)
     }
@@ -1166,12 +1176,13 @@ impl Kv {
     /// caller takes the ordinary path rather than guessing. Three
     /// reasons, all real:
     ///
-    /// * **Paged.** Rejecting a draft means releasing the positions it
-    ///   wrote, and a paged store hands those out through a block
-    ///   table that the radix cache may already have published a
-    ///   prefix of. Undoing that is its own row
-    ///   (`docs/plans/server-speculative-decoding.md`); refusing is the
-    ///   honest answer until it lands.
+    /// * **Paged, windowed or recurrent.** A paged lease rolls back by
+    ///   rewinding each table's length (`PagedKvCache::truncate`): the
+    ///   pages stay reserved and the next rows overwrite them, and the
+    ///   radix tree only ever publishes committed rows, at the end. Not
+    ///   when a sliding window recycles pages, nor for a recurrent
+    ///   target, whose paged state has no checkpoint yet
+    ///   (`PagedLease::can_roll_back`).
     /// * **Recurrent** (served, not refused). A Mamba-style state is a
     ///   REDUCTION over the whole prefix rather than a row per position,
     ///   so there is nothing to drop: the engine checkpoints it before
@@ -1209,7 +1220,19 @@ impl Kv {
                 }
                 Some(decoder.forward_batch(tokens, pos, caches))
             }
-            Kv::Paged(_) => None,
+            Kv::Paged(lease) => {
+                if !lease.can_roll_back(decoder) {
+                    return None;
+                }
+                Some(
+                    decoder
+                        .forward_batch_paged(tokens, pos, &mut lease.caches, &lease.store)
+                        .expect(
+                            "admission reserved the prompt plus max_tokens, and a draft never \
+                             runs past them",
+                        ),
+                )
+            }
         }
     }
 
@@ -1255,7 +1278,17 @@ impl Kv {
                 decoder.truncate_kv(caches, pos);
                 true
             }
-            Kv::Paged(_) => false,
+            Kv::Paged(lease) => {
+                if !lease.can_roll_back(decoder)
+                    || !lease.caches.iter().all(|c| c.can_truncate_to(pos))
+                {
+                    return false;
+                }
+                for cache in &mut lease.caches {
+                    cache.truncate(pos);
+                }
+                true
+            }
         }
     }
 
@@ -3407,9 +3440,7 @@ mod tests {
     /// why `step_batch` returns `None` rather than `truncate_to`
     /// failing after the damage is done.
     #[test]
-    fn a_paged_store_refuses_to_speculate_rather_than_failing_to_undo() {
-        // Constructed without a pool: the point is the arm, not the
-        // pages, and `step_batch` decides on the variant alone.
+    fn a_contiguous_store_speculates_and_undoes_it() {
         let decoder = small_decoder();
         let mut kv = Kv::Contiguous(decoder.config.new_kv_caches());
         assert!(
@@ -4703,6 +4734,74 @@ mod tests {
             anchor_token: None,
             slide_interval: crate::policy::pool_budget::DEFAULT_SWA_EVICTION_INTERVAL,
         }
+    }
+
+    /// The paged store speculates: a rejected block is rolled back by
+    /// rewinding the lease's tables, and the text is the contiguous
+    /// store's, greedy and sampled, with a draft that is right part of
+    /// the time and with prompt lookup. Every page comes back.
+    #[test]
+    fn a_paged_store_speculates_and_answers_as_a_contiguous_one() {
+        let decoder = small_decoder();
+        // One layer of the target's two, with the same seed: right
+        // often enough to be accepted, wrong often enough to be cut.
+        let draft = crate::server_draft::ServerDraft {
+            kind: crate::server_draft::DraftKind::Model(frink_models::DraftWeights::new(
+                Decoder::new_random_small(test_dense_fixture(), 1, 256),
+            )),
+            max: 4,
+            p_min: 0.0,
+        };
+        let config = paged_config(&decoder, /* block_size = */ 4, /* blocks = */ 64);
+        let free_before = config.store.free_groups();
+        let prompt = "abcabcabcabc";
+        let run = |params: &GenerationParams,
+                   paged: Option<&PagedKvConfig>,
+                   draft: Option<&crate::server_draft::ServerDraft>| {
+            let mut text = String::new();
+            let (finish, _rows, _ids, _truncated, usage) = generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                prompt,
+                params,
+                None,
+                paged,
+                None,
+                None,
+                draft,
+                |_, s| text.push_str(s),
+            )
+            .expect("generates");
+            (text, finish[0].0.clone(), usage)
+        };
+        let mut sampled = greedy_params(32);
+        sampled.sampling.temperature = 0.8;
+        sampled.seed = 7;
+        let mut cut = false;
+        for params in [greedy_params(32), sampled] {
+            for d in [Some(&draft), None] {
+                let (want, want_finish, want_usage) = run(&params, None, d);
+                let (got, got_finish, usage) = run(&params, Some(&config), d);
+                assert_eq!(got, want, "the paged store changed the answer");
+                assert_eq!(got_finish, want_finish);
+                // The same rounds, drafted and accepted alike: the paged
+                // store did not decline a block the contiguous one ran.
+                assert_eq!(
+                    (usage.draft_tokens, usage.accepted_draft_tokens),
+                    (want_usage.draft_tokens, want_usage.accepted_draft_tokens),
+                );
+                let drafted = usage.draft_tokens.unwrap_or(0);
+                let accepted = usage.accepted_draft_tokens.unwrap_or(0);
+                cut |= accepted > 0 && drafted > accepted;
+            }
+        }
+        assert!(
+            cut,
+            "no run both accepted and rejected a draft on the paged store"
+        );
+        assert_eq!(config.store.free_groups(), free_before, "a page leaked");
     }
 
     /// Serving on paged KV must produce the SAME TEXT as serving on
