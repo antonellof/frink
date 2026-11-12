@@ -5,12 +5,13 @@
 //!
 //! Two halves, deliberately separated:
 //!
-//! * **Drafting** is the [`Drafter`] trait. The only implementation in
-//!   the tree is [`PromptLookupSpeculator`], an n-gram match over the
-//!   history with no model at all (prompt-lookup drafting), chosen
-//!   because it needs no GPU, no second set
-//!   of weights and no checkpoint to be useful. A model-based drafter
-//!   (MTP head, EAGLE, dFlash) is a second impl of the same trait.
+//! * **Drafting** is the [`Drafter`] trait. [`PromptLookupSpeculator`]
+//!   is an n-gram match over the history with no model at all
+//!   (prompt-lookup drafting), which needs no GPU, no second set of
+//!   weights and no checkpoint to be useful.
+//!   `crate::draft_model::DraftModelSpeculator` drafts autoregressively
+//!   with a second GGUF. A block drafter conditioned on the target's
+//!   hidden states (DFlash2, #600) is another impl of the same trait.
 //! * **Verification** is [`speculative_decode_with`], and it does not
 //!   know or care which drafter proposed the block.
 //!

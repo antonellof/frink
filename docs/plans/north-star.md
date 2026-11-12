@@ -76,6 +76,9 @@ buys on one machine.
    private loop, so on Metal, where continuous batching is the default,
    it does not speculate at all. Next: speculation inside the batch,
    then multi-token-prediction heads as a second drafter (#533).
+   Trained block drafters first reach `frink run`: DFlash2 drafts on
+   every backend (#600,
+   [`dflash2-and-serving.md`](dflash2-and-serving.md)).
 5. **Scheduling.** Preemption on by default after a measurement (#408),
    and a request priority (#541). `/metrics` reports prefix reuse and the
    latency histograms a scheduler is tuned against.
