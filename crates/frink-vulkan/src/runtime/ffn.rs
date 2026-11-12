@@ -78,6 +78,7 @@ impl Runtime {
             set,
             push: push_constants(rows, n_blocks, row_bytes),
             grid: grid(rows),
+            depth: 1,
         };
         let gate_up = [matvec(p_g, 0, g_shape), matvec(p_u, 1, u_shape)];
         let combine = [Dispatch {
@@ -85,6 +86,7 @@ impl Runtime {
             set: 2,
             push: push_constants(n, 0, 0),
             grid: elementwise_grid(n),
+            depth: 1,
         }];
         let project = [matvec(p_d, 3, d_shape)];
         self.run(&[&gate_up, &combine, &project])?;

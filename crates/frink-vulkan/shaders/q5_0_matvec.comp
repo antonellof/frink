@@ -21,8 +21,8 @@ void main() {
             uint q = byte_at(blk + 6u + i);
             uint lo = (q & 0x0fu) | (((qh >> i) << 4) & 0x10u);
             uint hi = (q >> 4) | ((qh >> (i + 12u)) & 0x10u);
-            s += float(int(lo) - 16) * x[xb + i];
-            s += float(int(hi) - 16) * x[xb + 16u + i];
+            s += float(int(lo) - 16) * X(xb + i);
+            s += float(int(hi) - 16) * X(xb + 16u + i);
         }
         acc += d * s;
     }

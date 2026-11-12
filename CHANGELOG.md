@@ -17,6 +17,19 @@ are the ones worth reading twice.
 
 ### Added
 
+- **A Vulkan GEMM: a prefill batch is one dispatch** (#409, step 6;
+  #405). The matvec shaders read a batch position from the dispatch
+  grid's depth, so one shader per kind serves decode and prefill and
+  each position of a batch is its matvec bit for bit
+  (`frink_vulkan::runtime::Runtime::gemm`). `apply_batch` reaches it
+  under `--device vulkan` for every kind with a shader, and the Vulkan
+  GEMM column of `docs/KERNELS.md` falls from 22 host fallbacks to 9.
+  Every (row, position) decodes its row again; decoding once per batch
+  is left to tune on real hardware. On Llama-3.2-3B Q4_K_M with the
+  prefill on Vulkan, `frink parity` is MATCH at a 300-token prompt
+  (first-token KL 2.892e-5, the CPU's 2.875e-5) and over 48 decode
+  steps, and the greedy tokens are the CPU's.
+
 - **A Vulkan decode stack: every layer of a token in one submission**
   (#409, step 5). For a plain llama-family dense model the device runs
   norm, Q/K/V, RoPE, the KV append, attention, `wo`, the residual, norm,

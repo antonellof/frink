@@ -1,7 +1,13 @@
 // The matvec interface every frink-vulkan shader keeps
 // (crates/frink-vulkan/src/runtime.rs, `Runtime::matvec`): weights as
 // uint words at binding 0, activations at 1, outputs at 2; push
-// constants rows, n_blocks_per_row, row_bytes.
+// constants rows, n_blocks_per_row, row_bytes, x_stride.
+//
+// A GEMM IS THE SAME SHADER OVER A DEEPER GRID. The grid's z is the
+// batch position: position z reads its activations at `z * x_stride`
+// (through `X`) and writes its row at `z * rows + row`, the host's
+// `[batch][rows]` layout. A matvec dispatches z = 1 and leaves x_stride
+// zero, so both offsets are zero and nothing about it changes.
 //
 // ONE WORKGROUP PER ROW, the shape of llama.cpp's mul_mat_vec: the row
 // is cut into units (a block, or a sub-block with its own scale), the 64
@@ -27,11 +33,17 @@ layout(push_constant) uniform Push {
     uint rows;
     uint n_blocks_per_row;
     uint row_bytes;
+    uint x_stride;
 } p;
+
+// Activation `i` of this workgroup's batch position.
+uint x_base;
+#define X(i) x[x_base + (i)]
 
 shared float partial[WG];
 
 uint matvec_row() {
+    x_base = gl_WorkGroupID.z * p.x_stride;
     return gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
 }
 
@@ -46,7 +58,7 @@ void finish(uint row, float acc) {
         if (tid < s) partial[tid] += partial[tid + s];
         barrier();
     }
-    if (tid == 0u) y[row] = partial[0];
+    if (tid == 0u) y[gl_WorkGroupID.z * p.rows + row] = partial[0];
 }
 
 uint byte_at(uint k) {

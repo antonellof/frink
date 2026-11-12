@@ -14,7 +14,7 @@ void main() {
         uint xb = b * 32u;
         float s = 0.0;
         for (uint i = 0u; i < 32u; ++i) {
-            s += float(i8_at(blk + 2u + i)) * x[xb + i];
+            s += float(i8_at(blk + 2u + i)) * X(xb + i);
         }
         acc += f16_at(blk) * s;
     }

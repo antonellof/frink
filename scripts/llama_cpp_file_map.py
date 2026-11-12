@@ -63,7 +63,7 @@ MAPPING: list[tuple[str, str, Status, str]] = [
     ("ggml/src/ggml-cpu/", "crates/frink-quant/ + frink-core/", "partial", "AVX2/NEON/i8mm; no AVX512/SVE/AMX"),
     ("ggml/src/ggml-cuda/", "crates/frink-cuda/src/", "partial", "8 kernels vs 65 op families; no GEMM/MoE FA"),
     ("ggml/src/ggml-metal/", "crates/frink-metal/src/", "partial", "62 kernels vs ~70 ops; competitive MoE stack"),
-    ("ggml/src/ggml-vulkan/", "crates/frink-vulkan/src/", "partial", "decode matvecs for the K-quant, legacy, IQ4 and MXFP4 kinds; no GEMM, no attention"),
+    ("ggml/src/ggml-vulkan/", "crates/frink-vulkan/src/", "partial", "matvecs and a prefill GEMM for the K-quant, legacy, IQ4 and MXFP4 kinds; a decode stack for plain dense layers"),
     ("ggml/src/ggml-sycl/", "—", "missing", "Intel SYCL backend"),
     ("ggml/src/ggml-hip/", "—", "missing", "AMD HIP (falls from CUDA port)"),
     ("ggml/src/ggml-opencl/", "—", "missing", "Mobile GPU OpenCL"),

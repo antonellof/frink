@@ -13,7 +13,7 @@ void main() {
     uint base = row * p.row_bytes / 4u;
     float acc = 0.0;
     for (uint i = gl_LocalInvocationID.x; i < p.n_blocks_per_row; i += WG) {
-        acc += uintBitsToFloat(w[base + i]) * x[i];
+        acc += uintBitsToFloat(w[base + i]) * X(i);
     }
     finish(row, acc);
 }

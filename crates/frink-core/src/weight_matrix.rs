@@ -2652,6 +2652,29 @@ impl WeightMatrix {
             }
         }
 
+        // Vulkan: the whole batch as one dispatch of the kind's matvec
+        // shader (`gpu_backend::vulkan_gemm`). A kind with no shader was
+        // reported at load (`gemm_supported`); a launch that fails is
+        // reported here, and both run the host batch below.
+        #[cfg(feature = "vulkan")]
+        if vulkan_dense_enabled() {
+            if let WeightMatrix::Quantized { kind, .. } = self {
+                if gpu_backend::Vulkan::gemm_supported(*kind) {
+                    if let Some(out) = gpu_backend::vulkan_gemm(self, x_batch, batch_size) {
+                        return out;
+                    }
+                    crate::kernel_registry::miss(
+                        crate::kernel_registry::Lookup::new(
+                            crate::kernel_registry::Backend::Vulkan,
+                            crate::kernel_registry::op::GEMM_PREFILL,
+                            self.quant_kind(),
+                        ),
+                        "CPU apply_batch (the GEMM launch failed)",
+                    );
+                }
+            }
+        }
+
         match self {
             WeightMatrix::F32(t) => {
                 let xt = Tensor::new(x_batch.to_vec(), vec![batch_size, cols]);
@@ -4001,8 +4024,9 @@ impl WeightMatrix {
         // The predicate sets are per backend and genuinely different:
         // CUDA has a batched GEMM for a SUBSET of the kinds it has
         // matvecs for (Q8_0, Q4_0) and decomposes the rest into
-        // per-position matvecs; Vulkan has one matvec and no GEMM at
-        // all. `GEMM_FALLBACK` is what each of those decompositions is
+        // per-position matvecs; Vulkan's GEMM is its matvec shader
+        // over the batch, so it has one for exactly its matvec kinds.
+        // `GEMM_FALLBACK` is what each of those decompositions is
         // actually called.
         let (matvec, gemm, gemm_fallback) = {
             let mut found = (false, false, "");
@@ -4045,8 +4069,7 @@ impl WeightMatrix {
                     // backend -- Metal re-reads the whole weight matrix
                     // once per position but stays on the GPU (the 13.7x
                     // shape), CUDA does the same through a different
-                    // entry point, and Vulkan has no batch path at all
-                    // so the prefill lands on the host -- so the name
+                    // entry point -- so the name
                     // comes from the backend instead of from an arm
                     // here that a new variant would fall through.
                     (false, true, _) => Outcome::slow_path(gemm_fallback),

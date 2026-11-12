@@ -35,6 +35,7 @@
 //! every weight the model's matvecs have touched.
 
 mod ffn;
+mod gemm;
 mod memory;
 pub mod ops;
 
@@ -80,6 +81,8 @@ struct Dispatch {
     set: usize,
     push: [u8; PUSH_CONSTANT_BYTES as usize],
     grid: (u32, u32),
+    /// The grid's z: 1, or a GEMM's batch positions.
+    depth: u32,
 }
 
 /// A Vulkan device with the matvec state kept across calls. See the
@@ -327,6 +330,7 @@ impl Runtime {
                 set: i,
                 push: push_constants(rows, n_blocks, row_bytes),
                 grid: grid(rows),
+                depth: 1,
             });
         }
         // The dispatches only read shared inputs and write disjoint
@@ -436,7 +440,7 @@ impl Runtime {
                             0,
                             &d.push,
                         );
-                        device.cmd_dispatch(cmd, gx, gy, 1);
+                        device.cmd_dispatch(cmd, gx, gy, d.depth);
                     }
                 }
                 device.cmd_pipeline_barrier(
