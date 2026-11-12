@@ -37,11 +37,13 @@ layout(push_constant) uniform Push {
 } p;
 
 // Activation `i` of this workgroup's batch position.
-#define X(i) x[gl_WorkGroupID.z * p.x_stride + (i)]
+uint x_base;
+#define X(i) x[x_base + (i)]
 
 shared float partial[WG];
 
 uint matvec_row() {
+    x_base = gl_WorkGroupID.z * p.x_stride;
     return gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
 }
 
