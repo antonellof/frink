@@ -50,9 +50,9 @@ deepseek2_yarn_legacy_tiny               match                        make_deeps
 deepseek2_yarn_v2_tiny                   match                        make_deepseek2_fixture.py OUT --yarn 0.707
 deepseek2_yarn_v3_tiny                   match                        make_deepseek2_fixture.py OUT --yarn 1.0
 deepseek_tiny                            match                        make_deepseek_fixture.py OUT
-dflash1_draft_tiny                       refused                      make_dflash_fixture.py OUT --dflash1  # a draft head, not a decoder: tests/dflash_graphs.rs holds it to libllama through scripts/dflash_reference.cpp
-dflash2_draft_tiny                       refused                      make_dflash_fixture.py OUT  # a draft head, not a decoder: tests/dflash_graphs.rs holds it to libllama through scripts/dflash_reference.cpp
-dflash2_swa_draft_tiny                   refused                      make_dflash_fixture.py OUT --window 3  # a draft head, not a decoder: tests/dflash_graphs.rs holds it to libllama through scripts/dflash_reference.cpp
+dflash1_draft_tiny                       both-fail                    make_dflash_fixture.py OUT --dflash1  # a draft head, not a decoder, which libllama will not load alone either: tests/dflash_graphs.rs holds it to libllama through scripts/dflash_reference.cpp
+dflash2_draft_tiny                       both-fail                    make_dflash_fixture.py OUT  # a draft head, not a decoder, which libllama will not load alone either: tests/dflash_graphs.rs holds it to libllama through scripts/dflash_reference.cpp
+dflash2_swa_draft_tiny                   both-fail                    make_dflash_fixture.py OUT --window 3  # a draft head, not a decoder, which libllama will not load alone either: tests/dflash_graphs.rs holds it to libllama through scripts/dflash_reference.cpp
 dflash_target_tiny                       match                        make_dflash_fixture.py OUT --target
 dots1_tiny                               match                        make_dots1_fixture.py OUT
 ernie4_5_moe_step2_tiny                  both-fail                    make_ernie4_5_moe_fixture.py OUT --step 2  # refusal evidence: interleave step 2

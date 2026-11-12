@@ -132,16 +132,22 @@ fn dflash2_with_a_sliding_window_matches_libllama() {
     assert_matches_libllama("dflash2_swa_draft", "dflash2_swa_draft");
 }
 
-/// Plain greedy decoding of `n` tokens after the graph prompt, and the
-/// speculative loop with the DFlash2 draft over the same tokens.
-fn plain_and_speculative(target: &Decoder, n: usize) -> (Vec<usize>, Vec<usize>, usize, usize) {
+/// A prompt on which the random fixture draft is right at least once
+/// in 40 greedy tokens. On [`GRAPH_PROMPT`] it never is, and a test of
+/// speculation that accepts nothing has not tested acceptance.
+const ACCEPTING_PROMPT: [usize; 6] = [21, 22, 11, 16, 47, 20];
+
+/// Plain greedy decoding of `n` tokens after [`ACCEPTING_PROMPT`], and
+/// the speculative loop with the DFlash2 draft over the same tokens:
+/// both outputs and the drafted tokens the target accepted.
+fn plain_and_speculative(target: &Decoder, n: usize) -> (Vec<usize>, Vec<usize>, usize) {
     let mut plain = Vec::new();
     let mut caches = graph_caches(target);
     let mut logits = target
-        .forward_batch(&GRAPH_PROMPT, 0, &mut caches)
+        .forward_batch(&ACCEPTING_PROMPT, 0, &mut caches)
         .pop()
         .unwrap();
-    for pos in (GRAPH_PROMPT.len()..).take(n) {
+    for pos in (ACCEPTING_PROMPT.len()..).take(n) {
         let t = argmax(&logits);
         plain.push(t);
         logits = target.forward_token(t, pos, &mut caches);
@@ -151,7 +157,7 @@ fn plain_and_speculative(target: &Decoder, n: usize) -> (Vec<usize>, Vec<usize>,
     let mut caches = graph_caches(target);
     let result = speculative_decode_with(
         target,
-        &GRAPH_PROMPT,
+        &ACCEPTING_PROMPT,
         &mut caches,
         &mut drafter,
         &SpeculativeOptions {
@@ -161,12 +167,7 @@ fn plain_and_speculative(target: &Decoder, n: usize) -> (Vec<usize>, Vec<usize>,
             seed: 0,
         },
     );
-    (
-        plain,
-        result.generated_tokens,
-        result.drafted_tokens,
-        result.verification_steps,
-    )
+    (plain, result.generated_tokens, result.accepted_tokens)
 }
 
 /// The point of speculation: with a DFlash draft the target's greedy
@@ -176,11 +177,10 @@ fn plain_and_speculative(target: &Decoder, n: usize) -> (Vec<usize>, Vec<usize>,
 fn speculative_decoding_with_a_dflash_draft_is_greedy_decoding() {
     let target = load_graph_fixture("dflash_target");
     let n = 40;
-    let (plain, spec, drafted, steps) = plain_and_speculative(&target, n);
+    let (plain, spec, accepted) = plain_and_speculative(&target, n);
     assert_eq!(spec, plain);
-    assert!(drafted > 0, "the draft proposed nothing");
     assert!(
-        steps < n,
+        accepted > 0,
         "every block was rejected, so the loop never exercised an accepted draft"
     );
 }
@@ -201,10 +201,10 @@ fn metal_speculation_rewinds_the_device_kv() {
     {
         common::pin_backend(common::Backend::Metal);
         let target = load_graph_fixture("dflash_target");
-        let (plain, spec, _, steps) = plain_and_speculative(&target, 48);
+        let (plain, spec, accepted) = plain_and_speculative(&target, 48);
         assert_eq!(spec, plain);
         assert!(
-            steps < 48,
+            accepted > 0,
             "no block was accepted, so nothing was rolled back past"
         );
     }
