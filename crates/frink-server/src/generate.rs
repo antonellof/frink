@@ -2360,6 +2360,9 @@ pub fn generate<'p>(
         let caches = &mut *kv
             .contiguous_mut()
             .expect("a restored prefix is contiguous by construction");
+        // The arena still holds the previous request, which need not
+        // be the one these caches came from.
+        decoder.forget_device_kv();
         let suffix = &tokens[m.matched_len..];
         if suffix.is_empty() {
             if let Some(pl) = m.pending_logits {
@@ -2370,10 +2373,11 @@ pub fn generate<'p>(
                 pos = m.matched_len;
                 logits = pl;
             } else {
-                // Rare: our query exactly matches a strict PREFIX of a
-                // longer stored entry (someone else's conversation
-                // continued past this point), so there's no stored
-                // "what comes next" for our shorter query. Back the
+                // Our query exactly matches a strict PREFIX of a longer
+                // stored entry (someone else's conversation continued
+                // past this point), or an entry stored without logits
+                // (a greedy Metal decode keeps only the argmax), so
+                // there's no stored "what comes next". Back the
                 // restored cache off by one position and reprocess
                 // just that last matched token to get real logits,
                 // rather than guessing.
@@ -2386,13 +2390,12 @@ pub fn generate<'p>(
                 pos += 1;
             }
         } else {
-            pos = m.matched_len;
-            let mut l = Vec::new();
-            for &tok in suffix {
-                l = decoder.forward_token(tok, pos, caches);
-                pos += 1;
-            }
-            logits = l;
+            // One batch, as a prefill would: a chat turn's suffix is the
+            // last reply's closing and the new message, often hundreds
+            // of tokens. Host rows kept, since this request stores its
+            // KV again when it finishes.
+            logits = forward_prompt_batch(decoder, suffix, m.matched_len, caches, true);
+            pos = m.matched_len + suffix.len();
         }
     } else {
         kv = match (paged_kv, kv_pool) {
@@ -4553,6 +4556,47 @@ mod tests {
             out2_with_cache, out2_fresh,
             "restoring from the prefix cache must produce identical output to processing the whole prompt from scratch"
         );
+    }
+
+    #[test]
+    fn an_exact_repeat_of_an_entry_stored_without_logits_recomputes_them() {
+        // A greedy Metal decode leaves only the argmax, so its entry
+        // carries KV and no logit row. A query matching all of it must
+        // back off one position rather than sample from nothing.
+        let decoder = small_decoder();
+        let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
+        let pc = Mutex::new(PrefixCache::new(4));
+        let mut caches = decoder.config.new_kv_caches();
+        for (pos, tok) in [1usize, 2, 3].into_iter().enumerate() {
+            decoder.forward_token(tok, pos, &mut caches);
+        }
+        pc.lock()
+            .unwrap()
+            .store_maybe_logits(vec![1, 2, 3], caches, None, None);
+
+        let run = |cache: Option<&Mutex<PrefixCache>>| {
+            let mut out = String::new();
+            generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                &prompt,
+                &greedy_params(5),
+                None,
+                None,
+                cache,
+                None,
+                None,
+                |_, s| out.push_str(s),
+            )
+            .unwrap();
+            out
+        };
+        let restored = run(Some(&pc));
+        let stats = pc.lock().unwrap().stats();
+        assert_eq!((stats.hits, stats.total_positions_reused), (1, 3));
+        assert_eq!(restored, run(None));
     }
 
     #[test]

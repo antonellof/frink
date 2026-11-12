@@ -57,4 +57,20 @@ impl Decoder {
             }
         }
     }
+
+    /// Forgets the Metal arena, so the next forward rebuilds it from
+    /// `kv_caches` the caller is about to hand in.
+    ///
+    /// For caches that did not come from the arena's last sequence: a
+    /// prefix-cache restore. Each sync check compares only a length,
+    /// so an arena left by another conversation that happens to hold
+    /// as many rows as the restored caches passes for them, and the
+    /// model attends to that conversation's keys. A no-op without
+    /// Metal.
+    pub fn forget_device_kv(&self) {
+        #[cfg(feature = "metal")]
+        {
+            *Self::lock_metal_attn_kv(&self.metal_attn_kv) = None;
+        }
+    }
 }

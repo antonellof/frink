@@ -53,7 +53,11 @@ struct StoredPrefix {
     salt: Option<u64>,
     tokens: Vec<usize>,
     kv_caches: Vec<KvCache>,
-    pending_logits: Vec<f32>,
+    /// `None` when the request that stored this never had a full row:
+    /// a greedy Metal decode folds the last projection into an argmax
+    /// and downloads one id. Its KV is as good as any other's; only an
+    /// exact repeat must recompute the last position.
+    pending_logits: Option<Vec<f32>>,
     /// Monotonic recency stamp; smallest = least recently used.
     ///
     /// A stamp per touch rather than reshuffling a dedicated LRU list,
@@ -205,7 +209,7 @@ impl PrefixCache {
                 // `entry.tokens.len()`, and reusing the stored logits
                 // there would silently answer the wrong question.
                 let pending_logits = if matched_len == entry.tokens.len() {
-                    Some(entry.pending_logits.clone())
+                    entry.pending_logits.clone()
                 } else {
                     None
                 };
@@ -266,6 +270,21 @@ impl PrefixCache {
         pending_logits: Vec<f32>,
         salt: Option<u64>,
     ) {
+        self.store_maybe_logits(tokens, kv_caches, Some(pending_logits), salt);
+    }
+
+    /// [`Self::store_salted`] for a request that has no logit row to
+    /// leave (`None`): its KV is stored all the same, and a later query
+    /// matching all of it backs off one position to recompute the
+    /// logits there, as one matching a strict prefix of a longer entry
+    /// already does.
+    pub fn store_maybe_logits(
+        &mut self,
+        tokens: Vec<usize>,
+        kv_caches: Vec<KvCache>,
+        pending_logits: Option<Vec<f32>>,
+        salt: Option<u64>,
+    ) {
         if kv_caches.iter().any(|c| c.recurrent.is_some()) {
             return;
         }
@@ -321,14 +340,15 @@ pub struct PrefixCacheStats {
 /// Every cache must truncate to `matched_len` (`KvCache::can_truncate_to`,
 /// which is where a windowed cache says it no longer holds what the next
 /// query reads). And when the match covers the whole query but not the
-/// whole entry, the caller has no stored logits for that position and
-/// backs off one more to recompute them
+/// whole entry (or the entry stored none), the caller has no stored
+/// logits for that position and backs off one more to recompute them
 /// (`frink-server::generate`'s restore), so that position must be
 /// reachable too. Asking here keeps the refusal in one place: a lookup
 /// that answered yes and a restore that then could not truncate would be
 /// two structures disagreeing about one cache.
 fn reusable_at(entry: &StoredPrefix, matched_len: usize, query_len: usize) -> bool {
-    let backs_off = matched_len == query_len && matched_len < entry.tokens.len();
+    let backs_off = matched_len == query_len
+        && (matched_len < entry.tokens.len() || entry.pending_logits.is_none());
     let target = if backs_off {
         matched_len - 1
     } else {
@@ -530,7 +550,7 @@ mod tests {
             salt: None,
             tokens: stored.clone(),
             kv_caches: vec![windowed_cache(64, 8)],
-            pending_logits: vec![0.5],
+            pending_logits: Some(vec![0.5]),
             last_used: 0,
         };
         let limit = entry.kv_caches[0].rollback_limit();
@@ -552,6 +572,25 @@ mod tests {
         assert_eq!(m.matched_len, 0);
         assert!(m.kv_caches.is_none());
         assert_eq!(cache.stats().misses, 1);
+    }
+
+    #[test]
+    fn an_entry_stored_without_logits_is_reused_and_never_answers_for_them() {
+        let mut cache = PrefixCache::new(4);
+        cache.store_maybe_logits(vec![1, 2, 3], vec![dummy_cache(3)], None, None);
+
+        // An exact repeat gets the KV but no logits: the caller backs
+        // off one position and recomputes them.
+        let m = cache.find_longest_prefix(&[1, 2, 3]);
+        assert_eq!(m.matched_len, 3);
+        assert!(m.kv_caches.is_some());
+        assert_eq!(m.pending_logits, None);
+
+        // The next turn extends it, which is the case the store is for.
+        let m = cache.find_longest_prefix(&[1, 2, 3, 4, 5]);
+        assert_eq!(m.matched_len, 3);
+        assert_eq!(m.kv_caches.map(|c| c[0].positions()), Some(3));
+        assert_eq!(cache.stats().hits, 2);
     }
 
     #[test]
