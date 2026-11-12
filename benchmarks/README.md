@@ -3,9 +3,9 @@
 The published table is **[`RESULTS.md`](RESULTS.md)**. It is generated
 and holds nothing else, so never edit it by hand.
 
-Everything a generator cannot produce — measurements taken without a
+Everything a generator cannot produce (measurements taken without a
 receipt, before/after studies against frink itself, and the sections
-that predate the code they describe — is in
+that predate the code they describe) is in
 **[`HISTORY.md`](HISTORY.md)**.
 
 Every timed run writes one small JSON file of raw numbers into
@@ -264,10 +264,25 @@ cargo build -p frink-cli --release --features cuda
 ```
 
 Record the GPU and driver whenever you quote a CUDA number. CUDA rows
-come from rented hosts (an RTX 3090 and an RTX 3060 so far); their
-receipts are the `*_cuda__*.json` files under
-[`receipts/engine/`](receipts/engine/), and `RESULTS.md` renders them
-beside the Metal and CPU rows.
+come from rented hosts; their receipts are the `*_cuda__*.json` files
+under [`receipts/engine/`](receipts/engine/), and `RESULTS.md` renders
+them beside the Metal and CPU rows. The RTX 3090 and RTX 3060 rows
+predate the resident CUDA stack and are marked stale.
+
+The current CUDA rows ran on 2026-11-09 on an NVIDIA L40S (48 GB, driver
+580, CUDA 13.0) rented through Hugging Face Jobs, 8 vCPU of an AMD EPYC
+7R13, against llama.cpp at the pin built with CUDA for `sm_89`. Before
+each timed run the job checked frink's CUDA output against its CPU
+output (`frink verify`, 24 greedy tokens) and against llama.cpp
+(`frink parity`): every model matched, gpt-oss-20b at the DRIFT its CPU
+path shows too. [`tools/hf_jobs/cuda_bench.sh`](../tools/hf_jobs/cuda_bench.sh)
+is the whole job, rerunnable with your own token:
+
+```bash
+hf jobs run --flavor l40sx1 --timeout 3h --secrets HF_TOKEN \
+  -e MODELS="llama31_8b_q4km|bartowski/Meta-Llama-3.1-8B-Instruct-GGUF|Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf" \
+  nvidia/cuda:12.8.1-devel-ubuntu22.04 bash -c "$(cat tools/hf_jobs/cuda_bench.sh)"
+```
 
 ## Serving (HTTP)
 
@@ -280,7 +295,7 @@ batching.
 |---|---|
 | Measures | end-to-end HTTP latency and throughput |
 | Driver | `frink serve-bench` |
-| Compared against | — (no llama.cpp HTTP twin in-tree) |
+| Compared against | nothing yet: no llama.cpp HTTP twin in-tree |
 | Raw numbers | [`receipts/serving/`](receipts/serving/) |
 | Workload | streaming chat/completions, concurrency sweeps |
 
@@ -297,24 +312,13 @@ Rules for meaningful numbers: see [`docs/CLI.md`](../docs/CLI.md)
 positional TTFT/TPOT split are enforced in `frink-cli`'s `bench_client`
 module, which `serve-bench` drives.
 
-### Metal continuous batching (0.15.3)
+### Reproducing a concurrency sweep
 
-Host B, **Llama-3.2-3B-Instruct Q4_K_M**, CB auto-on, `frink 0.15.3`:
-
-| Workload | Concurrency | OK | Aggregate tok/s | Mean TTFT |
-|---|---|---|---|---|
-| parallel stream burst (`max_tokens=64`) | 1 | 2/2 | 17.4 | 157 ms |
-| | 2 | 4/4 | 19.0 | 272 ms |
-| | 4 | 8/8 | 22.7 | 450 ms |
-| | 8 | 16/16 | **24.4** | 957 ms |
-| sequential stream (`max_tokens=128`) | 1 | 8/8 | — | **118 ms** |
-
-These numbers were recorded with frink 0.15.3 by an external harness
-that is not part of this repository. Receipts:
-[`llama32_3b_q4km_metal_cb_parallel_0.15.3.json`](receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json),
-[`llama32_3b_q4km_metal_cb_stream_0.15.3.json`](receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json).
-To reproduce the same shapes with the in-repo client, start the server
-as above and run:
+The 0.15.3 continuous-batching receipts and how they were taken are in
+[`HISTORY.md`](HISTORY.md#metal-continuous-batching-0153). Current
+serving numbers are in
+[`RESULTS.md`](RESULTS.md#serving-features-measured). To run the same
+shapes with the in-repo client, start the server as above and run:
 
 ```bash
 # parallel stream burst, 64 output tokens, two requests per client
@@ -327,11 +331,4 @@ done
 ```
 
 `--url` points it at a server other than `http://127.0.0.1:8383`, and
-`--json` writes the report as JSON for a receipt. The prompts differ
-from the 0.15.3 harness's, so expect the shape of the results to
-match rather than the exact figures. Current serving numbers are in
-[`RESULTS.md`](RESULTS.md#serving-features-measured).
-
-0.15.2 measured similar aggregate throughput at concurrency 8 but returned
-garbled text under CB on Metal until the 0.15.3 host-K/V prefill fix.
-See [`docs/plans/archive/metal-parallel-concurrency.md`](../docs/plans/archive/metal-parallel-concurrency.md).
+`--json` writes the report as JSON for a receipt.

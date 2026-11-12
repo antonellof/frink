@@ -489,6 +489,14 @@ pub fn cuda_dense_enabled() -> bool {
     Cuda::dense_enabled()
 }
 
+/// Whether Vulkan was selected (`FRINK_VULKAN=1`, which `--device
+/// vulkan` sets) and a device opened: the switch every Vulkan path,
+/// including the decode stack, reads.
+#[cfg(feature = "vulkan")]
+pub fn vulkan_dense_enabled() -> bool {
+    gpu_backend::Vulkan::dense_enabled()
+}
+
 /// Whether CPU Q8_0 / Q4_0 / Q4_K / Q5_K / Q6_K matvec should quantize the
 /// activation to int8 and use the integer `vec_dot` path. Q4_K
 /// additionally lazy-repacks into interleaved `block_q4_Kx8` for 8-wide
@@ -2644,6 +2652,29 @@ impl WeightMatrix {
             }
         }
 
+        // Vulkan: the whole batch as one dispatch of the kind's matvec
+        // shader (`gpu_backend::vulkan_gemm`). A kind with no shader was
+        // reported at load (`gemm_supported`); a launch that fails is
+        // reported here, and both run the host batch below.
+        #[cfg(feature = "vulkan")]
+        if vulkan_dense_enabled() {
+            if let WeightMatrix::Quantized { kind, .. } = self {
+                if gpu_backend::Vulkan::gemm_supported(*kind) {
+                    if let Some(out) = gpu_backend::vulkan_gemm(self, x_batch, batch_size) {
+                        return out;
+                    }
+                    crate::kernel_registry::miss(
+                        crate::kernel_registry::Lookup::new(
+                            crate::kernel_registry::Backend::Vulkan,
+                            crate::kernel_registry::op::GEMM_PREFILL,
+                            self.quant_kind(),
+                        ),
+                        "CPU apply_batch (the GEMM launch failed)",
+                    );
+                }
+            }
+        }
+
         match self {
             WeightMatrix::F32(t) => {
                 let xt = Tensor::new(x_batch.to_vec(), vec![batch_size, cols]);
@@ -3637,10 +3668,11 @@ impl WeightMatrix {
 
     /// Dense SwiGLU FFN on GPU with device-resident activations:
     /// one upload of `x`, gate+up+silu×up+down on device, one download.
-    /// Tries CUDA first when enabled, then Metal. Returns `None` if
-    /// no GPU path applies — caller falls back to [`Self::apply`] /
+    /// Tries CUDA first when enabled, then Metal, then Vulkan, the
+    /// [`gpu_backend::gpu_backend_table`] order. Returns `None` if no GPU
+    /// path applies — caller falls back to [`Self::apply`] /
     /// multi-matvec.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     pub fn apply_gpu_dense_ffn_swiglu(
         gate: &WeightMatrix,
         up: &WeightMatrix,
@@ -3746,6 +3778,10 @@ impl WeightMatrix {
                     }
                 }
             }
+        }
+        #[cfg(feature = "vulkan")]
+        if let Some(out) = gpu_backend::vulkan_dense_ffn_swiglu(gate, up, down, x) {
+            return Some(out);
         }
         None
     }
@@ -3988,8 +4024,9 @@ impl WeightMatrix {
         // The predicate sets are per backend and genuinely different:
         // CUDA has a batched GEMM for a SUBSET of the kinds it has
         // matvecs for (Q8_0, Q4_0) and decomposes the rest into
-        // per-position matvecs; Vulkan has one matvec and no GEMM at
-        // all. `GEMM_FALLBACK` is what each of those decompositions is
+        // per-position matvecs; Vulkan's GEMM is its matvec shader
+        // over the batch, so it has one for exactly its matvec kinds.
+        // `GEMM_FALLBACK` is what each of those decompositions is
         // actually called.
         let (matvec, gemm, gemm_fallback) = {
             let mut found = (false, false, "");
@@ -4032,8 +4069,7 @@ impl WeightMatrix {
                     // backend -- Metal re-reads the whole weight matrix
                     // once per position but stays on the GPU (the 13.7x
                     // shape), CUDA does the same through a different
-                    // entry point, and Vulkan has no batch path at all
-                    // so the prefill lands on the host -- so the name
+                    // entry point -- so the name
                     // comes from the backend instead of from an arm
                     // here that a new variant would fall through.
                     (false, true, _) => Outcome::slow_path(gemm_fallback),
@@ -5276,8 +5312,10 @@ pub(crate) mod tests {
     fn shared_quads_are_what_each_consumer_would_have_built_itself() {
         // The early return below reads a process-global, so it has to be
         // pinned or a neighbour can turn the tier off between the check
-        // and the assertions it guards.
+        // and the assertions it guards. A device build would hand these
+        // kinds to the GPU, and `quantize_batch_acts` would refuse.
         let _int_dot = ForceIntDot::new(true);
+        let _host = host_pin::ForceHost::new();
         if !cpu_int_dot_for(IntDotShape::BatchGemm) {
             return;
         }
@@ -5370,7 +5408,7 @@ pub(crate) mod tests {
         }
 
         #[test]
-        #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored"]
+        #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
         fn apply_gpu_matches_apply_for_q8_0_on_real_hardware() {
             let weights: Vec<f32> = (0..64).map(|i| ((i as f32) - 32.0) * 0.05).collect();
             let x: Vec<f32> = (0..64).map(|i| (i as f32) * 0.01 - 0.3).collect();
@@ -5382,7 +5420,14 @@ pub(crate) mod tests {
                 kind: QuantKind::Q8_0,
             };
 
-            let cpu = matrix.apply_cpu(&x);
+            // The CPU dots what the device's matvec reads: on CUDA its
+            // q8_1 rounding under the dp4a default, by the switch the
+            // launch reads (`frink_cuda::matvec_kinds::dp4a::matvec_reads`).
+            #[cfg(feature = "cuda")]
+            let reads = frink_cuda::matvec_kinds::dp4a::matvec_reads("q8_0_matvec", 2, &x);
+            #[cfg(not(feature = "cuda"))]
+            let reads = x.clone();
+            let cpu = matrix.apply_cpu(&reads);
             let gpu = matrix
                 .apply_gpu(&x)
                 .expect("Q8_0 must dispatch to a real GPU kernel");

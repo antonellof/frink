@@ -2,8 +2,9 @@
 //!
 //! Same workload definition as `llama-bench` (`pp<N>` = batched prefill
 //! of N synthetic tokens, `tg<N>` = N single-token decode steps after a
-//! one-token prime), same reporting (median ± population stddev over
-//! `-r` repetitions, after one discarded warmup), same flag names.
+//! one-token prime), same reporting (mean ± sample stddev over `-r`
+//! repetitions, after one discarded warmup, as llama-bench's markdown
+//! cell prints them), same flag names.
 //! Output is directly comparable to
 //! `llama-bench -m <same gguf> -p <N> -n <N> -t <T> -ngl <L>`.
 //!
@@ -58,28 +59,18 @@ struct Row {
 }
 
 impl Row {
-    fn median(&self) -> f64 {
-        let mut s = self.samples.clone();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let n = s.len();
-        if n == 0 {
-            return 0.0;
-        }
-        if n % 2 == 1 {
-            s[n / 2]
-        } else {
-            0.5 * (s[n / 2 - 1] + s[n / 2])
-        }
+    /// The mean of the per-repetition rates: llama-bench's `avg_ts`, the
+    /// number before `±` in its markdown cell (`llama-bench.cpp:102-108`).
+    /// The table, the `--compare` gap, the receipt and `-o json` all
+    /// report it, so the gap divides llama.cpp's `avg_ts` by its like.
+    fn mean(&self) -> f64 {
+        output::mean(&self.samples)
     }
 
-    /// Population stddev, matching what `llama-bench` prints after `±`.
+    /// The sample stddev (`n - 1`): llama-bench's `stdev_ts`, the number
+    /// after `±` (`llama-bench.cpp:110-118`).
     fn stddev(&self) -> f64 {
-        let n = self.samples.len();
-        if n < 2 {
-            return 0.0;
-        }
-        let mean = self.samples.iter().sum::<f64>() / n as f64;
-        (self.samples.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64).sqrt()
+        output::sample_stddev(&self.samples)
     }
 }
 
@@ -127,17 +118,10 @@ pub fn apply_env(threads: usize, n_gpu_layers: usize, model: Option<&str>) -> an
             std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
             std::env::set_var("FRINK_CPU_THREADS", threads.to_string());
         }
-        if n_gpu_layers == 0 {
-            std::env::set_var("FRINK_METAL", "0");
-            std::env::set_var("FRINK_METAL_ATTN", "0");
-            std::env::set_var("FRINK_CUDA", "0");
-        } else {
-            std::env::set_var("FRINK_METAL", "auto");
-            if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                std::env::set_var("FRINK_METAL_ATTN", "1");
-            }
-            std::env::set_var("FRINK_CUDA", "auto");
-        }
+        frink_models::offload::select(frink_models::offload::OffloadDevice::with_offload(
+            None,
+            n_gpu_layers != 0,
+        ))?;
         frink_core::weight_matrix::default_cpu_int_dot_on();
     }
     frink_core::threads::init_cpu_pool();
@@ -355,7 +339,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
                 backend,
                 threads,
                 row.test,
-                row.median(),
+                row.mean(),
                 row.stddev(),
             );
         }
@@ -473,11 +457,11 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
         side_println!("| {:-<15} | {:->12} | {:->12} | {:->8} |", "", "", "", "");
         for row in &rows {
             let l = llama.tps.get(&row.test).copied();
-            let gap = l.map(|l| l / row.median());
+            let gap = l.map(|l| l / row.mean());
             side_println!(
                 "| {:<15} | {:>12.2} | {:>12} | {:>8} |",
                 row.test,
-                row.median(),
+                row.mean(),
                 l.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into()),
                 gap.map(|g| format!("{g:.2}×"))
                     .unwrap_or_else(|| "—".into()),
@@ -567,14 +551,12 @@ mod tests {
         }
     }
 
+    /// The centre is llama-bench's mean, not the median: a skewed set
+    /// tells them apart.
     #[test]
-    fn median_of_an_odd_sample_count_is_the_middle_value_regardless_of_order() {
-        assert_eq!(row(&[30.0, 10.0, 20.0]).median(), 20.0);
-    }
-
-    #[test]
-    fn median_of_an_even_sample_count_averages_the_two_middle_values() {
-        assert_eq!(row(&[10.0, 20.0, 30.0, 40.0]).median(), 25.0);
+    fn the_centre_is_the_mean_that_llama_bench_prints() {
+        assert_eq!(row(&[10.0, 20.0, 60.0]).mean(), 30.0);
+        assert_eq!(row(&[]).mean(), 0.0);
     }
 
     #[test]
@@ -585,14 +567,13 @@ mod tests {
     }
 
     #[test]
-    fn stddev_is_the_population_form_that_llama_bench_prints() {
-        // mean 20, deviations -10/0/+10 -> sqrt(200/3), not the sample
-        // form sqrt(200/2). Matching llama-bench matters because these
-        // numbers are printed side by side.
+    fn stddev_is_the_sample_form_that_llama_bench_prints() {
+        // mean 20, deviations -10/0/+10 -> sqrt(200/2) = 10, llama-bench's
+        // `stdev` (n - 1), not the population form sqrt(200/3).
         let got = row(&[10.0, 20.0, 30.0]).stddev();
         assert!(
-            (got - (200.0f64 / 3.0).sqrt()).abs() < 1e-9,
-            "population stddev expected, got {got}"
+            (got - 10.0).abs() < 1e-9,
+            "sample stddev expected, got {got}"
         );
     }
 }

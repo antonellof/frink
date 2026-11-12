@@ -916,15 +916,21 @@ fn every_case_parses_as_gbnf() {
 }
 
 #[test]
-fn serde_json_value_entry_point_agrees_on_sorted_schemas() {
-    // The two entry points differ only in property order, so a schema
-    // whose properties are already sorted must convert identically.
-    let text = r##"{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"], "additionalProperties": false}"##;
-    let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
-    assert_eq!(
-        json_schema_to_grammar(text).expect("text converts"),
-        json_schema_to_grammar_value(&value).expect("value converts")
-    );
+fn serde_json_value_entry_point_keeps_the_declaration_order() {
+    // `serde_json` keeps document order (`preserve_order`), so a parsed
+    // `Value` converts as its text does, an unsorted schema included:
+    // `b` is required before `a`, as llama.cpp requires it.
+    for text in [
+        r##"{"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}, "required": ["a", "b"], "additionalProperties": false}"##,
+        r##"{"type": "object", "properties": {"b": {"type": "string"}, "a": {"type": "string"}}, "required": ["a", "b"], "additionalProperties": false}"##,
+    ] {
+        let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+        assert_eq!(
+            json_schema_to_grammar(text).expect("text converts"),
+            json_schema_to_grammar_value(&value).expect("value converts"),
+            "{text}"
+        );
+    }
 }
 
 #[test]

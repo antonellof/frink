@@ -1,0 +1,7 @@
+<s><|start|>system<|message|>You are a helpful AI assistant.
+Knowledge cutoff: 2026-01-04.
+Current date: 2024-07-26.
+
+Reasoning strength: high.
+
+# Valid recipients: "self", "user".<|eot|><|start|>user<|message|>What is the capital of France?<|eot|><|start|>assistant to=user<|message|>Paris.<|eot|><|start|>user<|message|>And of Italy?<|eot|><|start|>assistant

@@ -18,6 +18,11 @@
 /// head_dim`, which is how the loader's length rule reads them
 /// (`frink_models::capability::QkNormStyle`).
 pub const RMSNORM_ROWS_KERNEL_SRC: &str = r#"
+// One block per row, any multiple of 32 threads up to 1024: each warp
+// reduces its sum of squares by shuffles, warp 0 reduces the warps'
+// sums, and the block scales its row. Two barriers, where the old tree
+// over 256 shared slots took nine; a decode token's one row of 4096
+// took 6.5 us on an L40S.
 extern "C" __global__ void rmsnorm_rows_f32(
     const float* x,
     const float* w,
@@ -26,27 +31,32 @@ extern "C" __global__ void rmsnorm_rows_f32(
     int n,
     float eps
 ) {
-    __shared__ float partial[256];
-    int row = blockIdx.x;
+    __shared__ float partial[32];
+    const int row = blockIdx.x;
     if (row >= n_rows) return;
     const float* xr = x + (size_t)row * n;
     float* orow = out + (size_t)row * n;
-    int tid = threadIdx.x;
-    int tg = blockDim.x;
+    const int tid = threadIdx.x;
+    const int tg = blockDim.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
     float acc = 0.0f;
     for (int i = tid; i < n; i += tg) {
-        float v = xr[i];
+        const float v = xr[i];
         acc += v * v;
     }
-    partial[tid] = acc;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) partial[warp] = acc;
     __syncthreads();
-    for (int stride = tg / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            partial[tid] += partial[tid + stride];
-        }
-        __syncthreads();
+    if (warp == 0) {
+        float total = lane < (tg >> 5) ? partial[lane] : 0.0f;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) total += __shfl_xor_sync(0xffffffffu, total, off);
+        if (lane == 0) partial[0] = total;
     }
-    float inv_rms = rsqrtf(partial[0] / (float)n + eps);
+    __syncthreads();
+    const float inv_rms = rsqrtf(partial[0] / (float)n + eps);
     for (int i = tid; i < n; i += tg) {
         orow[i] = xr[i] * inv_rms * w[i];
     }
@@ -84,6 +94,285 @@ extern "C" __global__ void add_rows_f32(
     if (i < n) {
         a[i] += b[i];
     }
+}
+"#;
+
+/// `y[i] += a * x[i]`: one routed expert's output, weighted, into the
+/// layer's MoE sum, in the order `frink_moe::combine_expert_outputs`
+/// adds them (`out += expert * weight`).
+pub const AXPY_KERNEL_SRC: &str = r#"
+extern "C" __global__ void axpy_f32(
+    float* y,
+    const float* x,
+    float a,
+    int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] += x[i] * a;
+    }
+}
+"#;
+
+/// `out[i] = sum_j w[j] * y[j][i]` over a layer's `k` routed experts,
+/// from zero in the routing's order, the order and the expression
+/// `frink_moe::combine_expert_outputs` adds them in.
+pub const MOE_COMBINE_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_combine_f32(
+    const float* y,
+    const float* w,
+    float* out,
+    int k,
+    int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float acc = 0.0f;
+        for (int j = 0; j < k; j++) acc += y[(size_t)j * n + i] * w[j];
+        out[i] = acc;
+    }
+}
+"#;
+
+/// A routed prefill's per-pair bias: row `r` of `x` gains the bias row
+/// of its expert, `tab[row_group[r]]` (gpt-oss's `ggml_add_id`), or
+/// `tab[r]` when `row_group` is null (a decode token's slots).
+pub const ADD_BIAS_TAB_ROWS_KERNEL_SRC: &str = r#"
+extern "C" __global__ void add_bias_tab_rows_f32(
+    float* x,
+    const unsigned long long* tab,
+    const int* row_group,
+    int n
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int r = blockIdx.y;
+    if (i < n) {
+        const float* b = (const float*)tab[row_group != nullptr ? row_group[r] : r];
+        x[(size_t)r * n + i] += b[i];
+    }
+}
+"#;
+
+/// A decode token's routing on the device, one warp per token row
+/// (`blockIdx.x`): the top `k` of `n_experts` logits (`bias` added
+/// first when not null, gpt-oss's router bias) and their weights, ids
+/// and weights in the order the host's routing returns them, so the
+/// combine sums them as the host does. `mode`:
+///
+/// * 0, `route_top_k_softmax`: a softmax over every expert, the top `k`
+///   by probability, their probabilities;
+/// * 1, the same with the chosen renormalised (`norm_topk_prob`);
+/// * 2, `route_top_k_softmax_weight`: the top `k` by logit and a
+///   softmax over the chosen alone (gpt-oss).
+///
+/// A tie goes to the lower expert id. `n_experts <= 256`, `k <= 16`;
+/// the launch refuses more.
+pub const MOE_TOPK_KERNEL_SRC: &str = r#"
+#define FX_TOPK_PER_LANE 8
+#define FX_TOPK_MAX_K 16
+
+__device__ __forceinline__ float frink_inf_tk() {
+    return __int_as_float(0x7f800000);
+}
+
+extern "C" __global__ void moe_topk_f32(
+    const float* __restrict__ logits,
+    const float* __restrict__ bias,
+    int n_experts,
+    int k,
+    int mode,
+    int* __restrict__ ids_out,
+    float* __restrict__ w_out
+) {
+    const int t = blockIdx.x;
+    const int lane = threadIdx.x;
+    const unsigned FULL = 0xffffffffu;
+    const float* lg = logits + (size_t)t * n_experts;
+    float v[FX_TOPK_PER_LANE];
+#pragma unroll
+    for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+        const int e = lane + 32 * j;
+        v[j] = e < n_experts ? lg[e] + (bias != nullptr ? bias[e] : 0.0f) : -frink_inf_tk();
+    }
+    // The softmax over every expert (modes 0 and 1).
+    float mx = -frink_inf_tk();
+#pragma unroll
+    for (int j = 0; j < FX_TOPK_PER_LANE; j++) mx = fmaxf(mx, v[j]);
+    for (int off = 16; off > 0; off >>= 1) mx = fmaxf(mx, __shfl_xor_sync(FULL, mx, off));
+    float sum = 0.0f;
+#pragma unroll
+    for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+        if (lane + 32 * j < n_experts) sum += expf(v[j] - mx);
+    }
+    for (int off = 16; off > 0; off >>= 1) sum += __shfl_xor_sync(FULL, sum, off);
+
+    float cv[FX_TOPK_MAX_K];
+    int ci[FX_TOPK_MAX_K];
+    for (int s = 0; s < k; s++) {
+        float bv = -frink_inf_tk();
+        int bi = 0x7fffffff;
+#pragma unroll
+        for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+            const int e = lane + 32 * j;
+            if (e < n_experts && (v[j] > bv || (v[j] == bv && e < bi))) {
+                bv = v[j];
+                bi = e;
+            }
+        }
+        for (int off = 16; off > 0; off >>= 1) {
+            const float ov = __shfl_xor_sync(FULL, bv, off);
+            const int oi = __shfl_xor_sync(FULL, bi, off);
+            if (ov > bv || (ov == bv && oi < bi)) {
+                bv = ov;
+                bi = oi;
+            }
+        }
+        cv[s] = bv;
+        ci[s] = bi;
+#pragma unroll
+        for (int j = 0; j < FX_TOPK_PER_LANE; j++) {
+            if (lane + 32 * j == bi) v[j] = -frink_inf_tk();
+        }
+    }
+    if (lane != 0) return;
+    int* ids = ids_out + (size_t)t * k;
+    float* w = w_out + (size_t)t * k;
+    if (mode == 2) {
+        float es = 0.0f;
+        for (int s = 0; s < k; s++) es += expf(cv[s] - cv[0]);
+        for (int s = 0; s < k; s++) {
+            const float e = expf(cv[s] - cv[0]);
+            w[s] = es > 0.0f ? e / es : e;
+            ids[s] = ci[s];
+        }
+        return;
+    }
+    float ts = 0.0f;
+    for (int s = 0; s < k; s++) {
+        const float p = expf(cv[s] - mx) / sum;
+        w[s] = p;
+        ts += p;
+        ids[s] = ci[s];
+    }
+    if (mode == 1) {
+        for (int s = 0; s < k; s++) w[s] = w[s] / ts;
+    }
+}
+"#;
+
+/// A routed prefill batch's pairs grouped by expert on the device:
+/// `moe_count_i32` counts each expert's pairs, `moe_offsets_i32` turns
+/// the counts into each expert's first pair, and `moe_scatter_i32` gives
+/// every pair `p` (token `p / k`, slot `p % k`) a place in its expert's
+/// group, recording the token it reads (`gather`), where its output
+/// lands (`pair_of`) and its expert (`pair_group`). Which place a pair
+/// takes inside its group depends on the atomics' order and changes no
+/// value: each output row is its own token's and its own expert's.
+pub const MOE_GROUP_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_count_i32(const int* ids, int pairs, int* counts) {
+    const int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p < pairs) atomicAdd(&counts[ids[p]], 1);
+}
+
+extern "C" __global__ void moe_offsets_i32(const int* counts, int n, int* group_off) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        int acc = 0;
+        group_off[0] = 0;
+        for (int e = 0; e < n; e++) {
+            acc += counts[e];
+            group_off[e + 1] = acc;
+        }
+    }
+}
+
+extern "C" __global__ void moe_scatter_i32(
+    const int* ids,
+    int pairs,
+    int k,
+    const int* group_off,
+    int* cursor,
+    int* gather,
+    int* pair_of,
+    int* pair_group
+) {
+    const int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p < pairs) {
+        const int e = ids[p];
+        const int pos = group_off[e] + atomicAdd(&cursor[e], 1);
+        gather[pos] = p / k;
+        pair_of[p] = pos;
+        pair_group[pos] = e;
+    }
+}
+"#;
+
+/// Each table's pointers for a decode token's chosen experts: `out[t][s]
+/// = all[t][ids[s]]` for `n_tabs` tables of `n` experts, so the routed
+/// matvecs read the chosen experts' weights without the host picking.
+pub const GATHER_PTRS_KERNEL_SRC: &str = r#"
+extern "C" __global__ void gather_ptrs_u64(
+    const unsigned long long* __restrict__ all,
+    const int* __restrict__ ids,
+    unsigned long long* __restrict__ out,
+    int n,
+    int n_tabs,
+    int k
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n_tabs * k) {
+        const int tab = i / k;
+        out[i] = all[(size_t)tab * n + ids[i - tab * k]];
+    }
+}
+"#;
+
+/// A routed prefill's combine: token `t`'s output is
+/// `sum_j w[t][j] * y[pair_of[t][j]]` from zero in its routing's order,
+/// the row form of `moe_combine_f32`.
+pub const MOE_COMBINE_ROWS_KERNEL_SRC: &str = r#"
+extern "C" __global__ void moe_combine_rows_f32(
+    const float* y,
+    const int* pair_of,
+    const float* w,
+    float* out,
+    int k,
+    int n
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = blockIdx.y;
+    if (i < n) {
+        float acc = 0.0f;
+        for (int j = 0; j < k; j++) {
+            acc += y[(size_t)pair_of[t * k + j] * n + i] * w[t * k + j];
+        }
+        out[(size_t)t * n + i] = acc;
+    }
+}
+"#;
+
+/// `out[r] = w[r] . x` for an f32 matrix, one warp per row: an MoE
+/// router, which a GGUF keeps in f32 (`llama-quantize` leaves
+/// `ffn_gate_inp` alone).
+pub const ROUTER_F32_KERNEL_SRC: &str = r#"
+extern "C" __global__ void router_f32_matvec(
+    const float* w,
+    const float* x_rows,
+    float* out_rows,
+    int rows,
+    int cols
+) {
+    // Token blockIdx.y of the batch: its input row and its logits.
+    const float* x = x_rows + (size_t)blockIdx.y * cols;
+    float* out = out_rows + (size_t)blockIdx.y * rows;
+    const int warp = (int)((blockIdx.x * blockDim.x + threadIdx.x) >> 5);
+    const int lane = threadIdx.x & 31;
+    if (warp >= rows) return;
+    const float* wr = w + (size_t)warp * cols;
+    float acc = 0.0f;
+    for (int i = lane; i < cols; i += 32) acc += wr[i] * x[i];
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) out[warp] = acc;
 }
 "#;
 
@@ -173,89 +462,189 @@ __device__ __forceinline__ float frink_inf_pf() {
 
 #define FX_ATTN_WARPS 4
 
+// Causal GQA for a block of query rows of one head, tiled over the keys.
+//
+// Grid (ceil(n_q / (4 * rpw)), n_heads), 128 threads. Warp w owns rows
+// w, w + 4, w + 8, ... of the block's 4 * rpw. Per tile of bc <= 32
+// keys the block stages K and V once in shared memory, and every row
+// of the block reads them there: lane j scores key j of the tile
+// against the row (K rows padded to head_dim + 4 floats so the lanes'
+// float4 reads land on distinct banks), the row's running max and sum
+// update once per tile, and lane l accumulates the row's float4
+// channels 4l.. (and 4l + 128.. for a head of 256) over the tile's
+// probabilities. Before this a warp walked one row's keys alone and
+// read each key from global memory, about 4 GB of L2 traffic per
+// Llama-3.1-8B layer at pp512.
+//
+// Dynamic shared memory: Q [4 * rpw][head_dim], K [bc][head_dim + 4],
+// V [bc][head_dim] floats. A row's probabilities stay in its lanes and
+// reach the accumulation by shuffle, so nothing needs a warp barrier
+// (which `hiprtc` does not have).
 extern "C" __global__ void causal_gqa_prefill_f32(
     const float* __restrict__ q,
     const float* __restrict__ k_all,
     const float* __restrict__ v_all,
     float* __restrict__ out,
-    int n_q,
-    int n_heads,
-    int n_kv_heads,
-    int head_dim,
+    int dims,       // head_dim | n_q << 16
+    int heads,      // n_heads | n_kv_heads << 16
+    const float* __restrict__ sinks,  // one logit per head, or null
     int start_pos,
     int window,
     float scale,
-    float softcap
+    float softcap,
+    int tile        // rows per warp | keys per tile << 8
 ) {
+    extern __shared__ __align__(16) float fx_smem[];
+    const int head_dim = dims & 0xffff;
+    const int n_q = dims >> 16;
+    const int n_heads = heads & 0xffff;
+    const int n_kv_heads = heads >> 16;
+    const int rpw = tile & 0xff;
+    const int bc = tile >> 8;
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
-    const int r = blockIdx.x * FX_ATTN_WARPS + warp;
     const int h = blockIdx.y;
-    if (r >= n_q || h >= n_heads) return;
+    const int rows_per_block = FX_ATTN_WARPS * rpw;
+    const int r0 = blockIdx.x * rows_per_block;
     const int group_size = n_heads / max(n_kv_heads, 1);
     const int kv_h = h / max(group_size, 1);
-    const int seq_len = start_pos + r + 1;
-    int lo = 0;
-    if (window > 0 && seq_len > window) lo = seq_len - window;
-    const int d4 = head_dim >> 2;          // float4s per row, <= 64
+    const int d4 = head_dim >> 2;
     const int n_slices = (d4 + 31) >> 5;   // float4s per lane, 1 or 2
-    const float4* q_h = (const float4*)(q + ((size_t)r * n_heads + h) * head_dim);
+    const int ks = head_dim + 4;           // padded K row, in floats
 
-    float4 qv[2];
-    float4 acc[2];
-#pragma unroll
-    for (int s = 0; s < 2; s++) {
-        const int i = lane + 32 * s;
-        qv[s] = (s < n_slices && i < d4) ? q_h[i] : make_float4(0.f, 0.f, 0.f, 0.f);
-        acc[s] = make_float4(0.f, 0.f, 0.f, 0.f);
+    float* q_s = fx_smem;
+    float* k_s = q_s + rows_per_block * head_dim;
+    float* v_s = k_s + bc * ks;
+
+    // The block's rows into shared memory; a row past n_q is zeros and
+    // is never stored.
+    for (int i = threadIdx.x; i < rows_per_block * d4; i += blockDim.x) {
+        const int rr = i / d4;
+        const int c = i - rr * d4;
+        const int r = r0 + rr;
+        float4 v4 = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (r < n_q) v4 = ((const float4*)(q + ((size_t)r * n_heads + h) * head_dim))[c];
+        ((float4*)(q_s + rr * head_dim))[c] = v4;
     }
 
-    float m = -frink_inf_pf();
-    float l = 0.f;
+    float m[8];
+    float l[8];
+    float4 acc[8][2];
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        m[i] = -frink_inf_pf();
+        l[i] = 0.f;
+        acc[i][0] = make_float4(0.f, 0.f, 0.f, 0.f);
+        acc[i][1] = make_float4(0.f, 0.f, 0.f, 0.f);
+    }
+
+    // Keys any row of the block can see: from the first row's window
+    // start to the last row's own position.
+    const int r_last = min(r0 + rows_per_block, n_q) - 1;
+    const int seq_first = start_pos + r0 + 1;
+    int t_lo = 0;
+    if (window > 0 && seq_first > window) t_lo = seq_first - window;
+    const int t_hi = start_pos + r_last + 1;
     const unsigned mask = 0xffffffffu;
 
-    for (int t = lo; t < seq_len; t++) {
-        const float4* k_t = (const float4*)(k_all + ((size_t)t * n_kv_heads + kv_h) * head_dim);
-        float pdot = 0.f;
+    for (int t0 = t_lo; t0 < t_hi; t0 += bc) {
+        const int n_t = min(bc, t_hi - t0);
+        __syncthreads();
+        for (int i = threadIdx.x; i < n_t * d4; i += blockDim.x) {
+            const int j = i / d4;
+            const int c = i - j * d4;
+            const size_t at = ((size_t)(t0 + j) * n_kv_heads + kv_h) * head_dim;
+            ((float4*)(k_s + j * ks))[c] = ((const float4*)(k_all + at))[c];
+            ((float4*)(v_s + j * head_dim))[c] = ((const float4*)(v_all + at))[c];
+        }
+        __syncthreads();
+
 #pragma unroll
-        for (int s = 0; s < 2; s++) {
-            const int i = lane + 32 * s;
-            if (s < n_slices && i < d4) {
-                const float4 kv = k_t[i];
-                pdot += qv[s].x * kv.x + qv[s].y * kv.y + qv[s].z * kv.z + qv[s].w * kv.w;
+        for (int i = 0; i < 8; i++) {
+            if (i >= rpw) break;
+            const int rr = warp + FX_ATTN_WARPS * i;
+            const int r = r0 + rr;
+            if (r >= n_q) break;
+            const int seq_len = start_pos + r + 1;
+            int lo = 0;
+            if (window > 0 && seq_len > window) lo = seq_len - window;
+
+            // Lane j scores key t0 + j.
+            const int t = t0 + lane;
+            float score = -frink_inf_pf();
+            if (lane < n_t && t >= lo && t < seq_len) {
+                const float4* qr = (const float4*)(q_s + rr * head_dim);
+                const float4* kr = (const float4*)(k_s + lane * ks);
+                float dot = 0.f;
+                for (int c = 0; c < d4; c++) {
+                    const float4 a = qr[c];
+                    const float4 b = kr[c];
+                    dot += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+                }
+                score = dot * scale;
+                if (softcap > 0.f) score = softcap * tanhf(score / softcap);
+            }
+            float tmax = score;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) tmax = fmaxf(tmax, __shfl_xor_sync(mask, tmax, off));
+            if (tmax == -frink_inf_pf()) continue;   // no key of this tile is the row's
+
+            const float m2 = fmaxf(m[i], tmax);
+            const float alpha = (m[i] == -frink_inf_pf()) ? 0.f : expf(m[i] - m2);
+            const float p = (score == -frink_inf_pf()) ? 0.f : expf(score - m2);
+            float psum = p;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) psum += __shfl_xor_sync(mask, psum, off);
+            l[i] = l[i] * alpha + psum;
+            m[i] = m2;
+#pragma unroll
+            for (int s = 0; s < 2; s++) {
+                acc[i][s].x *= alpha; acc[i][s].y *= alpha;
+                acc[i][s].z *= alpha; acc[i][s].w *= alpha;
+            }
+            // Key j's probability from lane j, every lane taking part:
+            // the shuffle is outside the lanes' channel condition.
+            for (int j = 0; j < n_t; j++) {
+                const float pj = __shfl_sync(mask, p, j);
+#pragma unroll
+                for (int s = 0; s < 2; s++) {
+                    const int c = lane + 32 * s;
+                    if (s < n_slices && c < d4) {
+                        const float4 vv = ((const float4*)(v_s + j * head_dim))[c];
+                        acc[i][s].x += pj * vv.x; acc[i][s].y += pj * vv.y;
+                        acc[i][s].z += pj * vv.z; acc[i][s].w += pj * vv.w;
+                    }
+                }
             }
         }
-#pragma unroll
-        for (int off = 16; off > 0; off >>= 1) {
-            pdot += __shfl_xor_sync(mask, pdot, off);
-        }
-        float score = pdot * scale;
-        if (softcap > 0.f) score = softcap * tanhf(score / softcap);
-        const float m2 = fmaxf(m, score);
-        const float a = (m == -frink_inf_pf()) ? 0.f : expf(m - m2);
-        const float b = expf(score - m2);
-        l = l * a + b;
-        const float4* v_t = (const float4*)(v_all + ((size_t)t * n_kv_heads + kv_h) * head_dim);
-#pragma unroll
-        for (int s = 0; s < 2; s++) {
-            const int i = lane + 32 * s;
-            if (s < n_slices && i < d4) {
-                const float4 vv = v_t[i];
-                acc[s].x = acc[s].x * a + b * vv.x;
-                acc[s].y = acc[s].y * a + b * vv.y;
-                acc[s].z = acc[s].z * a + b * vv.z;
-                acc[s].w = acc[s].w * a + b * vv.w;
-            }
-        }
-        m = m2;
     }
-    const float inv = (l > 0.f) ? (1.f / l) : 0.f;
-    float4* out_h = (float4*)(out + ((size_t)r * n_heads + h) * head_dim);
+
 #pragma unroll
-    for (int s = 0; s < 2; s++) {
-        const int i = lane + 32 * s;
-        if (s < n_slices && i < d4) {
-            out_h[i] = make_float4(acc[s].x * inv, acc[s].y * inv, acc[s].z * inv, acc[s].w * inv);
+    for (int i = 0; i < 8; i++) {
+        if (i >= rpw) break;
+        const int r = r0 + warp + FX_ATTN_WARPS * i;
+        if (r >= n_q) break;
+        // A sink (gpt-oss) is one more logit with no value, folded in
+        // after every key as the host's `online_attn_accumulate` folds
+        // it: the running max and sum move, the accumulator is rescaled.
+        float li = l[i];
+        float ai = 1.f;
+        if (sinks != nullptr) {
+            const float sk = sinks[h];
+            const float m2 = fmaxf(m[i], sk);
+            ai = (m[i] == -frink_inf_pf()) ? 0.f : expf(m[i] - m2);
+            li = li * ai + expf(sk - m2);
+        }
+        const float inv = (li > 0.f) ? (1.f / li) : 0.f;
+        float4* out_h = (float4*)(out + ((size_t)r * n_heads + h) * head_dim);
+#pragma unroll
+        for (int s = 0; s < 2; s++) {
+            const int c = lane + 32 * s;
+            if (s < n_slices && c < d4) {
+                const float4 a4 = acc[i][s];
+                out_h[c] = make_float4(a4.x * ai * inv, a4.y * ai * inv,
+                                       a4.z * ai * inv, a4.w * ai * inv);
+            }
         }
     }
 }
@@ -266,5 +655,17 @@ extern "C" __global__ void causal_gqa_prefill_f32(
 pub const RMSNORM_ROWS: (&str, &str) = ("frink_prefill_rmsnorm_rows", "rmsnorm_rows_f32");
 pub const ADD_BIAS_ROWS: (&str, &str) = ("frink_prefill_add_bias_rows", "add_bias_rows_f32");
 pub const ADD_ROWS: (&str, &str) = ("frink_prefill_add_rows", "add_rows_f32");
+pub const AXPY: (&str, &str) = ("frink_prefill_axpy", "axpy_f32");
+pub const MOE_COMBINE: (&str, &str) = ("frink_prefill_moe_combine", "moe_combine_f32");
+pub const MOE_COMBINE_ROWS: (&str, &str) =
+    ("frink_prefill_moe_combine_rows", "moe_combine_rows_f32");
+pub const MOE_TOPK: (&str, &str) = ("frink_prefill_moe_topk", "moe_topk_f32");
+pub const MOE_COUNT: (&str, &str) = ("frink_prefill_moe_count", "moe_count_i32");
+pub const MOE_OFFSETS: (&str, &str) = ("frink_prefill_moe_offsets", "moe_offsets_i32");
+pub const MOE_SCATTER: (&str, &str) = ("frink_prefill_moe_scatter", "moe_scatter_i32");
+pub const GATHER_PTRS: (&str, &str) = ("frink_prefill_gather_ptrs", "gather_ptrs_u64");
+pub const ADD_BIAS_TAB_ROWS: (&str, &str) =
+    ("frink_prefill_add_bias_tab_rows", "add_bias_tab_rows_f32");
+pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
 pub const ROPE_ROWS: (&str, &str) = ("frink_prefill_rope_rows", "rope_rows_f32");
 pub const CAUSAL_GQA_PREFILL: (&str, &str) = ("frink_prefill_causal_gqa", "causal_gqa_prefill_f32");

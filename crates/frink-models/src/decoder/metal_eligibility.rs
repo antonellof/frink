@@ -5,7 +5,7 @@
 
 #[cfg(feature = "metal")]
 use frink_core::weight_matrix::WeightMatrix;
-#[cfg(any(feature = "metal", feature = "cuda"))]
+#[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
 use frink_moe::GluAct;
 
 use crate::config::ModelConfig;
@@ -86,7 +86,7 @@ impl Decoder {
     /// resident prefill layer (`decoder/cuda_prefill.rs`, #259) asks the
     /// same question through `fused_view`, because the facts are
     /// properties of the model and not of the kernel language.
-    #[cfg(any(feature = "metal", feature = "cuda"))]
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
     pub(super) fn metal_can_serve_model(config: &ModelConfig, lora_attached: bool) -> bool {
         !lora_attached
             && config.residual_scale.is_none()
@@ -167,7 +167,7 @@ impl Decoder {
     pub(super) fn layer_supports_metal_attn(&self, layer: &LayerWeights) -> bool {
         // The backend-neutral questions are `fused_view`'s; what is
         // left is whether Metal has a launch for every projection.
-        self.layer_supports_fused_attn(layer)
+        self.layer_supports_fused_attn(layer, fused_view::FusedAttnCaps::METAL)
             && Self::metal_matvec_launch(&layer.attn.q_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.k_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.v_proj).is_some()
@@ -237,13 +237,17 @@ impl Decoder {
         &self,
         layer: &'a LayerWeights,
     ) -> Option<frink_metal::attn::AttnExtras<'a>> {
+        // Metal's caps refuse a layer with sinks or `wo`'s bias, so both
+        // are `None` here.
         let fused_view::FusedAttnExtras {
             q_bias,
             k_bias,
             v_bias,
             q_norm,
             k_norm,
-        } = Self::fused_attn_extras(layer)?;
+            sinks: _,
+            o_bias: _,
+        } = Self::fused_attn_extras(layer, fused_view::FusedAttnCaps::METAL)?;
         Some(frink_metal::attn::AttnExtras {
             q_bias,
             k_bias,

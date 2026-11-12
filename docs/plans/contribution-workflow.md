@@ -72,6 +72,26 @@ break first when the fleet grows:
   own scope, because the second is indistinguishable from success until
   someone depends on it.
 
+## Releasing
+
+Only when the user asks for a release.
+
+1. Open a `chore(release): X.Y.Z - title` PR that bumps
+   `version = "…"` in the root `Cargo.toml` (the workspace and every
+   internal pin), `Cargo.lock` with `cargo update --workspace
+   --offline`, and `FRINK_VERSION=vX.Y.Z` and `frink-inference = "X.Y"`
+   in `README.md` and `crates/frink-inference/README.md`. It also dates
+   the CHANGELOG's `[Unreleased]` section, keeps an empty
+   `[Unreleased]` above it, and merges duplicate `###` headings.
+2. After the merge, tag the merge commit:
+   `git tag -a vX.Y.Z <merge-sha>`, with the message `vX.Y.Z - title`
+   and the release PR's body, then push the tag. `release.yml` builds
+   the tarballs, and `publish-crates.yml` publishes every crate. A tag
+   push publishes for real. Only a manual dispatch defaults to a dry
+   run.
+3. Check `gh release view vX.Y.Z` for both tarballs and their
+   checksums, and that the publish run finished green.
+
 ## Why this is written down
 
 The alternative, which this project used, was to land several features

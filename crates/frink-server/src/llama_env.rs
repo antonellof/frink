@@ -32,6 +32,12 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_API_KEY", "api-key"),
     ("LLAMA_ARG_API_KEY_FILE", "api-key-file"),
     ("LLAMA_ARG_ALIAS", "alias"),
+    ("LLAMA_ARG_CHAT_TEMPLATE", "chat-template"),
+    ("LLAMA_ARG_CHAT_TEMPLATE_FILE", "chat-template-file"),
+    ("LLAMA_ARG_CHAT_TEMPLATE_KWARGS", "chat-template-kwargs"),
+    ("LLAMA_ARG_REASONING", "reasoning"),
+    ("LLAMA_ARG_REASONING_EFFORT", "reasoning-effort"),
+    ("LLAMA_ARG_REASONING_PRESERVE", "reasoning-preserve"),
     ("LLAMA_ARG_CACHE_TYPE_K", "ctk"),
     ("LLAMA_ARG_JINJA", "jinja"),
     ("LLAMA_ARG_FLASH_ATTN", "flash-attn"),
@@ -45,6 +51,9 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_BATCH", "batch-size"),
     ("LLAMA_ARG_UBATCH", "ubatch-size"),
     ("LLAMA_ARG_SLOT_SAVE_PATH", "slot-save-path"),
+    ("LLAMA_ARG_SPEC_DRAFT_MODEL", "model-draft"),
+    ("LLAMA_ARG_DRAFT_MAX", "draft-max"),
+    ("LLAMA_ARG_SPEC_DRAFT_P_MIN", "draft-p-min"),
     ("LLAMA_ARG_THINK_BUDGET", "reasoning-budget"),
     ("LLAMA_ARG_PREFILL_ASSISTANT", "prefill-assistant"),
     // llama.cpp declares the plain `HF_TOKEN` on `--hf-token`, which is
@@ -55,6 +64,7 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_CORS_ORIGINS", "cors-origins"),
     ("LLAMA_ARG_THREADS_HTTP", "threads-http"),
     ("LLAMA_ARG_ENDPOINT_METRICS", "metrics"),
+    ("LLAMA_ARG_ENDPOINT_SLOTS", "slots"),
 ];
 
 /// llama.cpp's `is_truthy` / `is_falsey`, through the one copy of them
@@ -69,20 +79,24 @@ fn switch_value(value: &str) -> Option<bool> {
     }
 }
 
-/// Appends the flag of every set variable in [`LLAMA_ENV_FLAGS`] to
+/// Prepends the flag of every set variable in [`LLAMA_ENV_FLAGS`] to
 /// `tail` (the arguments after the program or subcommand name), unless
-/// `tail` already gives that flag.
+/// `tail` already gives that flag. Before it, because llama.cpp applies
+/// the variable first: between two flags where the last wins, such as
+/// `--chat-template` and `--chat-template-file`, the command line has to
+/// come last.
 ///
 /// `cmd` is the server's BUILT command. A switch (a flag with no value)
 /// takes llama.cpp's truthy/falsy spellings; falsy selects its `--no-`
 /// twin when there is one and does nothing otherwise, which is what
 /// upstream does for a flag with no negation. The `LLAMA_ARG_NO_*`
 /// spelling upstream also reads for a negatable flag means falsy.
-pub fn append_llama_arg_env(
+pub fn prepend_llama_arg_env(
     cmd: &Command,
-    mut tail: Vec<String>,
+    tail: Vec<String>,
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<Vec<String>, String> {
+    let mut from_env = Vec::new();
     let given: Vec<String> = tail
         .iter()
         .filter_map(|t| frink_core::argv::arg_for_token(cmd, t))
@@ -97,7 +111,7 @@ pub fn append_llama_arg_env(
         }
         if arg.get_action().takes_values() {
             if let Some(value) = env(var) {
-                tail.push(format!("{flag}={value}"));
+                from_env.push(format!("{flag}={value}"));
             }
             continue;
         }
@@ -108,11 +122,11 @@ pub fn append_llama_arg_env(
             None => continue,
         };
         match switch_value(value.trim()) {
-            Some(true) => tail.push(flag),
+            Some(true) => from_env.push(flag),
             Some(false) => {
                 let off = format!("--no-{long}");
                 if frink_core::argv::arg_for_token(cmd, &off).is_some() {
-                    tail.push(off);
+                    from_env.push(off);
                 }
             }
             None => {
@@ -122,13 +136,15 @@ pub fn append_llama_arg_env(
             }
         }
     }
-    Ok(tail)
+    from_env.extend(tail);
+    Ok(from_env)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use serde_json::json;
 
     fn built() -> Command {
         let mut cmd = crate::ServerArgs::command();
@@ -137,7 +153,7 @@ mod tests {
     }
 
     fn with_env(tail: &[&str], vars: &[(&str, &str)]) -> Result<Vec<String>, String> {
-        append_llama_arg_env(
+        prepend_llama_arg_env(
             &built(),
             tail.iter().map(|s| s.to_string()).collect(),
             |k| {
@@ -180,6 +196,48 @@ mod tests {
     }
 
     /// A negative value must reach the flag as a value, not as a flag.
+    /// llama.cpp applies a variable first and the command line over it.
+    /// Between two flags where the last wins, the variable used to land
+    /// after the command line and beat an explicit flag.
+    #[test]
+    fn a_variable_comes_before_the_command_line_so_the_command_line_wins() {
+        assert_eq!(
+            with_env(
+                &["--chat-template-file", "t.jinja"],
+                &[("LLAMA_ARG_CHAT_TEMPLATE", "{{ x }}")]
+            )
+            .unwrap(),
+            ["--chat-template={{ x }}", "--chat-template-file", "t.jinja"]
+        );
+    }
+
+    /// A pair of switches: the variable's value picks the spelling, and
+    /// the command line's own spelling still comes after it.
+    #[test]
+    fn llama_arg_reasoning_preserve_is_the_preserve_pair() {
+        let preserve = |tail: &[&str], value: &str| {
+            let argv = with_env(tail, &[("LLAMA_ARG_REASONING_PRESERVE", value)]).unwrap();
+            let args = crate::ServerArgs::try_parse_from(
+                std::iter::once("frink-server".to_string()).chain(argv.clone()),
+            )
+            .unwrap();
+            let flags = crate::cli::template_flags(&args).unwrap();
+            (argv, flags.kwargs["preserve_reasoning"].clone())
+        };
+        let (argv, keep) = preserve(&[], "0");
+        assert_eq!(
+            (argv.as_slice(), keep),
+            (&["--no-reasoning-preserve".to_string()][..], json!(false))
+        );
+        let (argv, keep) = preserve(&[], "on");
+        assert_eq!(
+            (argv.as_slice(), keep),
+            (&["--reasoning-preserve".to_string()][..], json!(true))
+        );
+        let (_, keep) = preserve(&["--no-reasoning-preserve"], "1");
+        assert_eq!(keep, json!(false));
+    }
+
     #[test]
     fn a_negative_value_stays_a_value() {
         let tail = with_env(&[], &[("LLAMA_ARG_THINK_BUDGET", "-1")]).unwrap();

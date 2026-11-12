@@ -1,0 +1,29 @@
+#version 450
+// h[i] = silu(g[i]) * u[i], the SwiGLU combine between gate/up and
+// down (frink_core::matmul::swiglu, ggml's ggml_swiglu). silu is the
+// cancellation-free x / (1 + exp(-x)) the CPU uses.
+//
+// The matvec interface's three bindings, reused so one pipeline layout
+// serves every shader: binding 0 holds the gate output (read as uint
+// words and reinterpreted, since that binding is the matvecs' weights),
+// 1 the up output, 2 the result. Push constant `rows` is the length;
+// the other two are unused.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Gate { uint g[]; };
+layout(std430, binding = 1) readonly buffer Up { float u[]; };
+layout(std430, binding = 2) writeonly buffer Out { float h[]; };
+
+layout(push_constant) uniform Push {
+    uint n;
+    uint unused0;
+    uint unused1;
+} p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u + gl_GlobalInvocationID.x;
+    if (i >= p.n) return;
+    float gv = uintBitsToFloat(g[i]);
+    h[i] = gv / (1.0 + exp(-gv)) * u[i];
+}

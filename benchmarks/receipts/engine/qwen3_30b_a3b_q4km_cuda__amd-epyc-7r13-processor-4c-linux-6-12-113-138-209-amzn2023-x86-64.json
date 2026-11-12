@@ -1,0 +1,99 @@
+{
+  "backend": "cuda",
+  "backend_active": "CUDA",
+  "threads": 4,
+  "warmup_reps": 1,
+  "load_s": 0.07668546,
+  "host_load_1min_start": 1.27,
+  "host_load_1min_end": 1.21,
+  "host_thermal_start": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "host_thermal_end": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "quiet_host": true,
+  "host_spec": {
+    "label": "AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "arch": "x86_64",
+    "cores": 4,
+    "perf_cores": null,
+    "ram_gb": 61.9,
+    "os": "Linux 6.12.113-138.209.amzn2023.x86_64"
+  },
+  "accelerator": "NVIDIA L40S",
+  "engine_env": {
+    "FRINK_CPU_INT_DOT": "1"
+  },
+  "frink_version": "0.59.0",
+  "schema": 3,
+  "kind": "engine",
+  "id": "qwen3_30b_a3b_q4km",
+  "model_path": "/work/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+  "arch": "qwen3moe",
+  "quant": "quantized",
+  "size_bytes": 18556685824,
+  "approx_params": 3239575552,
+  "reps": 3,
+  "tests": [
+    {
+      "test": "pp512",
+      "frink_tps": 1569.789609897992,
+      "frink_stddev": 13.014825687991731,
+      "frink_samples": [
+        1543.574834178157,
+        1572.3928790920843,
+        1569.789609897992
+      ],
+      "llama_tps": 8689.291468,
+      "gap": 5.535322321673823,
+      "workload_digest": "b8d417040110e751"
+    },
+    {
+      "test": "tg128",
+      "frink_tps": 111.6305963005924,
+      "frink_stddev": 0.2398048888878353,
+      "frink_samples": [
+        111.57841322530633,
+        111.6305963005924,
+        112.11119641109008
+      ],
+      "llama_tps": 226.263455,
+      "gap": 2.026894619381329,
+      "workload_digest": "044655d19aa3baa5"
+    }
+  ],
+  "llama_cpp": {
+    "build_commit": "604cc43",
+    "build_number": 1,
+    "backends": "CUDA",
+    "cpu_info": "AMD EPYC 7R13 Processor",
+    "gpu_info": "NVIDIA L40S",
+    "command": [
+      "llama-bench",
+      "-m",
+      "/work/models/Qwen3-30B-A3B-Q4_K_M.gguf",
+      "-p",
+      "512",
+      "-n",
+      "128",
+      "-d",
+      "0",
+      "-r",
+      "3",
+      "-ngl",
+      "99",
+      "-o",
+      "json"
+    ]
+  }
+}

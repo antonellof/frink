@@ -215,6 +215,31 @@ Gemma-2-2B decode **1.11× to 0.94×**, Llama-3.2-3B **1.03× to 0.94×**,
 and every other Metal decode row moved the same direction; the summary
 line is now 0.60× to 0.96× on decode.
 
+## Metal continuous batching (0.15.3)
+
+Host B, **Llama-3.2-3B-Instruct Q4_K_M**, CB auto-on, `frink 0.15.3`:
+
+| Workload | Concurrency | OK | Aggregate tok/s | Mean TTFT |
+|---|---|---|---|---|
+| parallel stream burst (`max_tokens=64`) | 1 | 2/2 | 17.4 | 157 ms |
+| | 2 | 4/4 | 19.0 | 272 ms |
+| | 4 | 8/8 | 22.7 | 450 ms |
+| | 8 | 16/16 | **24.4** | 957 ms |
+| sequential stream (`max_tokens=128`) | 1 | 8/8 | n/a | **118 ms** |
+
+These numbers were recorded with frink 0.15.3 by an external harness
+that is not part of this repository. Receipts:
+[`llama32_3b_q4km_metal_cb_parallel_0.15.3.json`](receipts/serving/llama32_3b_q4km_metal_cb_parallel_0.15.3.json),
+[`llama32_3b_q4km_metal_cb_stream_0.15.3.json`](receipts/serving/llama32_3b_q4km_metal_cb_stream_0.15.3.json).
+
+0.15.2 measured similar aggregate throughput at concurrency 8 but returned
+garbled text under continuous batching on Metal until the 0.15.3 host-K/V
+prefill fix. See
+[`docs/plans/archive/metal-parallel-concurrency.md`](../docs/plans/archive/metal-parallel-concurrency.md).
+The in-repo `frink serve-bench` sends different prompts from that
+harness, so expect the shape of the results to match rather than the
+exact figures.
+
 ## Open
 
 | Issue | Gap | What is known |

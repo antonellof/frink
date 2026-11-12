@@ -13,10 +13,11 @@ comes back the same way.
 | `GET /health` | Supported (capability handshake, see below) |
 | `GET /v1/models` | Supported |
 | `POST /v1/chat/completions` | Supported (JSON + SSE) |
-| `POST /v1/completions` | Supported (`prompt`, `max_tokens`, sampling subset) |
+| `POST /v1/completions` | Supported, JSON only (`stream` is not served yet). The fields are in the tables below |
 | `POST /completion` · `POST /completions` | llama.cpp's native completion endpoint, JSON + its own SSE shape. Not an alias of the line above (see below) |
 | `POST /v1/tokenize` · `POST /tokenize` | Supported. The unprefixed spelling is llama.cpp's, on the same handler (see below) |
 | `POST /v1/detokenize` · `POST /detokenize` | Supported, same aliasing |
+| `POST /apply-template` | llama-server's prompt preview: a chat completions body in, `{"prompt": ...}` out, nothing generated. The prompt is the one `/v1/chat/completions` would decode, through the same rendering |
 | `POST /v1/score` · `POST /score` | Sentence-pair scoring. One text against many, or two lists of the same length paired element by element; different lengths are a **400** naming both counts. A cross-encoder answers with its head, a bi-encoder with the cosine of two embeddings, and `frink_score_kind` says which. A generative model is a **501** |
 | `POST /v1/embeddings` | Supported. A real BERT/BGE encoder when one is loaded (`cls`/`mean`/`last`, L2-normalized), otherwise a mean/last pool of a GGUF decoder's hidden states (see below) |
 | `POST /v1/rerank` · `POST /rerank` | Cross-encoder reranking with the checkpoint's own classification head. The unprefixed spelling is llama.cpp's, on the same handler (see below) |
@@ -32,7 +33,10 @@ comes back the same way.
 | `GET`/`POST /v1/conversations/{conversation_id}` | Read one with its messages, or rename, retarget and append |
 | `POST /v1/conversations/{conversation_id}/delete` | Delete. Spelled as a POST suffix because the CORS allow-list is `GET, POST`, so a `DELETE` method would work from curl and fail from every cross-origin browser |
 | `POST /v1/admin/prepare-stop` | Close admission, seal the accounting, and make the receipt durable (see below) |
-| `POST /slots/{id_slot}?action=save\|restore` | llama.cpp's slot save/restore: persist a prompt prefix's KV to disk and load it back after a restart. Needs `--slot-save-path` and `FRINK_PREFIX_CACHE_ENTRIES` (see below). `action=erase` is refused by name |
+| `POST /slots/{id_slot}?action=save\|restore\|erase` | llama.cpp's slot save/restore: persist a prompt prefix's KV to disk and load it back after a restart, or empty the slot. Needs `--slot-save-path` and `FRINK_PREFIX_CACHE_ENTRIES` (see below) |
+| `GET /slots` | llama.cpp's live slot listing: one entry per seat of the continuous batcher under `-np N`. A deployment with no seats refuses by name, and so does `--no-slots` (see below) |
+| `GET /props` · `POST /props` | llama.cpp's global properties, which its web UI reads first. `POST` is llama.cpp's refusal without `--props` (see below) |
+| `POST /infill` | llama.cpp's fill-in-the-middle completion, in `/completion`'s shape and through its serving path (see below) |
 | `GET /lora-adapters` · `POST /lora-adapters` | llama.cpp's LoRA listing and scale setting; the per-request `lora` field is honoured on `/v1/chat/completions`, `/v1/completions` and `/completion` (see below) |
 | `GET /cache/stats` · `GET /metrics` | Frink extensions |
 | `GET /admin/models` | Checkpoint inventory from GGUF headers (see [Admin control surface](#admin-control-surface)) |
@@ -44,9 +48,11 @@ comes back the same way.
 | `GET /` | 404. The web UI in [`ui/`](../ui) is a separate app and this server does not serve it |
 | Audio / images | Not supported |
 
-That is the complete list. Every path is defined as one constant in the
-`frink-api` crate, and the server mounts nothing that is not in it, so
-the UI and the server cannot disagree about a URL.
+That is the complete list. Every path a client of the public API uses is
+one constant in the `frink-api` crate, so the UI and the server cannot
+disagree about a URL. The `/v1/conversations` routes are the exception:
+they are the server's own (`frink-server/src/conversations.rs`) and
+`frink-api` does not carry them.
 
 ## Authentication
 
@@ -68,13 +74,14 @@ conversation or a large `/v1/embeddings` batch past that comes back
 | Field | Status |
 |---|---|
 | `model`, `messages` | Supported |
-| `max_tokens` | Supported; defaults to 32768 (OpenAI's legacy default is 16). An explicit `0` is a 400 |
+| `max_tokens` · `max_completion_tokens` | Supported, as one budget: `max_completion_tokens` is OpenAI's current name, and llama-server reads the two as aliases. Two that disagree are a 400 naming both. Defaults to 32768 (OpenAI's legacy default is 16). An explicit `0` is a 400 |
 | `temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`, `seed`, `stop` | Supported |
 | `typical_p`, `top_n_sigma`, `xtc_probability`, `xtc_threshold`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n`, `dry_sequence_breakers` | Supported. llama.cpp's own spellings; absent means the sampler is off |
 | `samplers` | Supported. The chain order, as a list of names or a `;`-separated string. Defaults to llama.cpp's own default chain |
 | `presence_penalty`, `frequency_penalty` | Supported |
 | `stream` | Supported (overlapped SSE when tools off and CB off) |
 | `tools` / `tool_choice: none\|auto` | Supported (prompt-engineered, parsed in eleven wire formats) |
+| `parallel_tool_calls` | Supported. `false` returns the first call the model made and drops any after it, in the whole answer and on the stream alike. Absent or `true` returns every call. Also on `/v1/responses` |
 | `tool_choice: required` / named function | Supported on ten of the eleven wire formats, by a lazy grammar built from the same marker description the parser reads with. **501 naming the format** on the remaining one (`muse_glimmer`), for the reason the refusal states |
 | `logprobs` | Served on `/v1/completions` (parallel arrays plus `text_offset`) and on `/v1/chat/completions` as `logprobs: true` + `top_logprobs` (OpenAI's `content[]` shape). Over the distribution the sampler drew from, so penalties and a grammar mask are in it; a candidate the chain removed is omitted rather than reported as `null`. Cap 5 on completions, 20 on chat, above which is a 400. Such a request always misses the response cache, which stores text and not distributions |
 | `n` (>1) | Served on `/v1/completions` and `/v1/chat/completions`: prefilled once and the KV forked per choice, so `prompt_tokens` counts the prompt once. Choice `i` samples from `seed + i`, so choice 0 is byte-identical to the `n = 1` answer. With `stream` on the chat route the choices are interleaved, and each chunk carries its own index. **501** on the native `/completion`, which returns a single `content` |
@@ -148,7 +155,24 @@ becomes a top-level template variable, which is how `enable_thinking`
 driven. It can never shadow `messages`, `tools`, or
 `add_generation_prompt`.
 
-Five rules are applied to it before rendering:
+`preserve_reasoning` is `true` unless the server was started with
+`--no-reasoning-preserve` or a request sets it, as in llama-server. A
+boolean `preserve_reasoning` also reaches the template as
+`preserve_thinking`, and its opposite as `clear_thinking`,
+`truncate_history_thinking` and `drop_thinking`, which is what decides
+whether GLM-4.7, LFM2.5, LFM3, Nemotron-3, Laguna and DeepSeek-V4 keep
+the reasoning of earlier assistant turns. A request that sets one of
+those four itself keeps its own value.
+
+`enable_thinking` is `true` when the template supports thinking and the
+server was not started with `-rea off`, and `false` otherwise, as in
+llama-server. A request's own `enable_thinking`, `reasoning_effort:
+"none"` or `thinking: {"type": "disabled"}` still turns it off. So a
+thinking checkpoint (DeepSeek V3.1 to V4, QwQ, R1-Distill, Gemma 4,
+Laguna, MiniCPM5) thinks by default. `date_string`
+and `datetime` carry today's date in the server's local time.
+
+Four rules are applied to it before rendering:
 
 * An explicit knob wins wholesale. A caller who already set any of
   `enable_thinking`, `thinking`, `thinking_mode` or `reasoning_effort`
@@ -160,9 +184,6 @@ Five rules are applied to it before rendering:
   gear, which would turn "do not think" into "think a little". The
   DeepSeek-wire `thinking: {"type": "disabled"}` does the same and beats
   any effort in the same request.
-* Offering tools turns thinking on. Some encoders emit well-formed tool
-  calls only in thinking mode, so `tools` implies `enable_thinking`
-  unless the request said otherwise.
 * Effort is quantized onto what this checkpoint grades. The template's
   effort vocabulary is probed once at load; a request asking for a gear
   outside it is mapped to the nearest one, or dropped (so the
@@ -181,6 +202,8 @@ then the gears, or a bare `on` when there is a toggle but no ladder) and
 nothing). A checkpoint that says nothing about thinking carries neither
 field. An empty list would read as "asked, and it has no gears", which
 is a different claim from "this is not a reasoning model".
+
+Offering tools leaves thinking where it was, as in llama-server.
 
 Whether the tools are described by the template or by a text preamble
 depends on the template, established at load by rendering it with and
@@ -201,7 +224,7 @@ described under [Tool-call formats](#tool-call-formats).
       "reason": "metal_not_built",       // stable code, safe to switch on
       "detail": "Apple M2 Pro is present but this binary was built without --features metal; rebuild to use it." }
   ],
-  "version": "0.50.0", "pid": 4242, "uptime_seconds": 12.5,
+  "version": "0.57.0", "pid": 4242, "uptime_seconds": 12.5,
   "server_time_unix_ms": 1786000000000,
   "last_request_age_seconds": 0.4    // absent until one is served
 }
@@ -269,7 +292,9 @@ means the cache was consulted and missed.
 
 The server drafts with prompt lookup: an n-gram match over the
 request's own history, with no second checkpoint, so it costs no memory
-and no load time and helps where output quotes input. Verification
+and no load time and helps where output quotes input. A server started
+with `-md` drafts with that model instead, with KV of the request's own
+([`CLI.md`](CLI.md#server-flags) says where it is refused). Verification
 draws with the server's own sampler and keeps a drafted token only when
 it equals that draw, so speculation never changes the answer. The four
 speculation fields are present whenever a request drafted.
@@ -280,7 +305,8 @@ opposite block sizes. `/admin/stats` rows carry `acceptance_length` and
 `draft_accept_rate_per_position` for the same reason.
 
 The speculation fields are absent for a request that did not draft: a
-grammar-constrained or `json_object` request (verification draws
+request the continuous-batching worker serves (the default on Metal,
+which has no speculation yet), a grammar-constrained or `json_object` request (verification draws
 through the same grammar machine, and a rejected block would leave it
 advanced over tokens that were never emitted), a paged or recurrent KV
 store (a rejected draft has to be rolled back and neither can), a
@@ -610,7 +636,7 @@ scorers) refuse by name, each saying what it needs;
 is among them: llama.cpp runs Llama's decoder body for it with no
 output head and with the mask its `attention.causal` key sets, so it
 has no logits to generate from, and its pooled embedding is not yet
-checked against llama.cpp's (#421).
+checked against llama.cpp's.
 
 ## Reranking
 
@@ -974,6 +1000,22 @@ While a batcher is active, `GET /metrics` reports
 `frink_scheduler_prefill_chunk` (`-ub`), so a flag can be read back from
 the process that received it.
 
+On every deployment, batched or not, it also reports what each finished
+request adds:
+
+| Family | Type | What |
+|---|---|---|
+| `frink_prompt_tokens_total` | counter | prompt tokens |
+| `frink_prompt_tokens_cached_total` | counter | prompt tokens the prefix cache served instead of a prefill. Over `frink_prompt_tokens_total`, the cache's hit rate in tokens |
+| `frink_generation_tokens_total` | counter | completion tokens |
+| `frink_time_to_first_token_seconds` | histogram | request to first token, for the requests that timed it |
+| `frink_time_per_output_token_seconds` | histogram | decode time over completion tokens, the decode loop alone |
+| `frink_request_duration_seconds` | histogram | the whole request: queue wait, prefill and decode |
+
+Each histogram counts a request only from the field that measured it,
+so one that did not time its first token adds nothing to that family.
+`/v1/requests` carries the same `cached_tokens` per request.
+
 ## Slot save and restore
 
 llama.cpp's `POST /slots/{id_slot}?action=save|restore`, so a long
@@ -1020,9 +1062,15 @@ Two things differ from llama.cpp:
   carries the prompt to prefill, tokenized with BOS as a completion
   would be.
 
-`action=erase` is `501`: the prefix cache has whole-cache clearing and
-no per-entry eviction, so erasing one slot would mean erasing all of
-them. Delete the file, or restart.
+`action=erase` empties one slot and answers llama.cpp's
+`{"id_slot": 0, "n_erased": 83}`, the tokens the slot held (`0` for a
+slot that held nothing). Every save and restore records which prompt its
+slot id holds, and an erase drops the prefix cache entry for exactly
+those tokens. Two exceptions keep it to one slot: an entry another slot
+id also holds stays, because it is that slot's state too, and a longer
+entry that only starts with the prompt is a request's continuation and
+stays. Like save and restore it needs `--slot-save-path`, as upstream's
+does, and the prefix cache.
 
 A restore is refused by name when the file is not of the model being
 served. A slot file is raw attention state, and restoring it under
@@ -1058,6 +1106,37 @@ engines refuse by name, as does a server without a checkpoint on disk.
 The slot file header holds one KV geometry, so a model whose layers
 cache different KV widths, or whose K and V heads differ in width, is
 refused with a 501 as well.
+
+### The live listing, `GET /slots`
+
+llama.cpp's listing: an array with one object per slot, and
+`?fail_on_no_slot=1` answers `503 no slot available` when every slot is
+busy. A slot here is a seat of the continuous batcher, and `-np N` gives
+it N seats, so the listing has N entries and the first ones, as many as
+there are sequences decoding or prefilling, are busy:
+
+```json
+[{"id": 0, "n_ctx": 8192, "speculative": false, "is_processing": true},
+ {"id": 1, "n_ctx": 8192, "speculative": false, "is_processing": false}]
+```
+
+Each seat carries the four fields llama.cpp always sends. `n_ctx` is
+the per-request context ceiling and is absent when the model could not
+be priced. `speculative` is `false` because a batched request never
+drafts. Left out, because a seat does not hold them: `id_task`,
+`n_prompt_tokens`, `n_prompt_tokens_processed`,
+`n_prompt_tokens_cache`, `params` and `next_token`, which llama.cpp
+keeps per slot from the task it last served, and `prompt` and
+`generated`, which it adds under `LLAMA_SERVER_SLOTS_DEBUG`. frink
+builds KV per request, so a seat keeps nothing once its request ends,
+and its `id` is a position in the listing rather than an address.
+
+A deployment without seats has no slot count, and says so with a 501
+rather than inventing one: no batcher (continuous batching off, or a KV
+pool or prefix cache keeping requests on the private loop), or a batcher
+without `-np`. `--no-slots` (`LLAMA_ARG_ENDPOINT_SLOTS=0`) turns the
+route off with llama.cpp's own 501, `This server does not support slots
+endpoint. Start it with --slots`. `--slots` is the default.
 
 ## LoRA adapters
 
@@ -1156,7 +1235,14 @@ what gets consulted.
 
 When the template does not consume `tools`, the server describes them
 in a preamble that asks for a Hermes-style
-`<tool_call>{"name": …, "arguments": {…}}</tool_call>`. A model trained
+`<tool_call>{"name": …, "arguments": {…}}</tool_call>`. This is a
+difference from llama-server, which hands `tools` to such a template
+and renders what it renders, so the model is not told what the tools
+are and has nothing to call them by. The preamble
+is an extra system turn of frink's own text, so the prompt is not
+llama-server's: on DeepSeek-R1-Distill, DeepSeek V3.1, SmolLM3,
+Phi-3.5 and RWKV World, the render census lists it under
+`deviation:tool-preamble`. A model trained
 on a different format frequently answers in its own, so parsing uses
 the format the checkpoint implies: the one its chat template prints
 when it prints one, otherwise the one the served model's name implies.
@@ -1341,6 +1427,131 @@ it was, so it is reported as `"eos"` where llama.cpp would say `"word"`.
 inputs. Multi-token stop strings, which is what a `/completion` caller
 normally sets, are reported correctly.
 
+## Infill, `POST /infill`
+
+llama.cpp's fill-in-the-middle completion. The body is a `/completion`
+request with three more fields, and the answer is `/completion`'s object
+and stream:
+
+```bash
+curl -s http://127.0.0.1:8383/infill -H 'content-type: application/json' -d '{
+  "input_prefix": "def add(a, b):\n    ",
+  "input_suffix": "\n\nprint(add(1, 2))\n",
+  "input_extra": [{"filename": "util.py", "text": "def sub(a, b): return a - b\n"}],
+  "n_predict": 32
+}'
+```
+
+- `input_prefix` and `input_suffix` (required) are a string, or an array
+  of strings and token ids, each string tokenized without parsing
+  special markers. A token id must be a non-negative integer.
+- `input_extra` (optional) is an array of `{"filename", "text"}`, other
+  files the model reads first. `filename` defaults to `tmp`.
+- `prompt` (optional) is text appended to the prefix, tokenized with
+  special markers parsed.
+
+The prompt is assembled as llama.cpp's `format_prompt_infill` assembles
+it, with the repo-level pattern when the vocabulary has the tokens for
+it: `[FIM_REP]myproject\n`, each extra file as `[FIM_SEP]filename\n`
+and its text (or llama.cpp's `--- snippet ---` separator without a file
+separator), a closing `[FIM_SEP]filename\n`, then the BOS where the
+vocabulary adds one, `[FIM_PRE]` prefix and prompt, `[FIM_SUF]` suffix,
+`[FIM_MID]`. `--spm-infill` puts the suffix half first. The prefix keeps
+its last `3 * (n_batch / 4)` tokens and the suffix its first
+`n_batch / 4 - (2 + prompt)`, where `n_batch` is `-b` (default 2048),
+and the extra context keeps its last `n_ctx - n_batch + 2` tokens. The
+assembled ids are prefilled as they are, and the response's `prompt` is
+their detokenization.
+
+The FIM tokens are read from the GGUF's `tokenizer.ggml.fim_*_token_id`
+keys (and the deprecated `prefix_token_id`, `suffix_token_id` and
+`middle_token_id`), then found by their text as llama.cpp finds them
+(`<|fim_prefix|>`, `<fim_prefix>`, `▁<PRE>` and the rest of its lists).
+A vocabulary without the prefix, suffix or middle token is llama.cpp's
+501, `Infill is not supported by this model: prefix token is missing.`
+and so on for each one missing. Where llama.cpp's lists match two
+entries of one kind, the lower id is taken: upstream keeps whichever
+its hash map reaches first.
+
+The body is checked with llama.cpp's messages (`"input_prefix" is
+required`, `"input_extra" must be an array of {"filename": string,
+"text": string}`, `extra_context chunk must contain a "text" field with
+a string value`, ...), and then as a `/completion` request, so every
+refusal of that route applies here too. Where this route answers
+differently:
+
+- A `prompt` that is not a string, and a missing `input_prefix` or
+  `input_suffix`, are each the 400 their message names. llama.cpp sets
+  the error and carries on: the first is served with an empty prompt,
+  the other two end in a JSON exception.
+- The dedicated engines (Kimi, MLA, Gemma-4, GLM-5.2) are a 501: their
+  loaders do not read the FIM tokens.
+- A prompt that carries repo-level context needs the context ceiling to
+  budget it against, and is a 501 on a deployment where the model could
+  not be priced.
+- llama.cpp also makes the FIM pad, repo and file-separator tokens end
+  generation, on every route. frink's end-of-generation set does not
+  include them yet, on any route, so an answer runs on past one of them
+  until the model's end of text, a stop string or `n_predict`.
+
+## Server properties, `GET /props`
+
+llama.cpp's global properties, with its field names, nesting and types.
+Every field frink can state is there. A field that would need a value
+frink does not have is left out rather than defaulted:
+
+| Field | Value |
+|---|---|
+| `default_generation_settings.params` | What `/completion` resolves an empty request to: the samplers in their default order by llama.cpp's names, each knob at its default, and the options frink lacks (`dynatemp_range`, `mirostat`, `n_probs`, `min_keep`, `n_keep`, `timings_per_token`, `post_sampling_probs`) at the off value `/completion` serves them at. `n_predict` and `max_tokens` are `-1` |
+| `default_generation_settings.n_ctx` | The per-request context ceiling |
+| `total_slots` | The `-np` seats of the continuous batcher |
+| `model_alias` | The served name (`-a`, or the model's own) |
+| `model_ftype` | `general.file_type` in llama.cpp's words (`Q4_K - Medium`), for the generic GGUF decoder |
+| `model_path` | The checkpoint path |
+| `modalities` | `vision`, `video` and `audio` all `false` |
+| `endpoint_slots` | `false` under `--no-slots` |
+| `endpoint_props` | `false`: there is no `--props` |
+| `endpoint_metrics` | `true`: `/metrics` is always served |
+| `ui` | `false`: this server serves no web UI |
+| `chat_template` | The Jinja source the checkpoint is served with |
+| `bos_token` · `eos_token` | The vocabulary entries the GGUF names, as the template renders them |
+| `build_info` | `frink-server` and its version |
+| `is_sleeping` | `true` between `POST /sleep` and `POST /wake_up` |
+| `cors_proxy_enabled` | `false`: there is no CORS proxy |
+
+Left out, and why:
+
+- `seed` in `params`: frink draws a random seed per request when none is
+  sent. llama.cpp spells that `4294967295`, which `/completion` here
+  reads as a fixed seed, so the value would not mean what it says.
+- `dynatemp_exponent`, `mirostat_tau`, `mirostat_eta`,
+  `adaptive_target`, `adaptive_decay`, `n_discard`: knobs of samplers
+  and of a context shift frink does not have. Each would be a number
+  with nothing behind it.
+- `chat_format`, `reasoning_format`, `reasoning_in_content`,
+  `generation_prompt`, `speculative.types`, `backend_sampling`: names
+  from llama.cpp's own parser, speculation and sampling vocabularies,
+  which frink's are not.
+- `n_ctx`, `total_slots`, `model_ftype`, `model_path`, `chat_template`,
+  `bos_token`, `eos_token` when the deployment does not have them: no
+  ceiling, no `-np` seats, an unknown or absent file type or a dedicated
+  engine, no checkpoint on disk, a builtin template with no source text,
+  no named BOS or EOS.
+- `media_marker`: frink takes no media input to mark.
+- `ui_settings`, `chat_template_caps`, `chat_template_tool_use`,
+  `connect_code`: the web UI's settings, llama.cpp's template capability
+  probe, the `tokenizer.chat_template.tool_use` template frink does not
+  read, and llama.cpp's tunnel, none of which frink has.
+
+An encoder model has no sampler, template or special tokens, so its
+`/props` carries only the fields about the model and the server.
+
+Asleep, the model is gone, and `/props` answers from the snapshot taken
+when the server went to sleep, with `is_sleeping: true`, as llama.cpp
+does. `POST /props` is llama.cpp's answer without `--props`, a 501:
+llama.cpp's handler changes nothing even with the flag, and a 200 for a
+change that did not happen is not an answer this server gives.
+
 ## Tokenize / detokenize, in both dialects
 
 OpenAI has no tokenize endpoint, so `/v1/tokenize` is frink's own
@@ -1409,11 +1620,8 @@ A `grammar` and a `json_schema` in one request are two constraints on
 one generation and are refused (400). A forced `tool_choice` beside
 either is refused the same way.
 
-One observable difference from llama.cpp: `required` members are
-enforced in lexicographic order rather than the schema's declaration
-order, because the request body reaches the converter as a parsed value
-and this workspace builds `serde_json` without `preserve_order`. Both
-are valid grammars for the schema.
+`required` members are enforced in the order the schema declares them,
+as llama.cpp enforces them.
 
 `tool_choice: "required"` and a named `tool_choice` are supported by a
 lazy grammar built from the request's own `tools`. Each tool's
@@ -1470,16 +1678,19 @@ nothing is called) · the embedding architectures listed above as
 refused by name · multi-GPU, tensor parallel, prefill/decode
 disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained or paged requests, so
-their speculation fields in `usage` are absent · llama.cpp's `/infill`,
-`/props`, `GET /slots` (the live slot listing; `POST /slots/{id}` save
-and restore is supported, see above) and `/apply-template`, none of
-which has a frink counterpart.
+speculative decoding for grammar-constrained, paged or continuously
+batched requests, so their speculation fields in `usage` are absent ·
+`/infill` on the dedicated engines, and the FIM pad, repo and file
+separator as end-of-generation tokens (see [Infill](#infill-post-infill))
+· `GET /slots` per-task fields, which a batcher seat does not hold.
 
 A few request fields deserialize and then go nowhere, accepted so a
 stock client's body does not fail validation over something this server
-has no use for: `metadata` on `/v1/messages`, and `store`, `metadata`
-and `parallel_tool_calls` on `/v1/responses`. Everything else this
-server does not implement is refused by name.
+has no use for: `metadata` on `/v1/messages`, `store` and `metadata` on
+`/v1/responses`, and `user` on the chat route, a tracing tag that
+cannot change the answer. `stream_options` is served as far as it goes:
+`usage` always rides the final chunk of a stream. Everything else this
+server does not implement is refused by name, `stream` on
+`/v1/completions` included.
 
-See [`ROADMAP.md`](ROADMAP.md).
+See [`plans/north-star.md`](plans/north-star.md).

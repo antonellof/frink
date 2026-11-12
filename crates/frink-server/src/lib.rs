@@ -34,6 +34,7 @@
 
 mod admin;
 mod anthropic;
+mod apply_template;
 mod attribution;
 mod best_of;
 mod budget;
@@ -57,6 +58,9 @@ mod journal;
 mod json_mode;
 mod limits;
 pub mod llama_env;
+mod llama_error;
+#[cfg(test)]
+mod llama_renders;
 mod loaded;
 mod logit_bias;
 mod logprobs;
@@ -68,6 +72,8 @@ mod openai_extra;
 mod output;
 mod policy;
 mod prefill_batch;
+mod prompt_input;
+mod props;
 mod reasoning_budget;
 mod reasoning_tokens;
 mod request_tail;
@@ -81,6 +87,7 @@ mod sampling_knobs;
 mod sampling_loop;
 mod score;
 mod security;
+mod server_draft;
 mod serving;
 mod session;
 mod slots;
@@ -153,8 +160,12 @@ pub(crate) struct GgufModel {
     tokenizer: Arc<ServerTokenizer>,
     stop_tokens: StopTokens,
     bos_id: Option<usize>,
+    facts: model::GgufFacts,
     is_synthetic: bool,
     chat_template: chat_template::PromptTemplate,
+    /// `--model-draft`, checked against this model when it was
+    /// activated (`server_draft::ServerDraft::check`).
+    draft: Option<server_draft::ServerDraft>,
 }
 
 pub(crate) struct KimiModel {
@@ -324,6 +335,16 @@ impl Model {
                 let mut caches: Vec<_> = m.decoder.config.new_kv_caches();
                 Some(m.decoder.forward_hidden_batch(tokens, 0, &mut caches))
             }
+            Model::Kimi(_) | Model::Mla(_) | Model::Gemma4(_) | Model::Glm52(_) => None,
+        }
+    }
+
+    /// What the generic GGUF's header said beside the weights
+    /// ([`model::GgufFacts`]): its FIM tokens and file type. `None` for
+    /// the dedicated engines, whose loaders do not read them.
+    pub(crate) fn gguf_facts(&self) -> Option<&model::GgufFacts> {
+        match self {
+            Model::Gguf(m) => Some(&m.facts),
             Model::Kimi(_) | Model::Mla(_) | Model::Gemma4(_) | Model::Glm52(_) => None,
         }
     }
@@ -509,6 +530,9 @@ pub(crate) struct AppState {
     /// worker, decided once at startup from the same env var and
     /// exclusions as the initial load.
     pub(crate) continuous_batching_enabled: bool,
+    /// `--model-draft`, loaded at startup. A swapped-in model is
+    /// checked against it before it is published (`admin`).
+    pub(crate) draft: Option<server_draft::ServerDraft>,
     /// Serializes private-loop Metal decodes when continuous batching is
     /// off. Shared `metal_attn_kv` is not safe across concurrent
     /// `forward_token` calls yet; see `docs/plans/archive/metal-parallel-concurrency.md`.
@@ -548,6 +572,10 @@ pub(crate) struct AppState {
     /// generation's receipt id would have its own receipt silently
     /// skipped as already written.
     pub(crate) started_unix: u64,
+    /// The prompt each slot id last saved or restored, so
+    /// `action=erase` can empty that slot and no other
+    /// ([`slots::SlotRecords`]).
+    pub(crate) slot_records: slots::SlotRecords,
 }
 
 /// How long a memory reading is served before it is taken again.
@@ -579,6 +607,16 @@ impl AppState {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .is_some()
+    }
+
+    /// What `GET /props` answers while asleep: the snapshot `POST /sleep`
+    /// took of the model it dropped ([`props::snapshot`]).
+    pub(crate) fn slept_props(&self) -> Option<serde_json::Value> {
+        self.slept
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|slept| slept.props.clone())
     }
 
     pub(crate) fn require_active(&self) -> Result<Arc<ActiveModel>, ApiError> {
@@ -919,8 +957,17 @@ enum StopParam {
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
-    #[serde(default = "default_max_tokens")]
-    max_tokens: usize,
+    /// The output budget, `max_tokens` or `max_completion_tokens`
+    /// (OpenAI's current name), as llama-server aliases them. Read
+    /// through [`Self::output_budget`], never directly.
+    #[serde(default)]
+    max_tokens: Option<usize>,
+    #[serde(default)]
+    max_completion_tokens: Option<usize>,
+    /// `false` returns at most one tool call. Absent or `true` returns
+    /// every call the model made.
+    #[serde(default)]
+    parallel_tool_calls: Option<bool>,
     #[serde(default)]
     temperature: Option<f32>,
     #[serde(default)]
@@ -1111,11 +1158,30 @@ const THINKING_KWARG_KEYS: [&str; 4] = [
 /// `"None"` means the same thing.
 const DISABLE_EFFORTS: [&str; 2] = ["none", "off"];
 
-fn default_max_tokens() -> usize {
-    DEFAULT_CHAT_MAX_TOKENS
-}
-
 impl ChatCompletionRequest {
+    /// How this request's output is read: the formats the served
+    /// template implies, and `parallel_tool_calls: false` as at most one
+    /// call. ONE constructor, so the whole-answer route and the stream
+    /// cannot read the same request two ways.
+    pub(crate) fn output_posture(
+        &self,
+        reasoning: Option<crate::policy::parser::ReasoningFormat>,
+        tools: crate::policy::parser::ToolCallFormat,
+        prompt: &str,
+    ) -> output::OutputPosture {
+        output::OutputPosture::resolve_full(reasoning, tools, prompt)
+            .one_call(self.parallel_tool_calls == Some(false))
+    }
+
+    /// `max_completion_tokens`, else `max_tokens`, else a whole answer
+    /// ([`DEFAULT_CHAT_MAX_TOKENS`]). Two that disagree are refused in
+    /// `validate_supported_fields` before this is read.
+    pub(crate) fn output_budget(&self) -> usize {
+        self.max_completion_tokens
+            .or(self.max_tokens)
+            .unwrap_or(DEFAULT_CHAT_MAX_TOKENS)
+    }
+
     /// This request's sampler knobs. Resolved to `SamplingParams` by
     /// `sampling_knobs`, shared with `/v1/completions`, so the two
     /// routes cannot disagree about what a knob means or which ones
@@ -1256,7 +1322,7 @@ impl ChatCompletionRequest {
 
     /// The `chat_template_kwargs` this request actually renders with.
     ///
-    /// Five rules, all of them from `frink-edge`:
+    /// Four rules, all of them from `frink-edge`:
     ///
     /// * **An explicit knob wins wholesale.** A caller who already set
     ///   any of `enable_thinking` / `thinking` / `thinking_mode` /
@@ -1270,10 +1336,6 @@ impl ChatCompletionRequest {
     ///   not think" into "think a little". Same for the DeepSeek-wire
     ///   `thinking: {"type": "disabled"}`, which beats any effort.
     ///
-    /// * **Thinking follows the tools.** Offering tools turns thinking
-    ///   on even when the caller said nothing, because some encoders
-    ///   emit well-formed tool calls only in thinking mode
-    ///   ([`crate::policy::effort::resolve_thinking_mode`]).
     /// * **Effort is quantized onto what this checkpoint grades.** A
     ///   template that accepts only the OpenAI triple must not be sent
     ///   `minimal`; it is mapped to the nearest gear, or dropped when no
@@ -1316,11 +1378,15 @@ impl ChatCompletionRequest {
         &self,
         template: &chat_template::PromptTemplate,
     ) -> serde_json::Map<String, serde_json::Value> {
-        let mut kwargs = self.chat_template_kwargs.clone().unwrap_or_default();
+        let request = self.chat_template_kwargs.clone().unwrap_or_default();
         // Whether the caller steered the template themselves. Read
         // BEFORE anything is added, or every request looks explicit
-        // from the second statement on.
-        let caller_steered = THINKING_KWARG_KEYS.iter().any(|k| kwargs.contains_key(*k));
+        // from the second statement on. The server's own defaults do not
+        // count: `--chat-template-kwargs` sits under whatever a request
+        // says, including its top-level knobs, as in llama.cpp.
+        let caller_steered = THINKING_KWARG_KEYS.iter().any(|k| request.contains_key(*k));
+        let mut kwargs = template.default_kwargs().clone();
+        kwargs.extend(request);
 
         if !caller_steered {
             match self.thinking_direction() {
@@ -1329,7 +1395,9 @@ impl ChatCompletionRequest {
                         kwargs.insert(k, v);
                     }
                     // Nothing below applies: an effort would re-enter a
-                    // block this request just closed.
+                    // block this request just closed. A server default
+                    // would too, so it goes.
+                    kwargs.remove("reasoning_effort");
                     return kwargs;
                 }
                 Some(true) => {
@@ -1340,23 +1408,10 @@ impl ChatCompletionRequest {
                 None => {}
             }
             if let Some(effort) = &self.reasoning_effort {
-                kwargs
-                    .entry("reasoning_effort".to_string())
-                    .or_insert_with(|| serde_json::json!(effort));
+                kwargs.insert("reasoning_effort".to_string(), serde_json::json!(effort));
             }
         }
 
-        let offered: Vec<serde_json::Value> = if self.tools_active() {
-            self.tools.iter().map(chat_template::tool_json).collect()
-        } else {
-            Vec::new()
-        };
-        let thinking = crate::policy::effort::resolve_thinking_mode(Some(&kwargs), Some(&offered));
-        if thinking == crate::policy::effort::ThinkingMode::Thinking {
-            for (k, v) in crate::policy::effort::thinking_on_kwargs() {
-                kwargs.entry(k).or_insert(v);
-            }
-        }
         match crate::policy::effort::sanitize_effort(&mut kwargs, template.efforts()) {
             crate::policy::effort::EffortMapping::Mapped(to) => {
                 tracing::debug!("reasoning_effort quantized to {}", to.as_str());
@@ -1382,10 +1437,26 @@ impl ChatCompletionRequest {
         // wrote, and the engine cannot serve a zero-token budget: the
         // request would never become decodable and the client would wait
         // for an answer that cannot arrive.
-        if self.max_tokens == 0 {
+        if let (Some(old), Some(new)) = (self.max_tokens, self.max_completion_tokens) {
+            if old != new {
+                return Err(invalid_request(
+                    &format!(
+                        "max_tokens ({old}) and max_completion_tokens ({new}) name two output \
+                         budgets; send one"
+                    ),
+                    "max_completion_tokens",
+                ));
+            }
+        }
+        if self.output_budget() == 0 {
+            let field = if self.max_completion_tokens.is_some() {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            };
             return Err(invalid_request(
-                "max_tokens must be at least 1",
-                "max_tokens",
+                &format!("{field} must be at least 1"),
+                field,
             ));
         }
         // An unrecognized switch is refused rather than read as "on":
@@ -2101,7 +2172,7 @@ pub(crate) fn join_error_response(e: tokio::task::JoinError) -> ApiError {
                                      // same list behind a struct at two call sites.
 fn run_generation_emit(
     model: &Model,
-    prompt: &str,
+    prompt: prompt_input::Prompt<'_>,
     params: &GenerationParams,
     kv_pool: Option<&generate::KvPoolConfig>,
     paged_kv: Option<&generate::PagedKvConfig>,
@@ -2116,6 +2187,24 @@ fn run_generation_emit(
     mut emit: impl FnMut(usize, &str),
 ) -> Result<generate::Generated, generate::DecodeError> {
     let synthetic = model.is_synthetic();
+    // The two readers of the prompt's TEXT are the reasoning budget and
+    // the reasoning-token count, and an id prompt has no text to give
+    // them (`prompt_input::Prompt::text`). The one route that sends ids,
+    // `/infill`, sets neither, so this is the guard that keeps it that
+    // way rather than a refusal any caller meets.
+    if prompt.is_ids()
+        && (params.reasoning.is_some()
+            || !matches!(
+                params.reasoning_budget,
+                reasoning_budget::ReasoningBudget::Unrestricted
+            ))
+    {
+        return Err(generate::DecodeError::Unsupported(
+            "a prompt of token ids carries no text to find a reasoning block in, so a \
+             reasoning format or budget cannot apply to it"
+                .to_string(),
+        ));
+    }
     // Held for the whole generation: a `POST /lora-adapters`, or a
     // request whose `lora` field overrides the scales, waits for this
     // one to finish rather than changing the weights under it. See
@@ -2146,7 +2235,7 @@ fn run_generation_emit(
         // hold beside the tokenizer.
         resolved.reasoning_budget = resolved
             .reasoning_budget
-            .armed(resolved.reasoning, prompt, |text| {
+            .armed(resolved.reasoning, prompt.text(), |text| {
                 model.encode(text, SpecialTokens::Parse)
             })
             .map_err(|detail| generate::DecodeError::ReasoningBudget { detail })?;
@@ -2158,8 +2247,7 @@ fn run_generation_emit(
     let (finishes, prompt_rows, prompt_ids, truncated_prompt, usage) = match model {
         Model::Gguf(m) => {
             if let Some(batcher) = continuous_batcher {
-                let mut tokens = m.tokenizer.encode(prompt, SpecialTokens::Parse);
-                frink_models::tokenizer::prepend_bos(&mut tokens, m.bos_id);
+                let tokens = prompt.tokens(m.tokenizer.as_ref(), m.bos_id);
                 let (finish, _generated_ids, text, usage) = if synthetic {
                     batcher.generate(tokens, params.clone(), m.stop_tokens.clone())?
                 } else {
@@ -2209,6 +2297,7 @@ fn run_generation_emit(
                     paged_kv,
                     prefix_cache,
                     ceiling,
+                    m.draft.as_ref(),
                     |choice, chunk| {
                         chunks[choice].push(chunk.to_string());
                         // Every choice streams, each saying which it
@@ -2331,9 +2420,9 @@ fn run_generation_emit(
 /// paths and tests.
 #[allow(clippy::too_many_arguments)] // mirrors `run_generation_emit`
                                      // exactly, minus the sink; see its note.
-pub(crate) fn run_generation(
+pub(crate) fn run_generation<'p>(
     model: &Model,
-    prompt: &str,
+    prompt: impl Into<prompt_input::Prompt<'p>>,
     params: &GenerationParams,
     kv_pool: Option<&generate::KvPoolConfig>,
     paged_kv: Option<&generate::PagedKvConfig>,
@@ -2346,7 +2435,7 @@ pub(crate) fn run_generation(
 ) -> Result<generate::Generated, generate::DecodeError> {
     run_generation_emit(
         model,
-        prompt,
+        prompt.into(),
         params,
         kv_pool,
         paged_kv,
@@ -2456,10 +2545,23 @@ fn tool_preamble(tools: &[ToolDef]) -> String {
 fn tool_call_deltas(
     events: Vec<crate::policy::parser::ToolCallEvent>,
     opened: &std::cell::Cell<usize>,
+    one_call: bool,
 ) -> (String, Vec<ToolCallDelta>) {
     let mut text = String::new();
     let mut deltas = Vec::new();
     for event in events {
+        // `parallel_tool_calls: false`: a call after the first is not
+        // sent, as the whole-answer parse drops it
+        // (`output::OutputPosture::one_call`).
+        let beyond_first = match &event {
+            crate::policy::parser::ToolCallEvent::CallStart { index, .. }
+            | crate::policy::parser::ToolCallEvent::CallArguments { index, .. }
+            | crate::policy::parser::ToolCallEvent::CallEnd { index, .. } => *index > 0,
+            crate::policy::parser::ToolCallEvent::Text(_) => false,
+        };
+        if one_call && beyond_first {
+            continue;
+        }
         match event {
             crate::policy::parser::ToolCallEvent::Text(chunk) => text.push_str(&chunk),
             crate::policy::parser::ToolCallEvent::CallStart { index, name } => {
@@ -2773,7 +2875,7 @@ async fn chat_completions_full(
     // calls and reasoning in its own right: a tool call in choice 2 is
     // a tool call, and reading only choice 0 would return the others
     // as raw marker text.
-    let posture = output::OutputPosture::resolve_full(
+    let posture = req.output_posture(
         active.reasoning_format(),
         active.tool_call_format(),
         &prompt,
@@ -2911,7 +3013,7 @@ async fn chat_completions_stream(
     // How to read this stream, fixed before the first token: the family
     // from the served checkpoint, and whether the prompt that was
     // actually rendered left the model inside a reasoning block.
-    let posture = output::OutputPosture::resolve_full(
+    let posture = req.output_posture(
         active.reasoning_format(),
         active.tool_call_format(),
         &prompt,
@@ -2999,6 +3101,7 @@ async fn chat_completions_stream(
                         crate::chat_stream_choice::ChoiceEmitter::new(
                             posture.reasoning_parser(),
                             tools_active.then(|| posture.tool_call_parser(&offered_tools)),
+                            posture.is_one_call(),
                         )
                     })
                     .collect(),
@@ -3006,7 +3109,7 @@ async fn chat_completions_stream(
         let emit_choices = Rc::clone(&emitters);
         let result = run_generation_emit(
             &model,
-            &prompt,
+            prompt_input::Prompt::Text(&prompt),
             &params,
             kv_pool.as_ref(),
             paged_kv.as_ref(),
@@ -3366,6 +3469,11 @@ fn protected_routes() -> Router<Arc<AppState>> {
             post(responses::responses_cancel),
         )
         .route(&axum_path(routes::SLOTS_ID), post(slots::post_slot))
+        // llama-server's live listing and global properties. Behind the
+        // key, as upstream puts every route but `/health` behind its
+        // `--api-key`.
+        .route(routes::SLOTS, get(slots::listing::get_slots))
+        .route(routes::PROPS, get(props::get_props).post(props::post_props))
         .route(routes::V1_STATS, get(serving_stats))
         .route(routes::V1_REQUESTS, get(recent_requests))
         .route(routes::V1_CACHE_STATUS, get(cache_admin::cache_status))
@@ -3398,6 +3506,9 @@ fn protected_routes() -> Router<Arc<AppState>> {
         // without `[DONE]`. See `crate::completion`.
         .route(routes::COMPLETION, post(completion::completion))
         .route(routes::COMPLETIONS, post(completion::completion))
+        // llama.cpp's fill-in-the-middle, on the same serving path as
+        // `/completion` once its prompt is assembled.
+        .route(routes::INFILL, post(completion::infill::infill))
         .route(routes::V1_TOKENIZE, post(openai_extra::tokenize))
         .route(routes::V1_DETOKENIZE, post(openai_extra::detokenize))
         // llama.cpp's unprefixed spelling of the same two, on the SAME
@@ -3406,6 +3517,7 @@ fn protected_routes() -> Router<Arc<AppState>> {
         // llama.cpp client was getting a 404 that named nothing. Behind
         // the key with their twins: they read the loaded vocabulary.
         .route(routes::TOKENIZE, post(openai_extra::tokenize))
+        .route(routes::APPLY_TEMPLATE, post(apply_template::apply_template))
         .route(routes::DETOKENIZE, post(openai_extra::detokenize))
         .route(routes::V1_EMBEDDINGS, post(embeddings::embeddings))
         // Cross-encoder reranking, under the `/v1` spelling Cohere and
@@ -3426,8 +3538,8 @@ fn protected_routes() -> Router<Arc<AppState>> {
         .route(routes::ADMIN_MODELS_LOAD, post(admin::load_model))
         .route(routes::ADMIN_MODELS_UNLOAD, post(admin::unload_model))
         // Not under `/admin`: a scheduler that puts a server to sleep
-        // between jobs is not administering it, and vLLM's own routes
-        // are at the root.
+        // between jobs is not administering it, and the clients that
+        // call these routes expect them at the root.
         .route(routes::SLEEP, post(admin::sleep))
         .route(routes::WAKE_UP, post(admin::wake_up))
         .route(routes::IS_SLEEPING, get(admin::is_sleeping))
@@ -3596,6 +3708,7 @@ pub(crate) fn activate_loaded_model(
     enable_continuous_batching: bool,
     path: Option<&str>,
     paged_kv: Option<&generate::PagedKvConfig>,
+    draft: Option<&server_draft::ServerDraft>,
 ) -> Activated {
     match loaded {
         model::LoadedModel::Gguf(g) => {
@@ -3632,8 +3745,10 @@ pub(crate) fn activate_loaded_model(
                     tokenizer,
                     stop_tokens: g.stop_tokens,
                     bos_id: g.bos_id,
+                    facts: g.facts,
                     is_synthetic: g.is_synthetic,
                     chat_template: g.chat_template,
+                    draft: draft.cloned(),
                 }))),
                 batcher,
                 Some(ceiling),
@@ -3702,6 +3817,8 @@ pub(crate) fn activate_loaded_model(
 struct StartupModels {
     loaded: model::LoadedModel,
     embedding: Option<Arc<frink_models::EmbeddingModel>>,
+    /// `--model-draft`, already checked against `loaded`.
+    draft: Option<server_draft::ServerDraft>,
 }
 
 fn continuous_batching_env() -> Option<bool> {
@@ -3776,13 +3893,18 @@ fn build_app_state(
     mcp: Option<mcp::LoadedMcpConfig>,
     detection: Arc<health::Detection>,
 ) -> AppState {
-    let StartupModels { loaded, embedding } = models;
+    let StartupModels {
+        loaded,
+        embedding,
+        draft,
+    } = models;
     let configured_path = std::env::var("FRINK_MODEL_PATH").ok();
     let (loaded, batcher, ceiling) = activate_loaded_model(
         loaded,
         enable_continuous_batching,
         configured_path.as_deref(),
         paged_kv.as_ref(),
+        draft.as_ref(),
     );
     // The startup model's admin id is whichever discovered entry sits
     // at the configured path; `None` when it was not discovered (the
@@ -3828,6 +3950,7 @@ fn build_app_state(
         detection,
         mcp,
         continuous_batching_enabled: enable_continuous_batching,
+        draft,
         metal_private_decode_gate,
         loading_model: Mutex::new(None),
         last_load_error: Mutex::new(None),
@@ -3835,6 +3958,7 @@ fn build_app_state(
         maintenance: Mutex::new(crate::policy::maintenance::MaintenanceGate::serving()),
         footprint: Mutex::new(crate::policy::footprint::ProbeCache::new(FOOTPRINT_TTL_MS)),
         started_unix: unix_now(),
+        slot_records: slots::SlotRecords::default(),
     }
 }
 
@@ -4591,11 +4715,15 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
     // binding the port: by the time a client can ask, it has usually
     // already landed.
     let detection = health::Detection::spawn();
+    // Loaded and checked against the startup model before the port is
+    // bound: a drafter that cannot serve is a refusal, not a warning.
+    let draft = server_draft::from_env(&loaded, enable_cb, paged_kv.is_some())?;
 
     let state = Arc::new(build_app_state(
         StartupModels {
             loaded,
             embedding: embedding_model,
+            draft,
         },
         kv_pool,
         paged_kv,
@@ -4781,8 +4909,10 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         })
     }
 
@@ -4843,9 +4973,23 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::from_eos(eos),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: synthetic,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         })
+    }
+
+    /// The synthetic byte-vocabulary fixture with these header facts,
+    /// for the routes that read them (`/infill`'s FIM tokens, `/props`'
+    /// file type). One builder, so those tests share this fixture
+    /// rather than each writing a `GgufModel` literal.
+    pub(crate) fn test_byte_model_with_facts(facts: model::GgufFacts) -> Model {
+        let mut model = test_byte_model(None, true);
+        if let Model::Gguf(m) = &mut model {
+            m.facts = facts;
+        }
+        model
     }
 
     /// One `AppState` for the HTTP-level tests, so a new field on the
@@ -4891,6 +5035,7 @@ pub(crate) mod tests {
             detection: Arc::new(health::Detection::ready(health::probe_backends())),
             mcp: None,
             continuous_batching_enabled: false,
+            draft: None,
             metal_private_decode_gate: None,
             loading_model: Mutex::new(None),
             last_load_error: Mutex::new(None),
@@ -4898,6 +5043,7 @@ pub(crate) mod tests {
             maintenance: Mutex::new(crate::policy::maintenance::MaintenanceGate::serving()),
             footprint: Mutex::new(crate::policy::footprint::ProbeCache::new(FOOTPRINT_TTL_MS)),
             started_unix: unix_now(),
+            slot_records: slots::SlotRecords::default(),
         }
     }
 
@@ -4943,8 +5089,10 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         })
     }
 
@@ -4960,6 +5108,7 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::from_gguf_metadata(
                 Some(source),
@@ -4969,6 +5118,7 @@ pub(crate) mod tests {
                 None,
                 None,
             ),
+            draft: None,
         })
     }
 
@@ -5418,8 +5568,10 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: false,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         test_app_with_state(Arc::new(test_state(
             model,
@@ -6795,6 +6947,45 @@ pub(crate) mod tests {
         assert_eq!(both_ways["tokens"], v1["tokens"]);
     }
 
+    /// `/apply-template` answers the prompt `/v1/chat/completions`
+    /// would decode, for the same body, and generates nothing.
+    #[tokio::test]
+    async fn apply_template_returns_the_prompt_the_chat_route_renders() {
+        let state = Arc::new(test_state(
+            test_model_full_byte_vocab(),
+            ResponseCache::new(1000, Duration::from_secs(3600)),
+        ));
+        let app = test_app_with_state(Arc::clone(&state));
+        let body = serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "Be brief."},
+                {"role": "user", "content": "hello"},
+            ],
+        });
+        let (status, answer) =
+            post_json_uri(&app, frink_api::routes::APPLY_TEMPLATE, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+
+        let req: ChatCompletionRequest = serde_json::from_value(body).unwrap();
+        let active = state.require_active().unwrap();
+        let template = active.generative().unwrap().chat_template();
+        let kwargs = req.resolve_template_kwargs(&template);
+        let want = req
+            .render_prompt(&req.messages, &template, &req.tools, kwargs, active.name())
+            .unwrap();
+        assert_eq!(answer["prompt"], want);
+        assert!(
+            want.contains("hello") && want.contains("Be brief."),
+            "{want}"
+        );
+        assert_eq!(
+            state.stats.tokens_generated_total(),
+            0,
+            "nothing is generated"
+        );
+    }
+
     /// llama.cpp answers detokenize under `content`
     /// (`server-context.cpp:4970`); frink has always answered under
     /// `text`. Both keys carry the same string, so neither dialect's
@@ -6858,8 +7049,10 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: Some(7),
+            facts: model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         let app = test_app_with_state(Arc::new(test_state(
             model,
@@ -7884,7 +8077,7 @@ pub(crate) mod tests {
             matches!(loaded, model::LoadedModel::Encoder(_)),
             "an encoder-only GGUF reached a decoder loader"
         );
-        let (loaded, batcher, ceiling) = activate_loaded_model(loaded, true, None, None);
+        let (loaded, batcher, ceiling) = activate_loaded_model(loaded, true, None, None, None);
         assert!(
             matches!(loaded, Loaded::Encoder(_)),
             "the encoder did not stay an encoder through activation"
@@ -8051,8 +8244,10 @@ pub(crate) mod tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: model::GgufFacts::default(),
             is_synthetic: false,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         let state = Arc::new(test_state(
             model,
@@ -8093,6 +8288,19 @@ pub(crate) mod tests {
             misses > 0,
             "decode must have read experts through the store: {after}"
         );
+        // The request families are on every deployment, not only one
+        // that streams experts or batches.
+        for family in [
+            "frink_prompt_tokens_cached_total",
+            "frink_time_to_first_token_seconds_bucket",
+            "frink_time_per_output_token_seconds_count",
+            "frink_request_duration_seconds_sum",
+        ] {
+            assert!(
+                after.contains(family),
+                "/metrics must expose {family}: {after}"
+            );
+        }
     }
 
     fn weather_tool() -> serde_json::Value {
@@ -8232,11 +8440,11 @@ pub(crate) mod tests {
         let mut text = String::new();
         for piece in wire.as_bytes().chunks(7) {
             let chunk = String::from_utf8_lossy(piece).into_owned();
-            let (more_text, more) = tool_call_deltas(parser.push(&chunk), &opened);
+            let (more_text, more) = tool_call_deltas(parser.push(&chunk), &opened, false);
             text.push_str(&more_text);
             deltas.extend(more);
         }
-        let (more_text, more) = tool_call_deltas(parser.finish(), &opened);
+        let (more_text, more) = tool_call_deltas(parser.finish(), &opened, false);
         text.push_str(&more_text);
         deltas.extend(more);
 
@@ -8285,10 +8493,10 @@ pub(crate) mod tests {
         let mut text = String::new();
         for piece in wire.as_bytes().chunks(5) {
             let chunk = String::from_utf8_lossy(piece).into_owned();
-            let (more, _) = tool_call_deltas(parser.push(&chunk), &opened);
+            let (more, _) = tool_call_deltas(parser.push(&chunk), &opened, false);
             text.push_str(&more);
         }
-        let (more, _) = tool_call_deltas(parser.finish(), &opened);
+        let (more, _) = tool_call_deltas(parser.finish(), &opened, false);
         text.push_str(&more);
 
         assert_eq!(opened.get(), 1);
@@ -8953,6 +9161,111 @@ pub(crate) mod tests {
         serde_json::from_value(value).expect("request")
     }
 
+    /// `max_completion_tokens` is the output budget, as llama-server
+    /// reads it. It agrees with `max_tokens` or the request is refused
+    /// naming both, and a zero names the field the caller sent.
+    #[test]
+    fn max_completion_tokens_is_the_output_budget() {
+        let budget = |extra: serde_json::Value| {
+            let mut body =
+                serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let req = chat_request(body);
+            req.validate_supported_fields()
+                .map(|()| req.output_budget())
+        };
+        assert_eq!(
+            budget(serde_json::json!({"max_completion_tokens": 7})).unwrap(),
+            7
+        );
+        assert_eq!(budget(serde_json::json!({"max_tokens": 9})).unwrap(), 9);
+        assert_eq!(
+            budget(serde_json::json!({"max_tokens": 5, "max_completion_tokens": 5})).unwrap(),
+            5
+        );
+        let (status, payload) =
+            budget(serde_json::json!({"max_tokens": 5, "max_completion_tokens": 6})).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["error"]["param"], "max_completion_tokens");
+        let (_, payload) = budget(serde_json::json!({"max_completion_tokens": 0})).unwrap_err();
+        assert_eq!(payload["error"]["param"], "max_completion_tokens");
+        let (_, payload) = budget(serde_json::json!({"max_tokens": 0})).unwrap_err();
+        assert_eq!(payload["error"]["param"], "max_tokens");
+    }
+
+    /// The budget the generation runs under is the alias's.
+    #[test]
+    fn max_completion_tokens_reaches_the_generation_params() {
+        let req = chat_request(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 11,
+        }));
+        let params = req
+            .generation_params_for_template(
+                &graded_template(),
+                "Qwen3-8B",
+                crate::sampling_knobs::SamplerModel::absent(),
+            )
+            .expect("compiles");
+        assert_eq!(params.max_tokens, 11);
+    }
+
+    /// The request's `parallel_tool_calls` reaches the posture both
+    /// routes read: `false` is one call, absent and `true` are all.
+    #[test]
+    fn parallel_tool_calls_false_reaches_the_output_posture() {
+        let posture = |extra: serde_json::Value| {
+            let mut body =
+                serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            chat_request(body)
+                .output_posture(None, crate::policy::parser::ToolCallFormat::Qwen25, "")
+                .is_one_call()
+        };
+        assert!(posture(serde_json::json!({"parallel_tool_calls": false})));
+        assert!(!posture(serde_json::json!({"parallel_tool_calls": true})));
+        assert!(!posture(serde_json::json!({})));
+    }
+
+    /// `parallel_tool_calls: false` on the stream: the second call's
+    /// events are not sent, and the first call and the text are.
+    #[test]
+    fn a_stream_with_one_call_sends_only_the_first() {
+        use crate::policy::parser::ToolCallEvent as E;
+        let events = || {
+            vec![
+                E::Text("ok ".into()),
+                E::CallStart {
+                    index: 0,
+                    name: "f".into(),
+                },
+                E::CallArguments {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                E::CallStart {
+                    index: 1,
+                    name: "g".into(),
+                },
+                E::CallArguments {
+                    index: 1,
+                    fragment: "{}".into(),
+                },
+            ]
+        };
+        let opened = std::cell::Cell::new(0);
+        let (text, both) = tool_call_deltas(events(), &opened, false);
+        assert_eq!((text.as_str(), both.len(), opened.get()), ("ok ", 4, 2));
+        let opened = std::cell::Cell::new(0);
+        let (text, one) = tool_call_deltas(events(), &opened, true);
+        assert_eq!((text.as_str(), one.len(), opened.get()), ("ok ", 2, 1));
+    }
+
     /// The wire field reaches the sampler, compiled.
     ///
     /// Serde is the failure mode here, not the grammar engine: an
@@ -9269,7 +9582,7 @@ pub(crate) mod tests {
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
         }));
-        assert_eq!(req.max_tokens, DEFAULT_CHAT_MAX_TOKENS);
+        assert_eq!(req.output_budget(), DEFAULT_CHAT_MAX_TOKENS);
     }
 
     /// A knob the wire accepts must reach the sampler. Serde declaring
@@ -9522,6 +9835,67 @@ pub(crate) mod tests {
         assert_eq!(prompt, "hi");
     }
 
+    /// A template with `--chat-template-kwargs`-style defaults.
+    fn defaulted(defaults: serde_json::Value) -> chat_template::PromptTemplate {
+        let serde_json::Value::Object(defaults) = defaults else {
+            panic!("defaults must be an object");
+        };
+        chat_template::PromptTemplate::with_default_kwargs(GRADED, defaults)
+    }
+
+    fn kwargs_for(
+        template: &chat_template::PromptTemplate,
+        extra: serde_json::Value,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let mut body = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        chat_request(body).resolve_template_kwargs(template)
+    }
+
+    #[test]
+    fn server_kwargs_fill_what_a_request_leaves_out_and_lose_to_what_it_sets() {
+        let template = defaulted(serde_json::json!({"a": 1, "b": 2}));
+        let kwargs = kwargs_for(
+            &template,
+            serde_json::json!({"chat_template_kwargs": {"b": 3}}),
+        );
+        assert_eq!(kwargs["a"], serde_json::json!(1));
+        assert_eq!(kwargs["b"], serde_json::json!(3));
+    }
+
+    /// A default is not the caller speaking. If it counted, one operator
+    /// flag would make every request look explicitly steered, and a
+    /// client's own `reasoning_effort` would be dropped without a word.
+    #[test]
+    fn a_server_default_does_not_silence_a_requests_top_level_knobs() {
+        let template = defaulted(serde_json::json!({"enable_thinking": true}));
+        let kwargs = kwargs_for(&template, serde_json::json!({"reasoning_effort": "high"}));
+        assert_eq!(kwargs["reasoning_effort"], serde_json::json!("high"));
+        assert_eq!(kwargs["enable_thinking"], serde_json::json!(true));
+    }
+
+    /// As in llama.cpp's `oaicompat_chat_params_parse`: the request's
+    /// top-level field goes on after the command line's defaults.
+    #[test]
+    fn a_requests_effort_beats_a_server_default_effort() {
+        let template = defaulted(serde_json::json!({"reasoning_effort": "low"}));
+        let kwargs = kwargs_for(&template, serde_json::json!({"reasoning_effort": "high"}));
+        assert_eq!(kwargs["reasoning_effort"], serde_json::json!("high"));
+    }
+
+    #[test]
+    fn turning_thinking_off_clears_a_server_default_effort() {
+        let template = defaulted(serde_json::json!({"reasoning_effort": "high"}));
+        let kwargs = kwargs_for(&template, serde_json::json!({"reasoning_effort": "none"}));
+        assert_eq!(kwargs["enable_thinking"], serde_json::json!(false));
+        assert!(!kwargs.contains_key("reasoning_effort"), "{kwargs:?}");
+    }
+
     /// `chat_template_kwargs` is the specific spelling and wins over the
     /// top-level one, which is what a caller who wrote both meant.
     #[test]
@@ -9539,30 +9913,36 @@ pub(crate) mod tests {
         );
     }
 
-    /// Offering tools turns thinking on even when the caller asked for
-    /// nothing: some encoders emit well-formed calls only in thinking
-    /// mode.
+    /// Offering tools changes nothing about thinking, and a request's own
+    /// `enable_thinking` reaches the template alone, as in llama-server:
+    /// no `thinking_mode` is added beside it (#515).
     #[test]
-    fn offering_tools_turns_thinking_on_by_itself() {
+    fn offering_tools_leaves_thinking_as_llama_cpp_leaves_it() {
         let template = graded_template();
-        let quiet = chat_request(serde_json::json!({
+        let kwargs =
+            |body: serde_json::Value| chat_request(body).resolve_template_kwargs(&template);
+        let quiet = kwargs(serde_json::json!({
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
         }));
-        assert!(!quiet
-            .resolve_template_kwargs(&template)
-            .contains_key("enable_thinking"));
-
-        let with_tools = chat_request(serde_json::json!({
+        let with_tools = kwargs(serde_json::json!({
             "model": "m",
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"type": "function", "function": {"name": "get_weather"}}],
         }));
-        let kwargs = with_tools.resolve_template_kwargs(&template);
-        assert_eq!(kwargs["enable_thinking"], serde_json::json!(true));
-        let prompt =
-            prompt_from_messages(&with_tools.messages, &template, &[], kwargs).expect("renders");
-        assert!(prompt.starts_with("THINK|"), "{prompt}");
+        assert!(
+            !with_tools.contains_key("enable_thinking"),
+            "{with_tools:?}"
+        );
+        assert_eq!(with_tools, quiet);
+
+        let asked = kwargs(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": {"enable_thinking": true},
+        }));
+        assert_eq!(asked["enable_thinking"], serde_json::json!(true));
+        assert!(!asked.contains_key("thinking_mode"), "{asked:?}");
     }
 
     /// The reason `force_reasoning` could only ever be `false` before:
@@ -10272,6 +10652,7 @@ pub(crate) mod tests {
             StartupModels {
                 loaded: model::LoadedModel::Kimi(loaded),
                 embedding: None,
+                draft: None,
             },
             None,
             None,
@@ -10321,6 +10702,7 @@ pub(crate) mod tests {
             StartupModels {
                 loaded: model::LoadedModel::Kimi(loaded),
                 embedding: None,
+                draft: None,
             },
             None,
             None,
@@ -10388,6 +10770,7 @@ pub(crate) mod tests {
             StartupModels {
                 loaded: model::LoadedModel::Kimi(loaded),
                 embedding: None,
+                draft: None,
             },
             None,
             None,

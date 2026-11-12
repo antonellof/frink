@@ -32,7 +32,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Jamba (`jamba`), Mamba and FalconMamba (`mamba`), Mamba-2 (`mamba2`), Falcon-H1 (`falcon-h1`), PLaMo-2 (`plamo2`) | Recurrent |
 | PLaMo (`plamo`), PLaMo-3 (`plamo3`) | |
 | LFM2 (`lfm2`), LFM2-MoE (`lfm2moe`) | A file declaring `attention.sliding_window` is refused by name, and so is an LFM2-d1 decision head (`decision.block_count`) |
-| gpt-oss (`gpt-oss`) | CPU only: no Metal kernel implements attention sinks |
+| gpt-oss (`gpt-oss`) | Runs in CUDA's resident stack (sinks, biases and its clamped SwiGLU on the device). Metal runs it on the host path: no Metal kernel implements attention sinks |
 | GPT-2 (`gpt2`), GPT-NeoX / Pythia (`gptneox`), StarCoder (`starcoder`), StarCoder2 (`starcoder2`), CodeShell (`codeshell`), Jais-2 (`jais2`), Falcon (`falcon`), StableLM (`stablelm`) | StableLM-2-12B is refused: it needs a per-head QK LayerNorm |
 | BLOOM (`bloom`), MPT (`mpt`), Refact (`refact`), Jais (`jais`) | ALiBi in place of RoPE |
 | BitNet (`bitnet`), Apertus (`apertus`), Mellum (`mellum`), Nanbeige (`nanbeige`), Talkie (`talkie`), Arcee (`arcee`), Deci (`deci`), OpenELM (`openelm`), Maincoder (`maincoder`) | |
@@ -41,10 +41,11 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint. `PTQ1_0` runs on CPU and Metal; `PQ2_0` is recognised, not executed |
 | BERT (`bert`), nomic-bert (`nomic-bert`), jina-bert-v2 (`jina-bert-v2`), jina-bert-v3 (`jina-bert-v3`), NeoBERT (`neo-bert`), EuroBERT (`eurobert`) | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
 
-101 architectures run on the shared decoder, each backed by a benchmark
-row, a pinned logit comparison against real `libllama`, or a fixture.
-The GGUF architecture string of each is in brackets above; every one of
-the 101 in `capability::AUDITED_GENERIC_GQA` appears there. Gemma-4,
+Every architecture in `capability::AUDITED_GENERIC_GQA` runs on the
+shared decoder, each backed by a benchmark row, a pinned logit
+comparison against real `libllama`, or a fixture. The GGUF architecture
+string of each is in brackets above, and every one of them appears
+there. Gemma-4,
 the MLA rows and the encoders run on engines of their own and are
 counted separately. `frink archs` is the authoritative list.
 
@@ -55,9 +56,9 @@ counted separately. `frink archs` is the authoritative list.
 | MiniMax-M3 | Needs MiniMax Sparse Attention |
 | Kimi K3, GLM-5.2, DeepSeek V4 | Loaders and primitives only; nothing has run end to end on a real checkpoint |
 | `bailingmoe3`, `dots3note`, `hy_v4`, `deepseek41` (DeepSeek-V4.1-Flash), `glm5-next` (GLM-5.3-Flash) | Each needs an attention or residual layout this engine does not have, and is refused by name |
-| `flint`, `beam`, `maion-coder`, `k2-horizon`, `muse-spark`, `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | The nine unaudited architectures; see below |
+| `flint`, `beam`, `maion-coder`, `k2-horizon`, `muse-spark`, `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | Unaudited; see below |
 | Vision | Frink finds an mmproj file and warns. An `image_url` in a request is an error |
-| MTP draft heads | `--mtp` errors by design. Speculation uses prompt lookup, or a second GGUF on the CLI (`--model-draft`) |
+| MTP draft heads | `--mtp` errors until a multi-token-prediction drafter exists. Speculation uses prompt lookup, or a second GGUF on the CLI (`--model-draft`) |
 
 ## Why a model stops
 
@@ -95,7 +96,7 @@ instead. The message names the reason, which is one of these six.
    `FRINK_ALLOW_UNAUDITED_ARCH=1` runs one anyway; compare the output
    against llama.cpp yourself before trusting it.
 
-## The nine unaudited architectures
+## The unaudited architectures
 
 None of the 9 is a fixture away or a single match arm away; each
 needs code or a reading nobody has done. All 9 have now been read on

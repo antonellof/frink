@@ -1,0 +1,2 @@
+<|im_system|>tool_declare<|im_middle|>[{"function": {"description": "The weather in a city", "name": "get_weather", "parameters": {"properties": {"city": {"description": "La città", "type": "string"}}, "required": ["city"], "type": "object"}}, "type": "function"}]<|im_end|><|im_system|>system<|im_middle|>You are Kimi, an AI assistant created by Moonshot AI.<|im_end|>
+<|im_user|>user<|im_middle|>What is the capital of France?<|im_end|><|im_assistant|>assistant<|im_middle|>Paris.<|im_end|><|im_user|>user<|im_middle|>And of Italy?<|im_end|><|im_assistant|>assistant<|im_middle|>

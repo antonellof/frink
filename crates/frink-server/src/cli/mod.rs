@@ -17,7 +17,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use frink_models::gpu_layers::GpuLayers;
 
 // `PartialEq` so frink-cli's serve tests can assert that both front
@@ -137,6 +137,61 @@ pub struct ServerArgs {
     #[arg(long = "no-jinja", default_value_t = false)]
     no_jinja: bool,
 
+    /// A chat template in place of the GGUF's own, llama.cpp's
+    /// `--chat-template`: its Jinja source, or `chatml`. Any other bare
+    /// name is refused. Sets `FRINK_CHAT_TEMPLATE`.
+    #[arg(
+        long = "chat-template",
+        value_name = "JINJA_TEMPLATE",
+        overrides_with = "chat_template_file"
+    )]
+    chat_template: Option<String>,
+
+    /// `--chat-template`, read from a file. The later of the two wins,
+    /// as in llama.cpp.
+    #[arg(
+        long = "chat-template-file",
+        value_name = "JINJA_TEMPLATE_FILE",
+        overrides_with = "chat_template"
+    )]
+    chat_template_file: Option<std::path::PathBuf>,
+
+    /// Template variables for every request, as a JSON object,
+    /// llama.cpp's `--chat-template-kwargs`. Repeatable. A request's own
+    /// `chat_template_kwargs` win. Sets `FRINK_CHAT_TEMPLATE_KWARGS`.
+    #[arg(long = "chat-template-kwargs", value_name = "STRING")]
+    chat_template_kwargs: Vec<String>,
+
+    /// Thinking in the chat, llama.cpp's `-rea`: `on`, `off` or `auto`
+    /// (the default), which turns it on where the template supports it.
+    /// `on` and `off` set the `enable_thinking` template variable for
+    /// every request.
+    #[arg(
+        long = "reasoning",
+        visible_alias = "rea",
+        value_name = "on|off|auto",
+        allow_hyphen_values = true
+    )]
+    reasoning: Option<String>,
+
+    /// The `reasoning_effort` template variable for every request,
+    /// llama.cpp's `--reasoning-effort`. `default` leaves the template's
+    /// own. Wins over the same key in `--chat-template-kwargs`.
+    #[arg(long = "reasoning-effort", value_name = "LEVEL")]
+    reasoning_effort: Option<String>,
+
+    /// Keep every earlier turn's reasoning in the prompt, llama.cpp's
+    /// `--reasoning-preserve` and its default: the `preserve_reasoning`
+    /// template variable, which a template that can drop old thoughts
+    /// reads. A request's own `chat_template_kwargs` win.
+    #[arg(long = "reasoning-preserve", overrides_with = "no_reasoning_preserve")]
+    reasoning_preserve: bool,
+
+    /// Let such a template drop earlier turns' reasoning
+    /// (`preserve_reasoning` false). The later of the pair wins.
+    #[arg(long = "no-reasoning-preserve", overrides_with = "reasoning_preserve")]
+    no_reasoning_preserve: bool,
+
     /// Accepted; frink does no warm-up pass, so there is none to skip.
     #[arg(long = "no-warmup", default_value_t = false)]
     no_warmup: bool,
@@ -187,6 +242,22 @@ pub struct ServerArgs {
     #[arg(long = "metrics", default_value_t = false)]
     metrics: bool,
 
+    /// Serve `GET /slots`, llama.cpp's `--slots` and its default. Sets
+    /// `FRINK_ENDPOINT_SLOTS`.
+    #[arg(long = "slots", overrides_with = "no_slots")]
+    slots: bool,
+
+    /// Refuse `GET /slots` as llama.cpp does without it. The later of the
+    /// pair wins.
+    #[arg(long = "no-slots", overrides_with = "slots")]
+    no_slots: bool,
+
+    /// Assemble `/infill` prompts Suffix/Prefix/Middle rather than
+    /// Prefix/Suffix/Middle, llama.cpp's `--spm-infill`. Sets
+    /// `FRINK_SPM_INFILL`.
+    #[arg(long = "spm-infill", default_value_t = false)]
+    spm_infill: bool,
+
     /// IP address to listen on.
     #[arg(long, value_name = "HOST")]
     host: Option<IpAddr>,
@@ -207,7 +278,11 @@ pub struct ServerArgs {
         long = "device",
         visible_alias = "dev",
         value_name = "DEVICE",
-        ignore_case = true
+        ignore_case = true,
+        value_parser = clap::builder::TypedValueParser::map(
+            clap::builder::PossibleValuesParser::new(OffloadDevice::ALL.map(|d| d.as_str())),
+            |s| s.parse::<OffloadDevice>().expect("a listed value parses"),
+        ),
     )]
     device: Option<OffloadDevice>,
 
@@ -279,6 +354,35 @@ pub struct ServerArgs {
     /// `-ub`. Clamped to `--batch-size` when both are given.
     #[arg(long = "ubatch-size", visible_alias = "ub", value_name = "N")]
     ubatch_size: Option<usize>,
+
+    /// A smaller checkpoint of the same family and tokenizer that drafts
+    /// for speculative decoding, llama.cpp's `-md`. Sets
+    /// `FRINK_MODEL_DRAFT`. The output is the output without it; see
+    /// `crate::server_draft` for where it runs and where it refuses.
+    #[arg(
+        long = "model-draft",
+        visible_aliases = ["md", "spec-draft-model"],
+        value_name = "GGUF"
+    )]
+    model_draft: Option<String>,
+
+    /// Tokens the drafter proposes per verification step, llama.cpp's
+    /// `--draft-max`. Sets `FRINK_DRAFT_MAX`.
+    #[arg(
+        long = "draft-max",
+        visible_aliases = ["draft", "draft-n"],
+        value_name = "N"
+    )]
+    draft_max: Option<usize>,
+
+    /// The drafter stops a block at a token whose own probability is
+    /// below this, llama.cpp's `--draft-p-min`. Sets `FRINK_DRAFT_P_MIN`.
+    #[arg(
+        long = "draft-p-min",
+        visible_alias = "spec-draft-p-min",
+        value_name = "P"
+    )]
+    draft_p_min: Option<f32>,
 
     /// Directory slot files are saved into and restored from,
     /// llama.cpp's `--slot-save-path`. Sets `FRINK_SLOT_SAVE_PATH`.
@@ -381,14 +485,7 @@ impl ServerArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum OffloadDevice {
-    Auto,
-    None,
-    Cpu,
-    Metal,
-    Cuda,
-}
+use frink_models::offload::OffloadDevice;
 
 /// Whether this build of the server has the Metal kernels compiled in.
 ///
@@ -416,7 +513,7 @@ fn llama_style_argv(
     let mut argv = argv.into_iter();
     let program = argv.next().unwrap_or_else(|| "frink-server".to_string());
     let tail = frink_core::argv::expand_single_dash_names(cmd, argv.collect())?;
-    let tail = crate::llama_env::append_llama_arg_env(cmd, tail, env)?;
+    let tail = crate::llama_env::prepend_llama_arg_env(cmd, tail, env)?;
     Ok(std::iter::once(program).chain(tail).collect())
 }
 
@@ -520,6 +617,42 @@ fn check_cors_origins(spec: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `FRINK_CHAT_TEMPLATE_KWARGS` as the flags set it, or `None` when no
+/// flag wrote a kwarg. llama.cpp's defaults alone are put back by every
+/// load, and writing them would replace a value set in the environment.
+fn kwargs_env_value(flags: &frink_models::template_flags::TemplateFlags) -> Option<String> {
+    flags
+        .kwargs_given
+        .then(|| serde_json::Value::Object(flags.kwargs.clone()).to_string())
+}
+
+/// What the chat-template flags mean, checked before a model loads.
+pub(crate) fn template_flags(
+    args: &ServerArgs,
+) -> anyhow::Result<frink_models::template_flags::TemplateFlags> {
+    let reasoning = args
+        .reasoning
+        .as_deref()
+        .map(frink_core::argv::reasoning_switch)
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten();
+    frink_models::template_flags::TemplateFlags::resolve(
+        frink_models::template_flags::TemplateFlagValues {
+            template: args.chat_template.as_deref(),
+            template_file: args.chat_template_file.as_deref(),
+            kwargs: &args.chat_template_kwargs,
+            reasoning,
+            reasoning_effort: args.reasoning_effort.as_deref(),
+            reasoning_preserve: frink_core::argv::flag_pair(
+                args.reasoning_preserve,
+                args.no_reasoning_preserve,
+            ),
+        },
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
@@ -651,66 +784,9 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         // device overrides skipped
     } else {
         let layers = args.n_gpu_layers.unwrap_or(GpuLayers::Auto);
-        let device = if layers.offload_enabled() {
-            args.device.unwrap_or(OffloadDevice::Auto)
-        } else {
-            OffloadDevice::None
-        };
-
-        match device {
-            OffloadDevice::None | OffloadDevice::Cpu => unsafe {
-                std::env::set_var("FRINK_METAL", "0");
-                std::env::set_var("FRINK_METAL_ATTN", "0");
-                std::env::set_var("FRINK_CUDA", "0");
-            },
-            OffloadDevice::Auto => unsafe {
-                std::env::set_var("FRINK_METAL", "auto");
-                std::env::set_var("FRINK_CUDA", "auto");
-                if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                    std::env::set_var("FRINK_METAL_ATTN", "1");
-                }
-            },
-            OffloadDevice::Metal => {
-                #[cfg(not(feature = "metal"))]
-                {
-                    anyhow::bail!(
-                        "Metal requested but this binary was built without --features metal"
-                    );
-                }
-                #[cfg(feature = "metal")]
-                {
-                    if !frink_metal::MetalProfile::detect().available {
-                        anyhow::bail!("Metal requested but no Metal device is available");
-                    }
-                    unsafe {
-                        std::env::set_var("FRINK_METAL", "1");
-                        if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                            std::env::set_var("FRINK_METAL_ATTN", "1");
-                        }
-                        std::env::set_var("FRINK_CUDA", "0");
-                    }
-                }
-            }
-            OffloadDevice::Cuda => {
-                #[cfg(not(feature = "cuda"))]
-                {
-                    anyhow::bail!(
-                        "CUDA requested but this binary was built without --features cuda"
-                    );
-                }
-                #[cfg(feature = "cuda")]
-                {
-                    if !frink_cuda::HardwareProfile::detect().cuda_available {
-                        anyhow::bail!("CUDA requested but no CUDA device is available");
-                    }
-                    unsafe {
-                        std::env::set_var("FRINK_CUDA", "1");
-                        std::env::set_var("FRINK_METAL", "0");
-                        std::env::set_var("FRINK_METAL_ATTN", "0");
-                    }
-                }
-            }
-        }
+        let device = OffloadDevice::with_offload(args.device, layers.offload_enabled());
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { frink_models::offload::select(device)? };
     }
 
     if let Some(n) = args.parallel {
@@ -758,6 +834,40 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_SLOT_SAVE_PATH", dir) };
     }
+    if let Some(on) = frink_core::argv::flag_pair(args.slots, args.no_slots) {
+        let value = if on { "1" } else { "0" };
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::slots::listing::ENDPOINT_SLOTS_ENV, value) };
+    }
+    if args.spm_infill {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::completion::infill::SPM_INFILL_ENV, "1") };
+    }
+
+    // Lowered to the variables `server_draft::from_env` reads, which
+    // also refuses, at load, a deployment that would not draft.
+    if let Some(path) = &args.model_draft {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::server_draft::DRAFT_ENV, path) };
+    }
+    if let Some(n) = args.draft_max {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::server_draft::DRAFT_MAX_ENV, n.to_string()) };
+    }
+    if let Some(p) = args.draft_p_min {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::server_draft::DRAFT_P_MIN_ENV, p.to_string()) };
+    }
+
+    let template_flags = template_flags(args)?;
+    if let Some(source) = &template_flags.source {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::chat_template::TEMPLATE_ENV, source) };
+    }
+    if let Some(kwargs) = kwargs_env_value(&template_flags) {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::chat_template::TEMPLATE_KWARGS_ENV, kwargs) };
+    }
 
     for (flag, value) in [
         ("--batch-size", args.batch_size),
@@ -776,6 +886,11 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
             // SAFETY: called before the runtime starts worker threads.
             unsafe { std::env::set_var(key, chunk.to_string()) };
         }
+    }
+    if let Some(n_batch) = args.batch_size {
+        // `-b` alone, for `/infill`'s prompt budget (`prefill_batch`).
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::prefill_batch::LOGICAL_BATCH_ENV, n_batch.to_string()) };
     }
 
     if let Some(budget) = args.reasoning_budget {

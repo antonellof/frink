@@ -114,22 +114,23 @@ pub enum CudaError {
 /// found at all -- it panics
 /// (`cudarc::panic_no_lib_found`/`driver::sys::lib`). That is a
 /// meaningfully different failure mode than "library loaded, but no
-/// device present," and this function has to catch it explicitly with
-/// `catch_unwind` or a CPU-only host would crash the whole process
-/// just from calling this probe. This is exactly the kind of bug that
-/// only surfaces by actually running code against a real (lack of)
-/// environment, not by reading API docs.
+/// device present," so this function opens the library itself first
+/// ([`driver_library_opens`]) and returns `None` when it will not, and
+/// keeps a `catch_unwind` behind that for a driver cudarc cannot use.
+/// The process's panic hook is left alone.
 pub fn probe() -> Option<CudaInfo> {
-    // Temporarily silence the default panic hook: on a host with no
-    // CUDA shared library at all, the catch_unwind below is expected
-    // to trigger on every single call (e.g. every process start that
-    // checks capabilities), and printing a full Rust panic backtrace
-    // for an anticipated, handled condition would be noise, not a bug
-    // report. The previous hook is always restored, even if the
-    // probed closure panics.
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = std::panic::catch_unwind(|| {
+    // cudarc panics on first use when the driver library will not open.
+    // This used to swap the process's panic hook for a silent one around
+    // the call, which silenced every panic any other thread raised in
+    // that window, a server's journal record included. Opening the
+    // library first, as cudarc does, keeps a GPU-less host quiet without
+    // touching the hook.
+    if !driver_library_opens() {
+        return None;
+    }
+    // A backstop for a driver that opens but lacks a symbol cudarc needs:
+    // that panics with cudarc's message, which is worth seeing.
+    std::panic::catch_unwind(|| {
         let dev = cudarc::driver::CudaDevice::new(0).ok()?;
         let name = dev.name().ok();
         let (free, total) = cudarc::driver::result::mem_get_info().ok()?;
@@ -139,9 +140,20 @@ pub fn probe() -> Option<CudaInfo> {
             total_vram_bytes: total as u64,
             free_vram_bytes: free as u64,
         })
-    });
-    std::panic::set_hook(previous_hook);
-    result.unwrap_or(None)
+    })
+    .unwrap_or(None)
+}
+
+/// Whether the CUDA driver library opens under the names cudarc 0.11
+/// tries (`driver::sys::lib`: `cuda`, then `nvcuda`), so that cudarc's
+/// own open, which panics on failure, will succeed.
+fn driver_library_opens() -> bool {
+    ["cuda", "nvcuda"].iter().any(|name| {
+        // SAFETY: opening the driver library runs its initialisers, the
+        // same open cudarc makes next; the handle is dropped at once and
+        // cudarc's own handle keeps the library loaded.
+        unsafe { libloading::Library::new(libloading::library_filename(name)) }.is_ok()
+    })
 }
 
 /// Process-wide CUDA device handle, created once and reused for every
@@ -169,6 +181,32 @@ pub(crate) fn compute_capability_major(dev: &std::sync::Arc<cudarc::driver::Cuda
             cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
         )
         .unwrap_or(0)
+    })
+}
+
+/// The shared device's compute capability `(major, minor)`, asked once;
+/// `(0, 0)` when the query fails.
+pub(crate) fn compute_capability(dev: &std::sync::Arc<cudarc::driver::CudaDevice>) -> (i32, i32) {
+    static CC: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
+    *CC.get_or_init(|| {
+        let minor = dev
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+            )
+            .unwrap_or(0);
+        (compute_capability_major(dev), minor)
+    })
+}
+
+/// The shared device's multiprocessor count, asked once; `1` when the
+/// query fails.
+pub(crate) fn multiprocessor_count(dev: &std::sync::Arc<cudarc::driver::CudaDevice>) -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        dev.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+        )
+        .map_or(1, |n| n.max(1) as usize)
     })
 }
 
@@ -242,224 +280,31 @@ pub(crate) fn ensure_module_loaded_lazy_for_arch(
     Ok(())
 }
 
-/// Compiles (once) and launches a matvec kernel from `kernel_src`/`fn_name`
-/// (either `Q8_0_MATVEC_KERNEL_SRC`/`"q8_0_matvec"` or
-/// `Q4_0_MATVEC_KERNEL_SRC`/`"q4_0_matvec"` -- both share the same
-/// launch config and buffer shapes, only the per-block unpack differs),
-/// using cudarc 0.11.9's actual API (`CudaDevice::load_ptx` /
-/// `get_func` / `htod_copy` / `alloc_zeros` / `dtoh_sync_copy` / the
-/// `LaunchAsync` trait). Verified on real GPU hardware -- see the
-/// module doc comment. The CUDA context and compiled kernel are now
-/// process-wide and persistent (see `shared_device`/`ensure_module_loaded`) --
-/// quantized weight buffers are also cached by host pointer+length
-/// (`resident_cuda_weights`) so decode does not re-upload multi-GB
-/// matrices every token. Activations upload per call HERE: this is the
-/// one-matrix launch a lone projection takes (the lm_head, a layer the
-/// resident stack declines). Chaining only adjacent matmuls was tried
-/// (PR #136) and measured 22% SLOWER on a GTX 1080, because norms,
-/// RoPE and attention sat on the host between them; a dense decode
-/// layer now runs whole on the device instead (`crate::prefill`, at one
-/// row). See `docs/plans/cpu-cuda-parity.md` step 2.
-#[allow(clippy::too_many_arguments)] // shared internal launch plumbing; each parameter is a distinct, clearly-named buffer/shape value, not something worth bundling into a struct for one private callee.
-fn launch_matvec(
-    kernel_src: &'static str,
-    module_name: &'static str,
-    fn_name: &'static str,
-    weights: &[u8],
-    x: &[f32],
-    rows: usize,
-    row_bytes: usize,
-    n_blocks_per_row: usize,
-) -> Result<Vec<f32>, CudaError> {
-    // Which kernel actually runs is `enqueue_matvec`'s decision, so
-    // every caller gets the same one -- see `matvec_launch_plan`.
-    let dev = shared_device()?;
-    let d_x = crate::xfer::htod(&dev, "matvec x upload", x)?;
-    let launch = MatvecLaunch {
-        kernel_src,
-        module_name,
-        fn_name,
-        weights,
-        rows,
-        row_bytes,
-        n_blocks_per_row,
-    };
-    // `_weights` holds the resident-weight Arc alive until the DtoH sync.
-    let (d_out, _weights) = enqueue_matvec(&dev, &launch, &d_x)?;
-    crate::xfer::dtoh(&dev, "matvec out download", &d_out)
-}
-
-/// How many warps a coalesced matvec block carries; one holder, in
-/// `matvec_kinds::coalesced`, so the host check launches the geometry
-/// this file does.
-const COALESCED_WARPS_PER_BLOCK: usize = crate::matvec_kinds::coalesced::WARPS_PER_BLOCK;
-
-/// Which kernel a matvec actually runs, and the geometry that kernel
-/// needs.
-///
-/// The two must agree: a coalesced kernel launched with the
-/// block-per-row geometry computes one row per BLOCK while indexing as
-/// if it had one row per WARP, and returns wrong numbers rather than
-/// failing. That is the repo's dominant bug shape, so the choice is
-/// made once, here, by the only function that decides it, and
-/// `the_plan_pairs_each_kernel_with_its_own_geometry` checks the
-/// pairing on the host.
-///
-/// This lives in `enqueue_matvec` rather than in `launch_matvec`
-/// because the fused dense FFN and `launch_matvec_multi` enqueue
-/// directly. Routing at the `launch_matvec` level left the FFN --
-/// gate, up and down, about 83% of the weight bytes a Llama-3.2-3B
-/// decode step reads -- on the uncoalesced kernels while the
-/// benchmarks said "coalesced".
-fn matvec_launch_plan(
-    fn_name: &'static str,
-    kernel_src: &'static str,
-    module_name: &'static str,
-    rows: usize,
-    width: MatvecWidth,
-) -> MatvecPlan {
-    match coalesced_kind(fn_name) {
-        Some(kind) => MatvecPlan {
-            source: PlanSource::Coalesced(kind, width),
-            module: kind.module(width),
-            entry: kind.entry,
-            // The same grid at both widths: one row per warp. Width
-            // changes what a warp does inside its row, not which row
-            // it owns, so the A/B varies exactly one thing.
-            cfg: cudarc::driver::LaunchConfig {
-                grid_dim: (rows.div_ceil(COALESCED_WARPS_PER_BLOCK) as u32, 1, 1),
-                block_dim: ((COALESCED_WARPS_PER_BLOCK * 32) as u32, 1, 1),
-                shared_mem_bytes: 0,
-            },
-        },
-        None => MatvecPlan {
-            source: PlanSource::Static(kernel_src),
-            module: module_name,
-            entry: fn_name,
-            cfg: cudarc::driver::LaunchConfig {
-                grid_dim: (rows as u32, 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 256 * std::mem::size_of::<f32>() as u32,
-            },
-        },
-    }
-}
-
-/// What [`matvec_launch_plan`] decided: the NVRTC module and entry
-/// point to launch, where its text comes from, and its geometry.
-struct MatvecPlan {
-    source: PlanSource,
-    module: &'static str,
-    entry: &'static str,
-    cfg: cudarc::driver::LaunchConfig,
-}
-
-/// A block-per-row kernel is a literal; a coalesced one is generated
-/// per width ([`CoalescedKind::source`]), and only on a module-cache
-/// miss.
-enum PlanSource {
-    Static(&'static str),
-    Coalesced(&'static CoalescedKind, MatvecWidth),
-}
-
-impl MatvecPlan {
-    fn text(&self) -> String {
-        match self.source {
-            PlanSource::Static(src) => src.to_string(),
-            PlanSource::Coalesced(kind, width) => kind.source(width),
-        }
-    }
-}
-
-/// Enqueues one matvec kernel on the shared device's default stream:
-/// ensures the module is compiled/loaded, fetches the function, pins
-/// the (process-resident) weight buffer, allocates the output, and
-/// launches — **without** any host synchronization. `d_x` is an
-/// already-on-device activation slice (uploaded once by the caller and
-/// reused across chained matvecs, e.g. the fused dense FFN), so no
-/// per-call HtoD of the activation happens here. Returns the device
-/// output slice plus the resident-weight `Arc`, which the caller must
-/// keep alive until it syncs (the kernel reads that buffer
-/// asynchronously). This is the single per-launch primitive shared by
-/// [`launch_matvec`], [`launch_matvec_multi`] and
-/// [`launch_dense_ffn_swiglu`].
-pub(crate) fn enqueue_matvec(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    launch: &MatvecLaunch<'_>,
-    d_x: &cudarc::driver::CudaSlice<f32>,
-) -> Result<
-    (
-        cudarc::driver::CudaSlice<f32>,
-        std::sync::Arc<ResidentCudaWeights>,
-    ),
-    CudaError,
-> {
-    // `FRINK_CUDA_MATVEC=narrow` is the A/B lever (docs/CONFIG.md).
-    enqueue_matvec_at(dev, launch, d_x, MatvecWidth::from_env())
-}
-
-/// [`enqueue_matvec`] at an explicit width, so the hardware test can
-/// hold both widths against their twins whatever the environment says.
-fn enqueue_matvec_at(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    launch: &MatvecLaunch<'_>,
-    d_x: &cudarc::driver::CudaSlice<f32>,
-    width: MatvecWidth,
-) -> Result<
-    (
-        cudarc::driver::CudaSlice<f32>,
-        std::sync::Arc<ResidentCudaWeights>,
-    ),
-    CudaError,
-> {
-    use cudarc::driver::LaunchAsync;
-
-    let plan = matvec_launch_plan(
-        launch.fn_name,
-        launch.kernel_src,
-        launch.module_name,
-        launch.rows,
-        width,
-    );
-    let (module, entry, cfg) = (plan.module, plan.entry, plan.cfg);
-
-    ensure_module_loaded_lazy(dev, module, entry, || plan.text())?;
-    let func = dev.get_func(module, entry).ok_or_else(|| {
-        CudaError::KernelCompile(format!("function '{entry}' not found after load_ptx"))
-    })?;
-
-    let d_weights = resident_cuda_weights(dev, launch.weights)?;
-    let mut d_out = dev
-        .alloc_zeros::<f32>(launch.rows)
-        .map_err(|e| CudaError::Launch(format!("output alloc: {e:?}")))?;
-
-    unsafe {
-        func.launch(
-            cfg,
-            (
-                &d_weights.slice,
-                d_x,
-                &mut d_out,
-                launch.rows as i32,
-                launch.row_bytes as i32,
-                launch.n_blocks_per_row as i32,
-            ),
-        )
-        .map_err(|e| CudaError::Launch(format!("kernel {entry}: {e:?}")))?;
-    }
-
-    Ok((d_out, d_weights))
-}
-
 // The resident weight cache moved to `crate::resident`; re-exported
 // here so `crate::gpu::resident_cuda_weights` still resolves.
 pub(crate) use crate::resident::{resident_cuda_f32, resident_cuda_weights, ResidentCudaWeights};
 
+// The matvec launch path (the plan that pairs a kernel with its
+// geometry, the enqueue primitives, the multi-matvec and fused-FFN
+// launches) moved to `crate::matvec_launch`; re-exported so every
+// existing path still resolves.
+#[cfg(test)]
+use crate::matvec_kinds::coalesced::coalesced_kind;
+pub(crate) use crate::matvec_launch::{
+    alloc_out, enqueue_matvec_in, enqueue_matvec_multi, enqueue_matvec_multi_table, launch_matvec,
+    MatvecInput, MultiShape,
+};
+#[cfg(test)]
+use crate::matvec_launch::{
+    enqueue_matvec, enqueue_matvec_at, matvec_launch_plan, COALESCED_WARPS_PER_BLOCK,
+};
+pub use crate::matvec_launch::{
+    launch_dense_ffn_swiglu, launch_matvec_multi, time_matvec, MatvecLaunch,
+};
 // The kernel TEXT moved to `matvec_kinds`, one module per format
 // family; `gpu.rs` keeps the device plumbing. Re-exported so every
 // existing path still resolves -- a refactor that moves a definition
 // should not move a public name.
-use crate::matvec_kinds::coalesced::{coalesced_kind, CoalescedKind, MatvecWidth};
 // The launchers of the matvecs generated from a GEMM dequant, one line
 // each in `gen_launch`; re-exported so every kind's launcher has the
 // same path.
@@ -652,120 +497,11 @@ pub fn launch_q6_k_matvec(
     launch_matvec_by_kind("Q6_K", weights, x, rows, row_bytes, n_blocks_per_row)
 }
 
-/// Metadata for a single matvec launch in a multi-matvec batch (shared
-/// activation upload). Each describes one weight matrix to dispatch
-/// against the same `x`.
-///
-/// `weights` must be a stable host slice (mmap / owned matrix storage) —
-/// never a temporary `to_vec()` copy. [`resident_cuda_weights`] keys by
-/// pointer+length; a per-call clone would miss the cache and re-upload
-/// multi-GB matrices every QKV fuse (the Vast ~2 tok/s failure mode).
-#[derive(Clone, Copy)]
-pub struct MatvecLaunch<'a> {
-    pub kernel_src: &'static str,
-    pub module_name: &'static str,
-    pub fn_name: &'static str,
-    pub weights: &'a [u8],
-    pub rows: usize,
-    pub row_bytes: usize,
-    pub n_blocks_per_row: usize,
-}
-
-/// Uploads `x` once, enqueues N matvec kernels (resident weights), then
-/// downloads N outputs. Mirrors ggml-cuda's "enqueue on stream, sync at
-/// the edge" discipline as far as cudarc 0.11.9 allows without a full
-/// device-resident graph: one HtoD for `x`, N kernel launches, then N
-/// DtoH. Used by `WeightMatrix::apply_gpu_multi` for Q/K/V and gate+up.
-pub fn launch_matvec_multi(
-    x: &[f32],
-    launches: &[MatvecLaunch<'_>],
-) -> Result<Vec<Vec<f32>>, CudaError> {
-    if launches.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let dev = shared_device()?;
-
-    let d_x = crate::xfer::htod(&dev, "x upload", x)?;
-
-    // Hold weight Arcs + device outs until after all launches so kernels
-    // can overlap before any host sync (llama: sync only at graph edge).
-    let mut weight_arcs = Vec::with_capacity(launches.len());
-    let mut d_outs = Vec::with_capacity(launches.len());
-
-    for launch in launches {
-        let (d_out, d_weights) = enqueue_matvec(&dev, launch, &d_x)?;
-        weight_arcs.push(d_weights);
-        d_outs.push(d_out);
-    }
-    drop(weight_arcs);
-
-    let mut results = Vec::with_capacity(d_outs.len());
-    for (i, d_out) in d_outs.into_iter().enumerate() {
-        let out = crate::xfer::dtoh(&dev, launches[i].fn_name, &d_out)?;
-        results.push(out);
-    }
-
-    Ok(results)
-}
-
-/// CUDA C source for an elementwise SwiGLU pair fuse:
-/// `out[i] = silu(gate[i]) * up[i]`, `silu(x) = x / (1 + exp(-x))`.
-/// Mirrors `frink_core::matmul::swiglu` (which is `silu(gate)*up`) and
-/// `frink-metal/src/elem.rs`'s `silu_mul_f32` kernel exactly, so the
-/// fused dense-FFN path keeps activations on-device between the
-/// gate/up matvecs and the down matvec instead of downloading two
-/// vectors, computing SwiGLU on the host, and re-uploading.
-pub const SILU_MUL_KERNEL_SRC: &str = r#"
-extern "C" __global__ void silu_mul_f32(
-    const float* gate,
-    const float* up,
-    float* out,
-    int n
-) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        float g = gate[i];
-        out[i] = (g / (1.0f + expf(-g))) * up[i];
-    }
-}
-"#;
-
-/// Enqueues the elementwise `silu(gate)*up` kernel on the shared
-/// device's default stream (no host sync), returning the device output
-/// slice. `gate`/`up` are device slices of length `n` produced by the
-/// two FFN input matvecs; the result feeds straight into the down
-/// matvec without ever touching host memory.
-pub(crate) fn silu_mul_device(
-    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
-    gate: &cudarc::driver::CudaSlice<f32>,
-    up: &cudarc::driver::CudaSlice<f32>,
-    n: usize,
-) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
-    use cudarc::driver::LaunchAsync;
-
-    ensure_module_loaded(dev, SILU_MUL_KERNEL_SRC, "frink_silu_mul", "silu_mul_f32")?;
-    let func = dev
-        .get_func("frink_silu_mul", "silu_mul_f32")
-        .ok_or_else(|| {
-            CudaError::KernelCompile("function 'silu_mul_f32' not found after load_ptx".to_string())
-        })?;
-    let mut d_out = dev
-        .alloc_zeros::<f32>(n)
-        .map_err(|e| CudaError::Launch(format!("silu_mul out alloc: {e:?}")))?;
-    let block = 256u32;
-    let grid = (n as u32).div_ceil(block);
-    let cfg = cudarc::driver::LaunchConfig {
-        grid_dim: (grid.max(1), 1, 1),
-        block_dim: (block, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    unsafe {
-        func.launch(cfg, (gate, up, &mut d_out, n as i32))
-            .map_err(|e| CudaError::Launch(format!("silu_mul launch: {e:?}")))?;
-    }
-    Ok(d_out)
-}
+pub(crate) use crate::glu::glu_mul_device;
+pub use crate::glu::{
+    GluCuda, GELU_MUL_KERNEL_SRC, SILU_MUL_KERNEL_SRC, SWIGLU_OAI_ALPHA, SWIGLU_OAI_LIMIT,
+    SWIGLU_OAI_SRC,
+};
 
 /// CUDA C source for a fused residual add + RMSNorm:
 /// `out[i] = (x[i] + residual[i]) / sqrt(mean((x+residual)^2) + eps) * weight[i]`.
@@ -863,44 +599,37 @@ pub fn launch_fused_add_rmsnorm(
     crate::xfer::dtoh(&dev, "fused_add_rmsnorm download", &d_out)
 }
 
-/// Fused dense SwiGLU FFN entirely on-device: uploads `x` once, runs
-/// the gate and up matvecs (device-resident weights), fuses
-/// `silu(gate)*up` in a kernel, runs the down matvec, and downloads the
-/// result once. This replaces the previous "3× `WeightMatrix::apply`
-/// with an HtoD+DtoH per matvec plus a host-side SwiGLU" pattern for
-/// dense/shared experts, cutting the activation traffic from six host↔
-/// device transfers to one up + one down. Weight buffers are already
-/// process-resident (see `resident_cuda_weights`); only the single
-/// activation upload and single result download cross the bus.
-///
-/// `gate`/`up` must have the same output row count (the FFN hidden dim)
-/// and the same input `cols` as `x`; `down`'s input `cols` must equal
-/// that FFN hidden dim (its `n_blocks_per_row` covers the SwiGLU output
-/// length). The caller (`frink-core`) guarantees this by construction
-/// from the expert's gate/up/down shapes.
-pub fn launch_dense_ffn_swiglu(
-    gate: &MatvecLaunch<'_>,
-    up: &MatvecLaunch<'_>,
-    down: &MatvecLaunch<'_>,
-    x: &[f32],
-) -> Result<Vec<f32>, CudaError> {
-    let dev = shared_device()?;
-
-    let d_x = crate::xfer::htod(&dev, "ffn x upload", x)?;
-
-    // Bind the resident-weight Arcs (`_wg`/`_wu`/`_wd`) for the whole
-    // function so every kernel's weight buffer outlives the final sync.
-    let (d_gate, _wg) = enqueue_matvec(&dev, gate, &d_x)?;
-    let (d_up, _wu) = enqueue_matvec(&dev, up, &d_x)?;
-    let d_act = silu_mul_device(&dev, &d_gate, &d_up, gate.rows)?;
-    let (d_out, _wd) = enqueue_matvec(&dev, down, &d_act)?;
-
-    crate::xfer::dtoh(&dev, "ffn out download", &d_out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process's panic hook is the binary's: a server journals every
+    /// panic through it. Nothing in this crate may swap it, even briefly,
+    /// because a swap silences whatever another thread panics with in the
+    /// window (`probe` did, and lost the server journal test's record).
+    #[test]
+    fn no_source_here_swaps_the_process_panic_hook() {
+        // Spelled in pieces so this test's own text does not match.
+        let calls = [concat!("set_", "hook("), concat!("take_", "hook(")];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut scanned = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for call in calls {
+                        assert!(!text.contains(call), "{} calls {call}", path.display());
+                    }
+                    scanned += 1;
+                }
+            }
+        }
+        assert!(scanned > 20, "scanned {scanned} files");
+    }
 
     #[test]
     fn probe_degrades_cleanly_regardless_of_real_hardware_presence() {
@@ -939,7 +668,9 @@ mod tests {
     /// zero weights, which would pass trivially even with a broken
     /// kernel) using `frink_quant::quantize_q8_0`, so the ignored GPU
     /// tests below check actual numerical agreement with the CPU
-    /// reference, not just "the launch didn't error."
+    /// reference, not just "the launch didn't error." The reference dots
+    /// the activation the matvec reads ([`reads`]): its q8_1 rounding on
+    /// the dp4a kernel, the f32 values on the coalesced one.
     fn real_q8_0_test_matrix(rows: usize, cols: usize) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
         let mut weights = Vec::new();
         let mut all_rows_f32 = Vec::new();
@@ -951,15 +682,24 @@ mod tests {
             all_rows_f32.push(row);
         }
         let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.019).cos()).collect();
+        let xr = reads("q8_0_matvec", cols / frink_quant::Q8_0_BLOCK_ELEMS, &x);
         let expected: Vec<f32> = all_rows_f32
             .iter()
-            .map(|row| frink_quant::dot_q8_0_f32_scalar(&frink_quant::quantize_q8_0(row), &x))
+            .map(|row| frink_quant::dot_q8_0_f32_scalar(&frink_quant::quantize_q8_0(row), &xr))
             .collect();
         (weights, x, expected)
     }
 
+    /// What the decode matvec `fn_name` reads of `x` in this process:
+    /// the q8_1 rounding under the dp4a kernels (the default for Q4_K,
+    /// Q6_K, Q8_0 and MXFP4), `x` itself under the f32 kernels, by the
+    /// same once-per-process switch the launch reads.
+    fn reads(fn_name: &str, n_blocks: usize, x: &[f32]) -> Vec<f32> {
+        crate::matvec_kinds::dp4a::matvec_reads(fn_name, n_blocks, x)
+    }
+
     #[test]
-    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai); run with --ignored on a CUDA-capable machine to re-verify"]
+    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai); run with --ignored on a CUDA-capable machine to re-verify; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_q8_0_matvec_matches_cpu_reference() {
         // Run manually on a machine with an actual CUDA device:
         //   cargo test -p frink-cuda --features cuda -- --ignored
@@ -1222,10 +962,14 @@ mod tests {
     /// independently verified elsewhere in this workspace), so the
     /// ignored GPU tests below check real numerical agreement with that
     /// trusted CPU reference, not just "the launch didn't error."
+    ///
+    /// `fn_name` is the kind's matvec, so the reference dots what that
+    /// matvec reads ([`reads`]).
     fn real_k_quant_test_matrix(
         rows: usize,
         cols: usize,
         block_bytes: usize,
+        fn_name: &str,
         scalar_dot: impl Fn(&[u8], &[f32]) -> f32,
     ) -> (Vec<u8>, Vec<f32>, Vec<f32>) {
         let n_blocks_per_row = cols / 256;
@@ -1235,8 +979,9 @@ mod tests {
             weights.extend(pseudo_bytes(r as u32 + 1, row_bytes));
         }
         let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
+        let xr = reads(fn_name, n_blocks_per_row, &x);
         let expected: Vec<f32> = (0..rows)
-            .map(|r| scalar_dot(&weights[r * row_bytes..(r + 1) * row_bytes], &x))
+            .map(|r| scalar_dot(&weights[r * row_bytes..(r + 1) * row_bytes], &xr))
             .collect();
         (weights, x, expected)
     }
@@ -1256,7 +1001,7 @@ mod tests {
     ///
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware. The WIDE width (the default since #133) has NEVER executed on a GPU; the narrow width passed on an RTX 3060/3070. Run with --ignored and record the result"]
+    #[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs) at both widths for every coalesced kind, MXFP4 included; the narrow width earlier on an RTX 3060/3070"]
     fn every_coalesced_matvec_matches_its_twin_at_both_widths() {
         use crate::matvec_kinds::coalesced::{MatvecWidth, COALESCED};
         let rows = 37usize; // not a multiple of the warps per block
@@ -1269,11 +1014,24 @@ mod tests {
                 .find(|m| m.fn_name == kind.base_fn)
                 .expect("routed from a MatvecKind");
             let mm = crate::mul_mm::kind_by_name(mv.name).expect("geometry");
-            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
+            for (width, wpr) in [
+                (MatvecWidth::Narrow, 1),
+                (MatvecWidth::Wide, 1),
+                (MatvecWidth::Wide, 2),
+                (MatvecWidth::Wide, 4),
+                (MatvecWidth::Narrow, 8),
+            ] {
                 for (n_blocks_per_row, seed) in [(3usize, 7u32), (12, 23)] {
                     let row_bytes = n_blocks_per_row * mm.block_bytes;
                     let cols = n_blocks_per_row * mm.block_elems;
-                    let weights = pseudo_bytes(seed, rows * row_bytes);
+                    let mut weights = pseudo_bytes(seed, rows * row_bytes);
+                    // MXFP4's E8M0 scale near 2^0: a random byte reaches
+                    // 2^128, an infinity no relative tolerance can hold.
+                    if mv.name == "MXFP4" {
+                        for b in weights.chunks_mut(mm.block_bytes) {
+                            b[0] = 120 + b[0] % 16;
+                        }
+                    }
                     let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.021).sin()).collect();
                     // Enter through the ordinary kernel identity, not the
                     // coalesced one, so this exercises the ROUTING too.
@@ -1287,8 +1045,8 @@ mod tests {
                         n_blocks_per_row,
                     };
                     let d_x = dev.htod_copy(x.clone()).expect("upload");
-                    let (d_out, _w) = super::enqueue_matvec_at(&dev, &launch, &d_x, width)
-                        .unwrap_or_else(|e| panic!("{} {width:?}: {e:?}", mv.name));
+                    let (d_out, _w) = super::enqueue_matvec_at(&dev, &launch, &d_x, width, wpr)
+                        .unwrap_or_else(|e| panic!("{} {width:?} x{wpr}: {e:?}", mv.name));
                     let got = dev.dtoh_sync_copy(&d_out).expect("download");
                     assert_eq!(got.len(), rows, "{}", mv.name);
                     let lanes = kind.lanes(width);
@@ -1297,11 +1055,72 @@ mod tests {
                         let want = twin(row, &x, n_blocks_per_row, lanes);
                         assert!(
                             !(want.is_nan() ^ got[r].is_nan()),
-                            "{} {width:?} row {r}: GPU={} twin={want}",
+                            "{} {width:?} x{wpr} row {r}: GPU={} twin={want}",
                             mv.name,
                             got[r]
                         );
                         assert_close_relative(got[r], want, r);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Several experts' projections in one launch equal the same
+    /// projections launched one at a time, bit for bit: a slot of the
+    /// routed-expert form is the single kernel's arithmetic on its own
+    /// weights, input and output. Once with one input for every expert
+    /// (gate, up) and once with an input of its own each (down).
+    #[test]
+    #[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+    fn several_experts_in_one_launch_equal_one_launch_each() {
+        use crate::matvec_kinds::coalesced::COALESCED;
+        let dev = super::shared_device().expect("device");
+        let (rows, k) = (37usize, 3usize);
+        for kind in COALESCED {
+            let mv = crate::matvec_kinds::KINDS
+                .iter()
+                .find(|m| m.fn_name == kind.base_fn)
+                .expect("routed from a MatvecKind");
+            let mm = crate::mul_mm::kind_by_name(mv.name).expect("geometry");
+            let n_blocks_per_row = 12;
+            let row_bytes = n_blocks_per_row * mm.block_bytes;
+            let cols = n_blocks_per_row * mm.block_elems;
+            let weights: Vec<Vec<u8>> = (0..k as u32)
+                .map(|e| crate::mul_mm_ref::fixtures::weights(mm, rows, cols, 50 + e))
+                .collect();
+            let launches: Vec<super::MatvecLaunch<'_>> = weights
+                .iter()
+                .map(|w| super::MatvecLaunch {
+                    kernel_src: mv.source(),
+                    module_name: mv.module_name,
+                    fn_name: mv.fn_name,
+                    weights: w,
+                    rows,
+                    row_bytes,
+                    n_blocks_per_row,
+                })
+                .collect();
+            for x_stride in [0, cols] {
+                let x: Vec<f32> = (0..k * cols).map(|i| ((i as f32) * 0.017).sin()).collect();
+                let d_x = dev.htod_copy(x.clone()).unwrap();
+                let (d_all, _held) =
+                    super::enqueue_matvec_multi(&dev, &launches, &MatvecInput::new(&d_x), x_stride)
+                        .expect("multi");
+                let all = dev.dtoh_sync_copy(&d_all).unwrap();
+                for (e, launch) in launches.iter().enumerate() {
+                    let xe = dev
+                        .htod_copy(x[e * x_stride..e * x_stride + cols].to_vec())
+                        .unwrap();
+                    let (d_one, _w) = super::enqueue_matvec(&dev, launch, &xe).expect("one");
+                    let one = dev.dtoh_sync_copy(&d_one).unwrap();
+                    let got = &all[e * rows..(e + 1) * rows];
+                    for (r, (a, b)) in got.iter().zip(&one).enumerate() {
+                        assert!(
+                            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                            "{} expert {e} row {r} stride {x_stride}: multi {a} one {b}",
+                            mv.name
+                        );
                     }
                 }
             }
@@ -1320,8 +1139,11 @@ mod tests {
 
         for kind in ["Q4_K", "Q5_K", "Q6_K", "Q8_0"] {
             let (src, module, fn_name) = super::matvec_launch_meta(kind).expect("kernel");
-            for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
-                let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+            for (width, wpr) in [MatvecWidth::Narrow, MatvecWidth::Wide]
+                .into_iter()
+                .flat_map(|w| [1usize, 2, 4, 8].map(|r| (w, r)))
+            {
+                let plan = super::matvec_launch_plan(fn_name, src, module, rows, width, wpr);
                 let ck = super::coalesced_kind(fn_name).expect("coalesced");
                 assert!(
                     plan.entry.ends_with("_coalesced"),
@@ -1330,8 +1152,13 @@ mod tests {
                 );
                 assert_eq!(
                     plan.module,
-                    ck.module(width),
-                    "{kind} {width:?}: module key"
+                    ck.module_for(width, wpr),
+                    "{kind} {width:?} x{wpr}: module key"
+                );
+                assert_eq!(
+                    wpr == 1,
+                    plan.module == ck.module(width),
+                    "{kind}: one key per wpr"
                 );
                 let text = plan.text();
                 assert!(
@@ -1340,12 +1167,20 @@ mod tests {
                     plan.entry
                 );
                 assert!(
-                    text.starts_with(&format!("#define FX_LANES {}\n", ck.lanes(width))),
-                    "{kind} {width:?}: source compiled for the wrong width"
+                    text.starts_with(&format!(
+                        "#define FX_LANES {}\n#define FX_WPR {wpr}\n",
+                        ck.lanes(width)
+                    )),
+                    "{kind} {width:?} x{wpr}: source compiled for the wrong geometry"
                 );
                 let cfg = plan.cfg;
-                let warps = super::COALESCED_WARPS_PER_BLOCK as u32;
-                assert_eq!(cfg.block_dim, (warps * 32, 1, 1), "{kind}: block_dim");
+                // Rows per block: the block's warps over the row's warps.
+                let warps = (super::COALESCED_WARPS_PER_BLOCK / wpr) as u32;
+                assert_eq!(
+                    cfg.block_dim,
+                    (super::COALESCED_WARPS_PER_BLOCK as u32 * 32, 1, 1),
+                    "{kind}: block_dim"
+                );
                 assert_eq!(cfg.shared_mem_bytes, 0, "{kind}: needs no shared memory");
                 // Every row must land in some warp, including the tail.
                 assert!(
@@ -1366,7 +1201,7 @@ mod tests {
         // whatever the width.
         let (src, module, fn_name) = super::matvec_launch_meta("Q4_0").expect("kernel");
         for width in [MatvecWidth::Narrow, MatvecWidth::Wide] {
-            let plan = super::matvec_launch_plan(fn_name, src, module, rows, width);
+            let plan = super::matvec_launch_plan(fn_name, src, module, rows, width, 4);
             assert_eq!(plan.entry, fn_name);
             assert!(std::ptr::eq(plan.module, module));
             assert_eq!(plan.text(), src);
@@ -1380,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai, 2026-07-31) with the relative-tolerance fix; run with --ignored on a CUDA-capable machine to re-verify"]
+    #[ignore = "requires real CUDA hardware -- verified passing on an RTX 3060 (vast.ai, 2026-07-31) with the relative-tolerance fix; run with --ignored on a CUDA-capable machine to re-verify; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_q4_k_matvec_matches_cpu_reference() {
         let rows = 3;
         let cols = 256; // 1 Q4_K super-block per row
@@ -1388,6 +1223,7 @@ mod tests {
             rows,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
 
@@ -1408,6 +1244,7 @@ mod tests {
             rows,
             cols,
             frink_quant::Q5_K_BLOCK_BYTES,
+            "q5_k_matvec",
             frink_quant::dot_q5_k_f32_scalar,
         );
 
@@ -1420,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires real CUDA hardware -- 2026-07-31 real RTX 3060 run failed on row 1 with GPU=NaN CPU reference=NaN (assert_close_relative didn't treat NaN==NaN as agreement; fixed, but not yet re-verified on hardware); run with --ignored on a CUDA-capable machine to re-verify"]
+    #[ignore = "requires real CUDA hardware -- 2026-07-31 real RTX 3060 run failed on row 1 with GPU=NaN CPU reference=NaN (assert_close_relative didn't treat NaN==NaN as agreement; fixed, but not yet re-verified on hardware); run with --ignored on a CUDA-capable machine to re-verify; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_q6_k_matvec_matches_cpu_reference() {
         let rows = 3;
         let cols = 512; // 2 Q6_K super-blocks per row
@@ -1428,6 +1265,7 @@ mod tests {
             rows,
             cols,
             frink_quant::Q6_K_BLOCK_BYTES,
+            "q6_k_matvec",
             frink_quant::dot_q6_k_f32_scalar,
         );
 
@@ -1440,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires real CUDA hardware -- verifies that launch_matvec_multi (shared x upload) matches N sequential single-matvec launches; run with --ignored on a CUDA-capable machine"]
+    #[ignore = "requires real CUDA hardware -- verifies that launch_matvec_multi (shared x upload) matches N sequential single-matvec launches; run with --ignored on a CUDA-capable machine; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_matvec_multi_matches_sequential() {
         // Build three Q4_K matrices (different shapes) that share the same
         // activation dimension.
@@ -1452,18 +1290,21 @@ mod tests {
             rows_a,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
         let (weights_b, _, expected_b) = real_k_quant_test_matrix(
             rows_b,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
         let (weights_c, _, expected_c) = real_k_quant_test_matrix(
             rows_c,
             cols,
             frink_quant::Q4_K_BLOCK_BYTES,
+            "q4_k_matvec",
             frink_quant::dot_q4_k_f32_scalar,
         );
 
@@ -1531,7 +1372,7 @@ mod tests {
     /// `frink_quant::quantize_q8_0` gives an exact producer/consumer
     /// pair, keeping this a real numerical-agreement check.
     #[test]
-    #[ignore = "requires real CUDA hardware -- run with --ignored on a CUDA-capable machine to verify the fused dense-FFN activation-residency path"]
+    #[ignore = "requires real CUDA hardware -- run with --ignored on a CUDA-capable machine to verify the fused dense-FFN activation-residency path; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn launch_dense_ffn_swiglu_matches_sequential_cpu() {
         let hidden_dim = 64; // 2 Q8_0 blocks per row
         let ffn_dim = 96; // 3 Q8_0 blocks per row; gate/up output length
@@ -1597,14 +1438,22 @@ mod tests {
                 })
                 .collect::<Vec<f32>>()
         };
-        let g = cpu_matvec(&gate_w, gate_rb, ffn_dim, &x);
-        let u = cpu_matvec(&up_w, up_rb, ffn_dim, &x);
+        // Each matvec dots what it reads: `x` for gate and up, the
+        // device's SwiGLU output for down.
+        let xr = reads("q8_0_matvec", blk(hidden_dim), &x);
+        let g = cpu_matvec(&gate_w, gate_rb, ffn_dim, &xr);
+        let u = cpu_matvec(&up_w, up_rb, ffn_dim, &xr);
         let act: Vec<f32> = g
             .iter()
             .zip(u.iter())
             .map(|(gv, uv)| (gv / (1.0 + (-gv).exp())) * uv)
             .collect();
-        let expected = cpu_matvec(&down_w, down_rb, hidden_dim, &act);
+        let expected = cpu_matvec(
+            &down_w,
+            down_rb,
+            hidden_dim,
+            &reads("q8_0_matvec", blk(ffn_dim), &act),
+        );
 
         assert_eq!(gpu.len(), expected.len());
         for (i, (got, want)) in gpu.iter().zip(expected.iter()).enumerate() {

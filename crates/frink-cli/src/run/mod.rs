@@ -219,6 +219,7 @@ fn banner_line(args: &InferArgs, device: OffloadDevice) -> String {
             OffloadDevice::Cpu => "cpu",
             OffloadDevice::Metal => "Metal",
             OffloadDevice::Cuda => "CUDA",
+            OffloadDevice::Vulkan => "Vulkan",
         },
         gpu_layers_note(args, device),
         effective_ctk.as_str(),
@@ -377,64 +378,9 @@ fn apply_backend_env(args: &InferArgs) -> anyhow::Result<()> {
     // cores by default, as llama.cpp does) and explicit QoS.
     frink_core::threads::init_cpu_pool();
 
-    let device = if args.n_gpu_layers.offload_enabled() {
-        args.device.unwrap_or(OffloadDevice::Auto)
-    } else {
-        OffloadDevice::None
-    };
-
-    match device {
-        OffloadDevice::None | OffloadDevice::Cpu => unsafe {
-            std::env::set_var("FRINK_METAL", "0");
-            std::env::set_var("FRINK_METAL_ATTN", "0");
-            std::env::set_var("FRINK_CUDA", "0");
-        },
-        OffloadDevice::Auto => unsafe {
-            std::env::set_var("FRINK_METAL", "auto");
-            std::env::set_var("FRINK_CUDA", "auto");
-            // Honor a pre-set FRINK_METAL_ATTN so ablations like
-            // `FRINK_METAL_ATTN=0 … --ngl 99` actually disable attn.
-            if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                std::env::set_var("FRINK_METAL_ATTN", "1");
-            }
-        },
-        OffloadDevice::Metal => {
-            #[cfg(not(feature = "metal"))]
-            {
-                anyhow::bail!("Metal requested but this binary was built without --features metal");
-            }
-            #[cfg(feature = "metal")]
-            {
-                if !frink_metal::MetalProfile::detect().available {
-                    anyhow::bail!("Metal requested but no Metal device is available");
-                }
-                unsafe {
-                    std::env::set_var("FRINK_METAL", "1");
-                    if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                        std::env::set_var("FRINK_METAL_ATTN", "1");
-                    }
-                    std::env::set_var("FRINK_CUDA", "0");
-                }
-            }
-        }
-        OffloadDevice::Cuda => {
-            #[cfg(not(feature = "cuda"))]
-            {
-                anyhow::bail!("CUDA requested but this binary was built without --features cuda");
-            }
-            #[cfg(feature = "cuda")]
-            {
-                if !frink_cuda::HardwareProfile::detect().cuda_available {
-                    anyhow::bail!("CUDA requested but no CUDA device is available");
-                }
-                unsafe {
-                    std::env::set_var("FRINK_CUDA", "1");
-                    std::env::set_var("FRINK_METAL", "0");
-                    std::env::set_var("FRINK_METAL_ATTN", "0");
-                }
-            }
-        }
-    }
+    let device = OffloadDevice::with_offload(args.device, args.n_gpu_layers.offload_enabled());
+    // SAFETY: single-threaded here; the rayon pool reads none of these.
+    unsafe { frink_models::offload::select(device)? };
 
     // SAFETY: single-threaded init before Metal/CUDA workers spawn.
     unsafe {
@@ -852,34 +798,15 @@ fn run_infer_speculative(
     if tokens.is_empty() {
         anyhow::bail!("--model-draft needs a prompt to continue");
     }
-    if decoder.config.has_recurrent_layers() {
-        anyhow::bail!(
-            "--model-draft cannot be used with a target model that has recurrent (Mamba) \
-             layers: a rejected draft rolls the KV caches back to the last accepted position, \
-             and a Mamba layer's state is a reduction over the whole prefix that cannot be \
-             rolled back (llama.cpp's server re-prefills such models for the same reason)"
-        );
-    }
-
-    let mut config =
-        frink_models::ModelConfig::from_gguf(&frink_gguf::ShardedGguf::open(draft_path)?)?;
-    // The draft's caches at the target's width: one `--ctk` for the run.
-    config.kv_dtype = decoder.config.kv_dtype;
-    if config.has_recurrent_layers() {
-        anyhow::bail!(
-            "--model-draft cannot be a model with recurrent (Mamba) layers: the draft cache is \
-             rolled back after every verification block"
-        );
-    }
-    let draft = frink_models::Decoder::from_gguf(draft_path, config)?;
+    let draft = frink_models::draft_model::load(draft_path, &decoder.config)?;
     eprintln!("frink: draft model {draft_path}");
 
     // Refused at construction when the vocabularies differ. The two
     // models must number their tokens identically or the rejection rule
     // is comparing probabilities of different tokens, which produces
     // fluent text with a plausible accept rate and no error at all.
-    let mut drafter = frink_models::DraftModelSpeculator::new(
-        draft,
+    let mut drafter = frink_models::DraftModelSpeculator::from_weights(
+        &draft,
         &decoder.config,
         sampling.clone(),
         seed,

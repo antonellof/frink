@@ -1,0 +1,42 @@
+<s><|start_header_id|>system<|end_header_id|>
+
+Environment: ipython
+Cutting Knowledge Date: December 2023
+Today Date: 26 Jul 2024
+
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.
+
+Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.Do not use variables.
+
+{
+    "function": {
+        "description": "The weather in a city",
+        "name": "get_weather",
+        "parameters": {
+            "properties": {
+                "city": {
+                    "description": "La città",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "city"
+            ],
+            "type": "object"
+        }
+    },
+    "type": "function"
+}
+
+Weather in Rome?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{"name": "get_weather", "parameters": {"city": "Rome"}}<|eot_id|><|start_header_id|>ipython<|end_header_id|>
+
+"Sunny"<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+It is sunny.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+And tomorrow?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+

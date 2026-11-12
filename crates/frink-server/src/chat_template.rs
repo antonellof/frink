@@ -60,6 +60,7 @@ use crate::policy::effort::{
     derive_think_gears, probe_effort_profile, probe_thinking_profile, EffortProfile, ThinkGears,
 };
 use crate::policy::turn::probe_end_of_turn;
+use frink_models::chat_template::reshape::Reshape;
 use frink_models::chat_template::{
     BuiltinTemplate, ChatTemplate as JinjaTemplate, RenderOptions, TemplateError,
 };
@@ -91,7 +92,16 @@ struct Inner {
     /// picked from the name alone left `<think>` prose in `content`
     /// with `reasoning_content` empty on exactly those checkpoints.
     implied_reasoning: Option<crate::policy::parser::ReasoningFormat>,
+    default_kwargs: Map<String, Value>,
     implied_tools: Option<crate::policy::parser::ToolCallFormat>,
+    /// Whether llama.cpp calls the template thinking-capable, which is
+    /// `enable_thinking`'s value in every render unless the request or a
+    /// flag sets it ([`JinjaTemplate::supports_thinking`]). Probed once,
+    /// at load, as llama-server does.
+    supports_thinking: bool,
+    /// What llama.cpp does to a conversation before rendering it with
+    /// this template ([`Reshape`]).
+    reshape: Reshape,
 }
 
 impl std::fmt::Debug for PromptTemplate {
@@ -100,11 +110,72 @@ impl std::fmt::Debug for PromptTemplate {
     }
 }
 
+/// What `--chat-template` and `--chat-template-file` lower to: the
+/// template's text.
+pub(crate) const TEMPLATE_ENV: &str = "FRINK_CHAT_TEMPLATE";
+/// What `--chat-template-kwargs`, `-rea` and `--reasoning-effort` lower
+/// to: their merged JSON object.
+pub(crate) const TEMPLATE_KWARGS_ENV: &str = "FRINK_CHAT_TEMPLATE_KWARGS";
+
 impl PromptTemplate {
-    /// The load-time entry point for a GGUF: compile whatever
-    /// `tokenizer.chat_template` holds, or fall back to a builtin when
-    /// the checkpoint ships none at all (llama.cpp `--jinja` defaults to
-    /// ChatML the same way).
+    /// The template a GGUF is served with: the operator's, or whatever
+    /// `tokenizer.chat_template` holds, or a builtin when the checkpoint
+    /// ships none at all (llama.cpp `--jinja` defaults to ChatML the same
+    /// way).
+    ///
+    /// These three constructors are the only ones outside tests, so a
+    /// load path cannot miss the flags.
+    pub(crate) fn for_gguf(
+        file: &frink_gguf::ShardedGguf,
+        arch: Option<&str>,
+        byte_tokenizer: bool,
+    ) -> anyhow::Result<Self> {
+        Self::served(
+            JinjaTemplate::from_gguf_metadata(
+                file.metadata_str("tokenizer.chat_template"),
+                arch,
+                byte_tokenizer,
+                JinjaTemplate::vocab_has_chatml(file),
+            ),
+            file.token_text("tokenizer.ggml.bos_token_id"),
+            file.token_text("tokenizer.ggml.eos_token_id"),
+        )
+    }
+
+    /// For checkpoints that carry their template outside GGUF metadata:
+    /// Kimi K3 keeps it as a top-level string in `tokenizer_config.json`,
+    /// the real HuggingFace convention. No vocabulary here: this path
+    /// always carries its own template, so the ChatML fallback is
+    /// unreachable.
+    pub(crate) fn for_tokenizer_config(source: Option<&str>) -> anyhow::Result<Self> {
+        Self::served(
+            JinjaTemplate::from_gguf_metadata(source, None, false, false),
+            None,
+            None,
+        )
+    }
+
+    /// Role-labeled lines, no special tokens: the synthetic-weights demo
+    /// path, where there is no real vocabulary for markers to live in.
+    pub(crate) fn for_synthetic_weights() -> anyhow::Result<Self> {
+        Self::served(JinjaTemplate::builtin(BuiltinTemplate::Plain), None, None)
+    }
+
+    fn served(
+        native: JinjaTemplate,
+        bos_token: Option<String>,
+        eos_token: Option<String>,
+    ) -> anyhow::Result<Self> {
+        let flags = operator_flags()?;
+        Ok(Self::build(
+            flags.template.unwrap_or(native),
+            bos_token,
+            eos_token,
+            flags.kwargs,
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_gguf_metadata(
         source: Option<&str>,
         arch: Option<&str>,
@@ -117,45 +188,79 @@ impl PromptTemplate {
             JinjaTemplate::from_gguf_metadata(source, arch, byte_tokenizer, chatml_tokens_present),
             bos_token,
             eos_token,
+            Map::new(),
         )
     }
 
-    /// For checkpoints that carry their template outside GGUF metadata
-    /// -- Kimi K3 keeps it as a top-level string in
-    /// `tokenizer_config.json`, the real HuggingFace convention.
+    /// A template from text, as `for_tokenizer_config` has one, with the
+    /// special tokens a test needs.
+    #[cfg(test)]
     pub(crate) fn from_source(
         source: Option<&str>,
         bos_token: Option<String>,
         eos_token: Option<String>,
     ) -> Self {
         Self::build(
-            // No vocabulary here: this path always carries its own
-            // template, so the ChatML fallback is unreachable.
             JinjaTemplate::from_gguf_metadata(source, None, false, false),
             bos_token,
             eos_token,
+            Map::new(),
         )
     }
 
-    /// Role-labeled lines, no special tokens: the synthetic-weights demo
-    /// path, where there is no real vocabulary for markers to live in.
+    #[cfg(test)]
     pub(crate) fn plain() -> Self {
-        Self::build(JinjaTemplate::builtin(BuiltinTemplate::Plain), None, None)
+        Self::build(
+            JinjaTemplate::builtin(BuiltinTemplate::Plain),
+            None,
+            None,
+            Map::new(),
+        )
+    }
+
+    /// A template with these server-wide kwargs, as flags would set them.
+    #[cfg(test)]
+    pub(crate) fn with_default_kwargs(source: &str, default_kwargs: Map<String, Value>) -> Self {
+        let template = JinjaTemplate::from_gguf_metadata(Some(source), None, false, true);
+        Self::build(template, None, None, default_kwargs)
+    }
+
+    /// A GGUF's template with its tokens and the server-wide kwargs, as
+    /// [`Self::for_gguf`] builds it, without reading the environment.
+    #[cfg(test)]
+    pub(crate) fn as_served(
+        source: &str,
+        bos_token: &str,
+        eos_token: &str,
+        default_kwargs: Map<String, Value>,
+    ) -> Self {
+        Self::build(
+            JinjaTemplate::from_gguf_metadata(Some(source), None, false, false),
+            Some(bos_token.to_string()),
+            Some(eos_token.to_string()),
+            default_kwargs,
+        )
     }
 
     fn build(
         template: JinjaTemplate,
         bos_token: Option<String>,
         eos_token: Option<String>,
+        default_kwargs: Map<String, Value>,
     ) -> Self {
         let (bos, eos) = (bos_token.as_deref(), eos_token.as_deref());
+        // First, because the probes below render as a request would, and
+        // a request's render carries its answer.
+        let supports_thinking = template.supports_thinking(bos, eos);
         let thinking = probe_thinking_profile(
-            probe_render(&template, bos, eos),
-            probe_efforts(&template, bos, eos),
+            probe_render(&template, bos, eos, supports_thinking),
+            probe_efforts(&template, bos, eos, supports_thinking),
         );
         let handles_tools = probe_tools_consumed(&template, bos, eos);
-        let implied_reasoning = probe_implied_reasoning(probe_render(&template, bos, eos));
+        let implied_reasoning =
+            probe_implied_reasoning(probe_render(&template, bos, eos, supports_thinking));
         let implied_tools = probe_implied_tool_format(&template, bos, eos);
+        let reshape = Reshape::for_template(&template, bos, eos);
         Self {
             inner: Arc::new(Inner {
                 // A terminator that IS the EOS adds nothing to the stop
@@ -171,8 +276,17 @@ impl PromptTemplate {
                 handles_tools,
                 implied_reasoning,
                 implied_tools,
+                default_kwargs,
+                supports_thinking,
+                reshape,
             }),
         }
+    }
+
+    /// `--chat-template-kwargs` and friends: what every render starts
+    /// from, under anything the request says.
+    pub(crate) fn default_kwargs(&self) -> &Map<String, Value> {
+        &self.inner.default_kwargs
     }
 
     /// The reasoning parser for a checkpoint served under `served_model`:
@@ -209,6 +323,22 @@ impl PromptTemplate {
     /// Short human-readable identity, for the load-time log line.
     pub(crate) fn describe(&self) -> String {
         self.inner.template.describe()
+    }
+
+    /// The Jinja source this checkpoint is served with, or `None` for a
+    /// builtin, which has no source text to show (`/props`).
+    pub(crate) fn source(&self) -> Option<&str> {
+        self.inner.template.source()
+    }
+
+    /// The BOS and EOS texts the template renders with, which are the
+    /// vocabulary entries the GGUF names (`/props`).
+    pub(crate) fn bos_token(&self) -> Option<&str> {
+        self.inner.bos_token.as_deref()
+    }
+
+    pub(crate) fn eos_token(&self) -> Option<&str> {
+        self.inner.eos_token.as_deref()
     }
 
     /// The end-of-turn string this family emits before EOS, if it has
@@ -255,10 +385,14 @@ impl PromptTemplate {
         extra: Map<String, Value>,
     ) -> Result<String, TemplateError> {
         let structured = self.handles_tools() && !tools.is_empty();
-        let json: Vec<Value> = messages
+        let mut json: Vec<Value> = messages
             .iter()
             .map(|m| message_json(m, structured))
             .collect();
+        self.inner
+            .reshape
+            .apply(&mut json, &extra)
+            .map_err(TemplateError::Render)?;
         let opts = RenderOptions {
             add_generation_prompt: true,
             bos_token: self.inner.bos_token.clone(),
@@ -269,9 +403,28 @@ impl PromptTemplate {
                 Vec::new()
             },
             extra,
+            enable_thinking: Some(self.inner.supports_thinking),
         };
         self.inner.template.render(&json, &opts)
     }
+}
+
+/// What the operator's flags say, read from the variables they lower to
+/// so that setting those directly is held to the same checks.
+fn operator_flags() -> anyhow::Result<frink_models::template_flags::TemplateFlags> {
+    let template = std::env::var(TEMPLATE_ENV).ok();
+    let kwargs: Vec<String> = std::env::var(TEMPLATE_KWARGS_ENV)
+        .ok()
+        .into_iter()
+        .collect();
+    frink_models::template_flags::TemplateFlags::resolve(
+        frink_models::template_flags::TemplateFlagValues {
+            template: template.as_deref(),
+            kwargs: &kwargs,
+            ..Default::default()
+        },
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 /// One OpenAI-shaped message, as a template reads it.
@@ -290,24 +443,23 @@ fn message_json(m: &ChatMessage, structured: bool) -> Value {
         .as_ref()
         .map(crate::MessageContent::as_text)
         .unwrap_or_default();
-    match (&m.tool_calls, structured) {
+    // Keys in llama.cpp's order (`common_chat_msg::to_json_oaicompat`):
+    // role, content, the reasoning, `tool_call_id`, `tool_calls`. A
+    // template that prints a message, or walks its items, shows it.
+    let tool_calls = match (&m.tool_calls, structured) {
         (Some(calls), true) => {
             obj.insert("content".into(), json!(text));
-            obj.insert(
-                "tool_calls".into(),
-                Value::Array(calls.iter().map(tool_call_json).collect()),
-            );
+            Some(Value::Array(calls.iter().map(tool_call_json).collect()))
         }
         (Some(_), false) => {
             obj.insert("content".into(), json!(m.rendered_content()));
+            None
         }
         (None, _) => {
             obj.insert("content".into(), json!(text));
+            None
         }
-    }
-    if let Some(id) = &m.tool_call_id {
-        obj.insert("tool_call_id".into(), json!(id));
-    }
+    };
     // Under every spelling, because templates disagree and a template
     // reads a key it does not know as undefined rather than erroring:
     // the DeepSeek/GLM family iterates `message.reasoning_content`, the
@@ -334,30 +486,33 @@ fn message_json(m: &ChatMessage, structured: bool) -> Value {
             obj.insert("thinking".into(), json!(reasoning));
         }
     }
+    if let Some(id) = &m.tool_call_id {
+        obj.insert("tool_call_id".into(), json!(id));
+    }
+    if let Some(calls) = tool_calls {
+        obj.insert("tool_calls".into(), calls);
+    }
     Value::Object(obj)
 }
 
-/// A replayed tool call.
-///
-/// `arguments` arrives on the wire as a JSON *string*, and templates
-/// disagree about what they expect: HuggingFace's own
-/// `apply_chat_template` hands the model a dict, so a template that
-/// writes `{{ call.function.arguments | tojson }}` would emit a
-/// double-encoded string if the wire form were passed through. Parsing
-/// it back to an object when it is one gives every template the shape it
-/// was written against; a value that is not a JSON object stays a
-/// string, because that is all that can honestly be said about it.
+/// A replayed tool call, with `arguments` as the JSON string the
+/// request carried, as llama.cpp builds it
+/// (`common_chat_msg::to_json_oaicompat`). [`Reshape`] parses it into an
+/// object for a template that reads one, as llama.cpp's
+/// `func_args_not_string` does.
 fn tool_call_json(call: &crate::ToolCallIn) -> Value {
-    let raw = call.function.arguments.as_str();
-    let args = match serde_json::from_str::<Value>(raw) {
-        Ok(v @ Value::Object(_)) => v,
-        _ => json!(raw),
-    };
-    json!({
+    let args = json!(call.function.arguments);
+    // llama.cpp's order (`common_chat_msg::to_json_oaicompat`), which a
+    // template printing the call shows: the id last, and only when there
+    // is one.
+    let mut out = json!({
         "type": "function",
-        "id": call.id,
         "function": {"name": call.function.name, "arguments": args},
-    })
+    });
+    if !call.id.is_empty() {
+        out["id"] = json!(call.id);
+    }
+    out
 }
 
 pub(crate) fn tool_json(t: &ToolDef) -> Value {
@@ -404,6 +559,7 @@ fn probe_tools_consumed(
                 eos_token: eos_token.map(str::to_string),
                 tools,
                 extra: Map::new(),
+                enable_thinking: None,
             },
         )
     };
@@ -467,6 +623,7 @@ fn probe_implied_tool_format(
                 eos_token: eos_token.map(str::to_string),
                 tools: vec![probe],
                 extra: Map::new(),
+                enable_thinking: None,
             },
         )
         .ok()?;
@@ -501,6 +658,7 @@ fn probe_render<'a>(
     template: &'a JinjaTemplate,
     bos_token: Option<&'a str>,
     eos_token: Option<&'a str>,
+    supports_thinking: bool,
 ) -> impl FnMut(&Map<String, Value>, Option<&[Value]>) -> Result<String, TemplateError> + 'a {
     let messages = vec![json!({"role": "user", "content": "probe"})];
     move |kwargs, tools| {
@@ -510,6 +668,7 @@ fn probe_render<'a>(
             eos_token: eos_token.map(str::to_string),
             tools: tools.map(<[Value]>::to_vec).unwrap_or_default(),
             extra: kwargs.clone(),
+            enable_thinking: Some(supports_thinking),
         };
         template.render(&messages, &opts)
     }
@@ -538,8 +697,14 @@ fn probe_efforts(
     template: &JinjaTemplate,
     bos_token: Option<&str>,
     eos_token: Option<&str>,
+    supports_thinking: bool,
 ) -> EffortProfile {
-    probe_effort_profile(probe_render(template, bos_token, eos_token))
+    probe_effort_profile(probe_render(
+        template,
+        bos_token,
+        eos_token,
+        supports_thinking,
+    ))
 }
 
 /// A render closure that varies the CONVERSATION, for
@@ -563,6 +728,7 @@ pub(crate) fn turn_render<'a>(
                 eos_token: eos_token.map(str::to_string),
                 tools: Vec::new(),
                 extra: Map::new(),
+                enable_thinking: None,
             },
         )
     }
@@ -820,24 +986,114 @@ mod tests {
     /// The wire form of `arguments` is a string; a template written
     /// against HuggingFace's `apply_chat_template` expects the parsed
     /// object, and `| tojson` on the string form would double-encode it.
+    /// A template that reads the arguments' members gets an object, and
+    /// one that concatenates them gets the request's JSON string, as
+    /// llama.cpp decides per template (#509).
     #[test]
-    fn replayed_call_arguments_reach_a_structural_template_as_an_object() {
-        let src = "{% for m in messages %}{% for c in m.tool_calls %}{{ c.function.arguments.city }}{% endfor %}{% endfor %}tools:{{ tools | length }}";
+    fn replayed_call_arguments_are_an_object_only_where_the_template_reads_one() {
+        let render = |src: &str| {
+            let tmpl = PromptTemplate::from_gguf_metadata(
+                Some(src),
+                Some("qwen3"),
+                false,
+                true,
+                None,
+                None,
+            );
+            let replayed = ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![tool_call_in("get_weather", r#"{"city":"Paris"}"#)]),
+                tool_call_id: None,
+                reasoning_content: None,
+            };
+            tmpl.render(&[replayed], &[tool_def("get_weather")], Map::new())
+                .expect("renders")
+        };
+        let reads = "{% for m in messages %}{% for c in m.tool_calls %}\
+                     {% for k, v in c.function.arguments.items() %}{{ k }}={{ v }}{% endfor %}\
+                     {% endfor %}{% endfor %}tools:{{ tools | length }}";
+        assert_eq!(render(reads), "city=Paristools:1");
+        let concatenates = "{% for m in messages %}{% for c in m.tool_calls %}\
+                            {{ '>>>' + c.function.name + '\\n' + c.function.arguments }}\
+                            {% endfor %}{% endfor %}tools:{{ tools | length }}";
+        assert_eq!(
+            render(concatenates),
+            ">>>get_weather\n{\"city\":\"Paris\"}tools:1"
+        );
+    }
+
+    /// A message and a replayed call reach the template with their keys
+    /// in llama.cpp's order, the call's id last and only when it has one.
+    #[test]
+    fn a_replayed_turn_keeps_llama_cpps_key_order() {
+        let src = "{% for m in messages %}{{ m | tojson }}\n\
+                   {% for c in m.tool_calls %}{% endfor %}{% endfor %}{{ tools | length }}";
         let tmpl =
             PromptTemplate::from_gguf_metadata(Some(src), Some("qwen3"), false, true, None, None);
+        let mut no_id = tool_call_in("g", "{}");
+        no_id.id.clear();
         let replayed = ChatMessage {
             role: "assistant".to_string(),
-            content: None,
-            tool_calls: Some(vec![tool_call_in("get_weather", r#"{"city":"Paris"}"#)]),
+            content: Some(MessageContent::Text("hi".to_string())),
+            tool_calls: Some(vec![tool_call_in("f", r#"{"b":1,"a":2}"#), no_id]),
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content: Some("why".to_string()),
         };
-        let tools = vec![tool_def("get_weather")];
+        let result = ChatMessage {
+            tool_call_id: Some("call_0".to_string()),
+            ..msg("tool", "18C")
+        };
+        let tools = vec![tool_def("f")];
         assert_eq!(
-            tmpl.render(&[replayed], &tools, Map::new())
+            tmpl.render(&[replayed, result], &tools, Map::new())
                 .expect("renders"),
-            "Paristools:1"
+            concat!(
+                r#"{"role": "assistant", "content": "hi", "reasoning_content": "why", "#,
+                r#""reasoning": "why", "tool_calls": ["#,
+                r#"{"type": "function", "function": {"name": "f", "arguments": {"b": 1, "a": 2}}, "id": "call_0"}, "#,
+                r#"{"type": "function", "function": {"name": "g", "arguments": {}}}]}"#,
+                "\n",
+                r#"{"role": "tool", "content": "18C", "tool_call_id": "call_0"}"#,
+                "\n1",
+            )
         );
+    }
+
+    /// A template that raises on a system turn, as Gemma 2's does, gets
+    /// it folded into the user's turn, as llama.cpp folds it. One that
+    /// prints it keeps it.
+    #[test]
+    fn a_system_turn_the_template_refuses_is_folded_into_the_next() {
+        let gemma2 = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}\
+                      {% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}";
+        let conversation = [msg("system", "Be brief."), msg("user", "Hi")];
+        let folded = PromptTemplate::from_gguf_metadata(
+            Some(gemma2),
+            Some("gemma2"),
+            false,
+            true,
+            None,
+            None,
+        );
+        assert_eq!(
+            folded
+                .render(&conversation, &[], Map::new())
+                .expect("renders"),
+            "<user>Be brief.\nHi"
+        );
+        let chatml = PromptTemplate::from_gguf_metadata(
+            Some(CHATML),
+            Some("qwen2"),
+            false,
+            true,
+            None,
+            None,
+        );
+        assert!(chatml
+            .render(&conversation, &[], Map::new())
+            .expect("renders")
+            .starts_with("<|im_start|>system\nBe brief.<|im_end|>"));
     }
 
     #[test]

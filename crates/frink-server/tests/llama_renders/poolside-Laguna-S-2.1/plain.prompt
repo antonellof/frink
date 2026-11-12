@@ -1,0 +1,5 @@
+〈|EOS|〉<system>Be brief.</system>
+<user>Hi</user>
+<assistant><think></think>Hello</assistant>
+<user>How are you?</user>
+<assistant><think>

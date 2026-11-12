@@ -1,6 +1,7 @@
-//! `POST /slots/{id_slot}?action=save|restore`: persist a prompt's KV
-//! state to disk and read it back, so a long system prompt survives a
-//! restart.
+//! `POST /slots/{id_slot}?action=save|restore|erase`: persist a
+//! prompt's KV state to disk and read it back, so a long system prompt
+//! survives a restart, and empty a slot again. `GET /slots`, the live
+//! listing, is [`listing`].
 //!
 //! # llama.cpp's shape, and where frink's differs
 //!
@@ -10,7 +11,8 @@
 //! `POST /slots/:id_slot`, `server-context.cpp:4536-4567` dispatches on
 //! `action` and refuses everything when `--slot-save-path` is unset, and
 //! `server-task.cpp:1570-1592` is the `n_saved`/`n_written` /
-//! `n_restored`/`n_read` response body reproduced here.
+//! `n_restored`/`n_read` response body reproduced here, beside
+//! `server-task.cpp`'s `id_slot`/`n_erased` for an erase.
 //!
 //! Two things genuinely differ, and both are said out loud rather than
 //! emulated:
@@ -28,8 +30,9 @@
 //!   operation an operator actually wants: warm a specific system
 //!   prompt, not whichever request happened to land on slot 3.
 //!
-//! `action=erase` is REFUSED rather than approximated -- see
-//! [`erase_refusal`].
+//! `action=erase` empties ONE slot, as upstream's does: see
+//! [`SlotRecords`] for how a slot id finds its state in a cache that
+//! every slot shares.
 //!
 //! # Where the state goes
 //!
@@ -51,9 +54,11 @@
 
 mod file;
 mod identity;
+pub(crate) mod listing;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::extract::{Path as AxumPath, Query, State};
@@ -62,7 +67,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use frink_core::cache::KvCache;
-use frink_models::Decoder;
+use frink_models::{Decoder, PrefixCache};
 
 use crate::{ActiveModel, ApiError, AppState};
 
@@ -109,25 +114,47 @@ fn error(status: StatusCode, message: String, kind: &str) -> ApiError {
     )
 }
 
-/// Why `action=erase` is a refusal and not a no-op.
+/// The prompt each slot id last saved or restored.
 ///
-/// llama.cpp's erase drops one slot's token cache
-/// (`server-context.cpp:2671-2690`). frink's slots share one
-/// `PrefixCache`, which has whole-cache `clear()` and no per-entry
-/// eviction, so the two things this could do are both wrong: clearing
-/// everything would throw away every other slot on an erase of one, and
-/// doing nothing while answering 200 would report an eviction that did
-/// not happen. A refusal naming the reason is the only answer that is
-/// true, and this repo counts a refusal as coverage.
-fn erase_refusal() -> ApiError {
-    error(
-        StatusCode::NOT_IMPLEMENTED,
-        "action=erase: frink holds slot KV in one shared prefix cache, which has no per-entry \
-         eviction, so erasing one slot would mean clearing all of them. Restart the server, or \
-         delete the slot file, to stop a slot being restorable"
-            .to_string(),
-        "unsupported_feature",
-    )
+/// llama.cpp's erase drops one slot's tokens (`SERVER_TASK_TYPE_SLOT_ERASE`
+/// in `server-context.cpp`) and answers with how many it held. frink's
+/// slots share one [`PrefixCache`], so what makes a slot erasable is
+/// knowing which entry is its: this record, written by every save and
+/// restore. An erase forgets the record and drops the cache entry for
+/// exactly those tokens, unless another slot id still records the same
+/// prompt: that entry is the other slot's state too, and an erase of
+/// one slot must not empty it. A longer entry that merely starts with the
+/// prompt is a request's continuation and stays.
+#[derive(Default)]
+pub(crate) struct SlotRecords(Mutex<HashMap<u32, Vec<usize>>>);
+
+impl SlotRecords {
+    fn record(&self, id_slot: u32, tokens: Vec<usize>) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(id_slot, tokens);
+    }
+
+    /// Empties `id_slot`, and returns upstream's `n_erased`: the tokens
+    /// the slot held, `0` for one that held nothing.
+    ///
+    /// The records lock is taken before the cache lock, and save and
+    /// restore never hold the cache while recording, so the two cannot
+    /// wait on each other.
+    fn erase(&self, id_slot: u32, cache: &Mutex<PrefixCache>) -> usize {
+        let mut records = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tokens) = records.remove(&id_slot) else {
+            return 0;
+        };
+        if !records.values().any(|other| *other == tokens) {
+            cache
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&tokens);
+        }
+        tokens.len()
+    }
 }
 
 /// llama.cpp's `fs_validate_filename` in the strict direction: a slot
@@ -237,7 +264,9 @@ fn serving_identity(active: &ActiveModel) -> Result<(SlotIdentity, Arc<Decoder>)
     ))
 }
 
-/// `POST /slots/{id_slot}?action=save|restore|erase`.
+/// `POST /slots/{id_slot}?action=save|restore|erase`. Every action needs
+/// `--slot-save-path`, erase included, as upstream checks it before it
+/// dispatches.
 pub(crate) async fn post_slot(
     State(state): State<Arc<AppState>>,
     AxumPath(id_slot): AxumPath<String>,
@@ -262,13 +291,24 @@ pub(crate) async fn post_slot(
     match query.action.as_str() {
         "save" => save(state, dir, id_slot, body).await,
         "restore" => restore(state, dir, id_slot, body).await,
-        "erase" => Err(erase_refusal()),
+        "erase" => erase(&state, id_slot),
         other => Err(error(
             StatusCode::BAD_REQUEST,
             format!("Invalid action {other:?}: expected save, restore or erase"),
             "invalid_request_error",
         )),
     }
+}
+
+/// upstream's erase: `{"id_slot", "n_erased"}`. Like save and restore
+/// it needs the prefix cache: without one no slot can hold anything.
+fn erase(state: &AppState, id_slot: u32) -> Result<Json<serde_json::Value>, ApiError> {
+    let cache = require_prefix_cache(state)?;
+    let n_erased = state.slot_records.erase(id_slot, &cache);
+    Ok(Json(serde_json::json!({
+        "id_slot": id_slot,
+        "n_erased": n_erased,
+    })))
 }
 
 fn parse_body(body: &str) -> Result<SlotBody, ApiError> {
@@ -350,6 +390,7 @@ async fn save(
     }
 
     let n_tokens = tokens.len();
+    let recorded = tokens.clone();
     let write = tokio::task::spawn_blocking(move || {
         let payload = prefill_slot(&decoder, tokens);
         let bytes = file::encode(&identity, &payload);
@@ -362,6 +403,9 @@ async fn save(
         Ok::<u64, std::io::Error>(written)
     })
     .await;
+    if matches!(write, Ok(Ok(_))) {
+        state.slot_records.record(id_slot, recorded);
+    }
 
     match write {
         Ok(Ok(n_written)) => Ok(Json(serde_json::json!({
@@ -465,11 +509,13 @@ async fn restore(
     }
 
     let n_restored = payload.tokens.len();
+    let recorded = payload.tokens.clone();
     cache.lock().unwrap_or_else(|p| p.into_inner()).store(
         payload.tokens,
         payload.layers,
         payload.pending_logits,
     );
+    state.slot_records.record(id_slot, recorded);
 
     Ok(Json(serde_json::json!({
         "id_slot": id_slot,
@@ -562,6 +608,94 @@ mod tests {
         for good in ["system.fslot", "sys-prompt_v2.fslot", "a", "0"] {
             assert!(validate_filename(good).is_ok(), "{good:?}");
         }
+    }
+
+    fn one_layer(positions: usize) -> Vec<KvCache> {
+        let mut cache = KvCache::new(1, 1);
+        for i in 0..positions {
+            cache.push(&[i as f32], &[i as f32]).unwrap();
+        }
+        vec![cache]
+    }
+
+    /// An erase empties the slot it names and reports upstream's
+    /// `n_erased`; a slot that holds nothing erases nothing.
+    ///
+    /// Sabotage: skip the `remove` call in `SlotRecords::erase`; the
+    /// cache still answers the prompt and this goes red.
+    #[test]
+    fn erase_empties_the_slot_it_names_and_counts_its_tokens() {
+        let cache = Mutex::new(PrefixCache::new(8));
+        let records = SlotRecords::default();
+        let prompt = vec![1, 2, 3, 4];
+        cache
+            .lock()
+            .unwrap()
+            .store(prompt.clone(), one_layer(4), vec![0.0]);
+        records.record(0, prompt.clone());
+
+        assert_eq!(records.erase(7, &cache), 0, "slot 7 holds nothing");
+        assert_eq!(records.erase(0, &cache), 4);
+        assert_eq!(
+            cache
+                .lock()
+                .unwrap()
+                .find_longest_prefix(&prompt)
+                .matched_len,
+            0,
+            "the slot's state is gone"
+        );
+        assert_eq!(records.erase(0, &cache), 0, "and erasing again is a no-op");
+    }
+
+    /// Two slots holding one prompt share one cache entry. Erasing one
+    /// empties THAT slot and leaves the other's state where it was.
+    #[test]
+    fn erasing_one_slot_leaves_another_slot_with_the_same_prompt_warm() {
+        let cache = Mutex::new(PrefixCache::new(8));
+        let records = SlotRecords::default();
+        let prompt = vec![5, 6, 7];
+        cache
+            .lock()
+            .unwrap()
+            .store(prompt.clone(), one_layer(3), vec![0.0]);
+        records.record(0, prompt.clone());
+        records.record(1, prompt.clone());
+
+        assert_eq!(records.erase(0, &cache), 3);
+        assert_eq!(
+            cache
+                .lock()
+                .unwrap()
+                .find_longest_prefix(&prompt)
+                .matched_len,
+            3,
+            "slot 1 still holds it"
+        );
+        assert_eq!(records.erase(1, &cache), 3);
+        assert_eq!(
+            cache
+                .lock()
+                .unwrap()
+                .find_longest_prefix(&prompt)
+                .matched_len,
+            0
+        );
+    }
+
+    /// upstream's body, and the prefix cache it needs.
+    #[test]
+    fn erase_answers_upstreams_body_and_needs_the_prefix_cache() {
+        let mut state = crate::tests::test_state(
+            crate::tests::test_byte_model_with_facts(crate::model::GgufFacts::default()),
+            crate::response_cache::ResponseCache::new(16, std::time::Duration::from_secs(60)),
+        );
+        let (status, _) = erase(&state, 3).unwrap_err();
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "no prefix cache");
+
+        state.prefix_cache = Some(Arc::new(Mutex::new(PrefixCache::new(4))));
+        let Json(body) = erase(&state, 3).expect("erased");
+        assert_eq!(body, serde_json::json!({"id_slot": 3, "n_erased": 0}));
     }
 
     /// A length read off the wire, bounded by the format rather than by

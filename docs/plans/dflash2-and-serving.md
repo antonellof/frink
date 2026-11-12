@@ -54,8 +54,8 @@ Metal kernels. Kernel work stays under the existing coverage matrix (#405).
 - `north-star.md` lists trained drafters as priority 10 instead of
   "Not now"; `dflash-speculative-decoding.md` is back from `on-hold/`
   with its GO/NO-GO resolved (GO).
-- Stale speculation lines fixed in `serving-parity-audit.md`,
-  `ROADMAP.md` and the `speculative.rs` module doc.
+- The `speculative.rs` module doc names every drafter, not only prompt
+  lookup.
 
 ## Phase 1: DFlash2 end to end (first deliverable)
 
@@ -90,7 +90,7 @@ Each step is its own PR, CPU first, token parity before any backend work.
    `accept_or_resample` when sampling. Draft-side KV keyed off target position,
    truncated on rejection. Compatibility check target/draft (hidden size, vocab
    by token-string hash, layer ids in range) refuses with the mismatch named;
-   this also closes the open step 2 of `speculative-decoding.md`.
+   this also closes the open step 2 of `archive/speculative-decoding.md`.
 5. **Recurrent rollback.** The Qwen hybrid targets have GDN layers with
    `rollback_limit() == 0`. Follow what llama.cpp does at the pin for
    speculative decode on recurrent memory (checkpoint and restore of the

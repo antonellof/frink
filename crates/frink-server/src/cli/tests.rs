@@ -163,6 +163,105 @@ fn reasoning_budget_parses_llama_cpps_range_and_refuses_the_rest() {
     assert!(err.contains("--reasoning-budget"), "{err}");
 }
 
+#[test]
+fn chat_template_flags_parse_like_llama_server() {
+    let args = server_args(&[
+        "--chat-template",
+        "chatml",
+        "--chat-template-kwargs",
+        r#"{"a": 1}"#,
+        "--chat-template-kwargs",
+        r#"{"b": 2}"#,
+        "--reasoning-effort",
+        "high",
+    ]);
+    assert_eq!(args.chat_template.as_deref(), Some("chatml"));
+    assert_eq!(args.chat_template_kwargs.len(), 2);
+    assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
+}
+
+/// Both set one thing upstream, so the later one wins there.
+#[test]
+fn the_later_of_chat_template_and_its_file_wins() {
+    let args = server_args(&["--chat-template", "a", "--chat-template-file", "b"]);
+    assert_eq!(args.chat_template, None);
+    assert!(args.chat_template_file.is_some());
+    let args = server_args(&["--chat-template-file", "b", "--chat-template", "a"]);
+    assert_eq!(args.chat_template.as_deref(), Some("a"));
+    assert_eq!(args.chat_template_file, None);
+}
+
+#[test]
+fn reasoning_takes_its_short_spelling_and_auto_as_minus_one() {
+    let argv = rewrite(vec!["frink-server".into(), "-rea".into(), "-1".into()]);
+    let args = ServerArgs::try_parse_from(argv).unwrap();
+    assert_eq!(args.reasoning.as_deref(), Some("-1"));
+}
+
+#[test]
+fn a_bad_chat_template_or_reasoning_value_is_refused_at_startup() {
+    for argv in [
+        vec!["--reasoning", "maybe"],
+        vec!["--chat-template", "llama3"],
+        vec!["--chat-template-kwargs", "[1]"],
+    ] {
+        let args = server_args(&argv);
+        assert!(apply_cli_overrides(&args).is_err(), "{argv:?} was accepted");
+    }
+}
+
+/// llama.cpp's default, both spellings, and the later of the pair
+/// winning, as it does upstream.
+#[test]
+fn reasoning_preserve_is_on_by_default_and_the_later_spelling_wins() {
+    let preserve = |argv: &[&str]| {
+        template_flags(&server_args(argv)).unwrap().kwargs["preserve_reasoning"].clone()
+    };
+    assert_eq!(preserve(&[]), serde_json::json!(true));
+    assert_eq!(
+        preserve(&["--no-reasoning-preserve"]),
+        serde_json::json!(false)
+    );
+    assert_eq!(preserve(&["--reasoning-preserve"]), serde_json::json!(true));
+    assert_eq!(
+        preserve(&["--reasoning-preserve", "--no-reasoning-preserve"]),
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        preserve(&["--no-reasoning-preserve", "--reasoning-preserve"]),
+        serde_json::json!(true)
+    );
+    let error = template_flags(&server_args(&[
+        "--no-reasoning-preserve",
+        "--chat-template-kwargs",
+        r#"{"preserve_reasoning": true}"#,
+    ]))
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("--no-reasoning-preserve"),
+        "{error}"
+    );
+}
+
+/// The defaults alone must not replace a FRINK_CHAT_TEMPLATE_KWARGS
+/// from the environment; a flag that writes a kwarg does.
+#[test]
+fn only_a_kwarg_flag_writes_the_kwargs_variable() {
+    for argv in [
+        &[][..],
+        &["--chat-template", "chatml"][..],
+        &["--reasoning", "auto"][..],
+    ] {
+        let flags = template_flags(&server_args(argv)).unwrap();
+        assert_eq!(kwargs_env_value(&flags), None, "{argv:?}");
+    }
+    let flags = template_flags(&server_args(&["--no-reasoning-preserve"])).unwrap();
+    assert_eq!(
+        kwargs_env_value(&flags).as_deref(),
+        Some(r#"{"preserve_reasoning":false}"#)
+    );
+}
+
 /// Both spellings of llama.cpp's prefill switch parse, and they
 /// conflict rather than letting the last one win silently.
 #[test]
@@ -309,4 +408,78 @@ fn threads_http_metrics_and_version_parse_like_llama_server() {
         .try_get_matches_from(["frink-server", "--usage"])
         .unwrap_err();
     assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+}
+
+/// llama-server's spellings of the draft flags (`common/arg.cpp`:
+/// `-md`, `--draft`, `--spec-draft-p-min`) reach the variables
+/// `server_draft` reads.
+#[test]
+fn the_draft_flags_lower_to_the_variables_the_drafter_reads() {
+    use crate::server_draft::{DRAFT_ENV, DRAFT_MAX_ENV, DRAFT_P_MIN_ENV};
+    let args = ServerArgs::try_parse_from(rewrite(
+        [
+            "frink-server",
+            "-md",
+            "draft.gguf",
+            "--draft",
+            "3",
+            "--spec-draft-p-min",
+            "0.5",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    ))
+    .unwrap();
+    apply_cli_overrides(&args).unwrap();
+    let read = |k: &str| std::env::var(k).ok();
+    let got = (read(DRAFT_ENV), read(DRAFT_MAX_ENV), read(DRAFT_P_MIN_ENV));
+    for k in [DRAFT_ENV, DRAFT_MAX_ENV, DRAFT_P_MIN_ENV] {
+        // SAFETY: test-only, and no other test reads these variables.
+        unsafe { std::env::remove_var(k) };
+    }
+    assert_eq!(
+        got,
+        (
+            Some("draft.gguf".to_string()),
+            Some("3".to_string()),
+            Some("0.5".to_string())
+        )
+    );
+}
+
+/// llama.cpp's `--slots` / `--no-slots` pair, its `LLAMA_ARG_ENDPOINT_SLOTS`
+/// in both truthy and falsy spellings, and `--spm-infill`, by their
+/// llama.cpp names. Parsing only: lowering `--no-slots` would turn the
+/// listing off for every HTTP test running beside this one.
+///
+/// Sabotage: drop `overrides_with` from both spellings; the two are then
+/// both set and this goes red.
+#[test]
+fn the_slots_switch_and_spm_infill_parse_like_llama_server() {
+    let pair = |argv: &[&str]| {
+        let a = server_args(argv);
+        frink_core::argv::flag_pair(a.slots, a.no_slots)
+    };
+    assert_eq!(pair(&[]), None);
+    assert_eq!(pair(&["--slots"]), Some(true));
+    assert_eq!(pair(&["--no-slots"]), Some(false));
+    assert_eq!(pair(&["--slots", "--no-slots"]), Some(false));
+    assert_eq!(pair(&["--no-slots", "--slots"]), Some(true));
+    for (value, want) in [("1", Some(true)), ("0", Some(false))] {
+        let mut cmd = ServerArgs::command();
+        cmd.build();
+        let argv = llama_style_argv(&cmd, vec!["frink-server".into()], |k| {
+            (k == "LLAMA_ARG_ENDPOINT_SLOTS").then(|| value.to_string())
+        })
+        .unwrap();
+        let a = ServerArgs::try_parse_from(argv).unwrap();
+        assert_eq!(
+            frink_core::argv::flag_pair(a.slots, a.no_slots),
+            want,
+            "LLAMA_ARG_ENDPOINT_SLOTS={value}"
+        );
+    }
+    assert!(server_args(&["--spm-infill"]).spm_infill);
+    assert!(!server_args(&[]).spm_infill);
 }

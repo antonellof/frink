@@ -18,6 +18,9 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 frink-quant = { workspace = true }
+# What a CUDA decode matvec reads of its activation (q8_1 under the dp4a
+# default), for the GPU test's CPU reference.
+frink-cuda = { workspace = true }
 
 [features]
 default = []

@@ -17,7 +17,7 @@ use frink_core::cache::{
     PagedStoreExhausted, SharedPagedKv,
 };
 use frink_models::sampling::SamplingParams;
-use frink_models::tokenizer::{prepend_bos, SpecialTokens, StopTokens};
+use frink_models::tokenizer::StopTokens;
 use frink_models::{Ceiling, Decoder, Engine, KvShape, PrefixCache, TextTokenizer};
 
 use crate::budget::ContextCeiling;
@@ -1474,7 +1474,7 @@ pub struct GenerationParams {
     /// STRINGS and turning them into ids needs the model's tokenizer:
     /// one seam that has both, rather than two answers that can drift.
     pub token_mask: crate::token_mask::TokenMask,
-    /// vLLM's `cache_salt`: which caller's namespace this request's
+    /// `cache_salt`: which caller's namespace this request's
     /// prefix cache entries belong to, hashed to a `u64`.
     ///
     /// `None` is the shared namespace, which is what every request got
@@ -1703,11 +1703,19 @@ pub(crate) fn forward_prompt_batch(
 /// back the same store a step writes to, and two borrows of it cannot
 /// coexist (`sampling_loop::DecodeEngine` says why).
 ///
-/// The drafter is `PromptLookupSpeculator`: an n-gram match over the
-/// history with no second checkpoint, so it costs no memory, no load
-/// time and no second tokenizer, and it is useful exactly where a
-/// coding agent lives -- output that quotes its input. A model-based
-/// drafter is another `Drafter` impl, not another engine.
+/// The drafter is [`ServerDrafter`]: prompt lookup by default, or the
+/// server's `--model-draft` checkpoint. Either way it is another
+/// drafter, not another engine.
+/// What drafts for one request's speculation.
+enum ServerDrafter {
+    /// An n-gram match over the request's own output: no second
+    /// checkpoint, no memory, no load time, and useful exactly where a
+    /// coding agent lives, output that quotes its input.
+    Lookup(frink_models::speculative::PromptLookupSpeculator),
+    /// The server's `--model-draft`, with KV of this request's own.
+    Model(Box<frink_models::DraftModelSpeculator>),
+}
+
 struct ServerEngine<'a> {
     decoder: &'a Decoder,
     kv: &'a mut Kv,
@@ -1717,7 +1725,7 @@ struct ServerEngine<'a> {
     first_token_at: &'a std::cell::Cell<Option<std::time::Instant>>,
     #[cfg(feature = "metal")]
     kv_offload: bool,
-    drafter: Option<frink_models::speculative::PromptLookupSpeculator>,
+    drafter: Option<ServerDrafter>,
     accepted: usize,
     drafted: usize,
     /// FORWARD PASSES, not speculative rounds.
@@ -1762,11 +1770,20 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
         l
     }
 
-    fn draft(&mut self, _prompt: &[usize], history: &[usize], max: usize) -> Vec<usize> {
-        let Some(d) = self.drafter.as_ref() else {
-            return Vec::new();
+    fn draft(&mut self, prompt: &[usize], history: &[usize], max: usize) -> Vec<usize> {
+        let mut proposal = match self.drafter.as_mut() {
+            None => return Vec::new(),
+            Some(ServerDrafter::Lookup(d)) => d.propose_tokens(history),
+            // The draft model continues the whole sequence, prompt
+            // included, and rolls its own KV back to it each round.
+            Some(ServerDrafter::Model(d)) => {
+                use frink_models::speculative::Drafter;
+                let mut sequence = Vec::with_capacity(prompt.len() + history.len());
+                sequence.extend_from_slice(prompt);
+                sequence.extend_from_slice(history);
+                d.propose(&sequence, &[], max).tokens().to_vec()
+            }
         };
-        let mut proposal = d.propose_tokens(history);
         proposal.truncate(max);
         proposal
     }
@@ -1898,17 +1915,18 @@ pub(crate) struct GeneratedChoice {
 // decoder/tokenizer/stop_tokens/bos_id/prompt/kv_pool/prefix_cache/emit
 // re-wrapped for no real benefit at this call depth (two call sites,
 // both in this crate).
-pub fn generate(
+pub fn generate<'p>(
     decoder: &Decoder,
     tokenizer: &ServerTokenizer,
     stop_tokens: &StopTokens,
     bos_id: Option<usize>,
-    prompt: &str,
+    prompt: impl Into<crate::prompt_input::Prompt<'p>>,
     params: &GenerationParams,
     kv_pool: Option<&KvPoolConfig>,
     paged_kv: Option<&PagedKvConfig>,
     prefix_cache: Option<&Mutex<PrefixCache>>,
     ceiling: Option<&ContextCeiling>,
+    draft: Option<&crate::server_draft::ServerDraft>,
     mut emit: impl FnMut(usize, &str),
 ) -> Result<GenerationOutput, DecodeError> {
     let vocab_size = decoder.config.vocab_size;
@@ -1939,9 +1957,11 @@ pub fn generate(
 
     // `Parse`: the prompt is what a chat template rendered, or a raw
     // completion, and llama.cpp's server tokenizes both with
-    // `parse_special = true`. See `Model::encode`.
-    let mut tokens = tokenizer.encode(prompt, SpecialTokens::Parse);
-    prepend_bos(&mut tokens, bos_id);
+    // `parse_special = true`. See `Model::encode`. An id prompt
+    // (`/infill`) is prefilled as its route assembled it.
+    let prompt: crate::prompt_input::Prompt<'_> = prompt.into();
+    let mut tokens = prompt.tokens(tokenizer, bos_id);
+    let prompt = prompt.text();
     // Before anything is prefilled, so the truncated sequence is the
     // only one that ever exists: the KV, the usage, the prefix cache
     // and `echo` all read the prompt that was ANSWERED.
@@ -2225,7 +2245,7 @@ pub fn generate(
     let draft_max = if params.grammar.is_some() || params.json_object {
         0
     } else {
-        crate::sampling_loop::DEFAULT_DRAFT_MAX
+        draft.map_or(crate::sampling_loop::DEFAULT_DRAFT_MAX, |d| d.max)
     };
     // `n` completions of ONE prompt, which is the whole reason the
     // field exists: the prefill above ran once and the forks below
@@ -2371,12 +2391,23 @@ pub fn generate(
                 first_token_at: &first_token_at,
                 #[cfg(feature = "metal")]
                 kv_offload,
-                drafter: (draft_max > 0).then(|| {
-                    frink_models::speculative::PromptLookupSpeculator::new(
-                        crate::sampling_loop::DRAFT_NGRAM,
-                        draft_max,
-                    )
-                }),
+                drafter: (draft_max > 0)
+                    .then(|| match draft {
+                        Some(d) => d
+                            .speculator(
+                                &decoder.config,
+                                choice_params.sampling.clone(),
+                                choice_params.seed,
+                            )
+                            .map(|s| ServerDrafter::Model(Box::new(s))),
+                        None => Some(ServerDrafter::Lookup(
+                            frink_models::speculative::PromptLookupSpeculator::new(
+                                crate::sampling_loop::DRAFT_NGRAM,
+                                draft_max,
+                            ),
+                        )),
+                    })
+                    .flatten(),
                 accepted: 0,
                 drafted: 0,
                 forwards: 0,
@@ -2482,7 +2513,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
     tokenizer: &T,
     stop_tokens: &StopTokens,
     bos_id: Option<usize>,
-    prompt: &str,
+    prompt: crate::prompt_input::Prompt<'_>,
     params: &GenerationParams,
     mut emit: impl FnMut(&str),
     // A `Vec` for the same reason `generate` returns one: two shapes
@@ -2504,8 +2535,7 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
 
     let vocab_size = engine.vocab_size();
     // `Parse`, as the GGUF path above. See `Model::encode`.
-    let mut tokens = tokenizer.encode(prompt, SpecialTokens::Parse);
-    prepend_bos(&mut tokens, bos_id);
+    let tokens = prompt.tokens(tokenizer, bos_id);
     let prompt_tokens = tokens.len();
     if let Some(&bad) = tokens.iter().find(|&&t| t >= vocab_size) {
         return Err(DecodeError::TokenOutOfVocab {
@@ -2659,6 +2689,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 |choice, s| per_choice[choice].push_str(s),
             )
             .expect("n = 4");
@@ -2700,6 +2731,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| one_text.push_str(s),
         )
         .expect("n = 1");
@@ -2715,6 +2747,7 @@ mod tests {
             None,
             prompt,
             &four,
+            None,
             None,
             None,
             None,
@@ -2773,6 +2806,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| one.push_str(s),
         )
         .expect("n = 1");
@@ -2787,6 +2821,7 @@ mod tests {
             None,
             prompt,
             &three,
+            None,
             None,
             None,
             None,
@@ -2816,6 +2851,7 @@ mod tests {
             None,
             "abcabcabcabcabcabcabcabcabcabcabcabc",
             &params,
+            None,
             None,
             None,
             None,
@@ -2862,6 +2898,7 @@ mod tests {
             None,
             "abcabcabcabcabcabcabcabcabcabcabcabc",
             &single,
+            None,
             None,
             None,
             None,
@@ -2915,6 +2952,55 @@ mod tests {
     /// store continues as if they never happened. Checked by walking
     /// the same tokens again after the rollback and demanding the same
     /// logits: a stale row left behind would change them.
+    /// `--model-draft`: a drafter changes how many forwards an answer
+    /// costs and not the answer. The control is the same request drafted
+    /// by prompt lookup, which is lossless too, over a prompt it finds no
+    /// match in, so any acceptance here is the model's. The drafter is
+    /// the target's own weights, so a greedy request accepts every
+    /// draft, and a sampled one is held to the same text.
+    #[test]
+    fn a_draft_model_changes_the_forward_count_and_not_the_answer() {
+        let decoder = small_decoder();
+        let draft = crate::server_draft::ServerDraft {
+            weights: frink_models::DraftWeights::new(small_decoder()),
+            max: 4,
+            p_min: 0.0,
+        };
+        let prompt = "The quick brown fox jumps over";
+        let run = |params: &GenerationParams, draft: Option<&crate::server_draft::ServerDraft>| {
+            let mut text = String::new();
+            let (finish, _rows, _ids, _truncated, usage) = generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                prompt,
+                params,
+                None,
+                None,
+                None,
+                None,
+                draft,
+                |_, s| text.push_str(s),
+            )
+            .expect("generates");
+            (text, finish[0].0.clone(), usage)
+        };
+        let mut sampled = greedy_params(20);
+        sampled.sampling.temperature = 0.8;
+        sampled.seed = 7;
+        for params in [greedy_params(20), sampled] {
+            let (plain, plain_finish, _) = run(&params, None);
+            let (drafted, drafted_finish, usage) = run(&params, Some(&draft));
+            assert_eq!(drafted, plain, "a drafter changed the answer");
+            assert_eq!(drafted_finish, plain_finish);
+            assert!(
+                usage.accepted_draft_tokens.is_some_and(|a| a > 0),
+                "the draft model was never accepted, so this proves nothing: {usage:?}"
+            );
+        }
+    }
+
     #[test]
     fn truncate_to_undoes_the_rows_a_rejected_draft_wrote() {
         let decoder = small_decoder();
@@ -3098,6 +3184,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| actual_text.push_str(s),
         )
         .unwrap();
@@ -3120,6 +3207,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, _| {},
         );
         assert!(matches!(result, Err(DecodeError::TokenOutOfVocab { .. })));
@@ -3137,6 +3225,7 @@ mod tests {
             None,
             &prompt,
             &greedy_params(5),
+            None,
             None,
             None,
             None,
@@ -3168,6 +3257,7 @@ mod tests {
             None,
             &prompt,
             &params,
+            None,
             None,
             None,
             None,
@@ -3213,6 +3303,7 @@ mod tests {
             None,
             &prompt,
             &params,
+            None,
             None,
             None,
             None,
@@ -3271,6 +3362,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, _| {},
         )
         .unwrap();
@@ -3309,6 +3401,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, _| {},
         )
         .unwrap();
@@ -3339,6 +3432,7 @@ mod tests {
             None,
             &prompt,
             &greedy_params(20),
+            None,
             None,
             None,
             None,
@@ -3377,6 +3471,7 @@ mod tests {
                 reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
                 lora: None,
             },
+            None,
             None,
             None,
             None,
@@ -3802,6 +3897,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| baseline.push_str(s),
         )
         .unwrap();
@@ -3862,6 +3958,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| truncated.push_str(s),
         )
         .unwrap();
@@ -3881,6 +3978,7 @@ mod tests {
             None,
             &prompt,
             &greedy_params(5),
+            None,
             None,
             None,
             None,
@@ -3920,6 +4018,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, _| {},
         )
         .unwrap();
@@ -3936,6 +4035,7 @@ mod tests {
             None,
             None,
             Some(&pc),
+            None,
             None,
             |_, _| {},
         )
@@ -3954,6 +4054,7 @@ mod tests {
             None,
             None,
             Some(&pc),
+            None,
             None,
             |_, _| {},
         )
@@ -3979,6 +4080,7 @@ mod tests {
             None,
             Some(&pc),
             None,
+            None,
             |_, s| out1.push_str(s),
         )
         .unwrap();
@@ -4000,6 +4102,7 @@ mod tests {
             None,
             Some(&pc),
             None,
+            None,
             |_, s| out2_with_cache.push_str(s),
         )
         .unwrap();
@@ -4015,6 +4118,7 @@ mod tests {
             None,
             &prompt2,
             &greedy_params(5),
+            None,
             None,
             None,
             None,
@@ -4047,6 +4151,7 @@ mod tests {
             None,
             Some(&pc),
             None,
+            None,
             |_, s| out1.push_str(s),
         )
         .unwrap();
@@ -4070,6 +4175,7 @@ mod tests {
             None,
             Some(&pc),
             None,
+            None,
             |_, s| out2_with_cache.push_str(s),
         )
         .unwrap();
@@ -4082,6 +4188,7 @@ mod tests {
             None,
             &prompt,
             &greedy_params(5),
+            None,
             None,
             None,
             None,
@@ -4112,6 +4219,7 @@ mod tests {
             None,
             Some(&pc),
             None,
+            None,
             |_, _| {},
         )
         .unwrap();
@@ -4125,6 +4233,7 @@ mod tests {
             Some(&config),
             None,
             Some(&pc),
+            None,
             None,
             |_, _| {},
         )
@@ -4256,6 +4365,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| contiguous.push_str(s),
         )
         .unwrap();
@@ -4271,6 +4381,7 @@ mod tests {
             &greedy_params(6),
             None,
             Some(&config),
+            None,
             None,
             None,
             |_, s| paged.push_str(s),
@@ -4311,6 +4422,7 @@ mod tests {
                 &greedy_params(5),
                 None,
                 Some(&config),
+                None,
                 None,
                 None,
                 |_, s| out.push_str(s),
@@ -4354,6 +4466,7 @@ mod tests {
                 &params,
                 None,
                 Some(&config),
+                None,
                 None,
                 None,
                 |_, _| {},
@@ -4423,6 +4536,7 @@ mod tests {
                 params,
                 None,
                 paged,
+                None,
                 None,
                 None,
                 |choice, s| per_choice[choice].push_str(s),
@@ -4882,6 +4996,7 @@ mod tests {
             Some(&win_config),
             None,
             None,
+            None,
             |_, s| out.push_str(s),
         )
         .expect("a window model must fit a store sized for its window");
@@ -4911,6 +5026,7 @@ mod tests {
                 &params,
                 None,
                 Some(&config),
+                None,
                 None,
                 None,
                 |_, _| {},
@@ -4949,6 +5065,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, s| contiguous.push_str(s),
         )
         .unwrap();
@@ -4964,6 +5081,7 @@ mod tests {
             &params,
             None,
             Some(&config),
+            None,
             None,
             None,
             |_, s| paged.push_str(s),
@@ -5126,6 +5244,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
+                None,
                 |_, s| out.push_str(s),
             )
             .unwrap_or_else(|e| panic!("run {run} was refused: {e}"));
@@ -5221,6 +5340,7 @@ mod tests {
             Some(&config),
             None,
             None,
+            None,
             |_, _| {},
         )
         .unwrap();
@@ -5283,6 +5403,7 @@ mod tests {
                 Some(&config),
                 None,
                 None,
+                None,
                 |_, s| out.push_str(s),
             )
             .unwrap();
@@ -5298,6 +5419,7 @@ mod tests {
                 &greedy_params(2),
                 None,
                 Some(&config),
+                None,
                 None,
                 None,
                 |_, s| probe.push_str(s),
@@ -5354,6 +5476,7 @@ mod tests {
                 Some(config),
                 None,
                 None,
+                None,
                 |_, s| out.push_str(s),
             )
             .unwrap();
@@ -5397,6 +5520,7 @@ mod tests {
             Some(&cfg2),
             None,
             None,
+            None,
             |_, s| sink.push_str(s),
         )
         .unwrap();
@@ -5414,6 +5538,7 @@ mod tests {
             &greedy_params(2),
             None,
             Some(&cfg2),
+            None,
             None,
             None,
             |_, s| sink.push_str(s),
@@ -5461,6 +5586,7 @@ mod tests {
                 &greedy_params(2),
                 None,
                 Some(&config),
+                None,
                 None,
                 None,
                 |_, s| out.push_str(s),
@@ -5514,6 +5640,7 @@ mod tests {
             Some(&config),
             None,
             None,
+            None,
             |_, _| panic!("a refused request must not emit"),
         );
         assert!(
@@ -5545,6 +5672,7 @@ mod tests {
             &prompt,
             &greedy_params(5),
             Some(&config),
+            None,
             None,
             None,
             None,
@@ -5591,6 +5719,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, _| {},
         )
         .unwrap();
@@ -5626,6 +5755,7 @@ mod tests {
             &prompt,
             &greedy_params(max_tokens),
             Some(&config),
+            None,
             None,
             None,
             None,
@@ -5728,6 +5858,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             |_, _| {},
         );
         let err = result.expect_err("one block cannot hold two layers' caches");
@@ -5766,6 +5897,7 @@ mod tests {
                 &prompt,
                 &greedy_params(5),
                 Some(&config),
+                None,
                 None,
                 None,
                 None,
@@ -5812,6 +5944,7 @@ mod tests {
             &prompt,
             &greedy_params(5),
             Some(&config),
+            None,
             None,
             None,
             None,
@@ -5863,6 +5996,7 @@ mod tests {
             None,
             None,
             Some(&ceiling),
+            None,
             |_, _| panic!("no token may be emitted by a refused request"),
         )
         .expect_err("a 5-token prompt must not be admitted under a 4-position ceiling");
@@ -5922,6 +6056,7 @@ mod tests {
             None,
             None,
             Some(&ceiling),
+            None,
             |_, _| emitted += 1,
         )
         .expect("a prompt that fits must be served");
@@ -5955,6 +6090,7 @@ mod tests {
             None,
             None,
             Some(&ceiling),
+            None,
             |_, s| with.push_str(s),
         )
         .expect("7 positions fits a 7-position ceiling exactly");
@@ -5968,6 +6104,7 @@ mod tests {
             None,
             &prompt,
             &greedy_params(5),
+            None,
             None,
             None,
             None,
@@ -6007,6 +6144,7 @@ mod tests {
             &prompt,
             &greedy_params(5),
             Some(&config),
+            None,
             None,
             None,
             None,

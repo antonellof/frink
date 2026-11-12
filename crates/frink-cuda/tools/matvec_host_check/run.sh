@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Executes the coalesced matvec CUDA C, at both widths, and the matvecs
+# Executes the coalesced matvec CUDA C, at both widths, the q8_1
+# quantizer and the dp4a matvecs at every geometry, and the matvecs
 # generated from a GEMM dequant (`matvec_kinds::generic`), on this host
 # and compares them bit for bit against the Rust scalar twins. No GPU
 # involved; see ../mul_mm_host_check/shim.h for what this does and does
@@ -40,8 +41,25 @@ while read -r unit fn tag rows row_bytes n_blocks warps; do
     "$bin" "$out/$tag" "$rows" "$row_bytes" "$n_blocks" "$warps" || status=1
 done < "$out/manifest.txt"
 
+# The q8_1 quantizer (`quant` lines: bytes compared whole) and the dp4a
+# matvecs (`dot` lines, every geometry and the routed form), through
+# their own driver. The remaining fields are the driver's arguments.
+while read -r mode unit fn tag args; do
+    bin="$out/run_$unit"
+    if [ ! -x "$bin" ]; then
+        quant=""
+        [ "$mode" = quant ] && quant="-DFQ_QUANT_DRIVER"
+        { echo '#include "shim.h"'; cat "$out/$unit.cu"; cat "$here/dp4a_main.cpp"; } > "$out/tu_$unit.cpp"
+        "$cxx" -std=c++14 -O1 -ffp-contract=off -fno-strict-aliasing -Wall -Wextra \
+            -Wno-unused-function -I"$shim" -DFX_KERNEL="$fn" $quant \
+            "$out/tu_$unit.cpp" -o "$bin"
+    fi
+    # shellcheck disable=SC2086 # `args` is the driver's argument list.
+    "$bin" "$out/$tag" $args || status=1
+done < "$out/dp4a_manifest.txt"
+
 if [ "$status" -eq 0 ]; then
-    echo "OK: every coalesced matvec (both widths) and every generated matvec matches its scalar twin bit for bit"
+    echo "OK: every coalesced matvec (both widths), every generated matvec, the q8_1 quantizer and every dp4a matvec (every geometry) match their scalar twins bit for bit"
 else
     echo "FAIL: a matvec's CUDA C diverges from its scalar twin" >&2
 fi

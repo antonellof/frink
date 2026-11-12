@@ -45,20 +45,40 @@ shader_matvec! {
     q4_k_matvec => "Q4_K",
     q5_k_matvec => "Q5_K",
     q6_k_matvec => "Q6_K",
+    q4_1_matvec => "Q4_1",
+    q5_0_matvec => "Q5_0",
+    q5_1_matvec => "Q5_1",
+    q2_k_matvec => "Q2_K",
+    q3_k_matvec => "Q3_K",
+    iq4_nl_matvec => "IQ4_NL",
+    iq4_xs_matvec => "IQ4_XS",
+    mxfp4_matvec => "MXFP4",
+    tq1_0_matvec => "TQ1_0",
+    ptq1_0_matvec => "PTQ1_0",
+    iq2_xxs_matvec => "IQ2_XXS",
+    iq2_xs_matvec => "IQ2_XS",
+    iq2_s_matvec => "IQ2_S",
+    iq3_xxs_matvec => "IQ3_XXS",
+    iq3_s_matvec => "IQ3_S",
+    iq1_s_matvec => "IQ1_S",
+    iq1_m_matvec => "IQ1_M",
+    f32_matvec => "F32",
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn pseudo_random(seed: u64, n: usize) -> Vec<f32> {
+    pub(crate) fn pseudo_random(seed: u64, n: usize) -> Vec<f32> {
         let mut s = seed | 1;
         (0..n)
             .map(|_| {
                 s = s
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(1442695040888963407);
-                ((s >> 33) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
+                // The top 32 bits, so the value spans [-1, 1]. `>> 33`
+                // kept 31, and every activation was <= 0.
+                ((s >> 32) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0
             })
             .collect()
     }
@@ -66,7 +86,7 @@ mod tests {
     /// A row of `blocks` blocks of `kind`: deterministic bytes, with each
     /// block's f16 scale fields set to small finite values so no block
     /// decodes to inf or NaN.
-    fn kind_row(kind: &str, blocks: usize, seed: u64) -> Vec<u8> {
+    pub(crate) fn kind_row(kind: &str, blocks: usize, seed: u64) -> Vec<u8> {
         let shader = crate::shaders::matvec_shader(kind).unwrap();
         let mut s = seed | 1;
         let mut next = || {
@@ -76,17 +96,51 @@ mod tests {
             (s >> 33) as u8
         };
         let mut out = Vec::new();
+        if kind == "F32" {
+            // Values, not bytes: random bytes are NaN as often as not.
+            for _ in 0..blocks {
+                let v = (next() as f32 - 127.5) / 128.0;
+                out.extend(v.to_le_bytes());
+            }
+            return out;
+        }
         for b in 0..blocks {
             let mut blk: Vec<u8> = (0..shader.block_bytes).map(|_| next()).collect();
             let d = half::f16::from_f32(0.01 + 0.002 * (b % 7) as f32).to_le_bytes();
             let dmin = half::f16::from_f32(0.005 + 0.001 * (b % 5) as f32).to_le_bytes();
             match kind {
-                "Q8_0" | "Q4_0" => blk[0..2].copy_from_slice(&d),
-                "Q4_K" | "Q5_K" => {
+                "Q8_0" | "Q4_0" | "Q5_0" | "IQ4_NL" | "IQ4_XS" => blk[0..2].copy_from_slice(&d),
+                // Every index and sign code these blocks can hold is
+                // inside its table; only the scale needs care.
+                "IQ2_XXS" | "IQ2_XS" | "IQ2_S" | "IQ3_XXS" | "IQ3_S" | "IQ1_S" => {
+                    blk[0..2].copy_from_slice(&d)
+                }
+                // The f16 scale is the top nibbles of four u16 at 48.
+                "IQ1_M" => {
+                    let bits = u16::from_le_bytes(d);
+                    for k in 0..4 {
+                        let nib = ((bits >> (4 * k)) & 0xf) as u8;
+                        blk[49 + 2 * k] = (blk[49 + 2 * k] & 0x0f) | (nib << 4);
+                    }
+                }
+                "Q4_K" | "Q5_K" | "Q4_1" | "Q5_1" => {
                     blk[0..2].copy_from_slice(&d);
                     blk[2..4].copy_from_slice(&dmin);
                 }
                 "Q6_K" => blk[208..210].copy_from_slice(&d),
+                "Q2_K" => {
+                    blk[80..82].copy_from_slice(&d);
+                    blk[82..84].copy_from_slice(&dmin);
+                }
+                "Q3_K" => blk[108..110].copy_from_slice(&d),
+                // E8M0: 2^-9 .. 2^-2, and e = 0 (the subnormal case) on
+                // every eighth block.
+                "MXFP4" => blk[0] = if b % 8 == 7 { 0 } else { 118 + (b % 8) as u8 },
+                // Every byte value unpacks to trits; the scale is last.
+                "TQ1_0" | "PTQ1_0" => {
+                    let at = blk.len() - 2;
+                    blk[at..].copy_from_slice(&d);
+                }
                 other => panic!("no layout for {other}"),
             }
             out.extend(blk);
@@ -94,22 +148,51 @@ mod tests {
         out
     }
 
-    fn twin(kind: &str) -> fn(&[u8], &[f32]) -> f32 {
+    pub(crate) fn twin(kind: &str) -> fn(&[u8], &[f32]) -> f32 {
         match kind {
             "Q8_0" => frink_quant::dot_q8_0_f32_scalar,
             "Q4_0" => frink_quant::dot_q4_0_f32_scalar,
             "Q4_K" => frink_quant::dot_q4_k_f32_scalar,
             "Q5_K" => frink_quant::dot_q5_k_f32_scalar,
             "Q6_K" => frink_quant::dot_q6_k_f32_scalar,
+            "Q4_1" => frink_quant::dot_q4_1_f32_scalar,
+            "Q5_0" => frink_quant::dot_q5_0_f32_scalar,
+            "Q5_1" => frink_quant::dot_q5_1_f32_scalar,
+            "Q2_K" => frink_quant::dot_q2_k_f32_scalar,
+            "Q3_K" => frink_quant::dot_q3_k_f32_scalar,
+            "IQ4_NL" => frink_quant::dot_iq4_nl_f32_scalar,
+            "IQ4_XS" => frink_quant::dot_iq4_xs_f32_scalar,
+            "MXFP4" => frink_quant::dot_mxfp4_gguf_f32_scalar,
+            "IQ2_XXS" => frink_quant::dot_iq2_xxs_f32_scalar,
+            "IQ2_XS" => frink_quant::dot_iq2_xs_f32_scalar,
+            "IQ2_S" => frink_quant::dot_iq2_s_f32_scalar,
+            "IQ3_XXS" => frink_quant::dot_iq3_xxs_f32_scalar,
+            "IQ3_S" => frink_quant::dot_iq3_s_f32_scalar,
+            "IQ1_S" => frink_quant::dot_iq1_s_f32_scalar,
+            "IQ1_M" => frink_quant::dot_iq1_m_f32_scalar,
+            "TQ1_0" => {
+                |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::TQ1_0, x)
+            }
+            "PTQ1_0" => {
+                |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::PTQ1_0, x)
+            }
+            "F32" => |w, x| {
+                w.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(x)
+                    .map(|(b, x)| f32::from_le_bytes(*b) * x)
+                    .sum()
+            },
             other => panic!("no twin for {other}"),
         }
     }
 
-    fn runtime() -> Option<Runtime> {
+    pub(crate) fn runtime() -> Option<Runtime> {
         match Runtime::new() {
             Ok(rt) => Some(rt),
             Err(e) => {
-                eprintln!("SKIPPED, no Vulkan device: {e}");
+                crate::skipped(&format!("no Vulkan device: {e}"));
                 None
             }
         }
@@ -117,13 +200,42 @@ mod tests {
 
     type Launch =
         fn(&mut Runtime, &[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, VulkanError>;
-    const LAUNCHES: [(&str, Launch); 5] = [
+    const LAUNCHES: [(&str, Launch); 23] = [
         ("Q8_0", q8_0_matvec),
         ("Q4_0", q4_0_matvec),
         ("Q4_K", q4_k_matvec),
         ("Q5_K", q5_k_matvec),
         ("Q6_K", q6_k_matvec),
+        ("Q4_1", q4_1_matvec),
+        ("Q5_0", q5_0_matvec),
+        ("Q5_1", q5_1_matvec),
+        ("Q2_K", q2_k_matvec),
+        ("Q3_K", q3_k_matvec),
+        ("IQ4_NL", iq4_nl_matvec),
+        ("IQ4_XS", iq4_xs_matvec),
+        ("MXFP4", mxfp4_matvec),
+        ("TQ1_0", tq1_0_matvec),
+        ("PTQ1_0", ptq1_0_matvec),
+        ("IQ2_XXS", iq2_xxs_matvec),
+        ("IQ2_XS", iq2_xs_matvec),
+        ("IQ2_S", iq2_s_matvec),
+        ("IQ3_XXS", iq3_xxs_matvec),
+        ("IQ3_S", iq3_s_matvec),
+        ("IQ1_S", iq1_s_matvec),
+        ("IQ1_M", iq1_m_matvec),
+        ("F32", f32_matvec),
     ];
+
+    /// Every shader in the table is exercised by [`LAUNCHES`], so a row
+    /// added without a test cannot pass.
+    #[test]
+    fn every_shader_has_a_launch_under_test() {
+        let tested: Vec<&str> = LAUNCHES.iter().map(|(k, _)| *k).collect();
+        for s in crate::shaders::MATVEC {
+            assert!(tested.contains(&s.kind), "{} has no test launch", s.kind);
+        }
+        assert_eq!(tested.len(), crate::shaders::MATVEC.len());
+    }
 
     /// `rows` rows of `kind` and an activation, deterministic per shape.
     fn case(kind: &str, rows: usize, blocks: usize) -> (Vec<u8>, Vec<f32>, usize) {

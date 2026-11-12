@@ -419,8 +419,10 @@ mod http_tests {
             tokenizer: Arc::new(ServerTokenizer::Byte),
             stop_tokens: StopTokens::default(),
             bos_id: None,
+            facts: crate::model::GgufFacts::default(),
             is_synthetic: true,
             chat_template: chat_template::PromptTemplate::plain(),
+            draft: None,
         });
         (model, decoder)
     }

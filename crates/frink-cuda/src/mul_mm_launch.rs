@@ -66,6 +66,47 @@ pub fn launch_mul_mm(
     Ok(out)
 }
 
+/// Seconds per launch of the GEMM body this device takes, over
+/// `iters` launches on operands already on the device, after one
+/// warm-up launch that also compiles the kernel. The output of each
+/// launch is discarded. For the `mul_mm_bench` example, which times
+/// the kernel without the uploads and downloads [`launch_mul_mm`]
+/// adds; nothing on a serving path calls it.
+#[allow(clippy::too_many_arguments)]
+pub fn time_mul_mm(
+    kind: &MulMmKind,
+    weights: &[u8],
+    x_batch: &[f32],
+    n_rows: usize,
+    n_cols: usize,
+    batch: usize,
+    row_bytes: usize,
+    iters: usize,
+) -> Result<f64, CudaError> {
+    validate_shape(
+        kind,
+        weights.len(),
+        x_batch.len(),
+        n_rows,
+        n_cols,
+        batch,
+        row_bytes,
+    )
+    .map_err(|e| CudaError::Unsupported(e.to_string()))?;
+    let dev = shared_device()?;
+    let d_x = crate::xfer::htod(&dev, "mul_mm bench activation", &x_batch[..batch * n_cols])?;
+    let warm = enqueue_mul_mm(&dev, kind, weights, &d_x, n_rows, n_cols, batch, row_bytes)?;
+    crate::xfer::sync(&dev, "mul_mm bench warm-up")?;
+    drop(warm);
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters.max(1) {
+        let run = enqueue_mul_mm(&dev, kind, weights, &d_x, n_rows, n_cols, batch, row_bytes)?;
+        drop(run);
+    }
+    crate::xfer::sync(&dev, "mul_mm bench")?;
+    Ok(t0.elapsed().as_secs_f64() / iters.max(1) as f64)
+}
+
 /// The launch alone: `d_x` is already on the device and the output
 /// stays there. This is what [`launch_mul_mm`] wraps in an upload and
 /// a download, and what the resident prefill layer
@@ -92,12 +133,38 @@ pub(crate) fn enqueue_mul_mm(
     ),
     CudaError,
 > {
+    // The int8 GEMM for the kinds it is faster on, on `sm_80` and up;
+    // `FRINK_CUDA_MUL_MM=tc` or `simt` keeps the f16 bodies for an A/B.
+    if let Some(mmq) = mmq_kind(dev, kind) {
+        return crate::mmq::enqueue_mmq(dev, mmq, weights, d_x, n_rows, n_cols, batch, row_bytes);
+    }
     // The tensor-core body on Ampere and up, the SIMT body below it;
     // `FRINK_CUDA_MUL_MM=simt` keeps the SIMT body for an A/B.
     let body = MulMmBody::select(dev);
     enqueue_mul_mm_with_body(
         dev, body, kind, weights, d_x, n_rows, n_cols, batch, row_bytes,
     )
+}
+
+/// The int8 GEMM's kind for `kind` unless `FRINK_CUDA_MUL_MM` names an
+/// f16 body (`tc` or `simt`), on a device with the int8 tensor cores it
+/// needs (`sm_80`); the switch is read once.
+pub(crate) fn mmq_kind(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    kind: &MulMmKind,
+) -> Option<crate::mmq::kernel::MmqKind> {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
+        !std::env::var("FRINK_CUDA_MUL_MM")
+            .is_ok_and(|v| v.eq_ignore_ascii_case("tc") || v.eq_ignore_ascii_case("simt"))
+    });
+    if !asked || crate::gpu::compute_capability_major(dev) < crate::mul_mm_tc::MIN_CC_MAJOR {
+        return None;
+    }
+    // Q6_K's int8 GEMM measured slower than the f16 tensor-core body on
+    // an A10G (two k16 dots a run, 2-byte loads), so it keeps that body.
+    crate::mmq::kernel::MmqKind::by_name(kind.name)
+        .filter(|k| *k != crate::mmq::kernel::MmqKind::Q6_K)
 }
 
 /// [`enqueue_mul_mm`] with the body chosen by the caller: the hardware
@@ -170,6 +237,32 @@ pub(crate) fn enqueue_mul_mm_with_body(
         shared_mem_bytes: 0,
     };
 
+    if body == MulMmBody::TensorCore {
+        // The tensor-core body reads its activations as f16, converted
+        // once here rather than in every block's every tile.
+        let x16 = f32_to_f16(dev, d_x, batch * n_cols)?;
+        // SAFETY: as for the launch below, with the activation the f16
+        // copy of `d_x`'s first `batch * n_cols` values: `x16` holds
+        // exactly that many, and the kernel reads token rows of `n_cols`
+        // below `batch`. `x16` is freed stream-ordered after the launch.
+        unsafe {
+            func.launch(
+                cfg,
+                (
+                    &d_weights.slice,
+                    &x16,
+                    &mut d_out,
+                    n_rows as i32,
+                    n_cols as i32,
+                    batch as i32,
+                    row_bytes as i32,
+                ),
+            )
+            .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
+        }
+        return Ok((d_out, d_weights));
+    }
+
     // SAFETY: `func` was compiled from `kernel_src(kind)`, whose
     // parameter list is (const uchar*, const float*, float*, int, int,
     // int, int) and is matched positionally by the tuple below. Each
@@ -197,6 +290,214 @@ pub(crate) fn enqueue_mul_mm_with_body(
         .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
     }
     Ok((d_out, d_weights))
+}
+
+/// A routed layer's experts' projection in ONE tensor-core launch: group
+/// `g` multiplies the weights `weights[g]` by the activation rows
+/// `gather[group_off[g] .. group_off[g + 1]]` of `x16` (f16, `n_cols`
+/// wide), and writes output rows `group_off[g] ..` of the result,
+/// `group_off.last()` rows of `n_rows` in all. Every group's weights are
+/// one kind and shape. `Unsupported` below `sm_80`, where there is no
+/// tensor-core body, so the caller keeps the host path.
+/// Only the hardware test drives it now: both routed paths group on the
+/// device and take [`enqueue_mul_mm_grouped_dev`] directly.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_mul_mm_grouped(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    kind: &MulMmKind,
+    weights: &[&[u8]],
+    x16: &cudarc::driver::CudaSlice<u16>,
+    group_off: &[i32],
+    gather: &[i32],
+    n_rows: usize,
+    n_cols: usize,
+    row_bytes: usize,
+) -> Result<
+    (
+        cudarc::driver::CudaSlice<f32>,
+        Vec<std::sync::Arc<crate::gpu::ResidentCudaWeights>>,
+    ),
+    CudaError,
+> {
+    use cudarc::driver::DevicePtr;
+    if MulMmBody::select(dev) != MulMmBody::TensorCore {
+        return Err(CudaError::Unsupported(
+            "grouped mul_mm: the tensor-core body needs sm_80".to_string(),
+        ));
+    }
+    let n_groups = weights.len();
+    let pairs = *group_off.last().unwrap_or(&0) as usize;
+    if n_groups == 0
+        || group_off.len() != n_groups + 1
+        || gather.len() != pairs
+        || group_off.windows(2).any(|w| w[1] < w[0])
+        || weights.iter().any(|w| w.len() != n_rows * row_bytes)
+        || !n_cols.is_multiple_of(kind.block_elems)
+        || row_bytes != n_cols / kind.block_elems * kind.block_bytes
+    {
+        return Err(CudaError::Unsupported(
+            "grouped mul_mm: groups, gather or weights do not agree with the shape".to_string(),
+        ));
+    }
+    let held: Vec<_> = weights
+        .iter()
+        .map(|w| resident_cuda_weights(dev, w))
+        .collect::<Result<_, _>>()?;
+    let table: Vec<u64> = held.iter().map(|w| *w.slice.device_ptr()).collect();
+    let d_table = crate::xfer::htod(dev, "grouped mul_mm table", &table)?;
+    let d_off = crate::xfer::htod(dev, "grouped mul_mm offsets", group_off)?;
+    let d_gather = crate::xfer::htod(dev, "grouped mul_mm gather", gather)?;
+    let max_group = group_off
+        .windows(2)
+        .map(|w| (w[1] - w[0]) as usize)
+        .max()
+        .unwrap_or(0);
+    let shape = GroupedShape {
+        kind,
+        n_rows,
+        n_cols,
+        row_bytes,
+    };
+    // SAFETY: the table holds `n_groups` live pointers to weights of this
+    // shape (checked above, held by the caller until its wait), the
+    // offsets are non-decreasing and end at `pairs`, the largest group is
+    // `max_group`, and every gather entry is a row of `x16`.
+    let d_out = unsafe {
+        enqueue_mul_mm_grouped_dev(
+            dev,
+            &shape,
+            &d_table.slice(..),
+            n_groups,
+            &d_off,
+            Some(&d_gather),
+            x16,
+            pairs,
+            max_group,
+        )
+    }?;
+    Ok((d_out, held))
+}
+
+/// The shape every group of a grouped GEMM shares.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GroupedShape<'k> {
+    pub kind: &'k MulMmKind,
+    pub n_rows: usize,
+    pub n_cols: usize,
+    pub row_bytes: usize,
+}
+
+/// The launch half of [`enqueue_mul_mm_grouped`], every input already on
+/// the device: the routed prefill groups its tokens by expert there, so
+/// no host round trip builds the offsets or the gather. A null `gather`
+/// reads pair `p`'s activations from row `p`.
+///
+/// # Safety
+/// `table` holds `n_groups` device pointers to `n_rows * row_bytes` live
+/// bytes of `shape.kind` each, alive until the stream has run the
+/// launch; `group_off` holds `n_groups + 1` non-decreasing pair indices
+/// from 0 to `pairs`, no group larger than `max_group`; every gather
+/// entry (or every pair, without one) is a row of `x16`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn enqueue_mul_mm_grouped_dev(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    shape: &GroupedShape<'_>,
+    table: &cudarc::driver::CudaView<'_, u64>,
+    n_groups: usize,
+    group_off: &cudarc::driver::CudaSlice<i32>,
+    gather: Option<&cudarc::driver::CudaSlice<i32>>,
+    x16: &cudarc::driver::CudaSlice<u16>,
+    pairs: usize,
+    max_group: usize,
+) -> Result<cudarc::driver::CudaSlice<f32>, CudaError> {
+    use cudarc::driver::{DevicePtr, LaunchAsync};
+    let GroupedShape {
+        kind,
+        n_rows,
+        n_cols,
+        row_bytes,
+    } = *shape;
+    if MulMmBody::select(dev) != MulMmBody::TensorCore {
+        return Err(CudaError::Unsupported(
+            "grouped mul_mm: the tensor-core body needs sm_80".to_string(),
+        ));
+    }
+    let (module, fn_name) = crate::mul_mm_tc::tc_grouped_names(kind);
+    crate::gpu::ensure_module_loaded_lazy_for_arch(
+        dev,
+        module,
+        fn_name,
+        MulMmBody::TensorCore.arch(),
+        || crate::mul_mm_tc::tc_grouped_kernel_src(kind),
+    )?;
+    let func = dev.get_func(module, fn_name).ok_or_else(|| {
+        CudaError::KernelCompile(format!("function '{fn_name}' not found after load_ptx"))
+    })?;
+    // SAFETY: every group's blocks write every one of its pairs' rows
+    // below `n_rows` (the grid covers the largest group and all rows), and
+    // the groups' pairs are `0 .. pairs`.
+    let mut d_out = unsafe { crate::gpu::alloc_out(dev, pairs * n_rows, "grouped mul_mm output") }?;
+    let (gx, gy) = crate::mul_mm_tc::tc_grid_dims(n_rows, max_group.max(1));
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (gx as u32, gy as u32, n_groups as u32),
+        block_dim: (crate::mul_mm_tc::TTHREADS as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let gather = gather.map_or(0u64, |g| *g.device_ptr());
+    // SAFETY: (const u64*, const int*, const int* or null, const u16*,
+    // float*, int x4) matched positionally by the FX_GROUPED parameter
+    // list, under the caller's contract above; `d_out` is `pairs * n_rows`.
+    unsafe {
+        func.launch(
+            cfg,
+            (
+                table,
+                group_off,
+                gather,
+                x16,
+                &mut d_out,
+                n_rows as i32,
+                n_cols as i32,
+                0i32,
+                row_bytes as i32,
+            ),
+        )
+        .map_err(|e| CudaError::Launch(format!("kernel {fn_name}: {e:?}")))?;
+    }
+    Ok(d_out)
+}
+
+/// `x[..n]` as f16 (round to nearest even), on the device.
+pub(crate) fn f32_to_f16(
+    dev: &std::sync::Arc<cudarc::driver::CudaDevice>,
+    x: &cudarc::driver::CudaSlice<f32>,
+    n: usize,
+) -> Result<cudarc::driver::CudaSlice<u16>, CudaError> {
+    use cudarc::driver::LaunchAsync;
+    let (module, name) = crate::mul_mm_tc::F32_TO_F16;
+    crate::gpu::ensure_module_loaded(dev, crate::mul_mm_tc::F32_TO_F16_SRC, module, name)?;
+    let func = dev
+        .get_func(module, name)
+        .ok_or_else(|| CudaError::KernelCompile(format!("function '{name}' not found")))?;
+    // SAFETY: uninitialised, and every one of its `n` elements is
+    // written by the launch below (one thread per element) before the
+    // GEMM reads it.
+    let mut y = unsafe { dev.alloc::<u16>(n) }
+        .map_err(|e| CudaError::Launch(format!("f16 activation alloc: {e:?}")))?;
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: ((n as u32).div_ceil(256).max(1), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // SAFETY: (const float*, unsigned short*, int) matched positionally;
+    // `x` holds at least `n` floats (the caller's `validate_shape`) and
+    // `y` exactly `n`, and thread `i` touches element `i < n` only.
+    unsafe {
+        func.launch(cfg, (x, &mut y, n as i32))
+            .map_err(|e| CudaError::Launch(format!("f32 to f16: {e:?}")))?;
+    }
+    Ok(y)
 }
 
 /// Which GEMM body a launch takes.
@@ -345,6 +646,85 @@ mod tests {
         }
     }
 
+    /// The grouped form, every expert of a routed layer in one launch,
+    /// against the plain tensor-core GEMM run once per group on that
+    /// group's gathered rows: bit-identical, for every kind, with an
+    /// empty group, a group of one, and one wider than a block's tokens,
+    /// and tokens shared between groups as top-k routing shares them.
+    #[test]
+    #[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+    fn the_grouped_gemm_equals_one_gemm_per_group() {
+        use crate::mul_mm::KINDS;
+        let dev = shared_device().expect("a CUDA device");
+        assert_eq!(MulMmBody::select(&dev), MulMmBody::TensorCore);
+        let (n_rows, cols, tokens) = (BM + 7, 256usize, 90usize);
+        // Group sizes 0, 1, 70 and 19: the 70 spans two blocks of tokens.
+        let groups: [Vec<i32>; 4] = [
+            vec![],
+            vec![17],
+            (0..70).map(|i| (i * 7 % tokens) as i32).collect(),
+            (0..19).map(|i| 89 - i * 3).collect(),
+        ];
+        for kind in KINDS {
+            let n_cols = cols.next_multiple_of(kind.block_elems);
+            let row_bytes = (n_cols / kind.block_elems) * kind.block_bytes;
+            let weights: Vec<Vec<u8>> = (0..groups.len() as u32)
+                .map(|g| crate::mul_mm_ref::fixtures::weights(kind, n_rows, n_cols, 500 + g))
+                .collect();
+            let x: Vec<f32> = (0..tokens * n_cols)
+                .map(|i| ((i as f32) * 0.023).sin())
+                .collect();
+            let mut group_off = vec![0i32];
+            let mut gather = Vec::new();
+            for g in &groups {
+                gather.extend_from_slice(g);
+                group_off.push(gather.len() as i32);
+            }
+            let d_x = dev.htod_copy(x.clone()).unwrap();
+            let x16 = f32_to_f16(&dev, &d_x, tokens * n_cols).unwrap();
+            let refs: Vec<&[u8]> = weights.iter().map(Vec::as_slice).collect();
+            let (d_out, held) = enqueue_mul_mm_grouped(
+                &dev, kind, &refs, &x16, &group_off, &gather, n_rows, n_cols, row_bytes,
+            )
+            .expect("grouped launch");
+            let got = dev.dtoh_sync_copy(&d_out).unwrap();
+            drop(held);
+            assert_eq!(got.len(), gather.len() * n_rows);
+            for (g, rows) in groups.iter().enumerate() {
+                if rows.is_empty() {
+                    continue;
+                }
+                let xg: Vec<f32> = rows
+                    .iter()
+                    .flat_map(|&t| {
+                        x[t as usize * n_cols..(t as usize + 1) * n_cols]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                let want = launch_with_body(
+                    MulMmBody::TensorCore,
+                    kind,
+                    &weights[g],
+                    &xg,
+                    n_rows,
+                    n_cols,
+                    rows.len(),
+                    row_bytes,
+                );
+                let lo = group_off[g] as usize * n_rows;
+                let have = &got[lo..lo + rows.len() * n_rows];
+                for (i, (a, b)) in have.iter().zip(&want).enumerate() {
+                    assert!(
+                        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                        "{} group {g} element {i}: grouped={a} plain={b}",
+                        kind.name
+                    );
+                }
+            }
+        }
+    }
+
     /// One launch of the chosen body, host slices in and out, for the
     /// tests: `launch_mul_mm` itself takes the device's pick.
     #[allow(clippy::too_many_arguments)]
@@ -385,7 +765,7 @@ mod tests {
     /// admit it: `2^-10` of the L1 norm of the products, which the test
     /// computes from the twin's own dequantization, plus the SIMT floor.
     #[test]
-    #[ignore = "requires real CUDA hardware (sm_80 and up); not yet run"]
+    #[ignore = "requires real CUDA hardware (sm_80 and up). Passed 2026-11-09 on an L40S (sm_89, driver 580) before the staged body"]
     fn the_tensor_core_body_matches_the_scalar_twin() {
         use crate::mul_mm::{KINDS, Q4_0, Q5_0, Q8_0};
 
@@ -448,6 +828,9 @@ mod tests {
                 (BM + 7, 96, 37),
                 (33, 64, 3),
                 (300, 256, 150),
+                // Several raw stages (`mul_mm_tc::stage_elems`) and,
+                // for the 32-column kinds, a partial one at the end.
+                (130, 672, 140),
             ] {
                 let n_cols = cols.next_multiple_of(kind.block_elems);
                 let row_bytes = (n_cols / kind.block_elems) * kind.block_bytes;

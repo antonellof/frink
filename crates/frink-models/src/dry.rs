@@ -312,13 +312,13 @@ pub struct DryParams {
 
 impl DryParams {
     /// DRY switched off, which is llama.cpp's default
-    /// (`dry_multiplier = 0.0f`, `common/common.h:242`).
+    /// (`dry_multiplier = 0.0f`, `common/common.h:248`).
     pub fn off() -> Self {
         DryParams {
             multiplier: 0.0,
             base: 1.75,
             allowed_length: 2,
-            penalty_last_n: -1,
+            penalty_last_n: 64,
             total_context_size: 0,
             breakers: Arc::new(DryBreakers::none()),
         }
@@ -562,14 +562,17 @@ pub struct DryRequest {
 }
 
 impl Default for DryRequest {
-    /// llama.cpp's defaults (`common/common.h:242-245, 259`), which are
-    /// DISABLED: `dry_multiplier` is 0.
+    /// llama.cpp's defaults at the pin (`common/common.h:248-251, 264`),
+    /// which are DISABLED: `dry_multiplier` is 0. The scan window is 64
+    /// tokens, not the whole context (`-1`, which an older `common.h`
+    /// had): a request that sets only `dry_multiplier` scans what
+    /// llama-server scans.
     fn default() -> Self {
         DryRequest {
             multiplier: 0.0,
             base: 1.75,
             allowed_length: 2,
-            penalty_last_n: -1,
+            penalty_last_n: 64,
             sequence_breakers: DEFAULT_SEQUENCE_BREAKERS
                 .iter()
                 .map(|s| s.to_string())
@@ -648,6 +651,20 @@ impl DryRequest {
 
 #[cfg(test)]
 mod tests {
+
+    /// The request defaults are llama.cpp's at the pin
+    /// (`common/common.h:248-251`), the scan window included: 64, not
+    /// the whole context.
+    #[test]
+    fn the_dry_defaults_are_llama_cpp_s_at_the_pin() {
+        let d = DryRequest::default();
+        assert_eq!(
+            (d.multiplier, d.base, d.allowed_length, d.penalty_last_n),
+            (0.0, 1.75, 2, 64)
+        );
+        assert_eq!(d.sequence_breakers, ["\n", ":", "\"", "*"]);
+    }
+
     use super::*;
 
     /// Every expected value below was produced by calling the real

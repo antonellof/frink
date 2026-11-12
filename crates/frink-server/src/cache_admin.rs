@@ -28,8 +28,8 @@
 //!
 //! The KV pool, and only the KV pool. The expert cache is sized once at
 //! load from `FRINK_EXPERT_CACHE_BYTES`, and there is no device-side
-//! slot pool to move bytes into -- that is `persistent-gpu-expert-cache`
-//! in `docs/ROADMAP.md`. A request naming `moe` is therefore refused as
+//! slot pool to move bytes into, which is #406's
+//! (`docs/plans/out-of-core-moe.md`). A request naming `moe` is therefore refused as
 //! a pool this deployment does not have, rather than accepted and
 //! silently ignored: an operator who asks for expert slots and gets a
 //! `200` has been told the split moved when it did not.

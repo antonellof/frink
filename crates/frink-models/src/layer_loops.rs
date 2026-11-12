@@ -249,27 +249,31 @@ pub fn read_layer_loops(
                 ),
             ));
         }
-        let schedule = LayerLoops::Hrm {
-            lps,
-            h_cycles,
-            l_cycles,
-        };
-        // `hrm-text.cpp:22-23`: the GGUF block count IS the expanded
-        // slot count, so `n_phys` here is the slot count and the two
-        // must agree. A file that disagrees fails llama.cpp's assert
-        // and stops here with the numbers rather than running a
-        // schedule the tensors do not match.
-        if schedule.logical_layers() != n_phys {
+        // Checked, because the three come off the wire and the product is
+        // only ever compared with `block_count`: an overflow is a file
+        // that cannot be the schedule `block_count` says.
+        let logical = lps
+            .checked_mul(h_cycles)
+            .and_then(|n| n.checked_mul(l_cycles.checked_add(1)?));
+        if logical != Some(n_phys) {
             return Err(LoadError::UnsupportedFeature(
                 arch.to_string(),
                 format!(
                     "block_count is {n_phys} but hrm.layers_per_stack * hrm.h_cycles * \
                      (hrm.l_cycles + 1) is {}; llama.cpp asserts they are equal \
                      (hrm-text.cpp:22-23)",
-                    schedule.logical_layers()
+                    logical.map_or("past usize::MAX".to_string(), |n| n.to_string())
                 ),
             ));
         }
+        let schedule = LayerLoops::Hrm {
+            lps,
+            h_cycles,
+            l_cycles,
+        };
+        // `hrm-text.cpp:22-23`: the GGUF block count IS the expanded
+        // slot count, checked above with the product unwrapped.
+        debug_assert_eq!(schedule.logical_layers(), n_phys);
         return Ok(Some(schedule));
     }
     let n_loops = file.metadata_u64(&key("num_loops")).unwrap_or(1) as usize;
@@ -282,6 +286,19 @@ pub fn read_layer_loops(
     }
     if n_loops == 1 {
         return Ok(None);
+    }
+    // `GGML_ASSERT(n_layer_phys * n_loops_u <= LLAMA_MAX_LAYERS)`,
+    // nanbeige.cpp:16: every logical layer is a KV slot, so an unbounded
+    // loop count would size one per loop.
+    let max = crate::mtp_blocks::LLAMA_MAX_LAYERS;
+    if n_phys.checked_mul(n_loops).is_none_or(|n| n > max) {
+        return Err(LoadError::UnsupportedFeature(
+            arch.to_string(),
+            format!(
+                "num_loops = {n_loops} over {n_phys} layers is more than llama.cpp's \
+                 LLAMA_MAX_LAYERS ({max}) logical layers (nanbeige.cpp:16)"
+            ),
+        ));
     }
     let skip_loop_final_norm = file
         .metadata_bool(&key("skip_loop_final_norm"))

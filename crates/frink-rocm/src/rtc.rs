@@ -154,6 +154,7 @@ mod tests {
         vec![
             k("gqa_decode", frink_cuda::attn::GQA_DECODE_KERNEL_SRC),
             k("silu_mul", frink_cuda::gpu::SILU_MUL_KERNEL_SRC),
+            k("swiglu_oai", frink_cuda::gpu::SWIGLU_OAI_SRC),
             k(
                 "fused_add_rmsnorm",
                 frink_cuda::gpu::FUSED_ADD_RMSNORM_KERNEL_SRC,
@@ -163,6 +164,10 @@ mod tests {
             k("prefill add_rows", p::ADD_ROWS_KERNEL_SRC),
             k("prefill rope_rows", p::ROPE_ROWS_KERNEL_SRC),
             k("prefill causal_gqa", p::CAUSAL_GQA_PREFILL_KERNEL_SRC),
+            k("prefill add_bias_tab_rows", p::ADD_BIAS_TAB_ROWS_KERNEL_SRC),
+            k("prefill moe_topk", p::MOE_TOPK_KERNEL_SRC),
+            k("prefill gather_ptrs", p::GATHER_PTRS_KERNEL_SRC),
+            k("prefill moe_group", p::MOE_GROUP_KERNEL_SRC),
         ]
     }
 

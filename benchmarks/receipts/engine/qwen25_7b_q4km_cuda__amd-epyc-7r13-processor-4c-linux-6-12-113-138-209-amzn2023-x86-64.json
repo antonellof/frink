@@ -1,0 +1,99 @@
+{
+  "backend": "cuda",
+  "backend_active": "CUDA",
+  "threads": 4,
+  "warmup_reps": 1,
+  "load_s": 0.037287774,
+  "host_load_1min_start": 1.31,
+  "host_load_1min_end": 1.26,
+  "host_thermal_start": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "host_thermal_end": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "quiet_host": true,
+  "host_spec": {
+    "label": "AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "arch": "x86_64",
+    "cores": 4,
+    "perf_cores": null,
+    "ram_gb": 61.9,
+    "os": "Linux 6.12.113-138.209.amzn2023.x86_64"
+  },
+  "accelerator": "NVIDIA L40S",
+  "engine_env": {
+    "FRINK_CPU_INT_DOT": "1"
+  },
+  "frink_version": "0.59.0",
+  "schema": 3,
+  "kind": "engine",
+  "id": "qwen25_7b_q4km",
+  "model_path": "/work/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+  "arch": "qwen2",
+  "quant": "quantized",
+  "size_bytes": 4683074240,
+  "approx_params": 8231845888,
+  "reps": 3,
+  "tests": [
+    {
+      "test": "pp512",
+      "frink_tps": 3590.4673400676993,
+      "frink_stddev": 32.036095300516976,
+      "frink_samples": [
+        3526.199018204264,
+        3597.3279020239643,
+        3590.4673400676993
+      ],
+      "llama_tps": 11228.471792,
+      "gap": 3.1273009133647443,
+      "workload_digest": "b8d417040110e751"
+    },
+    {
+      "test": "tg128",
+      "frink_tps": 112.54169908442763,
+      "frink_stddev": 0.04507173609722156,
+      "frink_samples": [
+        112.51247923812934,
+        112.61929125839893,
+        112.54169908442763
+      ],
+      "llama_tps": 144.021528,
+      "gap": 1.2797170219720648,
+      "workload_digest": "044655d19aa3baa5"
+    }
+  ],
+  "llama_cpp": {
+    "build_commit": "604cc43",
+    "build_number": 1,
+    "backends": "CUDA",
+    "cpu_info": "AMD EPYC 7R13 Processor",
+    "gpu_info": "NVIDIA L40S",
+    "command": [
+      "llama-bench",
+      "-m",
+      "/work/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+      "-p",
+      "512",
+      "-n",
+      "128",
+      "-d",
+      "0",
+      "-r",
+      "3",
+      "-ngl",
+      "99",
+      "-o",
+      "json"
+    ]
+  }
+}

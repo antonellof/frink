@@ -108,7 +108,12 @@ mod tests {
     use std::sync::Mutex;
 
     // Tests that install a tap share the one process-wide slot, so
-    // they serialise on this rather than racing each other.
+    // they serialise on this rather than racing each other. That covers
+    // the slot and nothing else: the tap also sees every projection any
+    // other test in this binary runs while it is installed, so each
+    // observer below keeps only its own matrix. A device build makes
+    // the overlap likely, because the first projection in the process
+    // probes the device while the tap is installed.
     static SERIAL: Mutex<()> = Mutex::new(());
 
     fn small_matrix() -> WeightMatrix {
@@ -117,19 +122,20 @@ mod tests {
 
     /// The tap sees each `apply_batch` call once, with every row, and
     /// can tell which matrix was applied by address. Both halves are
-    /// what `frink imatrix` relies on.
+    /// what `frink imatrix` relies on: a wrong address leaves `seen`
+    /// empty here, and a second observation leaves it with two entries.
     #[test]
     fn the_observer_sees_every_batch_row_once_and_the_matrix_identity() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let m = small_matrix();
         let addr = &m as *const WeightMatrix as usize;
-        type Seen = Mutex<Vec<(usize, Vec<f32>, usize)>>;
+        type Seen = Mutex<Vec<(Vec<f32>, usize)>>;
         let seen: Arc<Seen> = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
         let guard = install(Arc::new(move |w: &WeightMatrix, rows: &[f32], n: usize| {
-            sink.lock()
-                .unwrap()
-                .push((w as *const WeightMatrix as usize, rows.to_vec(), n));
+            if std::ptr::addr_eq(w, addr as *const WeightMatrix) {
+                sink.lock().unwrap().push((rows.to_vec(), n));
+            }
         }))
         .unwrap();
         let x: Vec<f32> = (0..12).map(|i| i as f32).collect();
@@ -137,9 +143,8 @@ mod tests {
         drop(guard);
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "one batch call, one observation");
-        assert_eq!(seen[0].0, addr);
-        assert_eq!(seen[0].1, x);
-        assert_eq!(seen[0].2, 3);
+        assert_eq!(seen[0].0, x);
+        assert_eq!(seen[0].1, 3);
     }
 
     /// After the guard drops nothing is observed, and a second install
@@ -148,10 +153,13 @@ mod tests {
     fn the_tap_is_gone_after_the_guard_drops_and_cannot_be_installed_twice() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let m = small_matrix();
+        let addr = &m as *const WeightMatrix as usize;
         let calls = Arc::new(Mutex::new(0usize));
         let c = calls.clone();
-        let guard = install(Arc::new(move |_: &WeightMatrix, _: &[f32], _| {
-            *c.lock().unwrap() += 1;
+        let guard = install(Arc::new(move |w: &WeightMatrix, _: &[f32], _| {
+            if std::ptr::addr_eq(w, addr as *const WeightMatrix) {
+                *c.lock().unwrap() += 1;
+            }
         }))
         .unwrap();
         assert_eq!(

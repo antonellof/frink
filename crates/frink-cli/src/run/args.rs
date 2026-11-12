@@ -6,7 +6,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use frink_models::{SamplerOrder, SamplingParams};
 
 /// llama.cpp-compatible completion flags.
@@ -258,12 +258,16 @@ pub struct InferArgs {
     #[arg(short = 's', long = "seed", default_value_t = -1)]
     pub seed: i64,
 
-    /// Devices used for offloading (`none` disables GPU use).
+    /// Device used for offloading (`none` disables GPU use).
     #[arg(
         long = "device",
         visible_alias = "dev",
         value_name = "DEVICE",
-        ignore_case = true
+        ignore_case = true,
+        value_parser = clap::builder::TypedValueParser::map(
+            clap::builder::PossibleValuesParser::new(OffloadDevice::ALL.map(|d| d.as_str())),
+            |s| s.parse::<OffloadDevice>().expect("a listed value parses"),
+        ),
     )]
     pub device: Option<OffloadDevice>,
 
@@ -374,6 +378,58 @@ pub struct InferArgs {
     /// `--no-cnv` is the raw completion.
     #[arg(long = "no-jinja", default_value_t = false)]
     pub no_jinja: bool,
+
+    /// A chat template in place of the GGUF's own, llama.cpp's
+    /// `--chat-template`: its Jinja source, or `chatml`. Any other bare
+    /// name is refused.
+    #[arg(
+        long = "chat-template",
+        value_name = "JINJA_TEMPLATE",
+        overrides_with = "chat_template_file"
+    )]
+    pub chat_template: Option<String>,
+
+    /// `--chat-template`, read from a file. The later of the two wins,
+    /// as in llama.cpp.
+    #[arg(
+        long = "chat-template-file",
+        value_name = "JINJA_TEMPLATE_FILE",
+        overrides_with = "chat_template"
+    )]
+    pub chat_template_file: Option<std::path::PathBuf>,
+
+    /// Template variables, as a JSON object, llama.cpp's
+    /// `--chat-template-kwargs`. Repeatable.
+    #[arg(long = "chat-template-kwargs", value_name = "STRING")]
+    pub chat_template_kwargs: Vec<String>,
+
+    /// Thinking in the chat, llama.cpp's `-rea`: `on`, `off` or `auto`
+    /// (the default), which turns it on where the template supports it.
+    #[arg(
+        long = "reasoning",
+        visible_alias = "rea",
+        value_name = "on|off|auto",
+        allow_hyphen_values = true
+    )]
+    pub reasoning: Option<String>,
+
+    /// The `reasoning_effort` template variable, llama.cpp's
+    /// `--reasoning-effort`. `default` leaves the template's own.
+    #[arg(long = "reasoning-effort", value_name = "LEVEL")]
+    pub reasoning_effort: Option<String>,
+
+    /// The `preserve_reasoning` template variable, llama.cpp's
+    /// `--reasoning-preserve` and its default.
+    #[arg(long = "reasoning-preserve", overrides_with = "no_reasoning_preserve")]
+    pub reasoning_preserve: bool,
+
+    /// `preserve_reasoning` false. The later of the pair wins.
+    #[arg(long = "no-reasoning-preserve", overrides_with = "reasoning_preserve")]
+    pub no_reasoning_preserve: bool,
+
+    /// The flags above, read by `apply_llama_flags`.
+    #[arg(skip)]
+    pub template_flags: frink_models::template_flags::TemplateFlags,
 
     /// Run one throwaway forward pass before the timed prompt, llama.cpp's
     /// `--warmup` (the default, on both).
@@ -542,6 +598,7 @@ impl InferArgs {
         if let Some(mode) = &self.flash_attn {
             frink_core::argv::check_flash_attn(mode).map_err(|e| anyhow::anyhow!(e))?;
         }
+        self.resolve_template_flags()?;
         if let Some(token) = &self.hf_token {
             // SAFETY: single-threaded, before any worker or download.
             unsafe { std::env::set_var("HF_TOKEN", token) };
@@ -549,6 +606,40 @@ impl InferArgs {
         self.read_system_prompt_file()?;
         crate::cli_output::set_colour(self.colour_choice()?);
         crate::cli_output::set_show_timings(self.show_timings_enabled());
+        Ok(())
+    }
+
+    /// The chat-template flags, checked before anything loads. They have
+    /// nothing to act on with `--no-cnv`, which skips the template, so
+    /// accepting them there would be a flag not honoured.
+    pub(crate) fn resolve_template_flags(&mut self) -> anyhow::Result<()> {
+        let reasoning = self
+            .reasoning
+            .as_deref()
+            .map(frink_core::argv::reasoning_switch)
+            .transpose()
+            .map_err(anyhow::Error::msg)?
+            .flatten();
+        self.template_flags = frink_models::template_flags::TemplateFlags::resolve(
+            frink_models::template_flags::TemplateFlagValues {
+                template: self.chat_template.as_deref(),
+                template_file: self.chat_template_file.as_deref(),
+                kwargs: &self.chat_template_kwargs,
+                reasoning,
+                reasoning_effort: self.reasoning_effort.as_deref(),
+                reasoning_preserve: frink_core::argv::flag_pair(
+                    self.reasoning_preserve,
+                    self.no_reasoning_preserve,
+                ),
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        if self.no_cnv && !self.template_flags.is_empty() {
+            anyhow::bail!(
+                "the chat-template flags have no effect with --no-cnv, which skips the chat \
+                 template. Drop one of the two"
+            );
+        }
         Ok(())
     }
 
@@ -704,14 +795,7 @@ impl InferArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum OffloadDevice {
-    Auto,
-    None,
-    Cpu,
-    Metal,
-    Cuda,
-}
+pub use frink_models::offload::OffloadDevice;
 
 pub use frink_models::gpu_layers::GpuLayers;
 

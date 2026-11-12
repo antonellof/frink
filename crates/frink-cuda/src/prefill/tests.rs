@@ -10,7 +10,7 @@ use crate::gpu::shared_device;
 use crate::mul_mm::Q8_0;
 use crate::mul_mm_ref::{fixtures, mul_mm_reference};
 
-fn host_rms_norm_rows(x: &[f32], w: &[f32], n: usize, eps: f32) -> Vec<f32> {
+pub(super) fn host_rms_norm_rows(x: &[f32], w: &[f32], n: usize, eps: f32) -> Vec<f32> {
     x.chunks_exact(n)
         .flat_map(|row| {
             let ms = row.iter().map(|v| v * v).sum::<f32>() / n as f32;
@@ -59,7 +59,27 @@ fn host_rope_rows(
 }
 
 /// `frink_core::attention::causal_gqa_attention_row` per query, naive.
-fn host_causal_gqa(q: &[f32], k: &[f32], v: &[f32], n_q: usize, a: &AttnArgs) -> Vec<f32> {
+pub(super) fn host_causal_gqa(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_q: usize,
+    a: &AttnArgs,
+) -> Vec<f32> {
+    host_causal_gqa_sinks(q, k, v, n_q, a, None)
+}
+
+/// [`host_causal_gqa`] with one sink logit per head: a key with no
+/// value in the max and the sum (`ggml_soft_max_add_sinks`'s plain
+/// definition).
+pub(super) fn host_causal_gqa_sinks(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    n_q: usize,
+    a: &AttnArgs,
+    sinks: Option<&[f32]>,
+) -> Vec<f32> {
     let hd = a.head_dim;
     let group = a.n_heads / a.n_kv_heads.max(1);
     let mut out = vec![0f32; n_q * a.n_heads * hd];
@@ -80,8 +100,13 @@ fn host_causal_gqa(q: &[f32], k: &[f32], v: &[f32], n_q: usize, a: &AttnArgs) ->
                     s
                 })
                 .collect();
-            let m = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let mut l = 0.0;
+            let sink = sinks.map(|s| s[h]);
+            let m = scores
+                .iter()
+                .cloned()
+                .chain(sink)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mut l = sink.map_or(0.0, |s| (s - m).exp());
             for s in scores.iter_mut() {
                 *s = (*s - m).exp();
                 l += *s;
@@ -132,7 +157,106 @@ pub(super) fn wave(n: usize, seed: f32) -> Vec<f32> {
 /// vector whose terms cancel (a residual stream after two adds) is
 /// held to the same absolute error as its neighbours rather than to a
 /// relative one it cannot meet through f16 operands.
-fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
+/// GELU's tanh approximation in f64, the function both the device
+/// kernel and `frink_core::matmul::geglu` evaluate in f32.
+fn host_gelu(x: f32) -> f32 {
+    let x = f64::from(x);
+    let u = (2.0 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x * x * x);
+    (0.5 * x * (1.0 + u.tanh())) as f32
+}
+
+/// gpt-oss's clamped SwiGLU, `frink_moe::swiglu_oai`'s arithmetic.
+pub(super) fn host_swiglu_oai(g: f32, u: f32) -> f32 {
+    use crate::gpu::{SWIGLU_OAI_ALPHA as A, SWIGLU_OAI_LIMIT as L};
+    let x = g.min(L);
+    let y = u.clamp(-L, L);
+    x / (1.0 + (A * -x).exp()) * (y + 1.0)
+}
+
+/// How far a prefill batch's outputs may sit from the host twins,
+/// relative to the larger of the value and its vector's RMS. The twins
+/// round every batch GEMM's input through q8_1 as the device's int8 GEMM
+/// does ([`q8_1_round`]), so what is left is the accumulation order and
+/// the rare run whose rounding the device's own f32 input tips the other
+/// way: the bound the f16 body was held to.
+pub(super) const BATCH_GEMM_TOL: f32 = 1e-2;
+
+/// `x` (rows of `cols`) rounded through q8_1 the way the batch GEMM's
+/// quantizer rounds it (`crate::mmq::quantize`): each 32-value run to
+/// `round(v * 127 / amax)` steps of `1 / (127 / amax)`. The int8 GEMM's
+/// result is the dot of the weights with these values up to f32
+/// rounding, so a twin that multiplies them models the device.
+pub(super) fn q8_1_round(x: &[f32], cols: usize) -> Vec<f32> {
+    assert!(cols.is_multiple_of(32), "{cols} values a row");
+    x.chunks(32)
+        .flat_map(|run| {
+            let amax = run.iter().map(|v| v.abs()).fold(0f32, f32::max);
+            let d_inv = if amax > 0.0 { 127.0 / amax } else { 0.0 };
+            let d = if amax > 0.0 { 1.0 / d_inv } else { 0.0 };
+            run.iter().map(move |v| (v * d_inv).round() * d)
+        })
+        .collect()
+}
+
+/// One row of `cols` Q8_0 inputs as a decode token's matvec reads it in
+/// this process: through the dp4a kernel's q8_1 (its quantizer divides
+/// by `d = amax / 127`, unlike the batch GEMM's [`q8_1_round`]) unless
+/// `FRINK_CUDA_MATVEC` keeps the f32 kernels. The switch is the one the
+/// launch reads, so a twin built on this passes under each value.
+pub(super) fn decode_reads(x: &[f32], cols: usize) -> Vec<f32> {
+    crate::matvec_kinds::dp4a::matvec_reads("q8_0_matvec", cols / 32, x)
+}
+
+/// The decode twins round as the decode matvec does: by default the
+/// dp4a quantizer's `x / (amax / 127)`, not the batch GEMM's
+/// `x * (127 / amax)` (on this fixture the two round some values
+/// differently), and under `wide` or `narrow` not at all.
+///
+/// Sabotage: `decode_reads` returning `q8_1_round(x, cols)` fails here.
+#[test]
+fn the_decode_twins_round_as_the_decode_matvec_does() {
+    let cols = 4096;
+    let x = wave(cols, 0.3);
+    let got = decode_reads(&x, cols);
+    if crate::matvec_kinds::dp4a::dp4a_enabled() {
+        assert_eq!(got, crate::dp4a_twin::q8_1_round(&x));
+        assert_ne!(
+            got,
+            q8_1_round(&x, cols),
+            "the fixture cannot tell the quantizers apart"
+        );
+    } else {
+        assert_eq!(got, x);
+    }
+}
+
+/// `q8_1_round` is the quantizer's rounding, value for value: the twins
+/// that use it and the int8 GEMM's quantizer cannot drift apart.
+#[test]
+fn the_twins_q8_1_rounding_is_the_quantizer_s() {
+    use crate::mmq::quantize::{quantize_twin, Layout, BLOCK_BYTES, QK};
+    let (rows, cols) = (3usize, 96usize);
+    let x: Vec<f32> = (0..rows * cols)
+        .map(|i| ((i as f32) * 0.41).sin() * (1u32 << ((i / 32) % 4)) as f32)
+        .collect();
+    let y = quantize_twin(&x, None, cols, rows, rows, Layout::D4);
+    let got = q8_1_round(&x, cols);
+    for r in 0..rows {
+        for i in 0..cols {
+            let blk = ((i / QK) * rows + r) * BLOCK_BYTES;
+            let sub = (i % QK) / 32;
+            let d = f32::from_le_bytes(y[blk + 4 * sub..blk + 4 * sub + 4].try_into().unwrap());
+            let want = f32::from(y[blk + 16 + i % QK] as i8) * d;
+            assert_eq!(
+                got[r * cols + i].to_bits(),
+                want.to_bits(),
+                "row {r} value {i}"
+            );
+        }
+    }
+}
+
+pub(super) fn assert_close(got: &[f32], want: &[f32], tol: f32, what: &str) {
     assert_eq!(got.len(), want.len(), "{what}: length");
     let rms = (want.iter().map(|w| w * w).sum::<f32>() / want.len().max(1) as f32).sqrt();
     for (i, (g, w)) in got.iter().zip(want).enumerate() {
@@ -164,9 +288,13 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
         k: m(32, 64),
         v: m(32, 64),
         o: m(64, 96),
-        gate: m(96, 64),
-        up: m(96, 64),
-        down: m(64, 96),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: m(96, 64),
+            up: m(96, 64),
+            down: m(64, 96),
+            bias: None,
+        }),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
@@ -190,22 +318,59 @@ fn a_layer_whose_shapes_disagree_is_refused_before_the_device() {
     assert!(matches!(err, CudaError::Unsupported(_)), "{err:?}");
 }
 
+/// The row RMSNorm's block is a whole number of warps the kernel's 32
+/// reduction slots hold, wide for one long row and 256 for a batch.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
-fn rmsnorm_rows_matches_the_host() {
-    let dev = shared_device().unwrap();
-    let (rows, n) = (37, 96);
-    let x = wave(rows * n, 0.1);
-    let w = wave(n, 0.7);
-    let d_x = dev.htod_copy(x.clone()).unwrap();
-    let d_w = dev.htod_copy(w.clone()).unwrap();
-    let out = enqueue_rmsnorm_rows(&dev, &d_x, &d_w, rows, n, 1e-5).unwrap();
-    let got = dev.dtoh_sync_copy(&out).unwrap();
-    assert_close(&got, &host_rms_norm_rows(&x, &w, n, 1e-5), 1e-5, "rmsnorm");
+fn the_rmsnorm_block_is_whole_warps_within_the_reduction() {
+    use super::enqueue::rmsnorm_threads;
+    for (n_rows, n) in [
+        (1usize, 4096usize),
+        (1, 3072),
+        (1, 128),
+        (32, 128),
+        (512, 4096),
+        (8, 64),
+    ] {
+        let t = rmsnorm_threads(n_rows, n);
+        assert!(
+            t.is_multiple_of(32) && (32..=1024).contains(&t),
+            "{n_rows}x{n}: {t}"
+        );
+    }
+    assert_eq!(rmsnorm_threads(1, 4096), 1024);
+    assert_eq!(rmsnorm_threads(512, 4096), 256);
 }
 
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+fn rmsnorm_rows_matches_the_host() {
+    let dev = shared_device().unwrap();
+    // A batch at 256 threads a row, and one long row at 1024: the two
+    // geometries `rmsnorm_threads` picks between.
+    for (rows, n) in [
+        (37usize, 96usize),
+        (64, 4096),
+        (1, 4096),
+        (1, 3072),
+        (2, 128),
+    ] {
+        let x = wave(rows * n, 0.1);
+        let w = wave(n, 0.7);
+        let d_x = dev.htod_copy(x.clone()).unwrap();
+        let d_w = dev.htod_copy(w.clone()).unwrap();
+        let out = enqueue_rmsnorm_rows(&dev, &d_x, &d_w, rows, n, 1e-5).unwrap();
+        let got = dev.dtoh_sync_copy(&out).unwrap();
+        assert_close(
+            &got,
+            &host_rms_norm_rows(&x, &w, n, 1e-5),
+            1e-5,
+            &format!("rmsnorm {rows}x{n}"),
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors() {
     let dev = shared_device().unwrap();
     let (rows, n_heads, head_dim) = (9, 3, 32);
@@ -257,51 +422,53 @@ fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors(
     }
 }
 
+/// The tile the prefill attention takes fits the limit it is handed,
+/// the widest one where it can, and a head of 256 still finds one in
+/// the 48 KiB every device gives without opting in.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
-fn causal_gqa_prefill_matches_the_host_with_a_prefix_a_window_and_a_softcap() {
-    let dev = shared_device().unwrap();
-    let (n_q, n_heads, n_kv_heads, head_dim) = (13, 4, 2, 64);
-    for (start_pos, window, softcap) in [
-        (0, None, None),
-        (7, None, None),
-        (7, Some(5), None),
-        (0, None, Some(50.0)),
-    ] {
-        let total = start_pos + n_q;
-        let q = wave(n_q * n_heads * head_dim, 0.2);
-        let k = wave(total * n_kv_heads * head_dim, 0.4);
-        let v = wave(total * n_kv_heads * head_dim, 0.6);
-        let args = AttnArgs {
-            n_heads,
-            n_kv_heads,
-            head_dim,
-            start_pos,
-            window,
-            scale: (head_dim as f32).sqrt().recip(),
-            softcap,
-        };
-        let want = host_causal_gqa(&q, &k, &v, n_q, &args);
-        let d_q = dev.htod_copy(q).unwrap();
-        let d_k = dev.htod_copy(k).unwrap();
-        let d_v = dev.htod_copy(v).unwrap();
-        let out = enqueue_causal_gqa_prefill(&dev, &d_q, &d_k, &d_v, n_q, &args).unwrap();
-        let got = dev.dtoh_sync_copy(&out).unwrap();
-        assert_close(
-            &got,
-            &want,
-            1e-4,
-            &format!("attn start={start_pos} window={window:?} softcap={softcap:?}"),
-        );
+fn the_prefill_attention_tile_fits_its_shared_memory() {
+    use super::enqueue::{prefill_attn_smem, prefill_attn_tile};
+    for head_dim in [64usize, 96, 128, 256] {
+        for limit in [48 * 1024usize, 64 * 1024, 99 * 1024, 163 * 1024] {
+            let (rpw, bc, bytes) = prefill_attn_tile(head_dim, limit).expect("a tile fits");
+            assert_eq!(bytes, prefill_attn_smem(head_dim, rpw, bc));
+            assert!(bytes <= limit && rpw <= 8 && bc <= 32, "{head_dim} {limit}");
+        }
     }
+    assert_eq!(
+        prefill_attn_tile(128, 99 * 1024).map(|t| (t.0, t.1)),
+        Some((8, 32))
+    );
 }
 
 /// The whole layer against a host twin: the same fixtures through
 /// `mul_mm_reference` and the naive loops above, in the order the
 /// host batched body runs them.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
 fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
+    dense_layer_matches_its_host_twin(GluCuda::Silu);
+}
+
+/// The same layer with Gemma's GeGLU: only the FFN's activation
+/// differs, so a stack that ran SwiGLU for it would miss by a whole
+/// term in every hidden element.
+#[test]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+fn the_dense_layer_matches_a_host_twin_with_a_geglu_ffn() {
+    dense_layer_matches_its_host_twin(GluCuda::Gelu);
+}
+
+/// And with gpt-oss's clamped SwiGLU, whose clamps bind on this
+/// fixture's FFN inputs (in the thousands): a kernel that dropped the
+/// clamp, the `+1` or `alpha` misses by a whole term.
+#[test]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs)"]
+fn the_dense_layer_matches_a_host_twin_with_a_clamped_swiglu() {
+    dense_layer_matches_its_host_twin(GluCuda::SwigluOai);
+}
+
+fn dense_layer_matches_its_host_twin(glu: GluCuda) {
     let (batch, hidden, n_heads, n_kv_heads, head_dim, ffn) =
         (40usize, 64usize, 2usize, 1usize, 32usize, 96usize);
     let start_pos = 6;
@@ -374,8 +541,18 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     let window = Some(20);
 
     // --- host twin ---
+    // The device's batch GEMM is the int8 one: its input is q8_1.
     let gemm = |data: &[u8], rows, cols, x: &[f32]| {
-        mul_mm_reference(&Q8_0, data, x, rows, cols, batch, cols / 32 * 34).unwrap()
+        mul_mm_reference(
+            &Q8_0,
+            data,
+            &q8_1_round(x, cols),
+            rows,
+            cols,
+            batch,
+            cols / 32 * 34,
+        )
+        .unwrap()
     };
     let normed = host_rms_norm_rows(&hidden_in, &attn_norm_w, hidden, eps);
     let mut q = gemm(qd, q_w, hidden, &normed);
@@ -436,11 +613,19 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     let normed2 = host_rms_norm_rows(&h, &ffn_norm_w, hidden, eps);
     let g = gemm(gd, ffn, hidden, &normed2);
     let u = gemm(ud, ffn, hidden, &normed2);
-    let act: Vec<f32> = g
-        .iter()
-        .zip(&u)
-        .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
-        .collect();
+    let act: Vec<f32> = match glu {
+        GluCuda::Silu => g
+            .iter()
+            .zip(&u)
+            .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+            .collect(),
+        GluCuda::Gelu => g.iter().zip(&u).map(|(&g, u)| host_gelu(g) * u).collect(),
+        GluCuda::SwigluOai => g
+            .iter()
+            .zip(&u)
+            .map(|(&g, &u)| host_swiglu_oai(g, u))
+            .collect(),
+    };
     let d = gemm(dd, hidden, ffn, &act);
     for (a, b) in h.iter_mut().zip(&d) {
         *a += b;
@@ -454,12 +639,18 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
         k: view(kd, kv_w, hidden),
         v: view(vd, kv_w, hidden),
         o: view(od, hidden, q_w),
-        gate: view(gd, ffn, hidden),
-        up: view(ud, ffn, hidden),
-        down: view(dd, hidden, ffn),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: view(gd, ffn, hidden),
+            up: view(ud, ffn, hidden),
+            down: view(dd, hidden, ffn),
+            bias: None,
+        }),
+        glu,
         post_attn_norm: Some(&post_attn),
         post_ffn_norm: None,
         extras: AttnExtrasCuda {
+            sinks: None,
+            o_bias: None,
             q_bias: Some(&q_bias),
             k_bias: Some(&k_bias),
             v_bias: Some(&v_bias),
@@ -494,9 +685,9 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
     // off by 6e-3 in a vector of RMS about 1 after two residual adds.
     // A wrong kernel is off by a whole term. The GEMM's own exactness
     // is `mul_mm_launch`'s test.
-    assert_close(&out.k_rows, &k, 1e-2, "K rows");
-    assert_close(&out.v_rows, &v, 1e-2, "V rows");
-    assert_close(&out.hidden, &h, 1e-2, "hidden");
+    assert_close(&out.k_rows, &k, BATCH_GEMM_TOL, "K rows");
+    assert_close(&out.v_rows, &v, BATCH_GEMM_TOL, "V rows");
+    assert_close(&out.hidden, &h, BATCH_GEMM_TOL, "hidden");
 
     // The stack: the same layer twice with the hidden batch resident
     // between them must equal two single launches, K/V rows per layer.
@@ -508,16 +699,21 @@ fn the_dense_layer_matches_a_host_twin_with_prefix_biases_norms_and_rope() {
         StackKv::UploadPrefix,
     )
     .unwrap();
-    assert_eq!(stacked.kv_rows.len(), 2);
-    assert_close(&stacked.kv_rows[0].0, &out.k_rows, 1e-5, "stack layer 0 K");
+    assert_eq!(stacked.kv_rows_owned().len(), 2);
     assert_close(
-        &stacked.kv_rows[1].0,
+        &stacked.kv_rows_owned()[0].0,
+        &out.k_rows,
+        1e-5,
+        "stack layer 0 K",
+    );
+    assert_close(
+        &stacked.kv_rows_owned()[1].0,
         &second.k_rows,
         1e-5,
         "stack layer 1 K",
     );
     assert_close(
-        &stacked.kv_rows[1].1,
+        &stacked.kv_rows_owned()[1].1,
         &second.v_rows,
         1e-5,
         "stack layer 1 V",
@@ -561,9 +757,13 @@ fn a_one_row_step_without_a_matvec_is_refused_before_the_device() {
         k: gemm(32, 64),
         v: gemm(32, 64),
         o: gemm(64, 64),
-        gate: gemm(96, 64),
-        up: gemm(96, 64),
-        down: gemm(64, 96),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: gemm(96, 64),
+            up: gemm(96, 64),
+            down: gemm(64, 96),
+            bias: None,
+        }),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
@@ -611,54 +811,11 @@ fn a_matvec_view_of_other_bytes_is_refused() {
     assert!(p.validate(4).is_ok());
 }
 
-#[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
-fn decode_attn_matches_its_twin_across_chunks_a_window_and_a_softcap() {
-    let dev = shared_device().unwrap();
-    for (n_heads, n_kv_heads, head_dim) in [(24usize, 8usize, 128usize), (4, 2, 64), (2, 1, 256)] {
-        for (seq_len, window, softcap) in [
-            (1usize, None, None),
-            (63, None, None),
-            (64, None, None),
-            (65, None, None),
-            (777, None, None),
-            (777, Some(300), None),
-            (130, None, Some(50.0)),
-        ] {
-            let q = wave(n_heads * head_dim, 0.2);
-            let k = wave(seq_len * n_kv_heads * head_dim, 0.4);
-            let v = wave(seq_len * n_kv_heads * head_dim, 0.6);
-            let scale = (head_dim as f32).sqrt().recip();
-            let want = crate::decode_attn::decode_attn_twin(
-                &q, &k, &v, n_heads, n_kv_heads, head_dim, seq_len, window, scale, softcap,
-            );
-            let args = AttnArgs {
-                n_heads,
-                n_kv_heads,
-                head_dim,
-                start_pos: seq_len - 1,
-                window,
-                scale,
-                softcap,
-            };
-            let d_q = dev.htod_copy(q.clone()).unwrap();
-            let d_k = dev.htod_copy(k.clone()).unwrap();
-            let d_v = dev.htod_copy(v.clone()).unwrap();
-            let out = enqueue_decode_attn(&dev, &d_q, &d_k, &d_v, &args).unwrap();
-            let got = dev.dtoh_sync_copy(&out).unwrap();
-            let what = format!("decode attn h={n_heads} hd={head_dim} seq={seq_len} w={window:?}");
-            assert_close(&got, &want, 1e-4, &what);
-            // And against the definition, through the prefill kernel's
-            // host loop at one query row.
-            let naive = host_causal_gqa(&q, &k, &v, 1, &args);
-            assert_close(&got, &naive, 1e-4, &format!("{what} vs naive"));
-        }
-    }
-}
-
 /// A Llama-shaped layer (no biases, no QK norm, NORM RoPE with
 /// divisors) on the host at one row: the arithmetic the stack's
-/// one-row step must reproduce. Returns the new hidden row, K, V.
+/// one-row step must reproduce. Returns the new hidden row, K, V. Each
+/// projection dots what the one-row step's matvec reads
+/// ([`decode_reads`]).
 #[allow(clippy::too_many_arguments)]
 fn host_llama_row(
     w: &[&[u8]; 7],
@@ -673,7 +830,16 @@ fn host_llama_row(
     let (hidden, n_heads, n_kv_heads, head_dim, ffn) = dims;
     let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
     let mv = |data: &[u8], rows, cols, x: &[f32]| {
-        mul_mm_reference(&Q8_0, data, x, rows, cols, 1, cols / 32 * 34).unwrap()
+        mul_mm_reference(
+            &Q8_0,
+            data,
+            &decode_reads(x, cols),
+            rows,
+            cols,
+            1,
+            cols / 32 * 34,
+        )
+        .unwrap()
     };
     let eps = 1e-5;
     let normed = host_rms_norm_rows(hidden_in, norms.0, hidden, eps);
@@ -731,7 +897,7 @@ fn host_llama_row(
 /// for the history), and a mirror the host cache no longer matches
 /// must be rebuilt rather than trusted.
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A10G (sm_86, Hugging Face Jobs); reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
 fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
     let (hidden, n_heads, n_kv_heads, head_dim, ffn) = (64usize, 2usize, 1usize, 32usize, 96usize);
     let (q_w, kv_w) = (n_heads * head_dim, n_kv_heads * head_dim);
@@ -759,9 +925,13 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         k: q8_0_proj(w[1], kv_w, hidden),
         v: q8_0_proj(w[2], kv_w, hidden),
         o: q8_0_proj(w[3], hidden, q_w),
-        gate: q8_0_proj(w[4], ffn, hidden),
-        up: q8_0_proj(w[5], ffn, hidden),
-        down: q8_0_proj(w[6], hidden, ffn),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: q8_0_proj(w[4], ffn, hidden),
+            up: q8_0_proj(w[5], ffn, hidden),
+            down: q8_0_proj(w[6], hidden, ffn),
+            bias: None,
+        }),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
@@ -825,7 +995,8 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
             "pos {pos}: mirror vs upload"
         );
         assert_eq!(
-            via_mirror.kv_rows, via_upload.kv_rows,
+            via_mirror.kv_rows_owned(),
+            via_upload.kv_rows_owned(),
             "pos {pos}: K/V rows"
         );
         // And the host twin, layer by layer.
@@ -842,13 +1013,13 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
                 pos,
             );
             assert_close(
-                &via_mirror.kv_rows[l].0,
+                &via_mirror.kv_rows_owned()[l].0,
                 &k,
                 1e-3,
                 &format!("pos {pos} layer {l} K"),
             );
             assert_close(
-                &via_mirror.kv_rows[l].1,
+                &via_mirror.kv_rows_owned()[l].1,
                 &v,
                 1e-3,
                 &format!("pos {pos} layer {l} V"),
@@ -857,8 +1028,8 @@ fn decode_through_the_mirror_matches_the_host_twin_token_by_token() {
         }
         assert_close(&via_mirror.hidden, &h, 1e-3, &format!("pos {pos} hidden"));
         for l in 0..2 {
-            host_k[l].extend_from_slice(&via_mirror.kv_rows[l].0);
-            host_v[l].extend_from_slice(&via_mirror.kv_rows[l].1);
+            host_k[l].extend_from_slice(&via_mirror.kv_rows_owned()[l].0);
+            host_v[l].extend_from_slice(&via_mirror.kv_rows_owned()[l].1);
             assert_eq!(mirrors[l].as_ref().unwrap().rows(), pos + 1);
         }
         row = via_mirror.hidden;

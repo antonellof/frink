@@ -1,0 +1,32 @@
+#version 450
+// RMSNorm over `rows` rows of `n`: out = x * w / sqrt(mean(x^2) + eps)
+// (frink_core::matmul::rms_norm; rms_norm_per_head when rows is the head
+// count and n the head width, w then shared by every row). One
+// workgroup per row; the sum of squares is a shared-memory tree in f32,
+// where ggml's CPU loop sums in order in f64 (a GPU deviation, as
+// ggml-vulkan's is).
+//
+// Bindings: 0 the weight (as uint words), 1 x, 2 out. Push: n, rows,
+// eps (f32 bits).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(push_constant) uniform Push { uint n; uint rows; uint eps_bits; } p;
+shared float partial[64];
+
+void main() {
+    uint row = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (row >= p.rows) return;
+    uint tid = gl_LocalInvocationID.x, base = row * p.n;
+    float acc = 0.0;
+    for (uint i = tid; i < p.n; i += 64u) acc += x[base + i] * x[base + i];
+    partial[tid] = acc;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (tid < s) partial[tid] += partial[tid + s];
+        barrier();
+    }
+    float scale = 1.0 / sqrt(partial[0] / float(p.n) + uintBitsToFloat(p.eps_bits));
+    for (uint i = tid; i < p.n; i += 64u) o[base + i] = x[base + i] * scale * uintBitsToFloat(w[i]);
+}

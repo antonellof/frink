@@ -104,7 +104,7 @@ Not here:
 - **Serving integration with a model drafter.** Since 0.28.0 `frink-server`
   speculates with prompt lookup and fills the acceptance metrics when it
   does. It cannot load a draft model; that is `spec-server-integration` and
-  [`server-speculative-decoding.md`](server-speculative-decoding.md).
+  [`archive/server-speculative-decoding.md`](archive/server-speculative-decoding.md).
 
 ## The constraint that decides whether this plan is real
 

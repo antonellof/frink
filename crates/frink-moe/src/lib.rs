@@ -978,7 +978,7 @@ pub use glu_act::{relu_sqr, ClampForm, GluAct, Ungated, XieluParams};
 ///
 /// `act` is not optional on purpose -- see [`GluAct`].
 pub fn run_expert(hidden: &[f32], expert: &ExpertWeights, act: GluAct) -> Vec<f32> {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     if act.is_swiglu() {
         // Full SwiGLU on-device (1× upload + 1× download) when dense GPU
         // is on. SwiGLU-only kernel: a GeGLU expert must not take it.
@@ -1043,7 +1043,7 @@ fn expert_activated(hidden: &[f32], expert: &ExpertWeights, act: GluAct) -> Vec<
 /// BEFORE any activation, which is where a bias lands
 /// (`dense_bias::run_expert_biased`).
 pub(crate) fn gate_up_projections(hidden: &[f32], expert: &ExpertWeights) -> (Vec<f32>, Vec<f32>) {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         // Gate and up share `hidden` — one GPU upload / multi-matvec.
         // Activation-agnostic: the combine happens on the host below.
@@ -1857,7 +1857,7 @@ mod tests {
 
     #[cfg(any(feature = "cuda", feature = "metal"))]
     #[test]
-    #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored"]
+    #[ignore = "requires real GPU hardware (CUDA or Metal) -- run with --ignored; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn run_expert_placed_on_gpu_matches_cpu_for_a_real_quantized_expert() {
         let hidden_dim = 32;
         let ffn_dim = 32; // must be a multiple of Q8_0 block elems (32)
@@ -1885,7 +1885,22 @@ mod tests {
         };
         let hidden = make_row(hidden_dim, 0.5);
 
-        let cpu = run_expert_placed(&hidden, &expert, ExpertPlacement::Cpu, GluAct::Swiglu);
+        // The CPU twin of the device's expert: each matvec dots what the
+        // device's reads, which on CUDA is the activation's q8_1 rounding
+        // under the dp4a default (gate and up read `hidden`, down the
+        // gated activation), by the switch the launch reads.
+        let reads = |x: &[f32]| -> Vec<f32> {
+            #[cfg(feature = "cuda")]
+            let r = frink_cuda::matvec_kinds::dp4a::matvec_reads("q8_0_matvec", x.len() / 32, x);
+            #[cfg(not(feature = "cuda"))]
+            let r = x.to_vec();
+            r
+        };
+        let gate = expert.gate.apply_cpu(&reads(&hidden));
+        let up = expert.up.apply_cpu(&reads(&hidden));
+        let cpu = expert
+            .down
+            .apply_cpu(&reads(&GluAct::Swiglu.apply(&gate, &up)));
         let gpu = run_expert_placed(
             &hidden,
             &expert,
@@ -1978,8 +1993,7 @@ pub fn gemma4_router_logits(
     debug_assert_eq!(hidden.len(), router_scale.len());
     let n = hidden.len() as f32;
     // Weightless RMSNorm: no learned per-channel term.
-    let mean_sq = hidden.iter().map(|v| v * v).sum::<f32>() / n;
-    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+    let inv_rms = frink_core::matmul::rms_scale(hidden, eps);
     let width_scale = n.powf(-0.5);
     let scaled: Vec<f32> = hidden
         .iter()

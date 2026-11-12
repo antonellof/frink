@@ -15,21 +15,59 @@ use super::*;
 /// way, including for the families the sniffer never recognised.
 pub(super) struct ChatKind {
     template: frink_models::chat_template::ChatTemplate,
+    kwargs: serde_json::Map<String, serde_json::Value>,
     bos_token: Option<String>,
     eos_token: Option<String>,
+    /// `enable_thinking` under the kwargs: whether the template supports
+    /// thinking, as llama-cli passes it.
+    enable_thinking: bool,
+    /// What llama-cli does to the conversation before rendering it with
+    /// this template: a system turn folded in where the template will
+    /// not show one, TranslateGemma's typed user turn.
+    reshape: frink_models::chat_template::reshape::Reshape,
 }
 
 impl ChatKind {
-    pub(super) fn detect_for_gguf(file: &ShardedGguf, byte_tokenizer: bool) -> Self {
+    pub(super) fn detect_for_gguf(
+        file: &ShardedGguf,
+        byte_tokenizer: bool,
+        flags: &frink_models::template_flags::TemplateFlags,
+    ) -> Self {
+        Self::new(
+            flags.template.clone().unwrap_or_else(|| {
+                frink_models::chat_template::ChatTemplate::from_gguf_metadata(
+                    file.metadata_str("tokenizer.chat_template"),
+                    file.metadata_str("general.architecture"),
+                    byte_tokenizer,
+                    frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
+                )
+            }),
+            flags.kwargs.clone(),
+            file.token_text("tokenizer.ggml.bos_token_id"),
+            file.token_text("tokenizer.ggml.eos_token_id"),
+        )
+    }
+
+    fn new(
+        template: frink_models::chat_template::ChatTemplate,
+        kwargs: serde_json::Map<String, serde_json::Value>,
+        bos_token: Option<String>,
+        eos_token: Option<String>,
+    ) -> Self {
+        let enable_thinking =
+            template.supports_thinking(bos_token.as_deref(), eos_token.as_deref());
+        let reshape = frink_models::chat_template::reshape::Reshape::for_template(
+            &template,
+            bos_token.as_deref(),
+            eos_token.as_deref(),
+        );
         ChatKind {
-            template: frink_models::chat_template::ChatTemplate::from_gguf_metadata(
-                file.metadata_str("tokenizer.chat_template"),
-                file.metadata_str("general.architecture"),
-                byte_tokenizer,
-                frink_models::chat_template::ChatTemplate::vocab_has_chatml(file),
-            ),
-            bos_token: file.token_text("tokenizer.ggml.bos_token_id"),
-            eos_token: file.token_text("tokenizer.ggml.eos_token_id"),
+            template,
+            kwargs,
+            bos_token,
+            eos_token,
+            enable_thinking,
+            reshape,
         }
     }
 
@@ -45,10 +83,15 @@ impl ChatKind {
             messages.push(serde_json::json!({"role": "system", "content": sys}));
         }
         messages.push(serde_json::json!({"role": "user", "content": user}));
+        self.reshape
+            .apply(&mut messages, &self.kwargs)
+            .map_err(|e| anyhow::anyhow!("chat template failed to render: {e}"))?;
         let opts = frink_models::chat_template::RenderOptions {
             add_generation_prompt: true,
             bos_token: self.bos_token.clone(),
             eos_token: self.eos_token.clone(),
+            extra: self.kwargs.clone(),
+            enable_thinking: Some(self.enable_thinking),
             ..Default::default()
         };
         self.template
@@ -102,7 +145,8 @@ pub(super) fn final_prompt(args: &InferArgs, file: &ShardedGguf) -> anyhow::Resu
         }
         user_prompt
     } else {
-        ChatKind::detect_for_gguf(file, false).wrap_user(args.system.as_deref(), &user_prompt)?
+        ChatKind::detect_for_gguf(file, false, &args.template_flags)
+            .wrap_user(args.system.as_deref(), &user_prompt)?
     };
     if args.verbose_prompt {
         eprintln!("----- prompt -----");
@@ -125,4 +169,78 @@ pub(super) fn resolve_prompt(args: &InferArgs) -> anyhow::Result<String> {
         prompt = apply_escapes(&prompt);
     }
     Ok(prompt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frink_models::template_flags::{TemplateFlagValues, TemplateFlags};
+
+    #[test]
+    fn the_template_flags_reach_the_rendered_prompt() {
+        let kwargs = [r#"{"mode": "x"}"#.to_string()];
+        let flags = TemplateFlags::resolve(TemplateFlagValues {
+            template: Some("{{ messages[0].content }}:{{ mode }}"),
+            kwargs: &kwargs,
+            ..Default::default()
+        })
+        .unwrap();
+        let kind = ChatKind::new(
+            flags.template.clone().unwrap(),
+            flags.kwargs.clone(),
+            None,
+            None,
+        );
+        assert_eq!(kind.wrap_user(None, "hi").unwrap(), "hi:x");
+    }
+
+    /// llama-cli's default: thinking on where the template supports it,
+    /// and `-rea off` still turns it off.
+    #[test]
+    fn enable_thinking_defaults_to_whether_the_template_thinks() {
+        // `if enable_thinking`, not `is false`: undefined and `true` must
+        // render differently, or the default could go unseen.
+        let source = "{{ messages[0].content }}{% if enable_thinking %}<think>{% endif %}";
+        let render = |reasoning| {
+            let flags = TemplateFlags::resolve(TemplateFlagValues {
+                template: Some(source),
+                reasoning,
+                ..Default::default()
+            })
+            .unwrap();
+            ChatKind::new(
+                flags.template.clone().unwrap(),
+                flags.kwargs.clone(),
+                None,
+                None,
+            )
+            .wrap_user(None, "hi")
+            .unwrap()
+        };
+        assert_eq!(render(None), "hi<think>");
+        assert_eq!(render(Some(false)), "hi");
+    }
+
+    /// `-sys` on a template that raises on a system turn, as Gemma 2's
+    /// does, folds into the user's turn, as llama-cli folds it.
+    #[test]
+    fn a_system_prompt_the_template_refuses_is_folded_in() {
+        let gemma2 = "{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}\
+                      {% for m in messages %}<{{ m.role }}>{{ m.content }}{% endfor %}";
+        let flags = TemplateFlags::resolve(TemplateFlagValues {
+            template: Some(gemma2),
+            ..Default::default()
+        })
+        .unwrap();
+        let kind = ChatKind::new(
+            flags.template.clone().unwrap(),
+            flags.kwargs.clone(),
+            None,
+            None,
+        );
+        assert_eq!(
+            kind.wrap_user(Some("Be brief."), "Hi").unwrap(),
+            "<user>Be brief.\nHi"
+        );
+    }
 }

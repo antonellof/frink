@@ -1,0 +1,34 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// GGUF MXFP4, 17 bytes per 32 values: an E8M0 scale byte, then 16
+// nibble bytes of E2M1 codes; low nibble is element i, high nibble
+// element i+16 (frink_quant::dot_mxfp4_gguf_f32_scalar). The scale is
+// 2^(e-127), placed straight into an f32's exponent as ggml does, with
+// e = 0 as the subnormal 2^-127. One unit per block.
+#include "matvec_common.glsl"
+
+const float KVALUES_MXFP4[16] = float[16](
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+    -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0);
+
+float e8m0(uint e) {
+    return uintBitsToFloat(e == 0u ? 0x00400000u : (e << 23));
+}
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint b = gl_LocalInvocationID.x; b < p.n_blocks_per_row; b += WG) {
+        uint blk = base + b * 17u;
+        uint xb = b * 32u;
+        float d = e8m0(byte_at(blk));
+        for (uint i = 0u; i < 16u; ++i) {
+            uint q = byte_at(blk + 1u + i);
+            acc += (d * KVALUES_MXFP4[q & 0x0fu]) * X(xb + i);
+            acc += (d * KVALUES_MXFP4[q >> 4]) * X(xb + 16u + i);
+        }
+    }
+    finish(row, acc);
+}

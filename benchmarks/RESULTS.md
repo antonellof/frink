@@ -7,19 +7,41 @@ Same machine, same GGUF, same backend. `pp` is prefill, `tg` is decode.
 **Gap = llama.cpp ÷ frink. Below 1.00 means frink is faster.**
 🟢 faster · ⚪ within 5% · 🔴 slower
 
-Measured on **5 machines**, one section each. A gap only means something against the machine it was measured on, so rows are never compared across sections.
+Measured on **6 machines**, one section each. A gap only means something against the machine it was measured on, so rows are never compared across sections.
+
+Compared against **2 llama.cpp references**, one section each. A gap is a ratio against one llama.cpp build, so gaps from different sections are not one comparison.
 
 ### At a glance
 
 | Machine | Backend | llama.cpp | Measured at | Prefill | Decode |
 |---|---|---|---|---|---|
-| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | unknown | `0.21.0` ⚠️ | ⚪ **1.04×** to 🔴 **4.45×** | ⚪ **1.04×** to 🔴 **1.34×** |
-| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | unknown | `0.21.0` ⚠️ | 🔴 **25.53×** to 🔴 **43.29×** | 🔴 **2.75×** to 🔴 **9.25×** |
-| AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | unknown | `0.17.1` ⚠️ | 🔴 **6.26×** to 🔴 **10.14×** | 🔴 **1.06×** to 🔴 **1.92×** |
-| Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | unknown | `0.20.0` ⚠️ | ⚪ **0.99×** to 🔴 **1.09×** | 🟢 **0.60×** to ⚪ **0.96×** |
-| Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | unknown | `0.17.1` ⚠️ | 🔴 **22.55×** to 🔴 **33.79×** | 🔴 **2.18×** to 🔴 **5.04×** |
+| AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64 + NVIDIA L40S | CUDA | `604cc43` | `0.59.0` ⚠️ | 🔴 **3.14×** to 🔴 **254.26×** | 🔴 **1.16×** to 🔴 **5.40×** |
+| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic | CPU | unknown | `0.21.0` ⚠️ | ⚪ **1.04×** to 🔴 **4.47×** | ⚪ **1.04×** to 🔴 **1.36×** |
+| AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090 | CUDA | unknown | `0.21.0` ⚠️ | 🔴 **25.52×** to 🔴 **43.33×** | 🔴 **2.75×** to 🔴 **9.25×** |
+| AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic | CPU | unknown | `0.17.1` ⚠️ | 🔴 **6.26×** to 🔴 **10.12×** | 🔴 **1.07×** to 🔴 **1.92×** |
+| Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro | METAL | unknown | `0.20.0` ⚠️ | ⚪ **1.00×** to 🔴 **1.11×** | 🟢 **0.61×** to ⚪ **0.96×** |
+| Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060 | CUDA | unknown | `0.17.1` ⚠️ | 🔴 **22.58×** to 🔴 **34.10×** | 🔴 **2.18×** to 🔴 **5.04×** |
 
-⚠️ marks rows measured on a build older than this one (**0.50.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
+⚠️ marks rows measured on a build older than this one (**0.61.0**). They are what that build did, not what this one does, and are kept until the machine that produced them is available again.
+
+### AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64 + NVIDIA L40S
+
+Against llama.cpp `604cc43` (build 1, CUDA).
+
+#### CUDA
+
+| Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
+|---|---|---|---:|---:|---:|---:|
+| Gemma-3-12B-IT Q4_K_M | 🔴 **3.73×** | 🔴 **1.27×** | 1790 | 6675 | 64.8 | 82.6 |
+| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **3.36×** | 🔴 **1.39×** | 5770 | 19396 | 196 | 272 |
+| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **3.43×** | 🔴 **1.21×** | 3118 | 10695 | 112 | 136 |
+| Meta-Llama-3.1-8B-Instruct Q8_0 | 🔴 **4.04×** | 🔴 **1.16×** | 2742 | 11087 | 71.8 | 83.2 |
+| Mistral-7B-Instruct-v0.3 Q4_K_M | 🔴 **3.63×** | 🔴 **1.23×** | 2972 | 10775 | 119 | 145 |
+| Phi-4-mini-Instruct Q4_K_M | 🔴 **3.96×** | 🔴 **1.44×** | 4388 | 17372 | 161 | 231 |
+| Qwen2.5-7B-Instruct Q4_K_M | 🔴 **3.14×** | 🔴 **1.28×** | 3571 | 11228 | 113 | 144 |
+| Qwen3-30B-A3B Q4_K_M | 🔴 **5.56×** | 🔴 **2.02×** | 1562 | 8689 | 112 | 226 |
+| Qwen3-8B Q4_K_M | 🔴 **3.59×** | 🔴 **1.26×** | 2905 | 10417 | 105 | 132 |
+| gpt-oss-20b MXFP4 | 🔴 **254.26×** | 🔴 **5.40×** | 43.8 | 11144 | 38.7 | 209 |
 
 ### AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic
 
@@ -29,20 +51,20 @@ Against llama.cpp build **unknown**: these receipts predate recording it, so the
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
 |---|---|---|---:|---:|---:|---:|
-| Gemma-2-2B-IT Q4_K_M | 🔴 **1.36×** | 🔴 **1.09×** | 167 | 228 | 13.6 | 14.8 |
-| Gemma-3-1B-IT Q8_0 | 🔴 **1.63×** | ⚪ **1.04×** | 302 | 492 | 23.7 | 24.8 |
-| Llama-3.2-1B-Instruct IQ4_XS | 🔴 **4.45×** | 🔴 **1.17×** | 56.5 | 251 | 30.8 | 36.1 |
-| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **1.29×** | 🔴 **1.11×** | 368 | 476 | 29.6 | 32.9 |
-| Llama-3.2-1B-Instruct Q5_K_M | ⚪ **1.04×** | 🔴 **1.16×** | 265 | 276 | 25.9 | 30.0 |
-| Llama-3.2-1B-Instruct Q6_K | 🔴 **1.36×** | 🔴 **1.16×** | 239 | 325 | 23.1 | 26.8 |
-| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **1.25×** | 🔴 **1.13×** | 139 | 173 | 11.9 | 13.4 |
-| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **1.20×** | 🔴 **1.10×** | 58.8 | 70.6 | 5.4 | 6.0 |
-| Mistral-7B-Instruct-v0.2 Q4_K_M | 🔴 **1.20×** | 🔴 **1.09×** | 58.9 | 70.7 | 5.8 | 6.3 |
-| Phi-4-mini-Instruct Q4_K_M | 🔴 **1.18×** | 🔴 **1.12×** | 114 | 134 | 9.8 | 10.9 |
-| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **1.64×** | 🔴 **1.16×** | 558 | 914 | 42.8 | 49.6 |
-| Qwen3-0.6B Q8_0 | 🔴 **1.50×** | 🔴 **1.15×** | 435 | 652 | 35.0 | 40.1 |
-| SmolLM2-135M-Instruct Q8_0 | 🔴 **2.08×** | 🔴 **1.34×** | 990 | 2064 | 111 | 149 |
-| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **1.52×** | 🔴 **1.08×** | 250 | 380 | 23.0 | 24.7 |
+| Gemma-2-2B-IT Q4_K_M | 🔴 **1.36×** | 🔴 **1.09×** | 168 | 228 | 13.5 | 14.8 |
+| Gemma-3-1B-IT Q8_0 | 🔴 **1.63×** | ⚪ **1.04×** | 301 | 492 | 23.7 | 24.8 |
+| Llama-3.2-1B-Instruct IQ4_XS | 🔴 **4.47×** | 🔴 **1.22×** | 56.3 | 251 | 29.6 | 36.1 |
+| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **1.31×** | 🔴 **1.11×** | 363 | 476 | 29.6 | 32.9 |
+| Llama-3.2-1B-Instruct Q5_K_M | ⚪ **1.04×** | 🔴 **1.16×** | 266 | 276 | 25.9 | 30.0 |
+| Llama-3.2-1B-Instruct Q6_K | 🔴 **1.36×** | 🔴 **1.16×** | 239 | 325 | 23.0 | 26.8 |
+| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **1.25×** | 🔴 **1.14×** | 139 | 173 | 11.8 | 13.4 |
+| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **1.20×** | 🔴 **1.10×** | 58.6 | 70.6 | 5.4 | 6.0 |
+| Mistral-7B-Instruct-v0.2 Q4_K_M | 🔴 **1.20×** | 🔴 **1.09×** | 59.0 | 70.7 | 5.8 | 6.3 |
+| Phi-4-mini-Instruct Q4_K_M | 🔴 **1.18×** | 🔴 **1.11×** | 114 | 134 | 9.8 | 10.9 |
+| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **1.64×** | 🔴 **1.16×** | 557 | 914 | 42.8 | 49.6 |
+| Qwen3-0.6B Q8_0 | 🔴 **1.50×** | 🔴 **1.15×** | 436 | 652 | 35.0 | 40.1 |
+| SmolLM2-135M-Instruct Q8_0 | 🔴 **2.13×** | 🔴 **1.36×** | 968 | 2064 | 109 | 149 |
+| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **1.52×** | 🔴 **1.08×** | 249 | 380 | 23.0 | 24.7 |
 
 ### AMD Ryzen 9 3900X 12-Core Processor (12c) Linux 5.15.0-191-generic + NVIDIA GeForce RTX 3090
 
@@ -52,18 +74,18 @@ Against llama.cpp build **unknown**: these receipts predate recording it, so the
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
 |---|---|---|---:|---:|---:|---:|
-| Gemma-2-2B-IT Q4_K_M | 🔴 **30.86×** | 🔴 **3.95×** | 400 | 12360 | 70.4 | 278 |
-| Gemma-3-1B-IT Q8_0 | 🔴 **30.75×** | 🔴 **3.98×** | 739 | 22732 | 85.8 | 342 |
-| Llama-3.2-1B-Instruct IQ4_XS | 🔴 **29.63×** | 🔴 **9.25×** | 896 | 26544 | 66.9 | 619 |
-| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **27.92×** | 🔴 **3.30×** | 873 | 24370 | 189 | 625 |
+| Gemma-2-2B-IT Q4_K_M | 🔴 **30.90×** | 🔴 **3.95×** | 400 | 12360 | 70.4 | 278 |
+| Gemma-3-1B-IT Q8_0 | 🔴 **30.68×** | 🔴 **3.98×** | 741 | 22732 | 85.8 | 342 |
+| Llama-3.2-1B-Instruct IQ4_XS | 🔴 **29.64×** | 🔴 **9.25×** | 896 | 26544 | 66.9 | 619 |
+| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **27.94×** | 🔴 **3.30×** | 872 | 24370 | 189 | 625 |
 | Llama-3.2-1B-Instruct Q5_K_M | 🔴 **27.24×** | 🔴 **3.36×** | 875 | 23834 | 174 | 583 |
-| Llama-3.2-1B-Instruct Q6_K | 🔴 **25.53×** | 🔴 **2.75×** | 886 | 22626 | 191 | 526 |
-| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **31.41×** | 🔴 **3.25×** | 329 | 10327 | 85.6 | 278 |
-| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **37.46×** | 🔴 **3.05×** | 140 | 5243 | 48.7 | 149 |
-| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **27.86×** | 🔴 **5.08×** | 1360 | 37873 | 129 | 656 |
-| Qwen3-0.6B Q8_0 | 🔴 **33.62×** | 🔴 **5.46×** | 843 | 28335 | 97.6 | 533 |
-| SmolLM2-135M-Instruct Q8_0 | 🔴 **27.04×** | 🔴 **4.67×** | 1617 | 43736 | 176 | 823 |
-| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **43.29×** | 🔴 **5.46×** | 526 | 22790 | 88.4 | 483 |
+| Llama-3.2-1B-Instruct Q6_K | 🔴 **25.52×** | 🔴 **2.75×** | 887 | 22626 | 191 | 526 |
+| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **31.43×** | 🔴 **3.25×** | 329 | 10327 | 85.6 | 278 |
+| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **37.47×** | 🔴 **3.05×** | 140 | 5243 | 48.7 | 149 |
+| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **27.82×** | 🔴 **5.08×** | 1361 | 37873 | 129 | 656 |
+| Qwen3-0.6B Q8_0 | 🔴 **34.24×** | 🔴 **5.46×** | 828 | 28335 | 97.6 | 533 |
+| SmolLM2-135M-Instruct Q8_0 | 🔴 **26.94×** | 🔴 **4.67×** | 1624 | 43736 | 176 | 823 |
+| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **43.33×** | 🔴 **5.45×** | 526 | 22790 | 88.5 | 483 |
 
 ### AMD Ryzen 9 7945HX with Radeon Graphics (16c) Linux 6.17.0-23-generic
 
@@ -73,16 +95,16 @@ Against llama.cpp build **unknown**: these receipts predate recording it, so the
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
 |---|---|---|---:|---:|---:|---:|
-| Gemma-2-2B-IT Q4_K_M | 🔴 **9.85×** | 🔴 **1.33×** | 42.7 | 421 | 22.2 | 29.5 |
-| Gemma-3-1B-IT Q8_0 | 🔴 **6.26×** | 🔴 **1.06×** | 147 | 918 | 46.5 | 49.5 |
-| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **10.14×** | 🔴 **1.44×** | 89.6 | 909 | 46.5 | 67.1 |
-| Llama-3.2-1B-Instruct Q6_K | 🔴 **7.96×** | 🔴 **1.44×** | 64.5 | 513 | 37.3 | 53.8 |
-| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **10.04×** | 🔴 **1.43×** | 31.5 | 316 | 18.9 | 27.0 |
-| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **9.93×** | 🔴 **1.33×** | 13.3 | 132 | 9.1 | 12.1 |
+| Gemma-2-2B-IT Q4_K_M | 🔴 **9.82×** | 🔴 **1.33×** | 42.8 | 421 | 22.1 | 29.5 |
+| Gemma-3-1B-IT Q8_0 | 🔴 **6.26×** | 🔴 **1.07×** | 147 | 918 | 46.4 | 49.5 |
+| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **10.12×** | 🔴 **1.44×** | 89.8 | 909 | 46.4 | 67.1 |
+| Llama-3.2-1B-Instruct Q6_K | 🔴 **8.00×** | 🔴 **1.46×** | 64.1 | 513 | 36.9 | 53.8 |
+| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **10.03×** | 🔴 **1.43×** | 31.5 | 316 | 18.9 | 27.0 |
+| Meta-Llama-3.1-8B-Instruct Q4_K_M | 🔴 **9.95×** | 🔴 **1.33×** | 13.3 | 132 | 9.1 | 12.1 |
 | Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **6.83×** | 🔴 **1.15×** | 272 | 1860 | 85.9 | 99.0 |
-| Qwen3-0.6B Q8_0 | 🔴 **6.93×** | 🔴 **1.29×** | 204 | 1413 | 63.6 | 82.4 |
+| Qwen3-0.6B Q8_0 | 🔴 **6.90×** | 🔴 **1.30×** | 205 | 1413 | 63.6 | 82.4 |
 | SmolLM2-135M-Instruct Q8_0 | 🔴 **6.77×** | 🔴 **1.92×** | 575 | 3892 | 207 | 398 |
-| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **6.53×** | 🔴 **1.15×** | 112 | 734 | 43.6 | 50.0 |
+| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **6.59×** | 🔴 **1.15×** | 111 | 734 | 43.6 | 50.0 |
 
 ### Apple M2 Pro (10c/6p) macOS 26.6.2 + Apple M2 Pro
 
@@ -92,22 +114,22 @@ Against llama.cpp build **unknown**: these receipts predate recording it, so the
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
 |---|---|---|---:|---:|---:|---:|
-| Gemma-2-2B-IT Q4_K_M | ⚪ **1.02×** | 🟢 **0.94×** | 882 | 897 | 71.6 | 67.0 |
-| Gemma-3-1B-IT Q8_0 | ⚪ **1.03×** | 🟢 **0.68×** | 2691 | 2779 | 122 | 83.2 |
+| Gemma-2-2B-IT Q4_K_M | ⚪ **1.02×** | 🟢 **0.95×** | 878 | 897 | 70.6 | 67.0 |
+| Gemma-3-1B-IT Q8_0 | ⚪ **1.03×** | 🟢 **0.68×** | 2694 | 2779 | 122 | 83.2 |
 | Gemma-4-E2B-IT Q4_K_M | — | — | 14.6 | — | 16.3 | — |
-| Llama-3.2-1B-Instruct IQ4_XS | ⚪ **1.03×** | 🟢 **0.90×** | 1847 | 1906 | 163 | 147 |
-| Llama-3.2-1B-Instruct Q4_K_M | ⚪ **1.04×** | 🟢 **0.95×** | 1814 | 1888 | 158 | 149 |
-| Llama-3.2-1B-Instruct Q5_K_M | ⚪ **1.02×** | 🟢 **0.86×** | 1654 | 1691 | 136 | 117 |
-| Llama-3.2-1B-Instruct Q6_K | 🔴 **1.08×** | 🟢 **0.94×** | 1709 | 1848 | 140 | 131 |
-| Llama-3.2-3B-Instruct Q4_K_M | ⚪ **1.03×** | 🟢 **0.94×** | 646 | 662 | 68.5 | 64.5 |
-| Meta-Llama-3.1-8B-Instruct Q4_K_M | ⚪ **1.03×** | 🟢 **0.95×** | 271 | 279 | 32.0 | 30.4 |
-| Mistral-7B-Instruct-v0.2 Q4_K_M | ⚪ **1.03×** | 🟢 **0.95×** | 273 | 280 | 34.3 | 32.4 |
-| OLMoE-1B-7B-0924 Q4_0 | 🔴 **1.08×** | ⚪ **0.96×** | 1441 | 1556 | 174 | 168 |
-| Phi-4-mini-Instruct Q4_K_M | ⚪ **1.02×** | 🟢 **0.88×** | 543 | 556 | 53.9 | 47.6 |
-| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **1.09×** | 🟢 **0.60×** | 4511 | 4935 | 218 | 131 |
-| Qwen3-0.6B Q8_0 | ⚪ **0.99×** | 🟢 **0.61×** | 3535 | 3500 | 191 | 116 |
-| SmolLM2-135M-Instruct Q8_0 | ⚪ **1.02×** | 🟢 **0.60×** | 11878 | 12161 | 363 | 217 |
-| TinyLlama-1.1B-Chat-v1.0 Q8_0 | ⚪ **1.00×** | 🟢 **0.83×** | 2032 | 2034 | 132 | 110 |
+| Llama-3.2-1B-Instruct IQ4_XS | ⚪ **1.03×** | 🟢 **0.90×** | 1846 | 1906 | 163 | 147 |
+| Llama-3.2-1B-Instruct Q4_K_M | ⚪ **1.04×** | 🟢 **0.95×** | 1815 | 1888 | 157 | 149 |
+| Llama-3.2-1B-Instruct Q5_K_M | ⚪ **1.02×** | 🟢 **0.86×** | 1654 | 1691 | 135 | 117 |
+| Llama-3.2-1B-Instruct Q6_K | 🔴 **1.08×** | 🟢 **0.94×** | 1708 | 1848 | 140 | 131 |
+| Llama-3.2-3B-Instruct Q4_K_M | ⚪ **1.03×** | 🟢 **0.94×** | 644 | 662 | 68.5 | 64.5 |
+| Meta-Llama-3.1-8B-Instruct Q4_K_M | ⚪ **1.03×** | ⚪ **0.95×** | 271 | 279 | 32.0 | 30.4 |
+| Mistral-7B-Instruct-v0.2 Q4_K_M | ⚪ **1.03×** | 🟢 **0.94×** | 273 | 280 | 34.3 | 32.4 |
+| OLMoE-1B-7B-0924 Q4_0 | 🔴 **1.09×** | ⚪ **0.96×** | 1433 | 1556 | 175 | 168 |
+| Phi-4-mini-Instruct Q4_K_M | ⚪ **1.05×** | 🟢 **0.89×** | 531 | 556 | 53.7 | 47.6 |
+| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **1.11×** | 🟢 **0.61×** | 4428 | 4935 | 216 | 131 |
+| Qwen3-0.6B Q8_0 | ⚪ **1.00×** | 🟢 **0.61×** | 3490 | 3500 | 190 | 116 |
+| SmolLM2-135M-Instruct Q8_0 | 🔴 **1.07×** | 🟢 **0.61×** | 11334 | 12161 | 358 | 217 |
+| TinyLlama-1.1B-Chat-v1.0 Q8_0 | ⚪ **1.00×** | 🟢 **0.83×** | 2028 | 2034 | 132 | 110 |
 
 ### Intel(R) Xeon(R) CPU E5-2630 v4 @ 2.20GHz (10c) Linux 5.15.0-186-generic + NVIDIA GeForce RTX 3060
 
@@ -117,16 +139,16 @@ Against llama.cpp build **unknown**: these receipts predate recording it, so the
 
 | Model | Prefill | Decode | frink pp512 | llama.cpp pp512 | frink tg128 | llama.cpp tg128 |
 |---|---|---|---:|---:|---:|---:|
-| Gemma-2-2B-IT Q4_K_M | 🔴 **24.99×** | 🔴 **2.88×** | 206 | 5141 | 43.2 | 125 |
-| Gemma-3-1B-IT Q8_0 | 🔴 **23.93×** | 🔴 **3.39×** | 452 | 10803 | 52.0 | 176 |
-| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **25.39×** | 🔴 **2.76×** | 416 | 10572 | 101 | 279 |
-| Llama-3.2-1B-Instruct Q5_K_M | 🔴 **27.09×** | 🔴 **2.91×** | 377 | 10203 | 88.4 | 257 |
-| Llama-3.2-1B-Instruct Q6_K | 🔴 **22.55×** | 🔴 **2.18×** | 426 | 9599 | 100 | 218 |
-| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **25.14×** | 🔴 **2.81×** | 162 | 4061 | 42.7 | 120 |
-| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **31.39×** | 🔴 **4.34×** | 651 | 20443 | 89.4 | 388 |
-| Qwen3-0.6B Q8_0 | 🔴 **32.02×** | 🔴 **4.80×** | 439 | 14049 | 64.6 | 310 |
-| SmolLM2-135M-Instruct Q8_0 | 🔴 **28.44×** | 🔴 **4.74×** | 995 | 28311 | 142 | 671 |
-| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **33.79×** | 🔴 **5.04×** | 302 | 10212 | 47.9 | 241 |
+| Gemma-2-2B-IT Q4_K_M | 🔴 **25.02×** | 🔴 **2.89×** | 205 | 5141 | 43.2 | 125 |
+| Gemma-3-1B-IT Q8_0 | 🔴 **23.96×** | 🔴 **3.39×** | 451 | 10803 | 52.0 | 176 |
+| Llama-3.2-1B-Instruct Q4_K_M | 🔴 **25.39×** | 🔴 **2.77×** | 416 | 10572 | 101 | 279 |
+| Llama-3.2-1B-Instruct Q5_K_M | 🔴 **27.08×** | 🔴 **2.91×** | 377 | 10203 | 88.3 | 257 |
+| Llama-3.2-1B-Instruct Q6_K | 🔴 **22.58×** | 🔴 **2.18×** | 425 | 9599 | 100 | 218 |
+| Llama-3.2-3B-Instruct Q4_K_M | 🔴 **25.20×** | 🔴 **2.81×** | 161 | 4061 | 42.8 | 120 |
+| Qwen2.5-0.5B-Instruct Q8_0 | 🔴 **31.45×** | 🔴 **4.33×** | 650 | 20443 | 89.5 | 388 |
+| Qwen3-0.6B Q8_0 | 🔴 **31.82×** | 🔴 **4.89×** | 442 | 14049 | 63.5 | 310 |
+| SmolLM2-135M-Instruct Q8_0 | 🔴 **28.30×** | 🔴 **4.75×** | 1001 | 28311 | 141 | 671 |
+| TinyLlama-1.1B-Chat-v1.0 Q8_0 | 🔴 **34.10×** | 🔴 **5.04×** | 299 | 10212 | 47.9 | 241 |
 
 ---
 
@@ -141,7 +163,7 @@ The table above is single-stream kernel throughput against llama.cpp.
 These are the **serving** numbers: what continuous batching, paged KV
 and the prefix cache are worth once several requests are in flight.
 
-Self-relative — one build against itself on one box, each figure taken
+Self-relative: one build against itself on one box, each figure taken
 twice in interleaved order, passes agreeing within 1.2%. Not a
 cross-engine comparison, and not comparable to the gap columns above.
 Apple M2 Pro, Metal, all layers offloaded, Llama-3.2-1B-Instruct

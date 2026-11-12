@@ -1,0 +1,99 @@
+{
+  "backend": "cuda",
+  "backend_active": "CUDA",
+  "threads": 4,
+  "warmup_reps": 1,
+  "load_s": 0.052465911,
+  "host_load_1min_start": 1.28,
+  "host_load_1min_end": 1.24,
+  "host_thermal_start": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "host_thermal_end": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "quiet_host": true,
+  "host_spec": {
+    "label": "AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "arch": "x86_64",
+    "cores": 4,
+    "perf_cores": null,
+    "ram_gb": 61.9,
+    "os": "Linux 6.12.113-138.209.amzn2023.x86_64"
+  },
+  "accelerator": "NVIDIA L40S",
+  "engine_env": {
+    "FRINK_CPU_INT_DOT": "1"
+  },
+  "frink_version": "0.59.0",
+  "schema": 3,
+  "kind": "engine",
+  "id": "llama31_8b_q8",
+  "model_path": "/work/models/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
+  "arch": "llama",
+  "quant": "quantized",
+  "size_bytes": 8540775840,
+  "approx_params": 8835301376,
+  "reps": 3,
+  "tests": [
+    {
+      "test": "pp512",
+      "frink_tps": 2753.767797071495,
+      "frink_stddev": 30.62964123433371,
+      "frink_samples": [
+        2700.543664800419,
+        2753.767797071495,
+        2772.950719282295
+      ],
+      "llama_tps": 11086.96254,
+      "gap": 4.026106540932926,
+      "workload_digest": "b8d417040110e751"
+    },
+    {
+      "test": "tg128",
+      "frink_tps": 71.75416878266721,
+      "frink_stddev": 0.04541741275734058,
+      "frink_samples": [
+        71.83061785866346,
+        71.75416878266721,
+        71.72240053316864
+      ],
+      "llama_tps": 83.186161,
+      "gap": 1.1593216451570725,
+      "workload_digest": "044655d19aa3baa5"
+    }
+  ],
+  "llama_cpp": {
+    "build_commit": "604cc43",
+    "build_number": 1,
+    "backends": "CUDA",
+    "cpu_info": "AMD EPYC 7R13 Processor",
+    "gpu_info": "NVIDIA L40S",
+    "command": [
+      "llama-bench",
+      "-m",
+      "/work/models/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
+      "-p",
+      "512",
+      "-n",
+      "128",
+      "-d",
+      "0",
+      "-r",
+      "3",
+      "-ngl",
+      "99",
+      "-o",
+      "json"
+    ]
+  }
+}

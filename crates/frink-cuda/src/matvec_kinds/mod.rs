@@ -25,7 +25,9 @@
 
 pub mod coalesced;
 pub mod codebook;
+pub mod dp4a;
 pub mod generic;
+pub mod helpers;
 pub mod kquant;
 pub mod legacy;
 
@@ -449,12 +451,14 @@ mod hardware_tests {
     /// built by the shared `mul_mm` fixtures -- the same bytes the GEMM
     /// twin and the GEMM hardware test use, so a disagreement between
     /// decode and prefill shows up as one of them failing on data the
-    /// other passed.
+    /// other passed. The oracle dots the activation the kind's matvec
+    /// reads in this process (`dp4a::matvec_reads`): its q8_1
+    /// rounding on a dp4a kernel, the f32 values on the others.
     ///
     /// Run on a machine with an actual CUDA device:
     ///   cargo test -p frink-cuda --features cuda -- --ignored
     #[test]
-    #[ignore = "requires real CUDA hardware. Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0, PTQ1_0 and the seven IQ1/IQ2/IQ3 kinds have NEVER executed on a GPU; Q5_0 has not either. Run with --ignored on a CUDA-capable machine and record the result before any doc claims those kinds decode on CUDA"]
+    #[ignore = "requires real CUDA hardware. Q2_K, Q3_K, IQ4_NL, IQ4_XS, MXFP4, Q4_1, Q5_1, TQ1_0, PTQ1_0 and the seven IQ1/IQ2/IQ3 kinds have NEVER executed on a GPU; Q5_0 has not either. Run with --ignored on a CUDA-capable machine and record the result before any doc claims those kinds decode on CUDA; reference now dots the matvec's own input (q8_1 under the dp4a default), not yet run on hardware with it"]
     fn every_cuda_matvec_matches_the_cpu_reference() {
         type Dot = fn(&[u8], &[f32]) -> f32;
         type Launch =
@@ -589,9 +593,13 @@ mod hardware_tests {
             let row_bytes = blocks_per_row * mm.block_bytes;
             let weights = crate::mul_mm_ref::fixtures::weights(mm, rows, cols, 31337);
             let x: Vec<f32> = (0..cols).map(|i| ((i as f32) * 0.09).sin()).collect();
+            let fn_name = super::kind_by_name(mm.name)
+                .unwrap_or_else(|| panic!("{}: no matvec row", mm.name))
+                .fn_name;
+            let xr = crate::matvec_kinds::dp4a::matvec_reads(fn_name, blocks_per_row, &x);
 
             let expected: Vec<f32> = (0..rows)
-                .map(|r| dot(&weights[r * row_bytes..(r + 1) * row_bytes], &x))
+                .map(|r| dot(&weights[r * row_bytes..(r + 1) * row_bytes], &xr))
                 .collect();
             let got = launch(&weights, &x, rows, row_bytes, blocks_per_row)
                 .expect("kernel launch must succeed on real CUDA hardware");

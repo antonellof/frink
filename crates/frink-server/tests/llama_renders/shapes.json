@@ -1,0 +1,242 @@
+{
+  "comment": "Requests rendered by libllama (tools/oracle/chat_render.cpp, driven by tools/oracle/chat_renders.py) and by frink-server (src/llama_renders.rs). flags are llama-server's, read by upstream's own parser.",
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "shapes": [
+    {
+      "name": "plain",
+      "flags": [],
+      "body": {
+        "messages": [
+          {
+            "role": "system",
+            "content": "Be brief."
+          },
+          {
+            "role": "user",
+            "content": "Hi"
+          },
+          {
+            "role": "assistant",
+            "content": "Hello"
+          },
+          {
+            "role": "user",
+            "content": "How are you?"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reasoning",
+      "flags": [],
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 2+2?"
+          },
+          {
+            "role": "assistant",
+            "content": "4.",
+            "reasoning_content": "Two and two make four."
+          },
+          {
+            "role": "user",
+            "content": "And 3+3?"
+          },
+          {
+            "role": "assistant",
+            "content": "6.",
+            "reasoning_content": "Three and three make six."
+          },
+          {
+            "role": "user",
+            "content": "And 4+4?"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reasoning_flag_no_preserve",
+      "flags": [
+        "--no-reasoning-preserve"
+      ],
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 2+2?"
+          },
+          {
+            "role": "assistant",
+            "content": "4.",
+            "reasoning_content": "Two and two make four."
+          },
+          {
+            "role": "user",
+            "content": "And 3+3?"
+          },
+          {
+            "role": "assistant",
+            "content": "6.",
+            "reasoning_content": "Three and three make six."
+          },
+          {
+            "role": "user",
+            "content": "And 4+4?"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reasoning_request_no_preserve",
+      "flags": [],
+      "body": {
+        "chat_template_kwargs": {
+          "preserve_reasoning": false
+        },
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 2+2?"
+          },
+          {
+            "role": "assistant",
+            "content": "4.",
+            "reasoning_content": "Two and two make four."
+          },
+          {
+            "role": "user",
+            "content": "And 3+3?"
+          },
+          {
+            "role": "assistant",
+            "content": "6.",
+            "reasoning_content": "Three and three make six."
+          },
+          {
+            "role": "user",
+            "content": "And 4+4?"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reasoning_on",
+      "flags": [
+        "--reasoning",
+        "on"
+      ],
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 2+2?"
+          },
+          {
+            "role": "assistant",
+            "content": "4.",
+            "reasoning_content": "Two and two make four."
+          },
+          {
+            "role": "user",
+            "content": "And 3+3?"
+          },
+          {
+            "role": "assistant",
+            "content": "6.",
+            "reasoning_content": "Three and three make six."
+          },
+          {
+            "role": "user",
+            "content": "And 4+4?"
+          }
+        ]
+      }
+    },
+    {
+      "name": "reasoning_off",
+      "flags": [
+        "--reasoning",
+        "off"
+      ],
+      "body": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 2+2?"
+          },
+          {
+            "role": "assistant",
+            "content": "4.",
+            "reasoning_content": "Two and two make four."
+          },
+          {
+            "role": "user",
+            "content": "And 3+3?"
+          }
+        ]
+      }
+    },
+    {
+      "name": "tool_round_trip",
+      "flags": [],
+      "body": {
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Weather for a city",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": "Weather in Rome?"
+          },
+          {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call00001",
+                "type": "function",
+                "function": {
+                  "name": "get_weather",
+                  "arguments": "{\"city\": \"Rome\"}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call00001",
+            "content": "Sunny"
+          },
+          {
+            "role": "assistant",
+            "content": "It is sunny."
+          },
+          {
+            "role": "user",
+            "content": "And tomorrow?"
+          }
+        ]
+      }
+    }
+  ]
+}

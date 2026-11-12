@@ -394,6 +394,11 @@ pub(super) fn worker_loop(
         }
         let held = rows.blocks_held() + prefills.iter().map(|p| p.blocks).sum::<usize>();
         counters.peak_blocks.fetch_max(held, Ordering::Relaxed);
+        // After the flush and the admission, so the last request to
+        // finish reads as gone before an idle worker blocks.
+        counters
+            .running
+            .store(rows.len() + prefills.len(), Ordering::Relaxed);
         // With nothing in flight the whole budget is free, and a job
         // that could not fit an empty server was refused at submission
         // -- so an idle worker with a non-empty queue would be a spin,

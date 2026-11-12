@@ -1,0 +1,13 @@
+<|im_start|>system
+<|im_end|>
+<|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+<think>
+Two and two make four.
+</think>
+4.<|im_end|>
+<|im_start|>user
+And 3+3?<|im_end|>
+<|im_start|>assistant
+<think></think>

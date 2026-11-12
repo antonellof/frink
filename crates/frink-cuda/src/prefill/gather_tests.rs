@@ -29,9 +29,13 @@ fn layer(norm: &'static [f32]) -> PrefillDenseLayerCuda<'static> {
         k: q8_0_proj(small_q8_0(kv_w, HIDDEN, 22), kv_w, HIDDEN),
         v: q8_0_proj(small_q8_0(kv_w, HIDDEN, 23), kv_w, HIDDEN),
         o: q8_0_proj(small_q8_0(HIDDEN, q_w, 24), HIDDEN, q_w),
-        gate: q8_0_proj(small_q8_0(ffn, HIDDEN, 25), ffn, HIDDEN),
-        up: q8_0_proj(small_q8_0(ffn, HIDDEN, 26), ffn, HIDDEN),
-        down: q8_0_proj(small_q8_0(HIDDEN, ffn, 27), HIDDEN, ffn),
+        ffn: StackFfn::Dense(ExpertProjCuda {
+            gate: q8_0_proj(small_q8_0(ffn, HIDDEN, 25), ffn, HIDDEN),
+            up: q8_0_proj(small_q8_0(ffn, HIDDEN, 26), ffn, HIDDEN),
+            down: q8_0_proj(small_q8_0(HIDDEN, ffn, 27), HIDDEN, ffn),
+            bias: None,
+        }),
+        glu: GluCuda::Silu,
         post_attn_norm: None,
         post_ffn_norm: None,
         extras: AttnExtrasCuda::default(),
@@ -120,7 +124,7 @@ fn a_gather_the_table_cannot_serve_is_refused_before_the_device() {
 /// runs are the same launches on the same bytes. One row (the decode
 /// path, matvecs) and four (a prefill batch, the GEMM).
 #[test]
-#[ignore = "requires real CUDA hardware; not yet run"]
+#[ignore = "requires real CUDA hardware. Passed 2026-11-09 on an A100 (sm_80, Hugging Face Jobs)"]
 fn a_gathered_stack_input_is_the_uploaded_host_row() {
     let (layer, p) = (layer(norm()), params());
     let t = table();
@@ -141,8 +145,8 @@ fn a_gathered_stack_input_is_the_uploaded_host_row() {
             ids.len()
         );
         assert_eq!(
-            gathered.kv_rows,
-            uploaded.kv_rows,
+            gathered.kv_rows_owned(),
+            uploaded.kv_rows_owned(),
             "{} rows: K/V",
             ids.len()
         );

@@ -41,14 +41,19 @@ to name a real flag of its tool.
 |---|---|---|---|
 | cli | `-n` | Default `128`; llama.cpp's is `-1` (to EOS) | A bare `frink -m x -p hi` should end. `-n -1` is accepted and fills the context |
 | cli | `--repeat-penalty` | Default `1.1`; llama.cpp's is `1.0` (off) | A deliberate default (`docs/FEATURES.md`), so a run left to defaults is not token-identical; `--repeat-penalty 1.0` gives upstream's |
-| cli, server | `-dev` | One of `auto`, `none`, `cpu`, `metal`, `cuda`; llama.cpp takes a device list (`CUDA0,CUDA1`) | frink places a model on one backend, not on named devices |
+| cli, server | `-dev` | One of `auto`, `none`, `cpu`, `metal`, `cuda`, `vulkan`; llama.cpp takes a device list (`CUDA0,Vulkan1`) | frink places a model on one backend, not on named devices. `vulkan` runs on `Vulkan0`; pick another with `GGML_VK_VISIBLE_DEVICES`, read as llama.cpp reads it (unset is every discrete and integrated GPU, so a CPU driver such as lavapipe must be named). Three differences there: a token that is not an index is an error where llama.cpp stops reading at it; frink does not drop a device without 16-bit storage buffers, which its shaders do not need; and it does not merge one GPU exposed by two drivers (RADV and AMDVLK), which needs a Vulkan 1.1 instance |
 | cli, server, bench | `-ngl` | `0`, `auto`, `all`, or a count at or above the layer count. A PARTIAL count is refused | frink has no partial layer placement. It used to offload everything and run out of memory on the machine the flag was meant for |
-| cli, server | `-ctk` | llama.cpp's types are accepted; `f16`, `q8_0`, `q4_0` and frink's `fp8` are served, the rest fall back and the banner says so. The quantized wires are Metal's device store only | Only the Metal KV store has a selectable dtype |
+| cli, server | `-ctk` | llama.cpp's types are accepted; `f16`, `q8_0`, `q4_0` and frink's `fp8` are served, the rest fall back and the banner says so. The quantized wires are Metal's device store only | The host store keeps `f16` or `f32`, CUDA's is `f32`, and only Metal's device store takes a quantized type |
 | server | `-c` | `0` is refused. Unset derives the ceiling from the device budget, capped at the trained context | llama.cpp's `-c 0` means "the trained context", which may not fit; omit the flag instead |
 | server | `-np` | The cap on concurrent sequences under continuous batching; implies `-cb`. `-1` (auto) is refused, omit it | frink has no fixed slots; sequences share one batched worker |
-| server | `-b` | `-b` and `-ub` resolve to ONE prefill chunk (the smaller named) | frink has no logical/physical batch split |
+| server | `-b` | `-b` and `-ub` resolve to ONE prefill chunk (the smaller named). `/infill` sizes its prefix and suffix by `-b` alone, as llama.cpp does | frink has no logical/physical batch split |
 | server | `-a` | One name. A comma-separated list is refused | `/v1/models` serves one model name |
 | cli, server | `--jinja` | Always on; `--no-jinja` is refused | frink always renders the GGUF's own template and has no template-free mode |
+| cli, server | `--chat-template` | Jinja source, or `chatml`. Any other bare name is refused, and `--chat-template-file` follows the same rule | Under `--jinja`, llama.cpp's default, a name like `llama3` compiles as plain text and every prompt becomes that word. Its named templates need `--no-jinja`, which frink does not have |
+| cli, server | `--chat-template-kwargs` | A JSON object, repeatable. On the server, the flag replaces `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` rather than merging with it | A variable stands in for its flag only when the command line does not give that flag |
+| cli, server | `-rea` | Refused beside a `--chat-template-kwargs` that sets `enable_thinking` to the other value | llama.cpp applies the later of the two on the command line, and frink does not keep the order across two flags |
+| cli, server | `--reasoning-effort` | Refused beside a `--chat-template-kwargs` that sets `reasoning_effort` to another value | Same |
+| cli, server | `--reasoning-preserve` | Refused beside a `--chat-template-kwargs` that sets `preserve_reasoning` to the other value. `--no-reasoning-preserve` likewise | Same |
 | cli, server | `-fa` | `on` / `auto` accepted, `off` refused. A bare `-fa` means `auto` | Fused attention is a backend property here; `FRINK_METAL_ATTN=0` or `--device cpu` |
 | bench | `-p` | One value per run; llama-bench's lists and ranges are refused by the parser | Run the command once per value |
 | bench | `-n` | One value per run, as `-p` | Same |
@@ -126,7 +131,10 @@ These have llama.cpp's meaning (differences above): `-m` / `--model`,
 `-jf` / `--json-schema-file`, `-hft` / `--hf-token` (sets `HF_TOKEN`),
 `--offline` (`-hf` resolves from the cache only, no network),
 `--warmup` / `--no-warmup`, `--show-timings` / `--no-show-timings`,
-`-co` / `--color`, `--jinja`, `-fa` / `--flash-attn`, `-st` /
+`-co` / `--color`, `--jinja`, `--chat-template`, `--chat-template-file`,
+`--chat-template-kwargs`, `-rea` / `--reasoning`, `--reasoning-effort`,
+`--reasoning-preserve` / `--no-reasoning-preserve`,
+`-fa` / `--flash-attn`, `-st` /
 `--single-turn`, `-e` / `--escape`, `--no-escape`, `--ignore-eos`,
 `--verbose-prompt`, and `--usage` (llama.cpp's third spelling of
 help) and `--version` on every subcommand.
@@ -261,8 +269,10 @@ plug in through the `Drafter` trait in `frink_models::speculative`.
 `--mtp` is reserved for MiniMax/GLM MTP draft heads
 (`num_nextn_predict_layers`) and errors today.
 
-`--device none` (or `cpu`) and `-ngl 0` force CPU. Default is
-`--device auto -ngl auto`. `auto`, `all`, or a count at or above the
+`--device none` (or `cpu`) and `-ngl 0` force CPU, Vulkan included.
+`--device vulkan` runs on Vulkan (a build with cargo's `vulkan` feature). Default
+is `--device auto -ngl auto`, under which Vulkan stays opt-in
+(`FRINK_VULKAN=1`). `auto`, `all`, or a count at or above the
 model's layer count enable all supported ops on the selected backend.
 
 A partial `-ngl` is refused on purpose. llama.cpp's `-ngl N` puts
@@ -287,15 +297,61 @@ was meant for. It now stops and says so. Use
   and llama.cpp's Jinja engine both compile a chat template. Templates
   that use explicit `{%- … -%}` control render the same either way;
   TinyLlama's does not, and with the flags off every turn gained blank
-  lines. 15 real templates are pinned byte-for-byte against goldens
-  generated by jinja2 itself
-  (`cargo test -p frink-models --test chat_template_real_gguf`,
-  regenerate with `python3 scripts/chat_template_goldens.py`).
-- One deviation: `{{ x | tojson }}` sorts object keys.
-  That is stock jinja2's policy, but transformers and llama.cpp both
-  preserve the author's order. Frink cannot: `serde_json::Map` is a
-  `BTreeMap` here, so the order is gone before the filter runs. It
-  changes the order of keys inside a `<tools>` block, nothing else.
+  lines. Real templates are pinned byte-for-byte against goldens
+  generated by jinja2 itself, including tool calling
+  (`cargo test -p frink-models --test chat_template_real_gguf` and
+  `--test upstream_template_census`, regenerate with
+  `python3 scripts/chat_template_goldens.py`). Every template llama.cpp
+  bundles at the pin is rendered in CI's oracle job. What frink refuses
+  there is listed in `EXPECTED_REFUSALS`.
+- Every render carries what llama.cpp's do, under the request's own
+  kwargs: `enable_thinking`, `date_string` and `datetime` (today, local
+  time, as is `strftime_now`), `reasoning_strength` from
+  `reasoning_effort`, and the four spellings of `preserve_reasoning`.
+  `enable_thinking` is `true` where the template supports thinking, on
+  `frink run` and `frink-server` alike, so a thinking model thinks by
+  default, as under llama-server and llama-cli. `-rea off` turns it off.
+- One deviation: whether a template supports thinking is a simpler test
+  than llama.cpp's template analysis (`common/chat-diff-analyzer.cpp`,
+  and a handler per family). frink asks whether turning thinking on
+  changes what follows the user's turn. On every template llama.cpp
+  bundles the two answers agree wherever the answer reaches the prompt,
+  which `llama_renders::census` checks in CI's oracle job. A template
+  outside that set can get the other default.
+- A map keeps the order its keys were written in, as llama.cpp keeps
+  it: a tool's schema prints in the request's order, and a replayed
+  call or message in llama.cpp's (`common_chat_msg::to_json_oaicompat`).
+  `{{ x }}` and `x | string` print a list or a map in Python's literal
+  syntax, `{'type': 'function'}`, as llama.cpp's engine does, and
+  `x ~ y` still joins minijinja's JSON-like text.
+- A conversation is reshaped before rendering where llama.cpp reshapes
+  it, on `frink run` and `frink-server` alike
+  (`frink_models::chat_template::reshape`). A system turn the template
+  does not show folds into the next message, as on Gemma 2 and
+  TranslateGemma. A replayed call's `arguments` stay the request's JSON
+  string unless the template reads them as an object, which Functionary
+  v3.2 does not: it concatenates them. Ministral 3, Devstral, K2
+  Horizon, Gemma 4's older template and TranslateGemma get the message
+  shape their llama.cpp handler builds. Whether a template shows a system turn is learned at
+  load by rendering one, and so is whether it reads `arguments` as an
+  object. llama.cpp asks whether the template read the value, and frink
+  whether it printed it. The two answers differ only for a template that
+  reads a value and drops it, or prints a whole `arguments` map raw.
+- One deviation: a string plus an undefined value, or plus `none`, is
+  an error, as in jinja2. llama.cpp's engine reads the missing side as
+  empty there (`workaround_concat_null_with_str`), and concatenates any
+  other value's string form. minijinja has no hook for `+`, so frink
+  refuses the request with a 400 naming the template line. Two bundled
+  templates reach it: Firefunction v2 on every request
+  (`system_prompt_suffix + "\n" + functions`, a variable no caller
+  sets), and Command R+ (tool use) when an offered tool has a parameter
+  without a description. The render census lists them under
+  `deviation:string-plus-undefined` (#522).
+- A Python method frink has not implemented is an error, as is
+  mutating a list outside a `namespace(...)`, because a dropped
+  `.append` would silently change every later turn. `.format()` takes
+  bare `{}` placeholders and `.replace()` takes no count, which are
+  llama.cpp's limits too.
 - `-st` / `--single-turn`: accepted so a llama.cpp 0.4 command line
   runs here unchanged, and ignored because `frink run` generates once
   and exits. It is not a synonym for `--no-cnv`: `-st` runs the
@@ -655,6 +711,38 @@ published numbers were measured with the default). `FRINK_CTK=f32`
 runs an f32 K/V cache on BOTH sides: the dumper reads the same variable
 frink does, so the two cannot disagree about it.
 
+### Per layer (`--dump-tensors`)
+
+A first-token KL says that the engines disagree, not where.
+`--dump-tensors DIR` makes both engines write the prompt's intermediates
+under llama.cpp's tensor names (`attn_norm-N`, `Qcur-N`, `kqv_out-N`,
+`attn_out-N`, `ffn_inp-N`, `ffn_norm-N`, `ffn_out-N`, `l_out-N`,
+`result_norm`) and prints, per tensor, the relative L2 distance of
+frink's from llama.cpp's: over all rows, for the worst row, and for the
+output row. The dumper writes through llama.cpp's own eval callback
+(`LLAMA_LOGITS_DUMP_TENSORS`, `tools/llama_logits.c`), and `parity`
+checks that its logits with the callback on are bit-identical to the
+run without it.
+
+```bash
+./target/release/frink parity -m model.gguf --dumper target/llama_logits \
+    -p "..." --prompt-tokens 64 --dump-tensors /tmp/layers
+```
+
+Read a row against the tensor before it: an op whose distance jumps
+from its input's is where the difference enters. On int8-activation
+paths a one-ulp input difference at a rounding boundary moves a whole
+quant step, so past the first such flip the distance grows layer by
+layer and two llama.cpp builds diverge from each other in the same way.
+Run the second dumper's library through the same comparison to see that
+spread. Generic decoder only, on the CPU.
+
+`parity` leaves the integer-dot tier off unless `FRINK_CPU_INT_DOT=1`
+is set, while `frink run` and the server turn it on where it is a win
+(every aarch64 host, and x86 hosts with the AVX2 batch GEMMs). Set it
+to compare the path they take: only then
+does frink quantize activations the way llama.cpp's CPU backend does.
+
 ### The decode half, and token ids
 
 `--decode-steps N` adds a greedy decode of N steps: llama.cpp decodes
@@ -828,7 +916,7 @@ tokenization and chunking agree.
 The gaps are not noise, and their shape is informative. frink sits below llama.cpp on every quantized checkpoint and the gap
 widens as the quant coarsens. That is the `vec_dot_type` difference this
 repo already documents
-([`plans/llama-cpp-gap-inventory.md`](plans/llama-cpp-gap-inventory.md)
+([`plans/llama-cpp-gap-inventory.md`](plans/archive/llama-cpp-gap-inventory.md)
 §10) showing up on a second axis, with the sign it should have:
 llama.cpp quantizes the activation to the weight's vec_dot type and
 frink keeps it in f32, so frink is slightly less surprised. Qwen3 is
@@ -1278,7 +1366,7 @@ FRINK_MODEL_PATH=model.gguf FRINK_ADDR=127.0.0.1:8383 ./target/release/frink-ser
 ## Server
 
 Two ways to start the same server. `frink serve` is a subcommand of the
-main binary and needs the optional `serve` feature at build time.
+main binary, built in by default (the `serve` feature).
 `frink-server` is that same server as its own executable, and both
 parse identical arguments through the same code.
 
@@ -1325,8 +1413,13 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `--n-gpu-layers`, `-cb` / `--cont-batching`, `-nocb` /
 `--no-cont-batching`, `-np` / `--parallel`, `-b` / `--batch-size`,
 `-ub` / `--ubatch-size`, `--slot-save-path DIR`, `--lora`,
-`--lora-scaled`, `--lora-init-without-apply`, `--reasoning-budget N`,
+`--lora-scaled`, `--lora-init-without-apply`, `-md` / `--model-draft` /
+`--spec-draft-model`, `--draft-max` / `--draft` / `--draft-n`,
+`--draft-p-min` / `--spec-draft-p-min`, `--reasoning-budget N`,
 `--prefill-assistant` / `--no-prefill-assistant`, `--jinja`,
+`--chat-template`, `--chat-template-file`, `--chat-template-kwargs`,
+`-rea` / `--reasoning`, `--reasoning-effort`,
+`--reasoning-preserve` / `--no-reasoning-preserve`,
 `--no-warmup` (there is no warm-up pass), `-fa` / `--flash-attn`,
 `-hft` / `--hf-token` (sets `HF_TOKEN` before `-hf` downloads),
 `--offline` / `LLAMA_ARG_OFFLINE` (`-hf` resolves from the cache only),
@@ -1334,7 +1427,10 @@ meaning: `-m` / `--model` (a GGUF or a Kimi directory), `-hf` / `-hfr`
 `FRINK_TLS_CERT`; one without the other is refused rather than serving
 plain HTTP), `--cors-origins` (sets `FRINK_CORS_ORIGINS`),
 `--threads-http N` (sets `FRINK_TOKIO_WORKERS`; below 1 keeps the
-default, as upstream), `--metrics`, `--usage` and `--version`.
+default, as upstream), `--metrics`, `--slots` / `--no-slots` (sets
+`FRINK_ENDPOINT_SLOTS`, and `GET /slots` is on by default, as upstream),
+`--spm-infill` (sets `FRINK_SPM_INFILL`, and `/infill` puts the suffix
+first), `--usage` and `--version`.
 
 Notes that are frink's own:
 
@@ -1349,9 +1445,38 @@ Notes that are frink's own:
   `/admin/models/load`, attaches the same adapters or refuses the
   checkpoint by name ([`API.md`](API.md#lora-adapters)).
 - `-cb`/`-np` read back as `frink_scheduler_max_seqs`, and `-b`/`-ub` as
-  `frink_scheduler_prefill_chunk`, on `GET /metrics`.
+  `frink_scheduler_prefill_chunk`, on `GET /metrics`. `-np N` is also
+  the N slots `GET /slots` lists and `/props` reports as `total_slots`.
+  Without it there is no slot count, and `GET /slots` says so.
+- `-b` also sets `FRINK_LOGICAL_BATCH`, the `n_batch` `/infill` budgets
+  its prompt with (2048 without the flag, llama.cpp's default).
+- `--chat-template` and `--chat-template-file` set
+  `FRINK_CHAT_TEMPLATE`, which replaces the checkpoint's template on
+  every load path. Both are checked at startup by rendering one user
+  turn, as llama.cpp does, so a template that cannot render stops the
+  server before the model loads.
+- `--chat-template-kwargs`, `-rea`, `--reasoning-effort` and
+  `--reasoning-preserve` set `FRINK_CHAT_TEMPLATE_KWARGS`, the variables
+  every render starts from. A request's `chat_template_kwargs` and its
+  top-level `reasoning_effort` or `thinking` win over them, and
+  `reasoning_effort: "none"` clears a default effort.
+- `preserve_reasoning` is on unless `--no-reasoning-preserve` or a
+  kwarg turns it off, as in llama.cpp. A template reads it as
+  `preserve_thinking`, `clear_thinking`, `truncate_history_thinking` or
+  `drop_thinking`, so GLM-4.7, LFM2.5, LFM3, Nemotron-3, Laguna and
+  DeepSeek-V4 keep earlier turns' reasoning in the prompt.
 - `--reasoning-budget` sets `FRINK_REASONING_BUDGET`, the default a
   request's `reasoning_budget_tokens` falls back to.
+- `-md` loads a draft model once, and every request on the private
+  decode loop drafts with it, in place of prompt lookup. Its KV is the
+  request's own, and the output is the output without it
+  ([`API.md`](API.md#usage-timings)). It is refused at startup, naming why, with
+  continuous batching (on by default on Metal: add `--no-cont-batching`),
+  the paged KV store, a recurrent or dedicated-engine model, a drafter
+  of another vocabulary size, and a drafter whose KV lands on the
+  device (`--device cpu`). A model swapped in through
+  `/admin/models/load` is held to the same drafter. `--draft-max`
+  (default 5) and `--draft-p-min` (default 0.75) are `frink run`'s.
 
 **Environment.** llama-server's own variables (`LLAMA_ARG_MODEL`,
 `LLAMA_ARG_CTX_SIZE`, `LLAMA_ARG_N_GPU_LAYERS`, `LLAMA_API_KEY`, ...)
@@ -1403,7 +1528,7 @@ curl -s -X POST http://127.0.0.1:8383/v1/chat/completions \
 ```bash
 # The kernel picks the port. The bound address is announced on stdout.
 ./target/release/frink-server -m model.gguf --port 0 --exit-on-stdin-close
-{"event":"frink.server.ready","addr":"127.0.0.1:52091","port":52091,"scheme":"http","pid":4242,"version":"0.15.2"}
+{"event":"frink.server.ready","addr":"127.0.0.1:52091","port":52091,"scheme":"http","pid":4242,"version":"0.57.0"}
 ```
 
 `--port 0` plus that one line saves a parent process from probing
@@ -1432,8 +1557,10 @@ The web UI is a separate app. See [`ui/`](../ui) and
 
 With `-m`, `bench` works like [`llama-bench`](https://github.com/ggerganov/llama.cpp/tree/master/tools/llama-bench).
 Same workload names (`pp<N>` batched prefill, `tg<N>` decode), same
-reporting (median ± population stddev over `-r` reps, one warmup
-discarded), same flag names. Put the two outputs side by side and they
+reporting (mean ± sample stddev over `-r` reps, as llama-bench's
+`avg_ts` and `stdev_ts`, one warmup discarded), same flag names. Receipts
+before schema 4 hold the median and the population stddev instead; each
+keeps its raw `frink_samples`. Put the two outputs side by side and they
 line up.
 
 ```bash
@@ -1461,7 +1588,7 @@ line up.
 | `-t/--threads` | CPU threads (`0` = performance-core default) |
 | `--n-gpu-layers` | `0` forces CPU, anything else offloads |
 | `-fa/--flash-attn` | `on` or `auto` (the default); `off` and sweeps are refused |
-| `--list-devices` | Print the devices this build can run on and exit |
+| `--list-devices` | Print the devices this build can run on and exit. A build with cargo's `vulkan` feature asks the Vulkan loader and prints one `Vulkan<i>` row per visible device, as llama.cpp numbers them (frink uses `Vulkan0`), or why there is none |
 | `--no-warmup` | Time every repetition, with no discarded warmup first. Refused with `--receipt` |
 | `--delay` | Seconds to sleep before each test, to let the host cool off |
 | `--prio` | Process priority: `-1` low, `0` normal, `1` medium, `2` high, `3` realtime (`nice` 5, 0, -5, -10, -20, as llama.cpp sets it). A priority the OS refuses is an error |

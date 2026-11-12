@@ -22,7 +22,7 @@ void main() {
         float s = 0.0;
         for (uint l = lg * 16u; l < lg * 16u + 16u; ++l) {
             int v = int(((byte_at(ql + l) >> nib) & 0x0fu) | (((byte_at(qh + l) >> hs) & 3u) << 4)) - 32;
-            s += float(v) * x[xb + l];
+            s += float(v) * X(xb + l);
         }
         acc += f16_at(blk + 208u) * float(i8_at(blk + 192u + h * 8u + lg + 2u * q)) * s;
     }

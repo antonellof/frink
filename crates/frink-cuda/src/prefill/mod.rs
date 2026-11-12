@@ -29,25 +29,33 @@
 //! about WHICH layers is the decoder's, made through the same
 //! predicates the Metal stack asks, so the two backends cannot admit
 //! different sets. The refusals here are the shapes the kernels cannot
-//! take (`head_dim > 256`, a GELU FFN, an odd rotary width, a one-row
+//! take (`head_dim > 256`, an odd rotary width, a one-row
 //! step on a kind with no matvec), and each is `CudaError::Unsupported`
 //! so the caller falls back to the host body rather than computing
 //! something else.
 
 pub mod enqueue;
+mod held;
 pub mod kernels;
 pub mod kv_mirror;
+pub mod moe;
+pub mod moe_device;
 pub mod proj;
 
-use crate::gpu::{resident_cuda_f32, shared_device, silu_mul_device, CudaError};
+pub use crate::gpu::GluCuda;
+use crate::gpu::{glu_mul_device, shared_device, CudaError, MatvecInput};
 use crate::mul_mm::{validate_shape, MulMmKind};
 use crate::xfer;
-use cudarc::driver::{CudaDevice, CudaSlice};
+use cudarc::driver::{CudaDevice, CudaSlice, CudaViewMut};
 use enqueue::{
     enqueue_add_bias_rows, enqueue_add_rows, enqueue_causal_gqa_prefill, enqueue_decode_attn,
     enqueue_rmsnorm_rows, enqueue_rope_rows, AttnArgs, RopeArgs,
 };
+use held::Held;
 pub use kv_mirror::CudaKvMirror;
+use moe::check_expert_shapes;
+pub use moe::routed_batch_supported;
+pub use moe_device::{device_routing_enabled, DeviceGating, DeviceRouting, ExpertSource};
 pub use proj::ProjWeights;
 use std::sync::Arc;
 
@@ -100,12 +108,14 @@ pub struct LayerRopeCuda<'a> {
     pub mscale: f32,
 }
 
-/// The optional per-layer attention ops the host body applies between
-/// the QKV projections and RoPE: the biases (Qwen2), the QK norms
+/// The optional per-layer attention ops the host body applies: the
+/// biases between the QKV projections and RoPE (Qwen2), the QK norms
 /// (Qwen3 / Gemma-3 per head, OLMoE whole vector; the weight's length
-/// says which). Built by `Decoder::fused_attn_extras`, the ONE
-/// exhaustive destructure of `AttnWeights`, so a field that arrives
-/// here has been accounted for there.
+/// says which), the attention sinks (gpt-oss: one logit per query head
+/// in the softmax, with no value) and the bias on `wo`'s output
+/// (gpt-oss). Built by `Decoder::fused_attn_extras`, the ONE exhaustive
+/// destructure of `AttnWeights`, so a field that arrives here has been
+/// accounted for there.
 #[derive(Clone, Copy, Default)]
 pub struct AttnExtrasCuda<'a> {
     pub q_bias: Option<&'a [f32]>,
@@ -113,6 +123,8 @@ pub struct AttnExtrasCuda<'a> {
     pub v_bias: Option<&'a [f32]>,
     pub q_norm: Option<&'a [f32]>,
     pub k_norm: Option<&'a [f32]>,
+    pub sinks: Option<&'a [f32]>,
+    pub o_bias: Option<&'a [f32]>,
 }
 
 /// One dense layer as the launch takes it.
@@ -123,15 +135,86 @@ pub struct PrefillDenseLayerCuda<'a> {
     pub k: ProjWeights<'a>,
     pub v: ProjWeights<'a>,
     pub o: ProjWeights<'a>,
-    pub gate: ProjWeights<'a>,
-    pub up: ProjWeights<'a>,
-    pub down: ProjWeights<'a>,
+    /// The FFN: one gated expert, or routed experts.
+    pub ffn: StackFfn<'a>,
+    /// The FFN's gated activation: SwiGLU, or Gemma's GeGLU.
+    pub glu: GluCuda,
     /// Gemma-2's norms on each branch output before its residual add.
     pub post_attn_norm: Option<&'a [f32]>,
     pub post_ffn_norm: Option<&'a [f32]>,
     pub extras: AttnExtrasCuda<'a>,
     pub rope: Option<LayerRopeCuda<'a>>,
 }
+
+/// One gated FFN's projections: a dense layer's, or one routed expert's.
+#[derive(Clone, Copy)]
+pub struct ExpertProjCuda<'a> {
+    pub gate: ProjWeights<'a>,
+    pub up: ProjWeights<'a>,
+    pub down: ProjWeights<'a>,
+    /// Its biases, for a routed expert that carries them (gpt-oss).
+    pub bias: Option<ExpertBiasCuda<'a>>,
+}
+
+/// A routed expert's biases: on its gate and up projections before the
+/// activation and on its down projection after, as `run_expert_oai`
+/// and `build_moe_ffn`'s `ggml_add_id`s add them.
+#[derive(Clone, Copy)]
+pub struct ExpertBiasCuda<'a> {
+    pub gate: &'a [f32],
+    pub up: &'a [f32],
+    pub down: &'a [f32],
+}
+
+/// An MoE layer's router, `[n_experts, hidden_dim]`.
+#[derive(Clone, Copy)]
+pub enum RouterCuda<'a> {
+    /// f32 rows, as a GGUF keeps a router.
+    F32 { data: &'a [f32], rows: usize },
+    /// A quantized router, through the matvec.
+    Quant(ProjWeights<'a>),
+}
+
+impl RouterCuda<'_> {
+    fn rows(&self) -> usize {
+        match self {
+            RouterCuda::F32 { rows, .. } => *rows,
+            RouterCuda::Quant(p) => p.rows(),
+        }
+    }
+}
+
+/// What a stack layer's FFN is.
+// The dense variant carries three projection views and the MoE one a
+// router view: a layer is described once per call and lives on the
+// stack, so boxing the large variant would allocate per layer per token
+// for nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy)]
+pub enum StackFfn<'a> {
+    /// One gated expert on every token.
+    Dense(ExpertProjCuda<'a>),
+    /// Routed experts ([`moe`]): the router's logits come back to the
+    /// host, the caller's routing ([`RouteFn`]) picks each token's
+    /// experts and their weights, and the experts run on the device.
+    /// The host routing is the one every other path routes with, so the
+    /// experts chosen are the host's for the logits the device computed.
+    Moe {
+        router: RouterCuda<'a>,
+        /// Each routed expert's FFN width.
+        ffn_dim: usize,
+        /// The routing on the device, at a decode token and over a
+        /// prefill batch, when the layer's gating is one the device has
+        /// ([`moe_device`]); the caller's routing otherwise.
+        device: Option<DeviceRouting<'a>>,
+    },
+}
+
+/// The caller's routing for an MoE layer of a stack: given the run's
+/// layer index and the router's logits, the experts to run, each with
+/// its weight, in the order their outputs are summed.
+pub type RouteFn<'r, 'e> =
+    dyn FnMut(usize, &[f32]) -> Result<Vec<(ExpertProjCuda<'e>, f32)>, CudaError> + 'r;
 
 /// The per-model facts the layer launch takes beside the weights.
 pub struct PrefillParams<'a> {
@@ -241,27 +324,29 @@ pub fn resident_decode_enabled() -> bool {
 /// Runs one dense layer over `hidden` (`batch * hidden_dim`, row-major)
 /// on the device: pre-norm, Q/K/V projections, biases, QK norms, RoPE,
 /// causal GQA over prefix + batch, `wo`, post-norm, residual, pre-norm,
-/// gate/up projections, SwiGLU, down projection, post-norm, residual.
+/// gate/up projections, the gated activation, down projection,
+/// post-norm, residual.
 /// One download at the end and no other sync.
 ///
 /// Refuses (`Unsupported`) rather than approximates: a GEMM shape the
 /// kernel cannot tile, a `head_dim` above 256, a rotary width that is
-/// odd or wider than the head. The activation is SwiGLU: the decoder
-/// only builds a layer for a model whose `fused_kernel_gelu_flag` is
-/// `Some(false)`.
+/// odd or wider than the head. The activation is the layer's
+/// [`GluCuda`]: the decoder builds a layer only for a model whose
+/// `fused_kernel_gelu_flag` names one.
 pub fn launch_prefill_dense_layer(
     hidden: &[f32],
     layer: &PrefillDenseLayerCuda<'_>,
     params: &PrefillParams<'_>,
     batch: usize,
 ) -> Result<PrefillLayerOut, CudaError> {
-    let mut out = launch_prefill_dense_stack(
+    let out = launch_prefill_dense_stack(
         StackInput::Hidden(hidden),
         &[(layer, params)],
         batch,
         StackKv::UploadPrefix,
     )?;
-    let (k_rows, v_rows) = out.kv_rows.pop().expect("one layer in, one layer out");
+    let (k_rows, v_rows) = out.kv(0);
+    let (k_rows, v_rows) = (k_rows.to_vec(), v_rows.to_vec());
     Ok(PrefillLayerOut {
         hidden: out.hidden,
         k_rows,
@@ -273,7 +358,41 @@ pub fn launch_prefill_dense_layer(
 /// each layer's K (post-RoPE) and V rows in the host cache's layout.
 pub struct PrefillStackOut {
     pub hidden: Vec<f32>,
-    pub kv_rows: Vec<(Vec<f32>, Vec<f32>)>,
+    /// The stack's one download: the hidden batch, then each layer's K
+    /// rows and V rows, read in place by [`Self::kv`] rather than copied
+    /// out per layer (134 MB a Llama-3.1-8B `pp512` step).
+    staged: xfer::Download,
+    kv_offsets: Vec<(usize, usize)>,
+    /// Per layer of the run, the experts its device routing chose, every
+    /// token's `k` in its routing's order, token after token; `None` for
+    /// a layer routed on the host (whose caller saw its choice) or not
+    /// routed at all.
+    pub device_routed: Vec<Option<Vec<usize>>>,
+}
+
+impl PrefillStackOut {
+    /// Layers in the run.
+    pub fn layers(&self) -> usize {
+        self.kv_offsets.len()
+    }
+
+    /// Layer `i`'s K rows and V rows, `batch` rows of the layer's
+    /// `n_kv_heads * head_dim` each, in the host cache's layout.
+    pub fn kv(&self, i: usize) -> (&[f32], &[f32]) {
+        let (at, n) = self.kv_offsets[i];
+        let all = self.staged.as_slice();
+        (&all[at..at + n], &all[at + n..at + 2 * n])
+    }
+
+    /// Every layer's rows, copied: for the tests, which compare runs.
+    pub fn kv_rows_owned(&self) -> Vec<(Vec<f32>, Vec<f32>)> {
+        (0..self.layers())
+            .map(|i| {
+                let (k, v) = self.kv(i);
+                (k.to_vec(), v.to_vec())
+            })
+            .collect()
+    }
 }
 
 /// A run of consecutive dense layers with the hidden batch resident
@@ -289,7 +408,20 @@ pub fn launch_prefill_dense_stack(
     input: StackInput<'_>,
     layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
     batch: usize,
+    kv: StackKv<'_, '_>,
+) -> Result<PrefillStackOut, CudaError> {
+    launch_stack(input, layers, batch, kv, None)
+}
+
+/// [`launch_prefill_dense_stack`] with the routing an MoE layer asks
+/// for; a run with an MoE layer and no routing is refused before the
+/// device.
+pub fn launch_stack<'e>(
+    input: StackInput<'_>,
+    layers: &[(&PrefillDenseLayerCuda<'_>, &PrefillParams<'_>)],
+    batch: usize,
     mut kv: StackKv<'_, '_>,
+    mut route: Option<&mut RouteFn<'_, 'e>>,
 ) -> Result<PrefillStackOut, CudaError> {
     let Some((first, first_params)) = layers.first() else {
         return Err(CudaError::Unsupported(
@@ -300,6 +432,18 @@ pub fn launch_prefill_dense_stack(
     input.check(batch, hidden_dim)?;
     for (layer, params) in layers {
         check_layer_shapes(layer, params, batch, hidden_dim)?;
+        if matches!(layer.ffn, StackFfn::Moe { .. }) && route.is_none() {
+            return Err(CudaError::Unsupported(
+                "resident stack: an MoE layer with no routing".to_string(),
+            ));
+        }
+        // A routed batch runs its experts through the grouped
+        // tensor-core GEMM, which needs `sm_80`.
+        if matches!(layer.ffn, StackFfn::Moe { .. }) && batch > 1 && !routed_batch_supported() {
+            return Err(CudaError::Unsupported(
+                "resident stack: a routed batch needs the tensor-core GEMM (sm_80)".to_string(),
+            ));
+        }
         if params.start_pos != first_params.start_pos {
             return Err(CudaError::Unsupported(
                 "prefill dense stack: layers of one run at different positions".to_string(),
@@ -368,6 +512,28 @@ pub fn launch_prefill_dense_stack(
             h
         }
     };
+    // Device-routed layers write their expert ids here, `IDS_PER_LAYER`
+    // a layer (every token's `k`, at most 16), downloaded once after the
+    // stack.
+    let ids_per_layer = batch * 16;
+    let device_k: Vec<Option<usize>> = layers
+        .iter()
+        .map(|(l, _)| match l.ffn {
+            StackFfn::Moe {
+                device: Some(d), ..
+            } => Some(d.k),
+            _ => None,
+        })
+        .collect();
+    let mut ids_all = if device_k.iter().any(Option::is_some) {
+        Some(
+            dev.alloc_zeros::<i32>(layers.len() * ids_per_layer)
+                .map_err(|e| CudaError::Launch(format!("routed ids alloc: {e:?}")))?,
+        )
+    } else {
+        None
+    };
+    let mut on_device = vec![false; layers.len()];
     for (i, (layer, params)) in layers.iter().enumerate() {
         let mirror = match &mut kv {
             StackKv::UploadPrefix => None,
@@ -377,12 +543,21 @@ pub fn launch_prefill_dense_stack(
                     .expect("every mirror slot was filled above"),
             ),
         };
+        let ids = match (&mut ids_all, device_k[i]) {
+            (Some(all), Some(_)) => Some(all.slice_mut(i * ids_per_layer..(i + 1) * ids_per_layer)),
+            _ => None,
+        };
         let step = LayerStep {
             batch,
+            ids,
+            index: i,
             mirror,
             stage_at: kv_offsets[i],
+            route: route.as_deref_mut(),
         };
-        run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
+        let _t = crate::phases::phase("enqueue");
+        on_device[i] =
+            run_layer_resident(&dev, &mut h, layer, params, step, &mut staged, &mut held)?;
     }
     xfer::dtod(
         &dev,
@@ -391,25 +566,47 @@ pub fn launch_prefill_dense_stack(
         &mut staged.slice_mut(..batch * hidden_dim),
     )?;
     // The stack's one host wait: everything above was enqueued.
-    let mut all = xfer::dtoh(&dev, "stack download", &staged)?;
+    let staged = {
+        let _t = crate::phases::phase("wait+download");
+        xfer::dtoh_staged(&dev, "stack download", &staged)?
+    };
+    // The device-routed layers' expert ids, for the caller's activation
+    // counts: after the stack's wait, so this copy waits on nothing.
+    let device_routed = match &ids_all {
+        Some(all) if on_device.iter().any(|&b| b) => {
+            let ids = xfer::dtoh(&dev, "routed ids", all)?;
+            on_device
+                .iter()
+                .zip(&device_k)
+                .enumerate()
+                .map(|(i, (&on, k))| {
+                    on.then(|| {
+                        ids[i * ids_per_layer..i * ids_per_layer + batch * k.unwrap_or(0)]
+                            .iter()
+                            .map(|&e| e as usize)
+                            .collect()
+                    })
+                })
+                .collect()
+        }
+        _ => vec![None; layers.len()],
+    };
     drop(held);
-
-    let kv_rows: Vec<(Vec<f32>, Vec<f32>)> = kv_offsets
-        .iter()
-        .map(|&(at, n)| (all[at..at + n].to_vec(), all[at + n..at + 2 * n].to_vec()))
-        .collect();
+    let out = PrefillStackOut {
+        hidden: staged.as_slice()[..batch * hidden_dim].to_vec(),
+        staged,
+        kv_offsets,
+        device_routed,
+    };
     if let StackKv::Mirrors(slots) = &mut kv {
-        for ((slot, (_, p)), (k_rows, _)) in slots.iter_mut().zip(layers).zip(&kv_rows) {
+        for (i, (slot, (_, p))) in slots.iter_mut().zip(layers).enumerate() {
             let width = p.n_kv_heads * p.head_dim;
+            let (k_rows, _) = out.kv(i);
             let m = slot.as_mut().expect("every mirror slot was filled above");
             m.commit(start_pos + batch, &k_rows[k_rows.len() - width..]);
         }
     }
-    all.truncate(batch * hidden_dim);
-    Ok(PrefillStackOut {
-        hidden: all,
-        kv_rows,
-    })
+    Ok(out)
 }
 
 /// The host-side shape agreement, before any device work: a mismatch
@@ -431,7 +628,20 @@ fn check_layer_shapes(
     } = *params;
     let q_width = n_heads * head_dim;
     let kv_width = n_kv_heads * head_dim;
-    let ffn_dim = layer.gate.rows();
+    if let StackFfn::Moe {
+        router, ffn_dim, ..
+    } = layer.ffn
+    {
+        let fits = match router {
+            RouterCuda::F32 { data, rows } => data.len() == rows * hidden_dim,
+            RouterCuda::Quant(p) => p.cols() == hidden_dim && p.validate(batch).is_ok(),
+        };
+        if !fits || router.rows() == 0 || ffn_dim == 0 {
+            return Err(CudaError::Unsupported(
+                "resident stack: an MoE router that does not fit its layer".to_string(),
+            ));
+        }
+    }
     if layer.attn_norm_w.len() != hidden_dim
         || layer.ffn_norm_w.len() != hidden_dim
         || layer.q.rows() != q_width
@@ -439,10 +649,7 @@ fn check_layer_shapes(
         || layer.v.rows() != kv_width
         || layer.o.rows() != hidden_dim
         || layer.o.cols() != q_width
-        || layer.up.rows() != ffn_dim
-        || layer.down.rows() != hidden_dim
-        || layer.down.cols() != ffn_dim
-        || [layer.q, layer.k, layer.v, layer.gate, layer.up]
+        || [layer.q, layer.k, layer.v]
             .iter()
             .any(|m| m.cols() != hidden_dim)
         || prefix_k.len() != start_pos * kv_width
@@ -453,16 +660,14 @@ fn check_layer_shapes(
                 .to_string(),
         ));
     }
-    for m in [
-        &layer.q,
-        &layer.k,
-        &layer.v,
-        &layer.o,
-        &layer.gate,
-        &layer.up,
-        &layer.down,
-    ] {
+    for m in [&layer.q, &layer.k, &layer.v, &layer.o] {
         m.validate(batch)?;
+    }
+    if let StackFfn::Dense(ex) = &layer.ffn {
+        check_expert_shapes(ex, hidden_dim, ex.gate.rows())?;
+        for m in [&ex.gate, &ex.up, &ex.down] {
+            m.validate(batch)?;
+        }
     }
     if batch == 1 && !crate::decode_attn::head_dim_ok(head_dim) {
         return Err(CudaError::Unsupported(format!(
@@ -489,10 +694,20 @@ fn check_layer_shapes(
     }
     norm_rows(layer.extras.q_norm, q_width)?;
     norm_rows(layer.extras.k_norm, kv_width)?;
+    if let Some(sinks) = layer.extras.sinks {
+        if sinks.len() != params.n_heads {
+            return Err(CudaError::Unsupported(format!(
+                "prefill dense layer: {} attention sinks for {} heads",
+                sinks.len(),
+                params.n_heads
+            )));
+        }
+    }
     for (bias, width) in [
         (layer.extras.q_bias, q_width),
         (layer.extras.k_bias, kv_width),
         (layer.extras.v_bias, kv_width),
+        (layer.extras.o_bias, hidden_dim),
     ] {
         if let Some(bias) = bias {
             if bias.len() != width {
@@ -522,47 +737,16 @@ fn norm_rows(w: Option<&[f32]>, width: usize) -> Result<Option<(usize, usize)>, 
     }
 }
 
-/// Every resident buffer a launch reads, held until the stack's one
-/// download has synchronised the stream: the kernels read them
-/// asynchronously, and a buffer must not be released under a kernel
-/// that is still reading it.
-#[derive(Default)]
-struct Held {
-    weights: Vec<Arc<crate::gpu::ResidentCudaWeights>>,
-    vectors: Vec<Arc<crate::resident::ResidentCuda<f32>>>,
-}
-
-impl Held {
-    /// A long-lived f32 vector (norm weight, bias, RoPE divisors) on
-    /// the device, held: uploaded on first use, never per call.
-    fn vector(
-        &mut self,
-        dev: &Arc<CudaDevice>,
-        v: &[f32],
-    ) -> Result<Arc<crate::resident::ResidentCuda<f32>>, CudaError> {
-        let r = resident_cuda_f32(dev, v)?;
-        self.vectors.push(r.clone());
-        Ok(r)
-    }
-
-    /// One projection on the device, its weights held.
-    fn proj(
-        &mut self,
-        dev: &Arc<CudaDevice>,
-        m: &ProjWeights<'_>,
-        x: &CudaSlice<f32>,
-        batch: usize,
-    ) -> Result<CudaSlice<f32>, CudaError> {
-        let (out, w) = m.enqueue(dev, x, batch)?;
-        self.weights.push(w);
-        Ok(out)
-    }
-}
-
 /// What one layer of a run varies by beside its weights: the batch,
 /// where its history lives, and where its K/V rows are staged.
-struct LayerStep<'m> {
+struct LayerStep<'m, 'r, 'e> {
     batch: usize,
+    /// Where a decode token's device routing writes its expert ids.
+    ids: Option<CudaViewMut<'m, i32>>,
+    /// This layer's index in the run, which the routing is asked by.
+    index: usize,
+    /// The caller's routing, for an MoE layer.
+    route: Option<&'m mut RouteFn<'r, 'e>>,
     /// The sequence's device history under [`StackKv::Mirrors`].
     mirror: Option<&'m mut CudaKvMirror>,
     /// `(offset, len)` of this layer's K rows in the staging buffer;
@@ -570,23 +754,28 @@ struct LayerStep<'m> {
     stage_at: (usize, usize),
 }
 
-/// One layer over the resident hidden batch `h`, in place. Stages the
-/// batch's K/V rows into `staged`. Shapes were checked by
+/// One layer over the resident hidden batch `h`, in place, answering
+/// whether its experts were routed on the device. Stages the batch's
+/// K/V rows into `staged`. Shapes were checked by
 /// `check_layer_shapes`.
-fn run_layer_resident(
+fn run_layer_resident<'e>(
     dev: &Arc<CudaDevice>,
     h: &mut CudaSlice<f32>,
     layer: &PrefillDenseLayerCuda<'_>,
     params: &PrefillParams<'_>,
-    step: LayerStep<'_>,
+    step: LayerStep<'_, '_, 'e>,
     staged: &mut CudaSlice<f32>,
     held: &mut Held,
-) -> Result<(), CudaError> {
+) -> Result<bool, CudaError> {
     let LayerStep {
         batch,
+        ids,
+        index,
         mirror,
         stage_at: (at, n_kv),
+        route,
     } = step;
+    let mut routed_on_device = false;
     let hidden_dim = layer.attn_norm_w.len();
     let PrefillParams {
         n_heads,
@@ -602,7 +791,6 @@ fn run_layer_resident(
     } = *params;
     let q_width = n_heads * head_dim;
     let kv_width = n_kv_heads * head_dim;
-    let ffn_dim = layer.gate.rows();
     let q_norm_shape = norm_rows(layer.extras.q_norm, q_width)?;
     let k_norm_shape = norm_rows(layer.extras.k_norm, kv_width)?;
     debug_assert_eq!(n_kv, batch * kv_width);
@@ -612,9 +800,12 @@ fn run_layer_resident(
 
     // --- attention ---
     let normed = enqueue_rmsnorm_rows(dev, h, &attn_norm_w.slice, batch, hidden_dim, rms_eps)?;
-    let mut q = held.proj(dev, &layer.q, &normed, batch)?;
-    let mut k = held.proj(dev, &layer.k, &normed, batch)?;
-    let mut v = held.proj(dev, &layer.v, &normed, batch)?;
+    // Q, K and V read one input: under dp4a, one q8_1 copy for all three.
+    let attn_x = MatvecInput::new(&normed);
+    let mut q = held.proj(dev, &layer.q, &attn_x, batch)?;
+    let mut k = held.proj(dev, &layer.k, &attn_x, batch)?;
+    let mut v = held.proj(dev, &layer.v, &attn_x, batch)?;
+    drop(attn_x);
     drop(normed);
 
     for (x, bias, width) in [
@@ -737,14 +928,25 @@ fn run_layer_resident(
     };
     // One query row is the decode kernel's shape, split across the
     // keys; a batch is the prefill kernel's, one warp per row.
+    let sinks = match layer.extras.sinks {
+        Some(s) => Some(held.vector(dev, s)?),
+        None => None,
+    };
+    let sinks = sinks.as_ref().map(|s| &s.slice);
     let attn = if batch == 1 {
-        enqueue_decode_attn(dev, &q, k_all, v_all, &args)?
+        enqueue_decode_attn(dev, &q, k_all, v_all, &args, sinks)?
     } else {
-        enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args)?
+        enqueue_causal_gqa_prefill(dev, &q, k_all, v_all, batch, &args, sinks)?
     };
     drop(q);
-    let mut o = held.proj(dev, &layer.o, &attn, batch)?;
+    let mut o = held.proj(dev, &layer.o, &MatvecInput::new(&attn), batch)?;
     drop(attn);
+    // `wo`'s bias, on the projection before any norm of it, where
+    // `build_attn` adds `wo_b`.
+    if let Some(b) = layer.extras.o_bias {
+        let d_b = held.vector(dev, b)?;
+        enqueue_add_bias_rows(dev, &mut o, &d_b.slice, batch, hidden_dim)?;
+    }
     if let Some(post) = layer.post_attn_norm {
         let d_w = held.vector(dev, post)?;
         o = enqueue_rmsnorm_rows(dev, &o, &d_w.slice, batch, hidden_dim, rms_eps)?;
@@ -754,22 +956,72 @@ fn run_layer_resident(
 
     // --- FFN ---
     let normed2 = enqueue_rmsnorm_rows(dev, h, &ffn_norm_w.slice, batch, hidden_dim, rms_eps)?;
-    let gate = held.proj(dev, &layer.gate, &normed2, batch)?;
-    let up = held.proj(dev, &layer.up, &normed2, batch)?;
+    // Gate and up (an MoE layer's router and experts too) read one input.
+    let ffn_x = MatvecInput::new(&normed2);
+    let mut down = match layer.ffn {
+        StackFfn::Dense(ex) => {
+            let ffn_dim = ex.gate.rows();
+            run_expert(dev, held, &ex, layer.glu, &ffn_x, batch, ffn_dim)?
+        }
+        StackFfn::Moe {
+            router,
+            ffn_dim,
+            device,
+        } => {
+            let route = route.ok_or_else(|| {
+                CudaError::Unsupported("resident stack: an MoE layer with no routing".to_string())
+            })?;
+            let device = device.zip(ids);
+            let (out, on_device) = moe::run_routed(
+                dev, held, router, layer.glu, &ffn_x, batch, hidden_dim, ffn_dim, index, route,
+                device,
+            )?;
+            routed_on_device = on_device;
+            out
+        }
+    };
+    drop(ffn_x);
     drop(normed2);
-    let act = silu_mul_device(dev, &gate, &up, batch * ffn_dim)?;
-    drop((gate, up));
-    let mut down = held.proj(dev, &layer.down, &act, batch)?;
-    drop(act);
     if let Some(post) = layer.post_ffn_norm {
         let d_w = held.vector(dev, post)?;
         down = enqueue_rmsnorm_rows(dev, &down, &d_w.slice, batch, hidden_dim, rms_eps)?;
     }
     enqueue_add_rows(dev, h, &down, batch * hidden_dim)?;
     drop(down);
-    Ok(())
+    Ok(routed_on_device)
 }
 
+/// One gated FFN over `x` (`batch` rows): gate and up, the gated
+/// activation, down. The weights are held until the stack's wait.
+fn run_expert(
+    dev: &Arc<CudaDevice>,
+    held: &mut Held,
+    ex: &ExpertProjCuda<'_>,
+    glu: GluCuda,
+    x: &MatvecInput<'_>,
+    batch: usize,
+    ffn_dim: usize,
+) -> Result<CudaSlice<f32>, CudaError> {
+    let mut gate = held.proj(dev, &ex.gate, x, batch)?;
+    let mut up = held.proj(dev, &ex.up, x, batch)?;
+    if let Some(b) = ex.bias {
+        let d_g = held.vector(dev, b.gate)?;
+        enqueue_add_bias_rows(dev, &mut gate, &d_g.slice, batch, ffn_dim)?;
+        let d_u = held.vector(dev, b.up)?;
+        enqueue_add_bias_rows(dev, &mut up, &d_u.slice, batch, ffn_dim)?;
+    }
+    let act = glu_mul_device(dev, glu, &gate, &up, batch * ffn_dim)?;
+    drop((gate, up));
+    let mut down = held.proj(dev, &ex.down, &MatvecInput::new(&act), batch)?;
+    if let Some(b) = ex.bias {
+        let d_d = held.vector(dev, b.down)?;
+        enqueue_add_bias_rows(dev, &mut down, &d_d.slice, batch, ex.down.rows())?;
+    }
+    Ok(down)
+}
+
+#[cfg(test)]
+mod attn_tests;
 #[cfg(test)]
 mod gather_tests;
 #[cfg(test)]

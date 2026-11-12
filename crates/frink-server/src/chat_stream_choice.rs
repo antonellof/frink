@@ -58,18 +58,22 @@ pub(crate) struct ChoiceEmitter {
     /// `choices[].index` gets a role on the first chunk of each, not
     /// one role for the whole stream.
     started: bool,
+    /// `parallel_tool_calls: false`: no call after the first is sent.
+    one_call: bool,
 }
 
 impl ChoiceEmitter {
     pub(crate) fn new(
         reasoning: Option<crate::policy::parser::ReasoningParser>,
         tools: Option<crate::policy::parser::ToolCallParser>,
+        one_call: bool,
     ) -> Self {
         ChoiceEmitter {
             reasoning,
             tools,
             calls: Cell::new(0),
             started: false,
+            one_call,
         }
     }
 
@@ -98,7 +102,7 @@ impl ChoiceEmitter {
         // anything that could still become a marker and turns a
         // recognized call into wire deltas.
         let (content, tool_calls) = match self.tools.as_mut() {
-            Some(parser) => tool_call_deltas(parser.push(&content), &self.calls),
+            Some(parser) => tool_call_deltas(parser.push(&content), &self.calls, self.one_call),
             None => (content, Vec::new()),
         };
         Delta {
@@ -124,7 +128,7 @@ impl ChoiceEmitter {
         if let Some(parser) = self.tools.as_mut() {
             let mut events = parser.push(&content);
             events.extend(parser.finish());
-            let (text, calls) = tool_call_deltas(events, &self.calls);
+            let (text, calls) = tool_call_deltas(events, &self.calls, self.one_call);
             content = text;
             tool_calls = calls;
         }

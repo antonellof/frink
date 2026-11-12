@@ -1,0 +1,99 @@
+{
+  "backend": "cuda",
+  "backend_active": "CUDA",
+  "threads": 4,
+  "warmup_reps": 1,
+  "load_s": 0.111608918,
+  "host_load_1min_start": 1.34,
+  "host_load_1min_end": 1.93,
+  "host_thermal_start": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "host_thermal_end": {
+    "measured": false,
+    "pressure": null,
+    "source": null,
+    "cpu_speed_limit_percent": null,
+    "degraded": null
+  },
+  "quiet_host": true,
+  "host_spec": {
+    "label": "AMD EPYC 7R13 Processor (4c) Linux 6.12.113-138.209.amzn2023.x86_64",
+    "cpu": "AMD EPYC 7R13 Processor",
+    "arch": "x86_64",
+    "cores": 4,
+    "perf_cores": null,
+    "ram_gb": 61.9,
+    "os": "Linux 6.12.113-138.209.amzn2023.x86_64"
+  },
+  "accelerator": "NVIDIA L40S",
+  "engine_env": {
+    "FRINK_CPU_INT_DOT": "1"
+  },
+  "frink_version": "0.59.0",
+  "schema": 3,
+  "kind": "engine",
+  "id": "gpt_oss_20b_mxfp4",
+  "model_path": "/work/models/gpt-oss-20b-MXFP4.gguf",
+  "arch": "gpt-oss",
+  "quant": "quantized",
+  "size_bytes": 12109566624,
+  "approx_params": 4343316480,
+  "reps": 3,
+  "tests": [
+    {
+      "test": "pp512",
+      "frink_tps": 43.877102855188355,
+      "frink_stddev": 0.21392640246307584,
+      "frink_samples": [
+        43.877102855188355,
+        44.06636687100295,
+        43.548562764822535
+      ],
+      "llama_tps": 11144.339652,
+      "gap": 253.98987004180043,
+      "workload_digest": "b8d417040110e751"
+    },
+    {
+      "test": "tg128",
+      "frink_tps": 38.72229658252732,
+      "frink_stddev": 0.14685053940781345,
+      "frink_samples": [
+        38.50085371010968,
+        38.85706476901407,
+        38.72229658252732
+      ],
+      "llama_tps": 208.838538,
+      "gap": 5.393237396312757,
+      "workload_digest": "044655d19aa3baa5"
+    }
+  ],
+  "llama_cpp": {
+    "build_commit": "604cc43",
+    "build_number": 1,
+    "backends": "CUDA",
+    "cpu_info": "AMD EPYC 7R13 Processor",
+    "gpu_info": "NVIDIA L40S",
+    "command": [
+      "llama-bench",
+      "-m",
+      "/work/models/gpt-oss-20b-MXFP4.gguf",
+      "-p",
+      "512",
+      "-n",
+      "128",
+      "-d",
+      "0",
+      "-r",
+      "3",
+      "-ngl",
+      "99",
+      "-o",
+      "json"
+    ]
+  }
+}

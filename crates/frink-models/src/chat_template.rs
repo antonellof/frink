@@ -54,10 +54,13 @@
 //! | `{% set x %}…{% endset %}` block set | supported |
 //! | `loop.index0` / `loop.last` / `loop.first` | supported |
 //! | `raise_exception(msg)` | provided here; aborts the render with the message |
-//! | `strftime_now(fmt)` | provided here, UTC, subset of `strftime` (see [`strftime_now`]) |
+//! | `strftime_now(fmt)` | provided here, local time as llama.cpp's, subset of `strftime` (see [`strftime_now`]) |
+//! | `enable_thinking`, `date_string`, `datetime`, `reasoning_strength`, `preserve_thinking` and its kin | set under the kwargs, as every llama.cpp render sets them (see [`llama_defaults`]) |
 //! | `dictsort`, `map`, `default`, `trim`, `reject`, `join`, slicing | minijinja builtins |
-//! | `tojson` | reimplemented here; `json.dumps` separators, keys sorted (see [`tojson`]) |
-//! | Python methods `.get()`, `.split()`, `.strip()/.lstrip()/.rstrip()` | provided here (see [`python_method`]) |
+//! | `tojson` | reimplemented, with `indent`, `ensure_ascii` and `separators`; keys in the order they were written (see [`py_compat::tojson`]) |
+//! | `{{ value }}`, `value \| string` | a list or a map in Python's literal syntax, as llama.cpp prints it (see [`py_compat::formatter`]) |
+//! | `is iterable`, `{% generation %}`, a `namespace(...)` list that `.append`s | [`py_compat`] |
+//! | Python methods `.get()`, `.split()`, `.strip()`, `.items()`, `.replace()`, `.format()` | provided here (see [`python_method`]) |
 //! | anything else | **hard error**, never silently empty |
 //!
 //! The one deliberate difference from `jinja2`: undefined variables are
@@ -71,6 +74,10 @@ use std::sync::Arc;
 
 use minijinja::value::Value as JinjaValue;
 use serde_json::Value;
+
+mod llama_defaults;
+mod py_compat;
+pub mod reshape;
 
 /// Everything that can go wrong between a GGUF's template string and a
 /// rendered prompt. Every variant is a refusal, not a fallback.
@@ -157,14 +164,22 @@ pub struct RenderOptions {
     /// [`ChatTemplate::handles_tools`]).
     pub tools: Vec<Value>,
     pub extra: serde_json::Map<String, Value>,
+    /// llama.cpp's `inputs.enable_thinking`: passed to every render under
+    /// a kwarg of the same name. llama-server and llama-cli set it to
+    /// whether the template supports thinking
+    /// ([`ChatTemplate::supports_thinking`]); `None` leaves it undefined.
+    pub enable_thinking: Option<bool>,
 }
 
 impl ChatTemplate {
     /// Compiles `source` as Jinja2. Errors are returned, never swallowed.
     pub fn from_jinja(source: &str) -> Result<Self, TemplateError> {
         let mut env = new_environment();
-        env.add_template_owned("chat".to_string(), source.to_string())
-            .map_err(|e| TemplateError::Compile(format_jinja_error(&e)))?;
+        env.add_template_owned(
+            "chat".to_string(),
+            py_compat::neutralise_generation_tags(source),
+        )
+        .map_err(|e| TemplateError::Compile(format_jinja_error(&e)))?;
         Ok(Self(Arc::new(Kind::Jinja(Box::new(JinjaTemplate {
             env,
             source: source.to_string(),
@@ -299,6 +314,10 @@ impl ChatTemplate {
                 for (k, v) in &opts.extra {
                     ctx.insert(k.clone(), v.clone());
                 }
+                // What every llama.cpp render carries beside the kwargs,
+                // under them.
+                llama_defaults::fill(&mut ctx, opts.enable_thinking)
+                    .map_err(TemplateError::Render)?;
                 ctx.insert("messages".into(), Value::Array(messages.to_vec()));
                 ctx.insert(
                     "add_generation_prompt".into(),
@@ -388,78 +407,13 @@ fn new_environment() -> minijinja::Environment<'static> {
     // nested JSON schemas, so keep the default rather than lowering it.
     env.add_function("raise_exception", raise_exception);
     env.add_function("strftime_now", strftime_now);
-    env.add_filter("tojson", tojson);
+    env.add_function("namespace", py_compat::namespace);
+    env.add_filter("tojson", py_compat::tojson);
+    env.add_filter("string", py_compat::string);
+    env.set_formatter(py_compat::formatter);
+    env.add_test("iterable", py_compat::is_iterable);
     env.set_unknown_method_callback(python_method);
     env
-}
-
-/// `{{ tool | tojson }}` — how every tool-calling template serialises a
-/// function schema into the prompt, so its exact byte output is part of
-/// the prompt the model was trained on.
-///
-/// Overrides minijinja's builtin, which emits `{"a":1}`. Both reference
-/// engines use `json.dumps`' default `", "` / `": "` separators, i.e.
-/// `{"a": 1}`, and matching that is the difference between the prompt
-/// HuggingFace produces and a near-miss.
-///
-/// Two disclosed deviations, both deliberate:
-///
-/// 1. **Key order.** This sorts, which is *stock* jinja2's default
-///    policy (`policies["json.dumps_kwargs"] = {"sort_keys": True}`).
-///    Neither engine that actually renders chat templates does:
-///    transformers replaces the filter with
-///    `json.dumps(..., sort_keys=False)`, and llama.cpp's refuses
-///    `sort_keys=true` outright (`common/jinja/value.cpp:251`). Frink
-///    cannot follow them today for a reason below this module:
-///    `serde_json::Map` is a `BTreeMap` unless the whole workspace turns
-///    on `serde_json/preserve_order`, so a tool schema arrives here
-///    already sorted and the author's key order is gone before `tojson`
-///    ever sees it. The visible effect is the order of the keys inside a
-///    `<tools>` block, not their content.
-/// 2. No `htmlsafe_json_dumps` escaping of `< > & '` into `<`-style
-///    escapes. llama.cpp does not do it either, and it is llama.cpp that
-///    this engine is checked against.
-fn tojson(value: JinjaValue) -> Result<String, minijinja::Error> {
-    let json: Value = serde_json::to_value(&value).map_err(|e| {
-        minijinja::Error::new(
-            minijinja::ErrorKind::InvalidOperation,
-            format!("tojson: value is not serialisable: {e}"),
-        )
-    })?;
-    let mut out = String::new();
-    write_python_json(&json, &mut out);
-    Ok(out)
-}
-
-fn write_python_json(v: &Value, out: &mut String) {
-    match v {
-        Value::Object(map) => {
-            // jinja2's default policy is `json.dumps(..., sort_keys=True)`.
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (i, k) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&Value::String((*k).clone()).to_string());
-                out.push_str(": ");
-                write_python_json(&map[*k], out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                write_python_json(item, out);
-            }
-            out.push(']');
-        }
-        other => out.push_str(&other.to_string()),
-    }
 }
 
 /// jinja2 runs on Python, so templates call Python *methods* on the
@@ -512,6 +466,44 @@ fn python_method(
                 .filter(|v| !v.is_undefined())
                 .unwrap_or(default))
         }
+        // dict.items() / .keys() / .values(): how tool schemas are walked.
+        "items" | "keys" | "values" if args.is_empty() => {
+            if !matches!(value.kind(), minijinja::value::ValueKind::Map) {
+                return Err(unknown());
+            }
+            py_compat::map_view(value, method)
+        }
+        "append" => {
+            let list = value
+                .downcast_object_ref::<py_compat::PyList>()
+                .ok_or_else(unknown)?;
+            let [item] = args else {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    "append() takes exactly one argument",
+                ));
+            };
+            list.append(item.clone());
+            Ok(value.clone())
+        }
+        "pop" => {
+            let list = value
+                .downcast_object_ref::<py_compat::PyList>()
+                .ok_or_else(unknown)?;
+            let index = match args {
+                [] => -1,
+                [index] => i64::try_from(index.clone())?,
+                _ => {
+                    return Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        "pop() takes at most one argument",
+                    ))
+                }
+            };
+            list.pop(index)
+        }
+        "format" => py_compat::format(value.as_str().ok_or_else(unknown)?, args),
+        "replace" => py_compat::replace(value.as_str().ok_or_else(unknown)?, args),
         // str.split(sep) -- Python's whitespace split when sep is absent.
         "split" => {
             let s = value.as_str().ok_or_else(unknown)?;
@@ -603,27 +595,17 @@ fn raise_exception(msg: String) -> Result<JinjaValue, minijinja::Error> {
 /// `{{ strftime_now("%d %b %Y") }}` — Llama-3.1's template stamps
 /// today's date into its system preamble with it.
 ///
-/// UTC, and a deliberately small `strftime` subset: `%Y %y %m %d %e %H
+/// Local time, as llama.cpp's `std::localtime`, and a deliberately small `strftime` subset: `%Y %y %m %d %e %H
 /// %M %S %j %B %b %A %a %F %T %%`, plus the `-` no-pad flag
 /// (`%-d`, `%-m`). Anything else is an error rather than a silently
 /// wrong date — a model told the wrong year is a real quality bug and it
 /// would never show up as a crash.
 ///
-/// `FRINK_TEST_CHAT_TEMPLATE_NOW` (Unix seconds) pins the clock, which is
-/// how the regression tests below assert an exact string.
+/// `FRINK_TEST_CHAT_TEMPLATE_NOW` (Unix seconds, read as UTC) pins the
+/// clock ([`llama_defaults::local_now`]).
 fn strftime_now(fmt: String) -> Result<String, minijinja::Error> {
-    let secs = match std::env::var("FRINK_TEST_CHAT_TEMPLATE_NOW") {
-        Ok(v) => v.trim().parse::<i64>().map_err(|_| {
-            minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                "FRINK_TEST_CHAT_TEMPLATE_NOW must be Unix seconds",
-            )
-        })?,
-        Err(_) => std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    };
+    let secs = llama_defaults::local_now()
+        .map_err(|e| minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e))?;
     format_utc(secs, &fmt).map_err(|spec| {
         minijinja::Error::new(
             minijinja::ErrorKind::InvalidOperation,
@@ -959,11 +941,11 @@ mod tests {
                 "You may call one or more functions to assist with the user query.\n\n",
                 "You are provided with function signatures within <tools></tools> XML tags:\n",
                 "<tools>\n",
-                // `tojson`: sorted keys and `", "` / `": "` separators,
-                // exactly as jinja2's `json.dumps(sort_keys=True)` does.
-                "{\"function\": {\"description\": \"Current weather\", \"name\": \"get_weather\", ",
-                "\"parameters\": {\"properties\": {\"city\": {\"type\": \"string\"}}, ",
-                "\"type\": \"object\"}}, \"type\": \"function\"}\n",
+                // `tojson`: the keys in the order the tool wrote them and
+                // `", "` / `": "` separators, as llama.cpp prints it.
+                "{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", ",
+                "\"description\": \"Current weather\", \"parameters\": {\"type\": \"object\", ",
+                "\"properties\": {\"city\": {\"type\": \"string\"}}}}}\n",
                 "</tools>\n\n",
                 "For each function call, return a json object with function name and arguments ",
                 "within <tool_call></tool_call> XML tags:\n",
@@ -1019,6 +1001,8 @@ mod tests {
     /// got Llama's ipython tool-calling preamble.
     #[test]
     fn llama31_binds_tools_to_null_so_a_plain_chat_gets_no_tool_preamble() {
+        // `date_string` is today's, as in llama.cpp, so pin today.
+        let _clock = llama_defaults::PinnedClock::at(1_721_952_000); // 2024-07-26
         let out = ChatTemplate::from_jinja(LLAMA31_TEMPLATE)
             .unwrap()
             .render(
@@ -1061,14 +1045,13 @@ mod tests {
     #[test]
     fn strftime_now_stamps_a_pinned_clock() {
         // 2024-07-04T12:34:56Z
-        std::env::set_var("FRINK_TEST_CHAT_TEMPLATE_NOW", "1720096496");
+        let _clock = llama_defaults::PinnedClock::at(1_720_096_496);
         let out = ChatTemplate::from_jinja(
             "{{ strftime_now(\"%d %b %Y\") }}|{{ strftime_now('%A %F %T %j %-d') }}",
         )
         .unwrap()
         .render(&[], &opts())
         .unwrap();
-        std::env::remove_var("FRINK_TEST_CHAT_TEMPLATE_NOW");
         assert_eq!(out, "04 Jul 2024|Thursday 2024-07-04 12:34:56 186 4");
     }
 
@@ -1183,7 +1166,76 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(out, "real|false");
+        // `False`: jinja2 and llama.cpp print Python's spelling of a bool.
+        assert_eq!(out, "real|False");
+    }
+
+    /// llama.cpp sets both spellings at render, so `frink run` needs this
+    /// as much as the server does. A caller's own spelling stays.
+    #[test]
+    fn reasoning_effort_also_reads_as_reasoning_strength() {
+        let render = |extra: serde_json::Value| {
+            let serde_json::Value::Object(extra) = extra else {
+                panic!("not an object");
+            };
+            ChatTemplate::from_jinja("[{{ reasoning_strength }}]")
+                .unwrap()
+                .render(
+                    &[msg("user", "x")],
+                    &RenderOptions {
+                        extra,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            render(serde_json::json!({"reasoning_effort": "high"})),
+            "[high]"
+        );
+        assert_eq!(render(serde_json::json!({"reasoning_effort": ""})), "[]");
+        assert_eq!(
+            render(serde_json::json!({"reasoning_effort": "high", "reasoning_strength": "low"})),
+            "[low]"
+        );
+    }
+
+    /// GLM-4.7-Flash keeps earlier thoughts only under
+    /// `clear_thinking=false`, and llama.cpp's default keeps them.
+    #[test]
+    fn preserve_reasoning_also_reads_as_the_four_names_templates_use() {
+        let render = |extra: serde_json::Value| {
+            let serde_json::Value::Object(extra) = extra else {
+                panic!("not an object");
+            };
+            ChatTemplate::from_jinja(
+                "{{ preserve_thinking }}{{ clear_thinking }}\
+                 {{ truncate_history_thinking }}{{ drop_thinking }}",
+            )
+            .unwrap()
+            .render(
+                &[msg("user", "x")],
+                &RenderOptions {
+                    extra,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            render(serde_json::json!({"preserve_reasoning": true})),
+            "TrueFalseFalseFalse"
+        );
+        assert_eq!(
+            render(serde_json::json!({"preserve_reasoning": false})),
+            "FalseTrueTrueTrue"
+        );
+        // Not a boolean: upstream skips it, so the template sees none.
+        assert_eq!(render(serde_json::json!({"preserve_reasoning": "yes"})), "");
+        assert_eq!(
+            render(serde_json::json!({"preserve_reasoning": false, "clear_thinking": false})),
+            "FalseFalseTrueTrue"
+        );
     }
 
     // ---- gemma-4: the variant the plan says was never implemented ---
@@ -1336,7 +1388,7 @@ mod tests {
                 &RenderOptions::default(),
             )
             .unwrap();
-        assert_eq!(out, "truetruefalse;");
+        assert_eq!(out, "TrueTrueFalse;");
     }
 
     #[test]

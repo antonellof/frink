@@ -1,0 +1,44 @@
+#version 450
+// RoPE over `n_heads` heads of `head_dim`, the first `rot_dim` channels
+// rotated and the rest copied (ggml n_dims). Norm pairs (2k, 2k+1),
+// llama.cpp's LLAMA_ROPE_TYPE_NORM; NeoX pairs (k, k + rot_dim/2).
+// Band k's cos and sin come from the host (`tab[2k]`, `tab[2k+1]`),
+// computed with the CPU's own sin_cos at this position, with any
+// per-band divisor and YaRN mscale already in them, so the angles are
+// the CPU's to the bit (frink_core::attention::apply_rope*).
+//
+// Bindings: 0 the cos/sin table (as uint words), 1 x, 2 out. Push:
+// n_heads, head_dim, rot_dim, neox (0 or 1), tab_stride.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer T { uint tab[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(push_constant) uniform Push { uint n_heads; uint head_dim; uint rot_dim; uint neox; uint tab_stride; } p;
+
+void main() {
+    uint i = gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u + gl_GlobalInvocationID.x;
+    if (i >= p.n_heads * p.head_dim) return;
+    // The grid's z is the batch position: its own heads and its own
+    // table (`tab_stride` values each). A decode token is z = 0.
+    uint z = gl_WorkGroupID.z;
+    uint c = i % p.head_dim, base = z * p.n_heads * p.head_dim + i - c;
+    uint tb = z * p.tab_stride;
+    i += z * p.n_heads * p.head_dim;
+    if (c >= p.rot_dim) {
+        o[i] = x[i];
+        return;
+    }
+    uint half_dim = p.rot_dim / 2u;
+    uint k, a, b;
+    if (p.neox != 0u) {
+        k = c < half_dim ? c : c - half_dim;
+        a = base + k;
+        b = base + k + half_dim;
+    } else {
+        k = c / 2u;
+        a = base + 2u * k;
+        b = a + 1u;
+    }
+    float cs = uintBitsToFloat(tab[tb + 2u * k]), sn = uintBitsToFloat(tab[tb + 2u * k + 1u]);
+    o[i] = (i == a) ? x[a] * cs - x[b] * sn : x[a] * sn + x[b] * cs;
+}

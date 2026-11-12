@@ -1,19 +1,17 @@
 //! An order-preserving JSON value.
 //!
-//! `serde_json::Value` stores objects in a `BTreeMap` unless the crate's
-//! `preserve_order` feature is on, and that feature is a workspace-wide
-//! switch this module is not allowed to flip. Property order is not
-//! cosmetic here: [`super::converter`] emits the *required* properties of
+//! `serde_json::Value` keeps an object's document order only while the
+//! crate's `preserve_order` feature is on. This workspace turns it on
+//! (#513), and this type keeps the order either way. Property order is
+//! not cosmetic here: [`super::converter`] emits the *required* properties of
 //! an object in the order `properties` declares them, so the order a
 //! schema was written in is part of the language the grammar accepts.
 //! llama.cpp gets this from `nlohmann::ordered_json`.
 //!
 //! So the converter runs on this type instead, which keeps objects as a
 //! `Vec<(String, JsonValue)>` and therefore preserves document order when
-//! parsed from text with [`JsonValue::parse`]. A `serde_json::Value` can
-//! still be converted in ([`JsonValue::from`]), but it can only carry the
-//! order that `Value` itself had -- see the note on
-//! [`super::json_schema_to_grammar_value`].
+//! parsed from text with [`JsonValue::parse`]. A `serde_json::Value`
+//! converts in ([`JsonValue::from`]) with the order it has.
 
 use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
