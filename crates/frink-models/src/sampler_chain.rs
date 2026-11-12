@@ -124,8 +124,8 @@ impl Candidates {
         self.softmax();
         let mut cum_sum = 0.0f32;
         let mut last_idx = self.len();
-        for i in 0..self.len() {
-            cum_sum += self.probs[i];
+        for (i, &prob) in self.probs[..self.len()].iter().enumerate() {
+            cum_sum += prob;
             if cum_sum >= p {
                 last_idx = i + 1;
                 break;
@@ -312,8 +312,8 @@ impl Candidates {
         }
         self.softmax();
         let mut pos_last = 0usize;
-        for i in 0..self.len() {
-            if self.probs[i] >= threshold {
+        for (i, &prob) in self.probs[..self.len()].iter().enumerate() {
+            if prob >= threshold {
                 pos_last = i;
             } else {
                 break;

@@ -316,11 +316,11 @@ fn the_loaded_decoder_is_the_graph() {
     assert_eq!(c.logit_multiplier, Some(0.25));
     assert_eq!(d.layers[0].moe.n_experts(), 1);
     assert_eq!(d.layers[0].moe.parallel_sum_scale, None);
-    for il in 1..4 {
-        assert_eq!(d.layers[il].moe.n_experts(), 4, "blk.{il}");
-        assert_eq!(d.layers[il].moe.shared_experts.len(), 1);
+    for (il, layer) in d.layers.iter().enumerate().take(4).skip(1) {
+        assert_eq!(layer.moe.n_experts(), 4, "blk.{il}");
+        assert_eq!(layer.moe.shared_experts.len(), 1);
         assert_eq!(
-            d.layers[il].moe.parallel_sum_scale,
+            layer.moe.parallel_sum_scale,
             Some(0.5),
             "cohere2moe.cpp:259"
         );
@@ -334,13 +334,13 @@ fn every_cohere2moe_seam_is_visible_in_the_logits() {
     let mut d = load_graph_fixture(C2M);
     assert_decoder_matches_on_all_three_paths(&d, &C2M_GOLDEN, GRAPH_TOL, "baseline");
 
-    for il in 1..4 {
-        d.layers[il].moe.parallel_sum_scale = None;
+    for layer in d.layers.iter_mut().take(4).skip(1) {
+        layer.moe.parallel_sum_scale = None;
     }
     let worst = worst_vs(&decode(&d), &C2M_GOLDEN);
     assert!(worst > 1e-2, "the 0.5 on the sum not seen: {worst}");
-    for il in 1..4 {
-        d.layers[il].moe.parallel_sum_scale = Some(0.5);
+    for layer in d.layers.iter_mut().take(4).skip(1) {
+        layer.moe.parallel_sum_scale = Some(0.5);
     }
 
     // `cohere2`'s rule: the dense prefix would not rotate.
