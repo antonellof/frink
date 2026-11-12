@@ -50,6 +50,22 @@ are the ones worth reading twice.
   `Decoder::truncate_kv` now rewinds the arena with the host rows, for
   `frink run -md` and for the server's prompt-lookup speculation;
   `metal_speculation_rewinds_the_device_kv` holds it on a GPU.
+- **Llama 3 tool calls written as bare JSON are tool calls.** Llama
+  3.1/3.2 answer a custom tool with `{"name": …, "parameters": {…}}`
+  and no `<|python_tag|>`. The non-streaming path only parsed text
+  holding a known marker, and the streaming parser released the JSON
+  as text before it could be read, so every such call reached the
+  client as `content` with `finish_reason: "stop"` -- on
+  `/v1/chat/completions`, streamed or not, and on `/v1/responses`. A
+  Llama 3 turn that opens with `{` is now parsed as a call (held to the
+  end of the stream when streaming); one naming no offered tool is
+  returned as the text it was.
+- **A Hermes/Qwen tool call ending a turn is a tool call.** With tools
+  active the server stops on `</tool_call>` and cuts the stop string,
+  and the parser then required that same closer, so the last call of
+  every Hermes/Qwen turn reached the client as text, streamed or not. An
+  unclosed block holding one complete call is now that call; one cut
+  mid-JSON stays text.
 
 ## [0.62.0] - 2026-11-12
 

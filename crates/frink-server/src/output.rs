@@ -202,11 +202,17 @@ fn extract_tool_calls(
     tools: &[ToolDef],
     posture: OutputPosture,
 ) -> (String, Vec<ParsedToolCall>) {
-    if tools.is_empty() || !ToolCallParser::text_may_contain_call(text) {
+    let native = posture.tools;
+    // The marker list is a shortcut, not the whole test: a Llama 3 call
+    // carries no marker at all when the model skips `<|python_tag|>` --
+    // which is how Llama 3.1/3.2 answer a custom (non built-in) tool, a
+    // bare `{"name": …, "parameters": {…}}`. Gating on markers alone
+    // returned every such call to the client as prose.
+    let bare_llama_call = native == ToolCallFormat::Llama3 && text.trim_start().starts_with('{');
+    if tools.is_empty() || !(bare_llama_call || ToolCallParser::text_may_contain_call(text)) {
         return (text.to_string(), Vec::new());
     }
     let schemas = tool_schemas(tools);
-    let native = posture.tools;
     let mut formats = vec![native];
     if native != ToolCallFormat::Qwen25 {
         formats.push(ToolCallFormat::Qwen25);
@@ -276,6 +282,31 @@ mod tests {
         assert_eq!(parsed.calls.len(), 1);
         assert_eq!(parsed.calls[0].name, "get_weather");
         assert_eq!(parsed.calls[0].arguments, r#"{"city":"Rome"}"#);
+    }
+
+    /// Llama 3.2 answers a custom tool with bare JSON and no
+    /// `<|python_tag|>`, so no marker is present. It used to be returned
+    /// to the client as prose.
+    #[test]
+    fn a_bare_llama_call_without_python_tag_is_a_call() {
+        let parsed = parse_output(
+            "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Rome\"}}",
+            &tools(),
+            OutputPosture::for_model("llama-3.2-3b-instruct"),
+        );
+        assert_eq!(parsed.calls.len(), 1, "{:?}", parsed.content);
+        assert_eq!(parsed.calls[0].name, "get_weather");
+        assert_eq!(parsed.calls[0].arguments, r#"{"city":"Rome"}"#);
+        assert!(parsed.content.is_empty());
+
+        // JSON that names no offered tool is still an answer.
+        let parsed = parse_output(
+            "{\"answer\": 42}",
+            &tools(),
+            OutputPosture::for_model("llama-3.2-3b-instruct"),
+        );
+        assert!(parsed.calls.is_empty());
+        assert_eq!(parsed.content, "{\"answer\": 42}");
     }
 
     /// ... and a model whose family implies one format but which
