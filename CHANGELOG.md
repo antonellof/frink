@@ -39,8 +39,25 @@ are the ones worth reading twice.
   llama.cpp's defaults at the pin; they were 5 and 0.75. The old
   spellings `--draft-max` and `--draft-p-min` still work. Output does
   not change, only how much is drafted.
+- **Continuous batching is opt-in on Metal too.** It was on by default
+  on a Metal build, and its decode attends on the host: Qwen3-8B
+  Q4_K_M with 7.4k tokens of context decoded at 2.5 tok/s on an M2 Pro,
+  where the private loop, attending on the device, does 24.6 (llama.cpp
+  does the same). `-cb`, `-np N` or `FRINK_CONTINUOUS_BATCHING=1` turn
+  it on for many clients; without them concurrent requests serialize.
+- **Host GQA decode attention reads each K/V row once per head group**,
+  not once per query head, and the contiguous kernel spreads its head
+  groups over the cores. Bit-identical; the batched decode above goes
+  from 2.52 to 3.65 tok/s.
 
 ### Fixed
+
+- **The Metal private decode loop answered 500 to every request whose
+  prompt-lookup draft was rejected.** Its KV lives on the device and the
+  host caches stop at the prompt, but the speculative gate only asked
+  whether the store could roll back, so the rollback hit the `truncate`
+  assert. A store whose host rows do not reach the position now steps
+  one token at a time.
 
 - **Speculative decoding on Metal answered from zeroed keys after a
   rejected draft.** A rollback shortened the host KV cache but not the

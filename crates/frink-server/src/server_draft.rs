@@ -246,8 +246,8 @@ pub(crate) fn configure(
         if deployment.continuous_batching {
             bail!(
                 "a DFlash --model-draft reads the target's layer inputs, which the continuous \
-                 batcher does not tap yet. On Metal it is on by default: add --no-cont-batching, \
-                 or use an autoregressive draft"
+                 batcher does not tap yet: drop --cont-batching / --parallel, or use an \
+                 autoregressive draft"
             );
         }
         if deployment.paged_kv {
@@ -410,7 +410,7 @@ mod tests {
             .err()
             .expect("refused")
         );
-        assert!(refused.contains("--no-cont-batching"), "{refused}");
+        assert!(refused.contains("--cont-batching"), "{refused}");
 
         // A target of another width is refused, at startup and on a swap.
         let other = target();

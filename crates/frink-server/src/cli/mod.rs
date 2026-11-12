@@ -328,8 +328,9 @@ pub struct ServerArgs {
     )]
     cont_batching: bool,
 
-    /// Disable auto continuous batching on Metal
-    /// (`FRINK_CONTINUOUS_BATCHING=0`).
+    /// Keep the private decode loop, even with `--parallel`
+    /// (`FRINK_CONTINUOUS_BATCHING=0`). Continuous batching is off
+    /// unless `--cont-batching` or `--parallel` asks for it.
     #[arg(
         long = "no-cont-batching",
         visible_alias = "nocb",

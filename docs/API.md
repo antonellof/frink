@@ -956,10 +956,9 @@ This is the supported multi-client path on Metal.
 
 Enable it with `FRINK_CONTINUOUS_BATCHING=1`, `--cont-batching` / `-cb`,
 or `-np N` / `--parallel N` (which also sets `FRINK_CB_MAX_SEQS`).
-Disable it with `FRINK_CONTINUOUS_BATCHING=0` or `--no-cont-batching`.
-When unset on Metal builds with fused attention, continuous batching is
-on by default unless a KV pool or prefix cache forces the private
-decode path.
+It is off by default: the private decode loop serializes requests but
+attends on the device, which one client finds faster. A KV pool or
+prefix cache forces the private loop.
 
 On the contiguous KV path it is mutually exclusive with
 `FRINK_KV_POOL_BLOCKS` and `FRINK_PREFIX_CACHE_ENTRIES`; the paged KV

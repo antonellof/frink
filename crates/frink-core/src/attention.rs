@@ -236,6 +236,7 @@ unsafe fn hsum256_ps(acc: std::arch::x86_64::__m256) -> f32 {
 /// already in score space, matching both the flash-attention path above
 /// and `ggml_compute_forward_soft_max_f32`, which applies `scale` to the
 /// KQ row before taking `MAX(max, sk[head])`.
+#[cfg(test)]
 fn online_attn_accumulate(
     q_h: &[f32],
     scale: f32,
@@ -250,31 +251,75 @@ fn online_attn_accumulate(
     // key -- ALiBi's `slope * (p_key - p_query)` (`crate::alibi`), or
     // `0.0` -- applied after the scale and the softcap, where
     // `ggml_soft_max_ext` adds `slope * mask`.
-    let mut m = f32::NEG_INFINITY;
-    let mut l = 0f32;
-    out_h.fill(0.0);
+    let mut state = OnlineSoftmax::new(out_h);
     for_each_kv(&mut |k_t, v_t, bias| {
+        state.visit(q_h, scale, attn_softcap, out_h, k_t, v_t, bias);
+    });
+    state.finish(out_h, sink);
+}
+
+/// One head's running max and denominator in [`online_attn_accumulate`].
+///
+/// A type of its own so a caller that reads each K/V row once for
+/// several heads (`causal_gqa_attention_paged_sinks`, one task per
+/// group of heads sharing a KV head) runs the very same per-key update
+/// and the very same close as the one-head loop. Same operations in the
+/// same order per head, so the outputs are bit-identical to it.
+struct OnlineSoftmax {
+    m: f32,
+    l: f32,
+}
+
+impl OnlineSoftmax {
+    /// Starts a head: clears `out_h`, the accumulator `visit` adds into.
+    #[inline]
+    fn new(out_h: &mut [f32]) -> Self {
+        out_h.fill(0.0);
+        Self {
+            m: f32::NEG_INFINITY,
+            l: 0.0,
+        }
+    }
+
+    /// Folds one key/value row into the head.
+    #[allow(clippy::too_many_arguments)] // the per-key step, unbundled
+    #[inline]
+    fn visit(
+        &mut self,
+        q_h: &[f32],
+        scale: f32,
+        attn_softcap: Option<f32>,
+        out_h: &mut [f32],
+        k_t: &[f32],
+        v_t: &[f32],
+        bias: f32,
+    ) {
         let mut s = dot_f32(q_h, k_t) * scale;
         if let Some(sc) = attn_softcap.filter(|&c| c > 0.0) {
             s = sc * (s / sc).tanh();
         }
         s += bias;
-        let m_new = m.max(s);
-        let alpha = (m - m_new).exp();
+        let m_new = self.m.max(s);
+        let alpha = (self.m - m_new).exp();
         let p = (s - m_new).exp();
-        l = l * alpha + p;
+        self.l = self.l * alpha + p;
         axpy_scale(out_h, alpha, v_t, p);
-        m = m_new;
-    });
-    if let Some(s) = sink {
-        let m_new = m.max(s);
-        let alpha = (m - m_new).exp();
-        l = l * alpha + (s - m_new).exp();
-        scale_inplace(out_h, alpha);
+        self.m = m_new;
     }
-    if l > 0.0 {
-        let inv = 1.0 / l;
-        scale_inplace(out_h, inv);
+
+    /// Applies the sink, if any, and normalises `out_h`.
+    #[inline]
+    fn finish(mut self, out_h: &mut [f32], sink: Option<f32>) {
+        if let Some(s) = sink {
+            let m_new = self.m.max(s);
+            let alpha = (self.m - m_new).exp();
+            self.l = self.l * alpha + (s - m_new).exp();
+            scale_inplace(out_h, alpha);
+        }
+        if self.l > 0.0 {
+            let inv = 1.0 / self.l;
+            scale_inplace(out_h, inv);
+        }
     }
 }
 
@@ -975,29 +1020,38 @@ pub fn causal_gqa_attention_row<'a>(
     // prompt's tiny region stays on one core through
     // `crate::par::backend`, which is exactly the case a hard-coded
     // threshold here would have had to guess at.
-    crate::par::chunks_mut(&mut out, v_head_dim, 1, |h, out_h| {
-        let kv_h = h / group_size.max(1);
-        let q_h = &q[h * head_dim..(h + 1) * head_dim];
-        let sink = sinks.map(|s| s[h]);
-        let slope = alibi.map_or(0.0, |s| s[h]);
-        // One scratch row per head for an f16 store to widen into; an f32
-        // store borrows and never touches it (`crate::kv_store`).
-        let (mut k_scratch, mut v_scratch) = (Vec::new(), Vec::new());
-        online_attn_accumulate(q_h, scale, out_h, attn_softcap, sink, |visit| {
-            for t in start..seq_len {
-                let k_t = k_cache.read(
-                    (t * n_kv_heads + kv_h) * head_dim..(t * n_kv_heads + kv_h + 1) * head_dim,
-                    &mut k_scratch,
-                );
-                let v_t = v_cache.read(
-                    (t * n_kv_heads + kv_h) * v_head_dim..(t * n_kv_heads + kv_h + 1) * v_head_dim,
-                    &mut v_scratch,
-                );
-                visit(k_t, v_t, slope * (t as f32 - q_pos));
-            }
-        });
-    });
-
+    //
+    // Heads that share a KV head now go to one task in runs
+    // (`attend_in_head_runs`), so each f16 row is widened once per run
+    // rather than once per head.
+    let rows = ContiguousRows {
+        k: k_cache,
+        v: v_cache,
+        n_kv_heads,
+        head_dim,
+        v_head_dim,
+    };
+    let head = HeadTerms {
+        q,
+        head_dim,
+        scale,
+        attn_softcap,
+        sinks,
+        alibi,
+        q_pos,
+    };
+    let group_size = group_size.max(1);
+    let per_task = heads_per_task(group_size, n_kv_heads, crate::par::num_threads());
+    attend_in_head_runs(
+        &rows,
+        &head,
+        &mut out,
+        group_size,
+        v_head_dim,
+        start..seq_len,
+        per_task,
+        Spread::Workers,
+    );
     out
 }
 
@@ -2268,6 +2322,45 @@ pub fn causal_gqa_attention_paged_sinks(
     attn_softcap: Option<f32>,
     alibi: Option<&[f32]>,
 ) -> Vec<f32> {
+    let group_size = (n_heads / n_kv_heads.max(1)).max(1);
+    paged_sinks_in_runs(
+        q,
+        store,
+        block_table,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        seq_len,
+        window,
+        sinks,
+        attn_softcap,
+        alibi,
+        // The whole group per run, one read of each row for all of it,
+        // on this thread: see `Spread::ThisThread`.
+        group_size,
+    )
+}
+
+/// [`causal_gqa_attention_paged_sinks`] with the run length explicit:
+/// each task attends `per_task` query heads (a divisor of the GQA group
+/// size) off one read of each K/V row. Split out so the tests can pin
+/// every run length rather than whichever this host's thread count
+/// picks.
+#[allow(clippy::too_many_arguments)]
+fn paged_sinks_in_runs(
+    q: &[f32],
+    store: &PagedKvStore,
+    block_table: &[usize],
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+    window: Option<usize>,
+    sinks: Option<&[f32]>,
+    attn_softcap: Option<f32>,
+    alibi: Option<&[f32]>,
+    per_task: usize,
+) -> Vec<f32> {
     assert_eq!(q.len(), n_heads * head_dim);
     if let Some(slopes) = alibi {
         assert_eq!(slopes.len(), n_heads, "ALiBi slopes are per query head");
@@ -2311,30 +2404,223 @@ pub fn causal_gqa_attention_paged_sinks(
         None => 0,
     };
 
-    let q_pos = seq_len as f32 - 1.0;
-    for h in 0..n_heads {
-        let kv_h = h / group_size.max(1);
-        let q_h = &q[h * head_dim..(h + 1) * head_dim];
-        let sink = sinks.map(|s| s[h]);
-        let slope = alibi.map_or(0.0, |s| s[h]);
-        let out_h = &mut out[h * v_head_dim..(h + 1) * v_head_dim];
-        let (mut k_scratch, mut v_scratch) = (Vec::new(), Vec::new());
-        online_attn_accumulate(q_h, scale, out_h, attn_softcap, sink, |visit| {
-            for t in start..seq_len {
-                let block_id = block_table[t / block_size];
-                let offset = t % block_size;
-                let k_t = store
-                    .k_row(block_id, offset)
-                    .read(kv_h * head_dim..(kv_h + 1) * head_dim, &mut k_scratch);
-                let v_t = store
-                    .v_row(block_id, offset)
-                    .read(kv_h * v_head_dim..(kv_h + 1) * v_head_dim, &mut v_scratch);
-                visit(k_t, v_t, slope * (t as f32 - q_pos));
-            }
-        });
-    }
-
+    let rows = PagedRows {
+        store,
+        block_table,
+        block_size,
+        head_dim,
+        v_head_dim,
+    };
+    let head = HeadTerms {
+        q,
+        head_dim,
+        scale,
+        attn_softcap,
+        sinks,
+        alibi,
+        q_pos: seq_len as f32 - 1.0,
+    };
+    attend_in_head_runs(
+        &rows,
+        &head,
+        &mut out,
+        group_size,
+        v_head_dim,
+        start..seq_len,
+        per_task,
+        Spread::ThisThread,
+    );
     out
+}
+
+/// Where [`attend_in_head_runs`] gets key/value row `t` of KV head `kv_h`,
+/// as f32: borrowed from an f32 store, widened into the scratch from an
+/// f16 one (`KvRows::read`).
+trait KvRowSource: Sync {
+    fn rows<'s>(
+        &'s self,
+        t: usize,
+        kv_h: usize,
+        k_scratch: &'s mut Vec<f32>,
+        v_scratch: &'s mut Vec<f32>,
+    ) -> (&'s [f32], &'s [f32]);
+}
+
+/// `causal_gqa_attention_row`'s rows: `[seq_len, n_kv_heads, width]`.
+struct ContiguousRows<'a> {
+    k: KvRows<'a>,
+    v: KvRows<'a>,
+    n_kv_heads: usize,
+    head_dim: usize,
+    v_head_dim: usize,
+}
+
+impl KvRowSource for ContiguousRows<'_> {
+    #[inline]
+    fn rows<'s>(
+        &'s self,
+        t: usize,
+        kv_h: usize,
+        k_scratch: &'s mut Vec<f32>,
+        v_scratch: &'s mut Vec<f32>,
+    ) -> (&'s [f32], &'s [f32]) {
+        let row = t * self.n_kv_heads + kv_h;
+        let (hd, vd) = (self.head_dim, self.v_head_dim);
+        (
+            self.k.read(row * hd..(row + 1) * hd, k_scratch),
+            self.v.read(row * vd..(row + 1) * vd, v_scratch),
+        )
+    }
+}
+
+/// `causal_gqa_attention_paged_sinks`'s rows: position `t` lives at
+/// offset `t % block_size` of page `block_table[t / block_size]`.
+struct PagedRows<'a> {
+    store: &'a PagedKvStore,
+    block_table: &'a [usize],
+    block_size: usize,
+    head_dim: usize,
+    v_head_dim: usize,
+}
+
+impl KvRowSource for PagedRows<'_> {
+    #[inline]
+    fn rows<'s>(
+        &'s self,
+        t: usize,
+        kv_h: usize,
+        k_scratch: &'s mut Vec<f32>,
+        v_scratch: &'s mut Vec<f32>,
+    ) -> (&'s [f32], &'s [f32]) {
+        let block_id = self.block_table[t / self.block_size];
+        let offset = t % self.block_size;
+        let (hd, vd) = (self.head_dim, self.v_head_dim);
+        (
+            self.store
+                .k_row(block_id, offset)
+                .read(kv_h * hd..(kv_h + 1) * hd, k_scratch),
+            self.store
+                .v_row(block_id, offset)
+                .read(kv_h * vd..(kv_h + 1) * vd, v_scratch),
+        )
+    }
+}
+
+/// The per-query-head terms of one attention row.
+struct HeadTerms<'a> {
+    /// `[n_heads, head_dim]`.
+    q: &'a [f32],
+    head_dim: usize,
+    scale: f32,
+    attn_softcap: Option<f32>,
+    sinks: Option<&'a [f32]>,
+    alibi: Option<&'a [f32]>,
+    /// The query's position, for ALiBi's distance.
+    q_pos: f32,
+}
+
+/// Attends every query head over `keys`, writing `out`
+/// (`[n_heads, v_head_dim]`).
+///
+/// One task per run of `per_task` query heads that share a KV head: the
+/// task widens each K/V row ONCE and folds it into every head of its
+/// run. Both kernels used to widen each row once per query head -- with
+/// an f16 store that widening was the largest single cost of a decode
+/// token at long context (Qwen3-8B, 32 heads over 8 KV heads, ~8k
+/// tokens: more host time than the dot products and the V sums
+/// together).
+///
+/// Each head still sees the same rows, in the same order, through the
+/// same [`OnlineSoftmax`] as [`online_attn_accumulate`], so the result
+/// is bit-identical whatever `per_task` is (tests pin 1, 2 and 4).
+#[allow(clippy::too_many_arguments)]
+fn attend_in_head_runs(
+    rows: &impl KvRowSource,
+    head: &HeadTerms<'_>,
+    out: &mut [f32],
+    group_size: usize,
+    v_head_dim: usize,
+    keys: std::ops::Range<usize>,
+    per_task: usize,
+    spread: Spread,
+) {
+    let group_size = group_size.max(1);
+    assert!(
+        per_task > 0 && group_size.is_multiple_of(per_task),
+        "a run of {per_task} heads must not straddle a KV head (group of {group_size})"
+    );
+    let hd = head.head_dim;
+    let attend_run = |task: usize, out_run: &mut [f32]| {
+        let h0 = task * per_task;
+        let kv_h = h0 / group_size;
+        let mut states: Vec<OnlineSoftmax> = out_run
+            .chunks_mut(v_head_dim)
+            .map(OnlineSoftmax::new)
+            .collect();
+        let (mut k_scratch, mut v_scratch) = (Vec::new(), Vec::new());
+        for t in keys.clone() {
+            let (k_t, v_t) = rows.rows(t, kv_h, &mut k_scratch, &mut v_scratch);
+            for (j, (state, out_h)) in states
+                .iter_mut()
+                .zip(out_run.chunks_mut(v_head_dim))
+                .enumerate()
+            {
+                let h = h0 + j;
+                let slope = head.alibi.map_or(0.0, |s| s[h]);
+                state.visit(
+                    &head.q[h * hd..(h + 1) * hd],
+                    head.scale,
+                    head.attn_softcap,
+                    out_h,
+                    k_t,
+                    v_t,
+                    slope * (t as f32 - head.q_pos),
+                );
+            }
+        }
+        for (j, (state, out_h)) in states
+            .into_iter()
+            .zip(out_run.chunks_mut(v_head_dim))
+            .enumerate()
+        {
+            state.finish(out_h, head.sinks.map(|s| s[h0 + j]));
+        }
+    };
+    match spread {
+        Spread::Workers => crate::par::chunks_mut(out, per_task * v_head_dim, 1, attend_run),
+        Spread::ThisThread => {
+            for (task, out_run) in out.chunks_mut(per_task * v_head_dim).enumerate() {
+                attend_run(task, out_run);
+            }
+        }
+    }
+}
+
+/// Where [`attend_in_head_runs`] runs its tasks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spread {
+    /// Across the worker pool.
+    Workers,
+    /// On the calling thread. The paged kernel's: it runs under the
+    /// store's read guard, inside a decode step that is itself a pool
+    /// job (`par::decode_step`). A worker waiting on a nested join
+    /// steals other jobs, and another request's decode step taking that
+    /// layer's write guard on top of this guard deadlocks the worker.
+    ThisThread,
+}
+
+/// How many query heads one task of [`attend_in_head_runs`] takes: a
+/// divisor of `group_size`, so a task never spans two KV heads. The
+/// whole group when that already makes enough tasks to keep every
+/// worker busy, halved while it does not -- fewer heads per task means
+/// more widening of the same rows, so it stops at about two tasks per
+/// thread.
+fn heads_per_task(group_size: usize, n_kv_heads: usize, threads: usize) -> usize {
+    let mut per_task = group_size.max(1);
+    while per_task.is_multiple_of(2) && n_kv_heads * (group_size / per_task) < 2 * threads {
+        per_task /= 2;
+    }
+    per_task
 }
 
 /// Single-token causal attention for DeepSeek/Kimi-style Multi-head
@@ -4075,6 +4361,170 @@ mod tests {
         }
         let table = cache.block_table().to_vec();
         (k_flat, v_flat, store, table)
+    }
+
+    /// The loop both GQA row kernels used to run: one head at a time,
+    /// each widening its own copy of every K/V row. Kept as the reference
+    /// [`super::attend_in_head_runs`] must match bit for bit.
+    #[allow(clippy::too_many_arguments)]
+    fn one_head_at_a_time(
+        q: &[f32],
+        k: KvRows<'_>,
+        v: KvRows<'_>,
+        n_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        seq_len: usize,
+        window: Option<usize>,
+        sinks: Option<&[f32]>,
+        softcap: Option<f32>,
+        alibi: Option<&[f32]>,
+    ) -> Vec<f32> {
+        let group_size = n_heads / n_kv_heads;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let start = window.map_or(0, |w| seq_len.saturating_sub(w));
+        let q_pos = seq_len as f32 - 1.0;
+        let mut out = vec![0f32; n_heads * head_dim];
+        for (h, out_h) in out.chunks_mut(head_dim).enumerate() {
+            let kv_h = h / group_size;
+            let slope = alibi.map_or(0.0, |s| s[h]);
+            let (mut ks, mut vs) = (Vec::new(), Vec::new());
+            super::online_attn_accumulate(
+                &q[h * head_dim..(h + 1) * head_dim],
+                scale,
+                out_h,
+                softcap,
+                sinks.map(|s| s[h]),
+                |visit| {
+                    for t in start..seq_len {
+                        let r = (t * n_kv_heads + kv_h) * head_dim;
+                        let k_t = k.read(r..r + head_dim, &mut ks);
+                        let v_t = v.read(r..r + head_dim, &mut vs);
+                        visit(k_t, v_t, slope * (t as f32 - q_pos));
+                    }
+                },
+            );
+        }
+        out
+    }
+
+    fn assert_bits_eq(want: &[f32], got: &[f32], what: &str) {
+        assert_eq!(want.len(), got.len(), "{what}");
+        for (i, (a, b)) in want.iter().zip(got).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "{what}, element {i}: {a} vs {b}");
+        }
+    }
+
+    /// Both GQA row kernels now read each K/V row once for a run of
+    /// query heads sharing a KV head, and run those tasks in parallel.
+    /// Neither may change a bit: every run length, with every term the
+    /// kernels carry (window, sinks, softcap, ALiBi), over an f32 and an
+    /// f16 store, must equal the old one-head-at-a-time loop.
+    #[test]
+    fn every_head_run_length_is_bit_identical_to_one_head_at_a_time() {
+        let (n_heads, n_kv_heads, head_dim, seq_len, block_size) = (8, 2, 4, 9, 4);
+        let (k_flat, v_flat, store, table) =
+            paged_fixture(seq_len, n_kv_heads, head_dim, block_size);
+        let k_half: Vec<half::f16> = k_flat.iter().map(|&x| half::f16::from_f32(x)).collect();
+        let v_half: Vec<half::f16> = v_flat.iter().map(|&x| half::f16::from_f32(x)).collect();
+        let q: Vec<f32> = (0..n_heads * head_dim)
+            .map(|i| ((i * 3 + 2) % 7) as f32 * 0.2 - 0.5)
+            .collect();
+        let sinks: Vec<f32> = (0..n_heads).map(|h| h as f32 * 0.7 - 2.0).collect();
+        let slopes: Vec<f32> = (0..n_heads).map(|h| 0.5f32.powi(h as i32 + 1)).collect();
+        for window in [None, Some(6)] {
+            for sinks in [None, Some(&sinks[..])] {
+                for softcap in [None, Some(5.0f32)] {
+                    for alibi in [None, Some(&slopes[..])] {
+                        let case = format!(
+                            "window {window:?}, sinks {}, softcap {softcap:?}, alibi {}",
+                            sinks.is_some(),
+                            alibi.is_some()
+                        );
+                        let stores: [(KvRows<'_>, KvRows<'_>, &str); 2] = [
+                            ((&k_flat[..]).into(), (&v_flat[..]).into(), "f32"),
+                            ((&k_half[..]).into(), (&v_half[..]).into(), "f16"),
+                        ];
+                        for (k, v, dtype) in stores {
+                            let want = one_head_at_a_time(
+                                &q, k, v, n_heads, n_kv_heads, head_dim, seq_len, window, sinks,
+                                softcap, alibi,
+                            );
+                            let rows = super::ContiguousRows {
+                                k,
+                                v,
+                                n_kv_heads,
+                                head_dim,
+                                v_head_dim: head_dim,
+                            };
+                            let head = super::HeadTerms {
+                                q: &q,
+                                head_dim,
+                                scale: 1.0 / (head_dim as f32).sqrt(),
+                                attn_softcap: softcap,
+                                sinks,
+                                alibi,
+                                q_pos: seq_len as f32 - 1.0,
+                            };
+                            let start = window.map_or(0, |w| seq_len.saturating_sub(w));
+                            for per_task in [1, 2, 4] {
+                                let mut got = vec![0f32; n_heads * head_dim];
+                                super::attend_in_head_runs(
+                                    &rows,
+                                    &head,
+                                    &mut got,
+                                    n_heads / n_kv_heads,
+                                    head_dim,
+                                    start..seq_len,
+                                    per_task,
+                                    super::Spread::Workers,
+                                );
+                                assert_bits_eq(
+                                    &want,
+                                    &got,
+                                    &format!("contiguous {dtype}, {per_task} heads/task, {case}"),
+                                );
+                            }
+                            // The public entry, at whatever run this host picks.
+                            let public = causal_gqa_attention_row(
+                                &q, k, v, n_heads, n_kv_heads, head_dim, head_dim, seq_len, window,
+                                sinks, softcap, alibi,
+                            );
+                            assert_bits_eq(&want, &public, &format!("row kernel {dtype}, {case}"));
+                            if dtype == "f32" {
+                                for per_task in [1, 2, 4] {
+                                    let paged = super::paged_sinks_in_runs(
+                                        &q, &store, &table, n_heads, n_kv_heads, head_dim, seq_len,
+                                        window, sinks, softcap, alibi, per_task,
+                                    );
+                                    assert_bits_eq(
+                                        &want,
+                                        &paged,
+                                        &format!("paged, {per_task} heads/task, {case}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A task never spans two KV heads, and the run shrinks only until
+    /// there are about two tasks per thread.
+    #[test]
+    fn head_runs_split_a_group_only_to_fill_the_threads() {
+        // Qwen3-8B on 6 cores: 8 groups of 4 is under 12 tasks, so halve.
+        assert_eq!(super::heads_per_task(4, 8, 6), 2);
+        // Enough KV heads already: keep the whole group.
+        assert_eq!(super::heads_per_task(4, 8, 4), 4);
+        // Down to one head when the groups are few.
+        assert_eq!(super::heads_per_task(4, 1, 16), 1);
+        // An odd group cannot be split without straddling: kept whole.
+        assert_eq!(super::heads_per_task(3, 2, 16), 3);
+        // MHA (group of one) is one head per task.
+        assert_eq!(super::heads_per_task(1, 32, 6), 1);
     }
 
     /// The paged kernel's sink term must be BIT-identical to the
