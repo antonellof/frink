@@ -17,6 +17,16 @@ are the ones worth reading twice.
 
 ### Added
 
+- **Vulkan shaders for the codebook kinds: IQ1_S, IQ1_M, IQ2_XXS,
+  IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S** (#409, #405). One unit per
+  16-value sub-block, the cut ggml's dequants use. The grids and sign
+  table are not typed again in GLSL: they are one buffer at a fourth
+  binding, filled from `frink_quant::iq_tables` when the runtime opens.
+  Each kind is held to its `frink_quant` scalar twin as a matvec and
+  as a GEMM, on MoltenVK and on lavapipe. Every weight kind now has a
+  Vulkan matvec and GEMM: those two columns of `docs/KERNELS.md` fall
+  from 7 host fallbacks to 0.
+
 - **Vulkan shaders for the trit formats, TQ1_0 and PTQ1_0** (#409,
   #405). One GLSL body (`trit_common.glsl`) for both block geometries,
   a unit per packed byte, held to `frink_quant::ternary::dot_trits_f32`

@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// IQ2_S, 82 bytes per 256 values: f16 d, 32 index bytes, 32 sign
+// bytes, 8 bytes of index high bits, 8 scale bytes
+// (frink_quant::dot_iq2_s_f32_scalar).
+#define IQ_BLOCK_BYTES 82u
+#include "iq_common.glsl"
+
+float sub_dot(uint blk, uint il, uint xb) {
+    uint ib32 = il >> 1;
+    uint sc = byte_at(blk + 74u + ib32);
+    float db = f16_at(blk) * (0.5 + float((il & 1u) != 0u ? sc >> 4 : sc & 15u)) * 0.25;
+    uint qh = byte_at(blk + 66u + ib32);
+    float s = 0.0;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint l = 2u * (il & 1u) + k;
+        uint idx = byte_at(blk + 2u + 4u * ib32 + l) | ((qh << (8u - 2u * l)) & 0x300u);
+        s += grid64_dot(IQ_GRID_IQ2S, idx, db, byte_at(blk + 34u + 4u * ib32 + l), xb + 8u * k);
+    }
+    return s;
+}
+#include "iq_main.glsl"

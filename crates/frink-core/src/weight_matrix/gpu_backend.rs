@@ -295,6 +295,13 @@ fn vulkan_matvec_launch(kind: QuantKind) -> Option<VulkanMatvecLaunchFn> {
         QuantKind::Mxfp4Gguf => Some(d::mxfp4_matvec),
         QuantKind::Tq1_0 => Some(d::tq1_0_matvec),
         QuantKind::Ptq1_0 => Some(d::ptq1_0_matvec),
+        QuantKind::IQ2XXS => Some(d::iq2_xxs_matvec),
+        QuantKind::IQ2XS => Some(d::iq2_xs_matvec),
+        QuantKind::IQ2S => Some(d::iq2_s_matvec),
+        QuantKind::IQ3XXS => Some(d::iq3_xxs_matvec),
+        QuantKind::IQ3S => Some(d::iq3_s_matvec),
+        QuantKind::IQ1S => Some(d::iq1_s_matvec),
+        QuantKind::IQ1M => Some(d::iq1_m_matvec),
         _ => None,
     }
 }
@@ -502,9 +509,9 @@ impl BackendCaps for Vulkan {
     const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
     /// The kinds with a shader in `frink_vulkan::shaders`: the K-quants,
-    /// the legacy 32-value kinds, IQ4_NL, IQ4_XS, MXFP4, TQ1_0 and
-    /// PTQ1_0, each run against its `frink_quant` scalar twin on a real
-    /// device. The codebook kinds (IQ1_S to IQ3_S) have none yet.
+    /// the legacy 32-value kinds, the IQ kinds, MXFP4, TQ1_0 and PTQ1_0:
+    /// every weight kind, each run against its `frink_quant` scalar twin
+    /// on a real device.
     ///
     /// Everything else must report `None` rather than something
     /// plausible. A capability table that over-claims is how a kind ends
@@ -1190,6 +1197,13 @@ mod tests {
                 QuantKind::Q5_1,
                 QuantKind::IQ4NL,
                 QuantKind::IQ4XS,
+                QuantKind::IQ1S,
+                QuantKind::IQ2XXS,
+                QuantKind::IQ3XXS,
+                QuantKind::IQ2XS,
+                QuantKind::IQ2S,
+                QuantKind::IQ3S,
+                QuantKind::IQ1M,
                 QuantKind::Mxfp4Gguf,
                 QuantKind::Tq1_0,
                 QuantKind::Ptq1_0,

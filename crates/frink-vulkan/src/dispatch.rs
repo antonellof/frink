@@ -55,6 +55,13 @@ shader_matvec! {
     mxfp4_matvec => "MXFP4",
     tq1_0_matvec => "TQ1_0",
     ptq1_0_matvec => "PTQ1_0",
+    iq2_xxs_matvec => "IQ2_XXS",
+    iq2_xs_matvec => "IQ2_XS",
+    iq2_s_matvec => "IQ2_S",
+    iq3_xxs_matvec => "IQ3_XXS",
+    iq3_s_matvec => "IQ3_S",
+    iq1_s_matvec => "IQ1_S",
+    iq1_m_matvec => "IQ1_M",
     f32_matvec => "F32",
 }
 
@@ -103,6 +110,19 @@ pub(crate) mod tests {
             let dmin = half::f16::from_f32(0.005 + 0.001 * (b % 5) as f32).to_le_bytes();
             match kind {
                 "Q8_0" | "Q4_0" | "Q5_0" | "IQ4_NL" | "IQ4_XS" => blk[0..2].copy_from_slice(&d),
+                // Every index and sign code these blocks can hold is
+                // inside its table; only the scale needs care.
+                "IQ2_XXS" | "IQ2_XS" | "IQ2_S" | "IQ3_XXS" | "IQ3_S" | "IQ1_S" => {
+                    blk[0..2].copy_from_slice(&d)
+                }
+                // The f16 scale is the top nibbles of four u16 at 48.
+                "IQ1_M" => {
+                    let bits = u16::from_le_bytes(d);
+                    for k in 0..4 {
+                        let nib = ((bits >> (4 * k)) & 0xf) as u8;
+                        blk[49 + 2 * k] = (blk[49 + 2 * k] & 0x0f) | (nib << 4);
+                    }
+                }
                 "Q4_K" | "Q5_K" | "Q4_1" | "Q5_1" => {
                     blk[0..2].copy_from_slice(&d);
                     blk[2..4].copy_from_slice(&dmin);
@@ -143,6 +163,13 @@ pub(crate) mod tests {
             "IQ4_NL" => frink_quant::dot_iq4_nl_f32_scalar,
             "IQ4_XS" => frink_quant::dot_iq4_xs_f32_scalar,
             "MXFP4" => frink_quant::dot_mxfp4_gguf_f32_scalar,
+            "IQ2_XXS" => frink_quant::dot_iq2_xxs_f32_scalar,
+            "IQ2_XS" => frink_quant::dot_iq2_xs_f32_scalar,
+            "IQ2_S" => frink_quant::dot_iq2_s_f32_scalar,
+            "IQ3_XXS" => frink_quant::dot_iq3_xxs_f32_scalar,
+            "IQ3_S" => frink_quant::dot_iq3_s_f32_scalar,
+            "IQ1_S" => frink_quant::dot_iq1_s_f32_scalar,
+            "IQ1_M" => frink_quant::dot_iq1_m_f32_scalar,
             "TQ1_0" => {
                 |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::TQ1_0, x)
             }
@@ -173,7 +200,7 @@ pub(crate) mod tests {
 
     type Launch =
         fn(&mut Runtime, &[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, VulkanError>;
-    const LAUNCHES: [(&str, Launch); 16] = [
+    const LAUNCHES: [(&str, Launch); 23] = [
         ("Q8_0", q8_0_matvec),
         ("Q4_0", q4_0_matvec),
         ("Q4_K", q4_k_matvec),
@@ -189,6 +216,13 @@ pub(crate) mod tests {
         ("MXFP4", mxfp4_matvec),
         ("TQ1_0", tq1_0_matvec),
         ("PTQ1_0", ptq1_0_matvec),
+        ("IQ2_XXS", iq2_xxs_matvec),
+        ("IQ2_XS", iq2_xs_matvec),
+        ("IQ2_S", iq2_s_matvec),
+        ("IQ3_XXS", iq3_xxs_matvec),
+        ("IQ3_S", iq3_s_matvec),
+        ("IQ1_S", iq1_s_matvec),
+        ("IQ1_M", iq1_m_matvec),
         ("F32", f32_matvec),
     ];
 
