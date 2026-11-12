@@ -91,14 +91,15 @@ Each step is its own PR, CPU first, token parity before any backend work.
    truncated on rejection. Compatibility check target/draft (hidden size, vocab
    by token-string hash, layer ids in range) refuses with the mismatch named;
    this also closes the open step 2 of `archive/speculative-decoding.md`.
-5. **Recurrent rollback.** The Qwen hybrid targets have GDN layers with
-   `rollback_limit() == 0`. Follow what llama.cpp does at the pin for
-   speculative decode on recurrent memory (checkpoint and restore of the
-   recurrent state around the verify batch); implement as snapshot/restore in
-   `frink-core/src/cache.rs` next to `truncate`, used by
-   `speculative_decode_observed` in place of the assert. If upstream refuses
-   that combination, Frink refuses too and Phase 1 targets a pure-attention
-   family first.
+5. **Recurrent rollback.** Done, as llama.cpp's server does it at the
+   pin (`tools/server/server-context.cpp:3938-3949`, `:4960-4993`):
+   `KvCache::checkpoint` before the verify batch, and on a partial
+   accept `Decoder::restore_kv` (in place, so Metal's no-copy wrap of
+   the state stays valid) and a replay of the committed tokens. Used by
+   `speculative_decode_observed` and the server's private loop. A draft
+   with recurrent layers stays refused (llama.cpp's draft contexts get no
+   snapshots). Per-token snapshots (`n_rs_seq`), which save the replay,
+   are a later speed step.
 6. **CLI.** `--spec-type draft-dflash` (also auto-detected from the draft's
    arch, as upstream), `--spec-draft-n-max/-n-min`, `-hfd` only if `-hf`
    already exists. Flags accepted but not honoured are errors. Update
@@ -116,7 +117,14 @@ Each step is its own PR, CPU first, token parity before any backend work.
    ignored GPU test `metal_speculation_rewinds_the_device_kv`. CUDA: its
    mirror re-validates against complete host rows, so nothing to do;
    the same test on a CUDA host is still to run.
-9. **Batcher.** Drafting inside `serving/batch/worker.rs`: one drafter pass per
+9. **Batcher.** Paged block-tail truncation is done
+   (`PagedKvCache::truncate`, `PagedLease::can_roll_back`): the private
+   loop speculates on the paged store unless a sliding window recycles
+   its pages. The batched verify forward is done too:
+   `Decoder::forward_multi_seq_lanes` gives a sequence several rows, at
+   consecutive positions, with layer taps, through the one
+   multi-sequence body. What is left: drafting inside
+   `serving/batch/worker.rs`: one drafter pass per
    lane, one batched verify through `forward_multi_seq_kv`, per-lane accept and
    truncate. Paged KV needs block-tail truncation in
    `frink-core/src/cache/paged.rs` and the radix tree must not publish

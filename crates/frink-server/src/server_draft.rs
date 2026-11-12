@@ -17,9 +17,11 @@
 //!
 //! Speculation runs on the private decode loop. Where the server could
 //! not honour the flag, it refuses at startup rather than accepting it
-//! and serving without it: continuous batching does not speculate yet,
-//! and neither the paged store nor a recurrent model can roll a
-//! rejected draft back.
+//! and serving without it: continuous batching does not speculate yet.
+//! The paged store rolls a rejected draft back by rewinding its tables,
+//! except under a sliding window, where that request decodes without
+//! drafting. A recurrent target is served: its caches are checkpointed
+//! before each verify batch and restored and replayed on a rejection.
 
 use std::sync::Arc;
 
@@ -101,16 +103,6 @@ impl ServerDraft {
         use frink_models::speculative::Drafter;
         let weights = match &self.kind {
             DraftKind::DFlash(draft) => {
-                // As `frink run -md` refuses it: the verify batch would
-                // be refused at every round and the request would decode
-                // without the speculation it was started for.
-                if target.config.has_recurrent_layers() {
-                    bail!(
-                        "a DFlash --model-draft cannot be used with a target model that has \
-                         recurrent layers yet: a rejected block rolls the target's caches back, \
-                         and a recurrent state cannot be rolled back to a middle position"
-                    );
-                }
                 frink_models::dflash::DFlashDrafter::new(Arc::clone(draft), target, 1, 0.0)?;
                 return Ok(());
             }
@@ -220,12 +212,6 @@ pub(crate) fn configure(
              not speculate yet: drop --cont-batching / --parallel"
         );
     }
-    if deployment.paged_kv {
-        bail!(
-            "--model-draft cannot run on the paged KV store, which cannot roll a rejected draft \
-             back. Unset FRINK_PAGED_KV_BLOCKS, or start without --model-draft"
-        );
-    }
     let Some(target) = target else {
         bail!(
             "--model-draft drafts for the generic GGUF decoder, and the loaded model runs on \
@@ -260,6 +246,15 @@ pub(crate) fn configure(
     let kind = if is_dflash {
         // A restored prefix brings K/V and no layer inputs, so the draft
         // would have nothing to read for the cached positions.
+        // The target's layer inputs are tapped on the contiguous
+        // store's forwards only.
+        if deployment.paged_kv {
+            bail!(
+                "a DFlash --model-draft reads the target's layer inputs, which the paged KV \
+                 store's forwards do not tap yet. Unset FRINK_PAGED_KV_BLOCKS, or use an \
+                 autoregressive draft"
+            );
+        }
         if deployment.prefix_cache {
             bail!(
                 "a DFlash --model-draft reads the target's features at every prompt position, \
@@ -345,7 +340,8 @@ mod tests {
         .unwrap()
         .is_none());
         assert!(refusal(None, None, Some(&t), true, false).contains("continuous batching"));
-        assert!(refusal(None, None, Some(&t), false, true).contains("paged KV"));
+        // The paged store speculates: what fails is the missing file.
+        assert!(refusal(None, None, Some(&t), false, true).contains("/no/such/draft.gguf"));
         assert!(refusal(None, None, None, false, false).contains("dedicated engine"));
         assert!(refusal(Some("0"), None, Some(&t), false, false).contains("--draft-max"));
         assert!(refusal(None, Some("1.5"), Some(&t), false, false).contains("--draft-p-min"));
@@ -373,7 +369,7 @@ mod tests {
     #[test]
     fn a_dflash_draft_is_picked_from_the_file_and_held_to_its_target() {
         let t = fixture_decoder("dflash_target");
-        let configured = |prefix_cache| {
+        let configured = |prefix_cache, paged_kv| {
             configure(
                 Some(fixture("dflash2_draft")),
                 Some("4".into()),
@@ -381,21 +377,21 @@ mod tests {
                 Some(&t),
                 Deployment {
                     prefix_cache,
+                    paged_kv,
                     ..Deployment::default()
                 },
             )
         };
-        let draft = configured(false).expect("loads").expect("configured");
+        let draft = configured(false, false)
+            .expect("loads")
+            .expect("configured");
         assert!(matches!(draft.kind, DraftKind::DFlash(_)));
         assert!(draft.dflash(&t).is_some());
         assert!(draft.speculator(&t.config, Default::default(), 0).is_none());
-        let refused = format!("{:#}", configured(true).err().expect("refused"));
+        let refused = format!("{:#}", configured(true, false).err().expect("refused"));
         assert!(refused.contains("FRINK_PREFIX_CACHE_ENTRIES"), "{refused}");
-
-        // A recurrent target is refused by name, before its width is.
-        let recurrent = fixture_decoder("mamba2");
-        assert!(recurrent.config.has_recurrent_layers());
-        assert!(format!("{:#}", draft.check(&recurrent).unwrap_err()).contains("recurrent"));
+        let refused = format!("{:#}", configured(false, true).err().expect("refused"));
+        assert!(refused.contains("FRINK_PAGED_KV_BLOCKS"), "{refused}");
 
         // A target of another width is refused, at startup and on a swap.
         let other = target();

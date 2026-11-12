@@ -1485,11 +1485,15 @@ Notes that are frink's own:
   request's own, and the output is the output without it
   ([`API.md`](API.md#usage-timings)). It is refused at startup, naming why, with
   continuous batching (`-cb` or `-np`),
-  the paged KV store, a recurrent or dedicated-engine model, a drafter
-  of another vocabulary size, and a drafter whose KV lands on the
-  device (`--device cpu`). A model swapped in through
-  `/admin/models/load` is held to the same drafter. `--draft-max`
-  (default 5) and `--draft-p-min` (default 0.75) are `frink run`'s.
+  a dedicated-engine model, a draft with recurrent
+  layers, a drafter of another vocabulary size, and a drafter whose KV
+  lands on the device (`--device cpu`). A TARGET with recurrent layers
+  is served: its state is checkpointed around each verify batch. A
+  DFlash draft is also refused beside the prefix cache and the paged KV
+  store. A model
+  swapped in through `/admin/models/load` is held to the same drafter.
+  `--draft-max` (default 3) and `--draft-p-min` (default 0) are
+  `frink run`'s, which are llama.cpp's.
 
 **Environment.** llama-server's own variables (`LLAMA_ARG_MODEL`,
 `LLAMA_ARG_CTX_SIZE`, `LLAMA_ARG_N_GPU_LAYERS`, `LLAMA_API_KEY`, ...)

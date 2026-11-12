@@ -1,6 +1,6 @@
 //! Rolling a sequence's caches back, device mirrors included.
 
-use frink_core::cache::KvCache;
+use frink_core::cache::{KvCache, KvCheckpoint};
 
 use super::Decoder;
 
@@ -22,6 +22,29 @@ impl Decoder {
         for cache in kv_caches.iter_mut() {
             cache.truncate(len);
         }
+        self.rewind_device_kv(kv_caches);
+    }
+
+    /// [`Self::truncate_kv`] for a target with recurrent layers: every
+    /// cache back to its [`KvCheckpoint`], the recurrent states with
+    /// them, and the device mirrors as `truncate_kv` rewinds them. The
+    /// recurrent states are restored in place, so a Metal kernel's
+    /// no-copy wrap of them stays valid.
+    pub fn restore_kv(&self, kv_caches: &mut [KvCache], checkpoints: &[KvCheckpoint]) {
+        assert_eq!(
+            kv_caches.len(),
+            checkpoints.len(),
+            "one checkpoint per layer's cache"
+        );
+        for (cache, cp) in kv_caches.iter_mut().zip(checkpoints) {
+            cache.restore(cp);
+        }
+        self.rewind_device_kv(kv_caches);
+    }
+
+    /// Shortens the device mirrors to the host caches' rows.
+    #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
+    fn rewind_device_kv(&self, kv_caches: &[KvCache]) {
         #[cfg(feature = "metal")]
         {
             let mut guard = Self::lock_metal_attn_kv(&self.metal_attn_kv);

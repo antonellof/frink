@@ -54,6 +54,7 @@ use frink_core::cache::{KvCache, PagedKvCache, PagedStoreExhausted, SharedPagedK
 use frink_core::par;
 
 use super::layer_taps::{LayerTapError, TappedBatch};
+use super::multi_seq::LaneRows;
 use super::{Decoder, MultiSeqKv};
 
 impl Decoder {
@@ -482,7 +483,42 @@ impl Decoder {
         positions: &[usize],
         kv: &mut MultiSeqKv<'_>,
     ) -> Vec<Vec<f32>> {
-        par::on_workers(move || self.forward_multi_seq_kv_on_worker(tokens, positions, kv))
+        par::on_workers(move || {
+            let lanes: Vec<usize> = (0..tokens.len()).collect();
+            let mut no_taps = super::layer_taps::LayerTaps::new(&[]);
+            self.forward_multi_seq_rows_on_worker(tokens, positions, &lanes, kv, &mut no_taps)
+        })
+    }
+
+    /// [`Self::forward_multi_seq_kv`] where a sequence may own several
+    /// rows: row `b` is `tokens[b]` at `positions[b]` of sequence
+    /// `lanes[b]`, and a sequence's rows are consecutive positions in
+    /// order. One batched forward verifies every lane's speculative
+    /// block, each row attending over its own sequence up to itself.
+    ///
+    /// Also returns, per row, the residual entering each layer `layers`
+    /// names, as [`Self::forward_batch_with_taps`] does for one
+    /// sequence; empty rows when `layers` is.
+    pub fn forward_multi_seq_lanes(
+        &self,
+        tokens: &[usize],
+        positions: &[usize],
+        lanes: &[usize],
+        kv: &mut MultiSeqKv<'_>,
+        layers: &[usize],
+    ) -> Result<LaneRows, LayerTapError> {
+        self.check_layer_taps(layers)?;
+        Ok(par::on_workers(move || {
+            let mut taps = super::layer_taps::LayerTaps::new(layers);
+            let logits =
+                self.forward_multi_seq_rows_on_worker(tokens, positions, lanes, kv, &mut taps);
+            let features = if layers.is_empty() {
+                vec![Vec::new(); tokens.len()]
+            } else {
+                taps.into_rows(tokens.len(), self.config.hidden_dim)
+            };
+            LaneRows { logits, features }
+        }))
     }
 }
 

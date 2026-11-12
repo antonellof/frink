@@ -308,8 +308,9 @@ The speculation fields are absent for a request that did not draft: a
 request the continuous-batching worker serves (the default on Metal,
 which has no speculation yet), a grammar-constrained or `json_object` request (verification draws
 through the same grammar machine, and a rejected block would leave it
-advanced over tokens that were never emitted), a paged or recurrent KV
-store (a rejected draft has to be rolled back and neither can), a
+advanced over tokens that were never emitted), a paged lease under a
+sliding window (a recycled page cannot be rolled back into) or a
+recurrent target on the paged store, a
 streamed `n > 1` request (its choices are interleaved a token at a
 time), and a request with no room to draft. An absent field reads as
 "this request did not speculate"; a zero would read as "the drafter was
@@ -1677,8 +1678,9 @@ nothing is called) · the embedding architectures listed above as
 refused by name · multi-GPU, tensor parallel, prefill/decode
 disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained, paged or continuously
-batched requests, so their speculation fields in `usage` are absent ·
+speculative decoding for grammar-constrained or continuously batched
+requests, and paged ones under a sliding window, so their speculation
+fields in `usage` are absent ·
 `/infill` on the dedicated engines, and the FIM pad, repo and file
 separator as end-of-generation tokens (see [Infill](#infill-post-infill))
 · `GET /slots` per-task fields, which a batcher seat does not hold.

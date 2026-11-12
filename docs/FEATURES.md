@@ -410,9 +410,13 @@ OpenAI-compatible HTTP API:
   names, and verifies them in one
   batched forward. A drafted token is kept only if it equals the
   sampler's own draw, so the output does not change. Grammar-constrained
-  requests, the continuous-batching worker (the default on Metal) and
-  the paged and recurrent stores do not speculate, and `usage` reports
-  the speculation fields only when it ran
+  requests, the continuous-batching worker (the default on Metal) and a
+  paged lease under a sliding window do not speculate, and `usage`
+  reports the speculation fields only when it ran. The paged store
+  rolls a rejected block back by rewinding its tables. A target with recurrent layers (Mamba, GDN,
+  Lightning) does: its state is checkpointed before each verify batch,
+  and a rejection restores it and replays the committed tokens, as
+  llama.cpp's server does
 - Slot save/restore (llama.cpp's `POST /slots/{id}?action=save|restore`):
   a prompt prefix's KV written to `--slot-save-path` and restored into
   the prefix cache after a restart, so a long system prompt is prefilled
