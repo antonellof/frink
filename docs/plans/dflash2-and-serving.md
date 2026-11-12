@@ -103,11 +103,13 @@ Each step is its own PR, CPU first, token parity before any backend work.
    arch, as upstream), `--spec-draft-n-max/-n-min`, `-hfd` only if `-hf`
    already exists. Flags accepted but not honoured are errors. Update
    `crates/frink-cli/tests/llama_cpp_flags.txt` and `docs/CLI.md`.
-7. **Server.** `-md` already reaches the server's private loop (#532)
-   with an autoregressive draft. What is left is the DFlash draft
-   there: the same `DFlashDrafter`, its target taps on the server's
-   verify forward, and verify-by-agreement (`verify_block`) unchanged so
-   grammars and penalties keep working.
+7. **Server.** Done. `--model-draft` picks a DFlash draft from the
+   file; the private loop taps the target on prefill, on every step and
+   on the verify batch, rolls the draft context back with the target,
+   and verifies by agreement (`verify_block`) unchanged. Refused beside
+   the prefix cache, whose hits restore K/V without layer inputs; a
+   grammar request does not speculate. Held by
+   `a_dflash_draft_changes_the_forward_count_and_not_the_answer`.
 8. **Device rollback.** Metal: done. A rejected block left the Metal
    arena longer than the host cache and the next verify rebuilt it from
    placeholder rows; `Decoder::truncate_kv` rewinds it, held by the

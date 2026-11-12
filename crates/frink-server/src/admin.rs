@@ -582,7 +582,7 @@ fn run_load_task(state: Arc<AppState>, task: Arc<Task>, id: String, path: String
     // A drafter that cannot serve the new model refuses the swap, as it
     // would have refused the model at startup.
     {
-        let target = crate::server_draft::generic_config(&loaded);
+        let target = crate::server_draft::generic_decoder(&loaded);
         if let Err(e) = crate::server_draft::check_swap(state.draft.as_ref(), target, &id) {
             tracing::warn!("admin load of '{id}' refused: {e}");
             state.set_last_load_error(Some((id, e.to_string())));
