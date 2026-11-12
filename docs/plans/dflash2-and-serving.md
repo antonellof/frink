@@ -103,17 +103,17 @@ Each step is its own PR, CPU first, token parity before any backend work.
    arch, as upstream), `--spec-draft-n-max/-n-min`, `-hfd` only if `-hf`
    already exists. Flags accepted but not honoured are errors. Update
    `crates/frink-cli/tests/llama_cpp_flags.txt` and `docs/CLI.md`.
-7. **Server.** `-md` / `FRINK_DRAFT_MODEL_PATH` on `frink-server`;
-   `ServerEngine` in `generate.rs` holds `Option<Box<dyn Drafter>>` instead of
-   the concrete prompt-lookup type; verification stays verify-by-agreement
-   (`verify_block`), so grammars and penalties keep working; drop the stale
-   `UNWIRED` attributes. Fill per-position acceptance in usage and report
-   acceptance length per verification step.
-8. **Device rollback.** Tests (ignored, hardware) that a target on Metal and on
-   CUDA truncates its device KV mirror correctly after a rejected block
-   (`KvCache::metal_attn`, `cuda_attn`, `decoder/metal_kv.rs`); fix or refuse
-   by name. Drafter on device follows once its KV keeps a host copy or the
-   mirror truncates.
+7. **Server.** `-md` already reaches the server's private loop (#532)
+   with an autoregressive draft. What is left is the DFlash draft
+   there: the same `DFlashDrafter`, its target taps on the server's
+   verify forward, and verify-by-agreement (`verify_block`) unchanged so
+   grammars and penalties keep working.
+8. **Device rollback.** Metal: done. A rejected block left the Metal
+   arena longer than the host cache and the next verify rebuilt it from
+   placeholder rows; `Decoder::truncate_kv` rewinds it, held by the
+   ignored GPU test `metal_speculation_rewinds_the_device_kv`. CUDA: its
+   mirror re-validates against complete host rows, so nothing to do;
+   the same test on a CUDA host is still to run.
 9. **Batcher.** Drafting inside `serving/batch/worker.rs`: one drafter pass per
    lane, one batched verify through `forward_multi_seq_kv`, per-lane accept and
    truncate. Paged KV needs block-tail truncation in

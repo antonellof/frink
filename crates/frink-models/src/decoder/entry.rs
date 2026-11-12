@@ -53,6 +53,7 @@
 use frink_core::cache::{KvCache, PagedKvCache, PagedStoreExhausted, SharedPagedKv};
 use frink_core::par;
 
+use super::layer_taps::{LayerTapError, TappedBatch};
 use super::{Decoder, MultiSeqKv};
 
 impl Decoder {
@@ -217,6 +218,42 @@ impl Decoder {
             let flat: Vec<f32> = hiddens.iter().flatten().copied().collect();
             (self.logits_from_flat_hidden(flat, batch_size), hiddens)
         })
+    }
+
+    /// [`Self::forward_batch_with_hidden`] that also returns the
+    /// residual stream entering each of `layers`, per position.
+    ///
+    /// The values are those of the one batch body every other batch
+    /// forward runs: a fused multi-layer device run is cut at each tap
+    /// so the stream between layers exists on the host to be read,
+    /// and nothing else about the forward changes.
+    pub fn forward_batch_with_taps(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [KvCache],
+        layers: &[usize],
+    ) -> Result<TappedBatch, LayerTapError> {
+        self.check_layer_taps(layers)?;
+        Ok(par::on_workers(move || {
+            let mut taps = super::layer_taps::LayerTaps::new(layers);
+            let hidden =
+                self.forward_hidden_batch_tapped(tokens, start_pos, kv_caches, false, &mut taps);
+            if hidden.is_empty() {
+                return TappedBatch {
+                    logits: Vec::new(),
+                    hidden,
+                    features: Vec::new(),
+                };
+            }
+            let batch_size = hidden.len();
+            let flat: Vec<f32> = hidden.iter().flatten().copied().collect();
+            TappedBatch {
+                logits: self.logits_from_flat_hidden(flat, batch_size),
+                hidden,
+                features: taps.into_rows(batch_size, self.config.hidden_dim),
+            }
+        }))
     }
 
     /// [`Self::forward_batch`] for the common case where only the final

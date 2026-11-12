@@ -15,6 +15,42 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **DFlash and DFlash2 drafts for speculative decoding** (#600).
+  `frink run -m target.gguf -md draft.gguf` now takes a draft GGUF of
+  llama.cpp's `dflash` architecture: a small stack that reads the
+  target's residual stream at the layers it names, injects it into its
+  own KV, and drafts a whole block from `[anchor, mask, ...]` in one
+  non-causal pass. DFlash2's two-tap grouped convolution and candidate
+  selector are both built. The draft's tokens and the scores they were
+  chosen on match libllama's over four drafting rounds on three
+  fixtures (`tests/dflash_graphs.rs`, goldens from
+  `scripts/dflash_reference.cpp`). The DSpark, LiLiCorr and
+  reduced-vocabulary variants refuse by name. The target exposes the
+  inputs of chosen layers through `Decoder::forward_batch_with_taps`.
+- `--spec-type` (`draft-simple`, `draft-dflash`, `none`; the other
+  upstream types refuse by name), `--spec-draft-n-max` and
+  `--spec-draft-n-min`, llama.cpp's spellings at the pin.
+
+### Changed
+
+- **`--spec-draft-n-max` defaults to 3 and `--spec-draft-p-min` to 0**,
+  llama.cpp's defaults at the pin; they were 5 and 0.75. The old
+  spellings `--draft-max` and `--draft-p-min` still work. Output does
+  not change, only how much is drafted.
+
+### Fixed
+
+- **Speculative decoding on Metal answered from zeroed keys after a
+  rejected draft.** A rollback shortened the host KV cache but not the
+  Metal arena, whose host rows Metal prefill leaves as placeholders, so
+  the next verify rebuilt the arena from those placeholders. Greedy
+  output with a draft model left the plain greedy path two tokens in.
+  `Decoder::truncate_kv` now rewinds the arena with the host rows, for
+  `frink run -md` and for the server's prompt-lookup speculation;
+  `metal_speculation_rewinds_the_device_kv` holds it on a GPU.
+
 ## [0.62.0] - 2026-11-12
 
 ### Added
