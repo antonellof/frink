@@ -217,7 +217,7 @@ pub(crate) fn configure(
     if deployment.continuous_batching {
         bail!(
             "--model-draft speculates on the private decode loop, and continuous batching does \
-             not speculate yet. On Metal it is on by default: add --no-cont-batching"
+             not speculate yet: drop --cont-batching / --parallel"
         );
     }
     if deployment.paged_kv {

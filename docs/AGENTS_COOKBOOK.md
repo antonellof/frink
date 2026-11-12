@@ -43,12 +43,12 @@ Run `npm run dev` from that directory.
 
 ## Continuous batching
 
-On by default on a Metal build with fused attention. Elsewhere, turn it
-on, or off on Metal, with the flag or its variable:
+Off by default. Turn it on for several concurrent clients with the
+flag, `-np N`, or the variable:
 
 ```bash
 ./target/release/frink-server -m model.gguf -cb      # or FRINK_CONTINUOUS_BATCHING=1
-./target/release/frink-server -m model.gguf --no-cont-batching
+./target/release/frink-server -m model.gguf -np 4
 ```
 
 - Not with `FRINK_KV_POOL_BLOCKS` or `FRINK_PREFIX_CACHE_ENTRIES`, unless

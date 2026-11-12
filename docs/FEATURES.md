@@ -380,12 +380,13 @@ OpenAI-compatible HTTP API:
   json_object` is still the best-effort character mask, and composes
 - Parallel serving (Metal). Multiple concurrent streaming clients
   share one batched decode worker (llama.cpp slots model). Continuous
-  batching is on by default when compatible, and streaming emits
-  tokens incrementally under it. The measured throughput at each
+  batching is opt-in (`-cb` or `-np N`), since its decode attends on
+  the host and one client decodes faster on the private loop; streaming
+  emits tokens incrementally under it. The measured throughput at each
   concurrency is in
   [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured).
   CLI: `-cb`, `-np` / `--parallel N`,
-  `--no-cont-batching` for the serialized private path. See
+  the serialized private path otherwise. See
   [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
 - Cache-aware admission. When a radix prefix cache is configured,
   a waiting job whose prompt is already computed may be admitted ahead
