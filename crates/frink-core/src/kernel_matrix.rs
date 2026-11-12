@@ -23,8 +23,9 @@
 //! - **Metal `get_rows`** is `frink_metal::embd_kinds`, the set the
 //!   decode path's embedding gather looks itself up in, and **CUDA
 //!   `get_rows`** is `frink_cuda::get_rows::kind_by_name`, the set the
-//!   resident stack's gather is built for. Vulkan has no gather; its
-//!   embedding row is [`WeightMatrix::dequant_row`] on the host.
+//!   resident stack's gather is built for. **Vulkan `get_rows`** is its
+//!   matvec shader table: every matvec is compiled again as a gather,
+//!   which the decode stack's first op runs.
 //!
 //! `docs/KERNELS.md` is [`KernelMatrix::markdown`], checked in, and a
 //! test fails when the two differ. Another test pins the host-fallback
@@ -296,7 +297,12 @@ fn get_rows_cell(backend: Backend, kind: QuantKind) -> Cell {
             Some(_) => Cell::Kernel,
             None => Cell::Host(HOST_GET_ROWS),
         },
-        Backend::Vulkan => Cell::Host(HOST_GET_ROWS),
+        // Every matvec shader is compiled a second time as its gather
+        // (`frink_vulkan::runtime::gather`), so the two columns agree.
+        Backend::Vulkan => match frink_vulkan::shaders::matvec_shader(kind.name()) {
+            Some(_) => Cell::Kernel,
+            None => Cell::Host(HOST_GET_ROWS),
+        },
     }
 }
 

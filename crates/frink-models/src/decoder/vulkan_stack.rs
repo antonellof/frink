@@ -51,8 +51,8 @@ const OPS_PER_LAYER: usize = 19;
 /// batch, which is a refusal by size and not a different answer.
 const MAX_SCORE_BYTES: usize = 256 << 20;
 
-/// Layers one submission holds.
-const MAX_RUN: usize = MAX_DISPATCHES / OPS_PER_LAYER;
+/// Layers one submission holds, with a dispatch left for the gather.
+const MAX_RUN: usize = (MAX_DISPATCHES - 1) / OPS_PER_LAYER;
 
 /// One layer as the stack runs it: borrowed weights and its RoPE.
 struct StackLayer<'a> {
@@ -71,6 +71,17 @@ struct StackLayer<'a> {
     rope: Option<(Vec<f32>, usize)>,
 }
 
+/// What the first layer of a run starts from.
+#[derive(Clone, Copy)]
+pub(crate) enum StackInput<'a> {
+    /// The hidden rows, a row per position.
+    Hidden(&'a [f32]),
+    /// One decode token whose embedding row IS the first hidden state:
+    /// the run's first op gathers it on the device
+    /// ([`Decoder::vulkan_embedding_gather`]).
+    Token(usize),
+}
+
 /// The run's new hidden rows, and each layer's rotated K rows and V
 /// rows (a row per position) for the host cache.
 type StackOut = (Vec<f32>, Vec<(Vec<f32>, Vec<f32>)>);
@@ -80,6 +91,26 @@ fn job(m: &WeightMatrix) -> Option<MatvecJob<'_>> {
 }
 
 impl Decoder {
+    /// The embedding table as the device gather reads it, or `None` when
+    /// the first hidden state is not the bare table row and the host
+    /// must embed: an embedding scale, an embedding norm, a learned
+    /// position table, the skip stream, the HRM streams, or a table that
+    /// is not plain bytes of a kind with a shader. The list
+    /// `cuda_embedding_gather` keeps, for the same reason: each is
+    /// something `embed_token` does to the row after `dequant_row`.
+    pub(crate) fn vulkan_embedding_gather(&self) -> Option<MatvecJob<'_>> {
+        if !frink_core::weight_matrix::vulkan_dense_enabled()
+            || self.config.embedding_scale.is_some()
+            || !matches!(self.embedding_norm, crate::norm::NormOp::None)
+            || self.position_embd.is_some()
+            || self.config.skip_stream
+            || self.hrm_z_l_init.is_some()
+        {
+            return None;
+        }
+        job(&self.embedding)
+    }
+
     /// Layer `li` as the stack takes it for `batch` positions from
     /// `pos`, or `None` for a layer or a cache state it does not serve.
     fn vulkan_stack_layer<'a>(
@@ -183,14 +214,25 @@ impl Decoder {
     pub(crate) fn try_vulkan_dense_stack(
         &self,
         l: usize,
-        hidden_rows: &[f32],
+        input: StackInput<'_>,
         pos: usize,
         batch: usize,
         kv_caches: &mut [KvCache],
     ) -> Option<(Vec<f32>, usize)> {
+        let fits = match input {
+            StackInput::Hidden(rows) => rows.len() == batch * self.config.hidden_dim,
+            // A gathered row is the first layer's input for one token.
+            StackInput::Token(t) => {
+                l == 0
+                    && batch == 1
+                    && self
+                        .vulkan_embedding_gather()
+                        .is_some_and(|table| t < table.rows)
+            }
+        };
         if !frink_core::weight_matrix::vulkan_dense_enabled()
             || batch == 0
-            || hidden_rows.len() != batch * self.config.hidden_dim
+            || !fits
             // `frink parity --dump-tensors` reads the host body's
             // intermediates.
             || crate::tensor_dump::active().is_some()
@@ -217,16 +259,15 @@ impl Decoder {
         let run = layers.len();
         let rt = frink_core::weight_matrix::gpu_backend::vulkan_runtime()?;
         let mut rt = rt.lock().ok()?;
-        let out =
-            match self.run_vulkan_stack(&mut rt, &layers, l, hidden_rows, pos, batch, kv_caches) {
-                Ok(out) => out,
-                Err(e) => {
-                    warn_once(&format!(
-                        "frink: Vulkan stack declined, host body runs it: {e}"
-                    ));
-                    return None;
-                }
-            };
+        let out = match self.run_vulkan_stack(&mut rt, &layers, l, input, pos, batch, kv_caches) {
+            Ok(out) => out,
+            Err(e) => {
+                warn_once(&format!(
+                    "frink: Vulkan stack declined, host body runs it: {e}"
+                ));
+                return None;
+            }
+        };
         drop(rt);
         let (new_hidden, rows) = out;
         let kv_dim = self.config.n_kv_heads * self.config.head_dim;
@@ -258,7 +299,7 @@ impl Decoder {
         rt: &mut Runtime,
         layers: &[StackLayer<'_>],
         l: usize,
-        hidden: &[f32],
+        input: StackInput<'_>,
         pos: usize,
         batch: usize,
         kv_caches: &mut [KvCache],
@@ -285,7 +326,9 @@ impl Decoder {
         let up = rt.scratch("up", 0, batch * ffn_dim)?;
         let act = rt.scratch("act", 0, batch * ffn_dim)?;
         let scores = rt.scratch("scores", 0, batch * n_heads * (seq + batch - 1))?;
-        rt.write_f32(h, 0, hidden)?;
+        if let StackInput::Hidden(rows) = input {
+            rt.write_f32(h, 0, rows)?;
+        }
 
         // Per layer: the norms' weights, its RoPE table, its K before
         // and after rotation and its V (read back for the host cache),
@@ -345,6 +388,12 @@ impl Decoder {
 
         let eps = c.rms_norm_eps;
         let mut ops = Batch::for_positions(batch);
+        if let StackInput::Token(t) = input {
+            let table = self
+                .vulkan_embedding_gather()
+                .expect("checked at admission");
+            ops.gather(table, t, h);
+        }
         for (s, b) in layers.iter().zip(&bound) {
             // --- attention ---
             ops.rms_norm(b.attn_norm, h, normed, dim, 1, eps);
@@ -388,7 +437,7 @@ impl Decoder {
             ops.matvec(s.down, (act, 0), (proj, 0));
             ops.add(h_mid, proj, h, dim);
         }
-        assert!(ops.len() <= OPS_PER_LAYER * layers.len());
+        assert!(ops.len() <= OPS_PER_LAYER * layers.len() + 1);
         rt.submit_batch(&ops)?;
 
         let new_hidden = rt.read_f32(h, 0, batch * dim)?;

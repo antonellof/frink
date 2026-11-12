@@ -35,6 +35,7 @@
 //! every weight the model's matvecs have touched.
 
 mod ffn;
+mod gather;
 mod gemm;
 mod memory;
 pub mod ops;
@@ -101,7 +102,7 @@ pub struct Runtime {
     cmd_pool: vk::CommandPool,
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
-    kernels: HashMap<&'static str, Kernel>,
+    kernels: HashMap<usize, Kernel>,
     x: Option<Buf>,
     y: Option<Buf>,
     /// The codebook kinds' grid and sign tables
@@ -542,18 +543,17 @@ impl Runtime {
 
     /// The pipeline for `shader`, built on first use.
     fn kernel(&mut self, shader: &'static MatvecShader) -> Result<vk::Pipeline, VulkanError> {
-        self.pipeline(shader.kind, shader.spv)
+        self.pipeline(shader.spv)
     }
 
     /// The pipeline for the module `spv`, cached under `name`, built on
     /// first use. Every module keeps the matvec interface, so they all
     /// share one pipeline layout.
-    fn pipeline(
-        &mut self,
-        name: &'static str,
-        spv: &'static [u8],
-    ) -> Result<vk::Pipeline, VulkanError> {
-        if let Some(k) = self.kernels.get(name) {
+    fn pipeline(&mut self, spv: &'static [u8]) -> Result<vk::Pipeline, VulkanError> {
+        // Keyed by the module, which is unique where a name is not: a
+        // kind's matvec and its gather share the kind's name.
+        let key = spv.as_ptr() as usize;
+        if let Some(k) = self.kernels.get(&key) {
             return Ok(k.pipeline);
         }
         let device = &self.ctx.device;
@@ -586,7 +586,7 @@ impl Runtime {
                 });
             }
         };
-        self.kernels.insert(name, Kernel { module, pipeline });
+        self.kernels.insert(key, Kernel { module, pipeline });
         Ok(pipeline)
     }
 

@@ -56,7 +56,7 @@ impl Runtime {
         let (p_g, w_g) = (self.kernel(gate.shader)?, self.resident(gate.weights)?);
         let (p_u, w_u) = (self.kernel(up.shader)?, self.resident(up.weights)?);
         let (p_d, w_d) = (self.kernel(down.shader)?, self.resident(down.weights)?);
-        let p_s = self.pipeline(SWIGLU.name, SWIGLU.spv)?;
+        let p_s = self.pipeline(SWIGLU.spv)?;
         let x_buf = self.upload_x(x)?;
         let y = Self::grow(&self.ctx.device, &self.mem_props, &mut self.y, end as usize)?;
 

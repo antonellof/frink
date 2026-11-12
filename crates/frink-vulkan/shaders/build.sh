@@ -11,3 +11,8 @@ mkdir -p "$out"
 for src in *.comp; do
   glslangValidator -V --target-env vulkan1.0 -Os -o "$out/${src%.comp}.spv" "$src" >/dev/null
 done
+# Every matvec again as its embedding gather (matvec_common.glsl).
+for src in *_matvec.comp; do
+  glslangValidator -V --target-env vulkan1.0 -Os -DGATHER \
+    -o "$out/${src%_matvec.comp}_gather.spv" "$src" >/dev/null
+done

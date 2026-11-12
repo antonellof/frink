@@ -19,7 +19,7 @@ const PINNED: &[(Backend, Op, usize)] = &[
     (Backend::Metal, Op::GetRows, 0),
     (Backend::Vulkan, Op::Matvec, 0),
     (Backend::Vulkan, Op::Gemm, 0),
-    (Backend::Vulkan, Op::GetRows, 22),
+    (Backend::Vulkan, Op::GetRows, 0),
 ];
 
 /// `n/a` is exactly the activation formats' accelerator cells: it can
@@ -268,7 +268,7 @@ fn the_cpu_int_dot_table_is_the_dispatch() {
 }
 
 /// The Metal and CUDA gather columns are their decode paths' tables,
-/// and Vulkan claims none.
+/// and Vulkan's is its matvec shaders, each compiled again as a gather.
 #[test]
 fn get_rows_is_the_gather_tables_and_host_elsewhere() {
     let m = KernelMatrix::derive();
@@ -297,6 +297,10 @@ fn get_rows_is_the_gather_tables_and_host_elsewhere() {
             !cuda_gathers,
             "{k:?}"
         );
-        assert!(m.cell(Backend::Vulkan, Op::GetRows, k).is_host());
+        assert_eq!(
+            m.cell(Backend::Vulkan, Op::GetRows, k) == Cell::Kernel,
+            frink_vulkan::shaders::matvec_shader(k.name()).is_some(),
+            "{k:?}"
+        );
     }
 }
