@@ -1234,7 +1234,17 @@ impl ToolCallParser {
             normal.push_str(&text[cursor..start]);
             let body_start = start + open.len();
             let Some(end) = text[body_start..].find(close).map(|i| i + body_start) else {
-                normal.push_str(&text[start..]);
+                // No closer. When tools are active the server itself
+                // stops generation on `</tool_call>` and the stop string
+                // is cut from the text, so the LAST block of a turn
+                // normally arrives unclosed. A body that is one
+                // complete call is that call; anything else (a block
+                // truncated mid-JSON) stays text, as before.
+                let body = text[body_start..].trim();
+                match self.call_from_json(body, calls.len()) {
+                    Some(call) => calls.push(call),
+                    None => normal.push_str(&text[start..]),
+                }
                 cursor = text.len();
                 break;
             };
@@ -2762,6 +2772,45 @@ mod tests {
         let events = stream(&mut llama, prose, 2);
         assert!(calls_of(&events).is_empty());
         assert_eq!(text_of(&events), prose);
+    }
+
+    /// With tools active the server stops on `</tool_call>` and cuts the
+    /// stop string, so a Hermes/Qwen turn's last block arrives with no
+    /// closer. It is still a call -- streamed or not.
+    #[test]
+    fn a_hermes_block_cut_at_its_stop_string_is_a_call() {
+        let text =
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Rome\"}}\n";
+        let qwen = parser(ToolCallFormat::Qwen25);
+        let (rest, calls) = qwen.parse_complete(text);
+        assert!(rest.trim().is_empty(), "{rest:?}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, r#"{"city":"Rome"}"#);
+
+        for width in [1, 5, 64] {
+            let mut qwen = parser(ToolCallFormat::Qwen25);
+            let events = stream(&mut qwen, text, width);
+            assert_eq!(
+                calls_of(&events),
+                vec![(
+                    0,
+                    "get_weather".to_string(),
+                    r#"{"city":"Rome"}"#.to_string()
+                )],
+                "width {width}"
+            );
+        }
+    }
+
+    /// An unclosed block that is not a whole call -- generation cut
+    /// mid-JSON -- stays text rather than becoming a guessed call.
+    #[test]
+    fn a_truncated_hermes_block_stays_text() {
+        let text = "<tool_call>\n{\"name\": \"get_weather\", \"argum";
+        let qwen = parser(ToolCallFormat::Qwen25);
+        let (rest, calls) = qwen.parse_complete(text);
+        assert!(calls.is_empty());
+        assert_eq!(rest, text);
     }
 
     #[test]
