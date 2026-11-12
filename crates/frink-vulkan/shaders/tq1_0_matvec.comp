@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// TQ1_0, 54 bytes per 256 values: qs[48], qh[4], f16 d.
+#define QS_LEN 48u
+#define QH_LEN 4u
+#include "trit_common.glsl"

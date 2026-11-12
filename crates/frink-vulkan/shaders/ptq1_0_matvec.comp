@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// PrismML's PTQ1_0, 28 bytes per 128 values: qs[24], qh[2], f16 d.
+#define QS_LEN 24u
+#define QH_LEN 2u
+#include "trit_common.glsl"

@@ -53,6 +53,8 @@ shader_matvec! {
     iq4_nl_matvec => "IQ4_NL",
     iq4_xs_matvec => "IQ4_XS",
     mxfp4_matvec => "MXFP4",
+    tq1_0_matvec => "TQ1_0",
+    ptq1_0_matvec => "PTQ1_0",
     f32_matvec => "F32",
 }
 
@@ -114,6 +116,11 @@ pub(crate) mod tests {
                 // E8M0: 2^-9 .. 2^-2, and e = 0 (the subnormal case) on
                 // every eighth block.
                 "MXFP4" => blk[0] = if b % 8 == 7 { 0 } else { 118 + (b % 8) as u8 },
+                // Every byte value unpacks to trits; the scale is last.
+                "TQ1_0" | "PTQ1_0" => {
+                    let at = blk.len() - 2;
+                    blk[at..].copy_from_slice(&d);
+                }
                 other => panic!("no layout for {other}"),
             }
             out.extend(blk);
@@ -136,6 +143,12 @@ pub(crate) mod tests {
             "IQ4_NL" => frink_quant::dot_iq4_nl_f32_scalar,
             "IQ4_XS" => frink_quant::dot_iq4_xs_f32_scalar,
             "MXFP4" => frink_quant::dot_mxfp4_gguf_f32_scalar,
+            "TQ1_0" => {
+                |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::TQ1_0, x)
+            }
+            "PTQ1_0" => {
+                |w, x| frink_quant::ternary::dot_trits_f32(w, frink_quant::ternary::PTQ1_0, x)
+            }
             "F32" => |w, x| {
                 w.as_chunks::<4>()
                     .0
@@ -160,7 +173,7 @@ pub(crate) mod tests {
 
     type Launch =
         fn(&mut Runtime, &[u8], &[f32], usize, usize, usize) -> Result<Vec<f32>, VulkanError>;
-    const LAUNCHES: [(&str, Launch); 14] = [
+    const LAUNCHES: [(&str, Launch); 16] = [
         ("Q8_0", q8_0_matvec),
         ("Q4_0", q4_0_matvec),
         ("Q4_K", q4_k_matvec),
@@ -174,6 +187,8 @@ pub(crate) mod tests {
         ("IQ4_NL", iq4_nl_matvec),
         ("IQ4_XS", iq4_xs_matvec),
         ("MXFP4", mxfp4_matvec),
+        ("TQ1_0", tq1_0_matvec),
+        ("PTQ1_0", ptq1_0_matvec),
         ("F32", f32_matvec),
     ];
 
