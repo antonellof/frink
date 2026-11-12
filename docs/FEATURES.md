@@ -208,8 +208,10 @@ draft (llama.cpp's `dflash` architecture, picked from the file as
 stream at the layers it names and proposes a whole block in one pass;
 its drafted tokens and lattice scores match libllama on the fixtures
 (`tests/dflash_graphs.rs`), and the target's greedy output with it is
-token for token the output without it, on the CPU and on Metal. See
-[`CLI.md`](CLI.md).
+token for token the output without it, on the CPU and on Metal. The
+server takes the same draft with `--model-draft` and feeds it the
+target's layer inputs from the prompt on. See [`CLI.md`](CLI.md) and
+[`CONFIG.md`](CONFIG.md).
 
 `frink perplexity` is the quality axis: corpus evaluation using
 llama.cpp's method, agreeing with `llama-perplexity` to within a fifth

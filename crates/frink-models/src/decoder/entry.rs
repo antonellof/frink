@@ -256,6 +256,32 @@ impl Decoder {
         }))
     }
 
+    /// [`Self::forward_batch_with_taps`] for a prompt: the layer inputs
+    /// of every position, and the logits of the LAST one only, the
+    /// output head running once as [`Self::forward_batch_last`] runs
+    /// it. `host_kv` is that function's `_host_kv` choice: whether the
+    /// caller will read the caches back.
+    pub fn forward_batch_last_with_taps(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [KvCache],
+        layers: &[usize],
+        host_kv: bool,
+    ) -> Result<(Vec<f32>, Vec<Vec<f32>>), LayerTapError> {
+        self.check_layer_taps(layers)?;
+        Ok(par::on_workers(move || {
+            let mut taps = super::layer_taps::LayerTaps::new(layers);
+            let hidden =
+                self.forward_hidden_batch_tapped(tokens, start_pos, kv_caches, host_kv, &mut taps);
+            let Some(last) = hidden.last() else {
+                return (Vec::new(), Vec::new());
+            };
+            let logits = self.logits_from_normed(last);
+            (logits, taps.into_rows(hidden.len(), self.config.hidden_dim))
+        }))
+    }
+
     /// [`Self::forward_batch`] for the common case where only the final
     /// position's logits are wanted: prefill a prompt, then sample the
     /// next token. Runs `output_head` on **one** row instead of all

@@ -453,12 +453,15 @@ impl DFlashDraft {
                 q.extend_from_slice(&qr);
             }
 
+            // The context before the anchor. Rows past it, which a
+            // caller whose target has already committed the anchor
+            // holds, are not read.
             let ctx_kv = &ctx[il];
-            let ctx_len = ctx_kv.k.len() / kvw;
-            debug_assert_eq!(
-                ctx_len, pos0,
+            assert!(
+                ctx_kv.k.len() >= pos0 * kvw,
                 "the draft context must hold every position before the block"
             );
+            let ctx_len = pos0;
             let window = c.sliding_window.filter(|_| c.swa_layers[il]);
             let mut attn = Vec::with_capacity(n_block * qw);
             for b in 0..n_block {
@@ -471,8 +474,8 @@ impl DFlashDraft {
                 let visible = if c.causal { b + 1 } else { n_block };
                 let mut keys = Vec::with_capacity((ctx_len - first + visible) * kvw);
                 let mut vals = Vec::with_capacity(keys.capacity());
-                keys.extend_from_slice(&ctx_kv.k[first * kvw..]);
-                vals.extend_from_slice(&ctx_kv.v[first * kvw..]);
+                keys.extend_from_slice(&ctx_kv.k[first * kvw..ctx_len * kvw]);
+                vals.extend_from_slice(&ctx_kv.v[first * kvw..ctx_len * kvw]);
                 // A block key behind the window is masked too.
                 let block_first = window.map_or(0, |w| (b + 1).saturating_sub(w).min(visible));
                 keys.extend_from_slice(&bk[block_first * kvw..visible * kvw]);
