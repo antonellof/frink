@@ -26,8 +26,8 @@ void main() {
         float d = e8m0(byte_at(blk));
         for (uint i = 0u; i < 16u; ++i) {
             uint q = byte_at(blk + 1u + i);
-            acc += (d * KVALUES_MXFP4[q & 0x0fu]) * x[xb + i];
-            acc += (d * KVALUES_MXFP4[q >> 4]) * x[xb + 16u + i];
+            acc += (d * KVALUES_MXFP4[q & 0x0fu]) * X(xb + i);
+            acc += (d * KVALUES_MXFP4[q >> 4]) * X(xb + 16u + i);
         }
     }
     finish(row, acc);

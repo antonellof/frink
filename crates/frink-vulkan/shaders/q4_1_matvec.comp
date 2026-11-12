@@ -16,8 +16,8 @@ void main() {
         float d = f16_at(blk), m = f16_at(blk + 2u);
         for (uint i = 0u; i < 16u; ++i) {
             uint q = byte_at(blk + 4u + i);
-            acc += (float(q & 0x0fu) * d + m) * x[xb + i];
-            acc += (float(q >> 4) * d + m) * x[xb + 16u + i];
+            acc += (float(q & 0x0fu) * d + m) * X(xb + i);
+            acc += (float(q >> 4) * d + m) * X(xb + 16u + i);
         }
     }
     finish(row, acc);

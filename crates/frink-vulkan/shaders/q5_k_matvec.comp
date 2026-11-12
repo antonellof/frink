@@ -25,7 +25,7 @@ void main() {
             uint lo = w[(qs + l) >> 2] >> shift;
             uint hi = w[(qh + l) >> 2] >> j;
             for (uint k = 0u; k < 4u; ++k) {
-                float xv = x[xb + l + k];
+                float xv = X(xb + l + k);
                 uint q = ((lo >> (8u * k)) & 0x0fu) | (((hi >> (8u * k)) & 1u) << 4);
                 s += float(q) * xv;
                 xs += xv;

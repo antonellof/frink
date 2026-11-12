@@ -288,8 +288,7 @@ published separately if you want one rather than the stack:
 [api](https://crates.io/crates/frink-api),
 [metal](https://crates.io/crates/frink-metal),
 [cuda](https://crates.io/crates/frink-cuda),
-[vulkan](https://crates.io/crates/frink-vulkan) (early and opt-in:
-decode matvecs only). All share one version.
+[vulkan](https://crates.io/crates/frink-vulkan) (early and opt-in). All share one version.
 
 ## AI full disclosure
 

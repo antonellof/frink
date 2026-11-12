@@ -1,11 +1,13 @@
 # frink-vulkan
 
-Decode matvecs on any Vulkan device (#409): every K-quant and legacy
+Matvecs and a prefill GEMM on any Vulkan device (#409): every K-quant and legacy
 kind, IQ4_NL, IQ4_XS and MXFP4, written in GLSL and committed as
 SPIR-V. The codebook kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0 have no
 shader yet; `docs/KERNELS.md` is the list. Weights are uploaded once
-and stay resident. There is no GEMM (prefill runs on the host) and no
-attention yet. `frink-core` reaches it behind its `vulkan` feature, and
+and stay resident. A prefill batch is the same shader dispatched over the
+batch (`Runtime::gemm`), and a decode token of a plain llama-family
+model runs 26 layers per submission, attention included
+(`runtime::ops`). `frink-core` reaches it behind its `vulkan` feature, and
 only with `--device vulkan` (or `FRINK_VULKAN=1`). The device is
 llama.cpp's `Vulkan0`: the first discrete or integrated GPU, or the
 first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).

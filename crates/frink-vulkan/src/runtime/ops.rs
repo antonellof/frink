@@ -486,6 +486,7 @@ impl Runtime {
                 set,
                 push,
                 grid,
+                depth: 1,
             });
         }
         let stages: Vec<&[Dispatch]> = dispatches.chunks(1).collect();

@@ -24,7 +24,7 @@ void main() {
         uint shift = 2u * j;
         for (uint l = 0u; l < 16u; ++l) {
             float raw = float((byte_at(qs + l) >> shift) & 3u);
-            acc += (dl * raw - ml) * x[xb + l];
+            acc += (dl * raw - ml) * X(xb + l);
         }
     }
     finish(row, acc);

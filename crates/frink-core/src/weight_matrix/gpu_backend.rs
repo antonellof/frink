@@ -34,7 +34,7 @@
 //!    enum variant, cargo feature / registry name, and seam type, once.
 //!
 //! `Vulkan` is what that recipe looks like when it is followed: a
-//! decode-matvec backend (a few kinds, no GEMM, no batch path) added
+//! backend (a matvec and a GEMM for the kinds with a shader) added
 //! without touching `apply_gpu` or `active_backend`.
 //!
 //! # The one list, and its three consumers
@@ -315,10 +315,12 @@ pub struct Cuda;
 ///   the shader table; every other kind reports no kernel, which is the
 ///   honest answer and is what makes the registry say "NO KERNEL …
 ///   falls back to CPU apply_cpu" instead of quietly running slow.
-/// - **No GEMM at all.** [`Vulkan::gemm_supported`] is false for every
-///   kind. There is no `mul_mm` shader, and `apply_batch_with_acts` has
-///   no Vulkan arm, so a batched prefill runs on the host —
-///   [`Vulkan::GEMM_FALLBACK`] says exactly that.
+/// - **A GEMM for exactly the matvec kinds.** The GEMM is the matvec
+///   shader over a grid whose depth is the batch
+///   (`frink_vulkan::runtime::Runtime::gemm`), so
+///   [`Vulkan::gemm_supported`] is [`Vulkan::matvec_kernel`] and the two
+///   cannot part. `apply_batch_with_acts` sends a batch there through
+///   [`vulkan_gemm`].
 /// - **Opt-in.** The host runs everything between matvecs, so a token
 ///   pays a queue round trip per submission (Q/K/V and gate/up share
 ///   one, [`vulkan_matvec_many`]); [`Vulkan::dense_enabled`] says why
@@ -493,11 +495,8 @@ impl BackendCaps for Cuda {
 impl BackendCaps for Vulkan {
     const ID: Backend = Backend::Vulkan;
     const NAME: &'static str = "Vulkan";
-    /// There is no Vulkan batch entry point of any kind:
-    /// `apply_gpu_batch` is `#[cfg(feature = "metal")]` and
-    /// `apply_batch_with_acts` has a CUDA arm and a Metal arm. So a
-    /// prefill against a Vulkan-resident kind runs on the host, and
-    /// this names the host path rather than inventing a GPU one.
+    /// A kind with no shader, or a launch that failed, is a host batch:
+    /// there is no per-position Vulkan arm to degrade to.
     const GEMM_FALLBACK: &'static str = crate::kernel_registry::host_fallback::BATCH;
 
     /// The kinds with a shader in `frink_vulkan::shaders`: the K-quants,
@@ -514,19 +513,10 @@ impl BackendCaps for Vulkan {
         frink_vulkan::shaders::matvec_shader(kind.name()).map(|s| s.kind)
     }
 
-    /// No kind, for any kind. `frink-vulkan` has matvec shaders and
-    /// deliberately no `mul_mm` yet; the verdict puts a real GEMM in
-    /// `vulkan-prefill-gemm`, which is where the backend decision
-    /// actually lives.
-    ///
-    /// This is the one place the Metal invariant
-    /// (`every_metal_matvec_kind_also_has_a_metal_gemm`: matvec set ==
-    /// GEMM set) is knowingly not held, and it is held open rather than
-    /// papered over: a kind decodes on Vulkan and prefills on the CPU,
-    /// the registry records the split by name, and `frink bench` would
-    /// show it.
-    fn gemm_supported(_kind: QuantKind) -> bool {
-        false
+    /// Exactly the matvec kinds: the GEMM is each kind's matvec shader
+    /// dispatched over the batch, so a kind has both or neither.
+    fn gemm_supported(kind: QuantKind) -> bool {
+        Self::matvec_kernel(kind).is_some()
     }
 }
 
@@ -877,6 +867,32 @@ pub(crate) fn vulkan_matvec_many(
     }
 }
 
+/// The Vulkan arm of `WeightMatrix::apply_batch_with_acts`: `x_batch`
+/// (`[batch][cols]`) through one quantized matrix as one dispatch,
+/// answering `[batch][rows]`. `None` when Vulkan is off or absent, the
+/// matrix is not plain quantized bytes of a kind with a shader, or the
+/// launch fails, which is logged; the caller then runs the host batch.
+#[cfg(feature = "vulkan")]
+pub(crate) fn vulkan_gemm(
+    m: &crate::weight_matrix::WeightMatrix,
+    x_batch: &[f32],
+    batch: usize,
+) -> Option<Vec<f32>> {
+    if !Vulkan::dense_enabled() {
+        return None;
+    }
+    let job = m.vulkan_matvec_job()?;
+    let rt = vulkan_runtime()?;
+    let mut guard = rt.lock().ok()?;
+    match guard.gemm(job, x_batch, batch) {
+        Ok(out) => Some(out),
+        Err(e) => {
+            eprintln!("frink: Vulkan GEMM failed, {}: {e}", Vulkan::GEMM_FALLBACK);
+            None
+        }
+    }
+}
+
 /// The Vulkan arm of `WeightMatrix::apply_gpu_dense_ffn_swiglu`: gate,
 /// up, SwiGLU and down in one submission (`Runtime::dense_ffn_swiglu`).
 /// `None`, for the caller's split path, under the same conditions as
@@ -1151,7 +1167,7 @@ mod tests {
     /// property of the kernel set, so it is checked on every build,
     /// including the CPU-only one that runs `cargo test --workspace`.
     #[test]
-    fn vulkan_claims_exactly_its_shader_kinds_and_no_gemm() {
+    fn vulkan_claims_exactly_its_shader_kinds_for_matvec_and_gemm() {
         let claimed: Vec<QuantKind> = QuantKind::ALL
             .iter()
             .copied()
@@ -1178,10 +1194,11 @@ mod tests {
              table claims {claimed:?}"
         );
         for &k in QuantKind::ALL {
-            assert!(
-                !Vulkan::gemm_supported(k),
-                "{k:?}: there is no Vulkan mul_mm shader, so a claimed GEMM would send \
-                 prefill to a kernel that does not exist"
+            assert_eq!(
+                Vulkan::gemm_supported(k),
+                claimed.contains(&k),
+                "{k:?}: the Vulkan GEMM is the matvec shader over the batch, so a kind \
+                 has both or neither"
             );
         }
     }
@@ -1359,6 +1376,74 @@ mod tests {
                     (g - w).abs() <= 1e-3 * w.abs().max(1.0),
                     "{kind:?} row {r}: vulkan {g} vs cpu {w}"
                 );
+            }
+        }
+    }
+
+    /// `apply_batch` under `FRINK_VULKAN=1`: a batch of five different
+    /// activations through a K-quant matrix is ONE submission, and each
+    /// position's rows are the CPU matvec of that position, so a batch
+    /// offset that reads another position's activations or writes over
+    /// another position's rows cannot pass.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn the_vulkan_gemm_is_one_submission_and_matches_the_cpu_per_position() {
+        use crate::weight_matrix::{WeightBytes, WeightMatrix};
+        if !Vulkan::dense_enabled() {
+            frink_vulkan::skipped(
+                "Vulkan not selected (FRINK_VULKAN=1) or no device; the GEMM seam was NOT checked",
+            );
+            return;
+        }
+        let (rows, cols, batch) = (11usize, 512usize, 5usize);
+        let f: Vec<f32> = (0..rows * cols)
+            .map(|i| (((i * 37) % 101) as f32 - 50.0) / 31.0)
+            .collect();
+        let x: Vec<f32> = (0..batch * cols)
+            .map(|i| (((i * 13) % 29) as f32 - 14.0) / 9.0)
+            .collect();
+        type Enc = fn(&[f32], &mut Vec<u8>);
+        let kinds: [(QuantKind, Enc); 3] = [
+            (QuantKind::Q4K, |r, o| {
+                frink_quant::encode_row_q4_k(r, None, o).expect("encodes")
+            }),
+            (QuantKind::Q5K, |r, o| {
+                frink_quant::encode_row_q5_k(r, None, o).expect("encodes")
+            }),
+            (QuantKind::Q6K, |r, o| {
+                frink_quant::encode_row_q6_k(r, None, o).expect("encodes")
+            }),
+        ];
+        let submissions = || vulkan_runtime().unwrap().lock().unwrap().submissions();
+        for (kind, enc) in kinds {
+            let mut data = Vec::new();
+            for r in 0..rows {
+                enc(&f[r * cols..(r + 1) * cols], &mut data);
+            }
+            let m = WeightMatrix::Quantized {
+                data: WeightBytes::Owned(data),
+                rows,
+                cols,
+                kind,
+            };
+            let before = submissions();
+            let got = m.apply_batch(&x, batch);
+            assert_eq!(
+                submissions() - before,
+                1,
+                "{kind:?}: one submission a batch"
+            );
+            assert_eq!(got.len(), batch * rows);
+            for b in 0..batch {
+                // `apply_cpu`: `apply` is the Vulkan path here too.
+                let want = m.apply_cpu(&x[b * cols..(b + 1) * cols]);
+                for (r, w) in want.iter().enumerate() {
+                    let g = got[b * rows + r];
+                    assert!(
+                        (g - w).abs() <= 1e-3 * w.abs().max(1.0),
+                        "{kind:?} position {b} row {r}: vulkan {g} vs cpu {w}"
+                    );
+                }
             }
         }
     }

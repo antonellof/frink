@@ -33,7 +33,7 @@ void main() {
         for (uint l = 0u; l < 16u; ++l) {
             int raw = int((byte_at(qs + l) >> shift) & 3u);
             int bias = ((byte_at(hm + l) >> hbit) & 1u) != 0u ? 0 : 4;
-            s += float(raw - bias) * x[xb + l];
+            s += float(raw - bias) * X(xb + l);
         }
         acc += dl * s;
     }

@@ -20,7 +20,7 @@ void main() {
         uint xb = b * 256u + j * 32u;
         float s = 0.0, xs = 0.0;
         for (uint l = 0u; l < 32u; ++l) {
-            float xv = x[xb + l];
+            float xv = X(xb + l);
             s += float((byte_at(qs + l) >> shift) & 0x0fu) * xv;
             xs += xv;
         }

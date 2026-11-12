@@ -13,8 +13,8 @@
 //! submission (`frink_models::decoder::vulkan_stack`, over
 //! [`runtime::ops`]): norms, RoPE, an f16 KV and attention included.
 //! What it is not, yet, is a backend in the sense Metal and CUDA are:
-//! there is no GEMM (a prefill stays on the host), and a layer the
-//! stack declines runs on the host with its matvecs offloaded, each
+//! a prefill is a batch per matrix ([`runtime::Runtime::gemm`]) with
+//! the host between them, and a layer the stack declines runs on the host with its matvecs offloaded, each
 //! submission (Q/K/V together, the output projection, and a dense
 //! SwiGLU FFN as one, [`runtime::Runtime::dense_ffn_swiglu`]) waiting
 //! for its own result, about three queue round

@@ -20,8 +20,8 @@ void main() {
             uint q = byte_at(blk + 8u + i);
             uint lo = (q & 0x0fu) | (((qh >> i) << 4) & 0x10u);
             uint hi = (q >> 4) | ((qh >> (i + 12u)) & 0x10u);
-            acc += (float(lo) * d + m) * x[xb + i];
-            acc += (float(hi) * d + m) * x[xb + 16u + i];
+            acc += (float(lo) * d + m) * X(xb + i);
+            acc += (float(hi) * d + m) * X(xb + 16u + i);
         }
     }
     finish(row, acc);
