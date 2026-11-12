@@ -413,9 +413,9 @@ OpenAI-compatible HTTP API:
   requests and a paged lease under a sliding window do not speculate,
   and `usage` reports the speculation fields only when it ran. The
   paged store rolls a rejected block back by rewinding its tables. The
-  continuous batch (the default on Metal) speculates too: every row's
+  continuous batch (`--cont-batching`) speculates too: every row's
   block is verified in one forward, and a row's answer is the one it
-  gets decoded alone A target with recurrent layers (Mamba, GDN,
+  gets decoded alone. A target with recurrent layers (Mamba, GDN,
   Lightning) does: its state is checkpointed before each verify batch,
   and a rejection restores it and replays the committed tokens, as
   llama.cpp's server does

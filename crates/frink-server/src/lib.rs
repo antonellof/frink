@@ -4708,12 +4708,7 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
     let detection = health::Detection::spawn();
     // Loaded and checked against the startup model before the port is
     // bound: a drafter that cannot serve is a refusal, not a warning.
-    let draft = server_draft::from_env(
-        &loaded,
-        enable_cb,
-        paged_kv.is_some(),
-        prefix_cache.is_some(),
-    )?;
+    let draft = server_draft::from_env(&loaded, paged_kv.is_some(), prefix_cache.is_some())?;
 
     let state = Arc::new(build_app_state(
         StartupModels {

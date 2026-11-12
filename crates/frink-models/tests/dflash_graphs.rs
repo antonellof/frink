@@ -60,7 +60,7 @@ fn draft(name: &str) -> Result<DFlashDraft, DFlashError> {
 }
 
 /// `dflash_reference.cpp`'s loop, step for step.
-fn replay(target: &Decoder, drafter: &mut DFlashDrafter<'_>, rounds: usize) -> Vec<Round> {
+fn replay(target: &Decoder, drafter: &mut DFlashDrafter<&Decoder>, rounds: usize) -> Vec<Round> {
     let layers = drafter.target_layers().to_vec();
     let mut caches = graph_caches(target);
     let prompt = GRAPH_PROMPT.to_vec();

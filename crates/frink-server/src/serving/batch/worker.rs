@@ -422,6 +422,25 @@ pub(super) fn worker_loop(
         // more the busier the server was. `rows.len()` is the decode
         // width, known here because the decode step runs below.
         if let Some(mut prefill) = prefills.pop_front() {
+            // Before the first chunk: built per row, and again after a
+            // preemption, since a draft's state is this row's own and is
+            // not carried. A DFlash draft taps the prompt from here.
+            if prefill.drafter.is_none() {
+                let drafter = config
+                    .speculate
+                    .then(|| {
+                        super::speculate::RowDrafter::for_row(
+                            draft.as_ref(),
+                            &decoder,
+                            &prefill.params,
+                        )
+                    })
+                    .flatten();
+                if let Some(layers) = drafter.as_ref().and_then(|d| d.target_layers()) {
+                    prefill.state.tap(layers);
+                }
+                prefill.drafter = Some(drafter);
+            }
             let budget = step_budget::prefill_budget(
                 config.max_batch_tokens,
                 rows.len(),
@@ -435,19 +454,11 @@ pub(super) fn worker_loop(
                 Ordering::Relaxed,
             );
             if done {
+                let features = prefill.state.take_features();
                 let mut slot = prefill.into_slot();
-                // Built per row, and again after a preemption: a draft
-                // model's KV is this row's own and is not carried.
-                slot.drafter = config
-                    .speculate
-                    .then(|| {
-                        super::speculate::RowDrafter::for_row(
-                            draft.as_ref(),
-                            &decoder,
-                            &slot.params,
-                        )
-                    })
-                    .flatten();
+                if let Some(drafter) = slot.drafter.as_mut() {
+                    drafter.observe_prompt(&features);
+                }
                 rows.insert(slot);
             } else {
                 prefills.push_back(prefill);
@@ -501,7 +512,21 @@ pub(super) fn worker_loop(
                     )
                 })
                 .collect();
-            let speculating = drafts.iter().any(|d| !d.is_empty());
+            // A DFlash row reads the target's layer inputs at every
+            // position it writes, so a batch holding one is tapped, and
+            // goes through the lanes body even on a tick nobody drafts.
+            // Every DFlash row shares the server's one draft, so one
+            // list of layers serves them all.
+            let taps: Vec<usize> = active
+                .iter()
+                .find_map(|&uid| {
+                    rows.get(uid)
+                        .and_then(|s| s.drafter.as_ref())
+                        .and_then(|d| d.target_layers())
+                        .map(<[usize]>::to_vec)
+                })
+                .unwrap_or_default();
+            let speculating = !taps.is_empty() || drafts.iter().any(|d| !d.is_empty());
             // `active[j]` names the row that owns `logits_batch[j]`.
             // The kernel takes slices, so the batch itself is
             // positional -- but the position maps to a *uid*, so the
@@ -570,6 +595,7 @@ pub(super) fn worker_loop(
             // `first_row[j]` is where row `active[j]`'s logits start: one
             // row for its newest token, and one per drafted token after.
             let mut first_row = Vec::with_capacity(active.len());
+            let mut features_batch: Vec<Vec<f32>> = Vec::new();
             let mut logits_batch = if speculating {
                 let (mut row_tokens, mut row_positions, mut row_lanes) =
                     (Vec::new(), Vec::new(), Vec::new());
@@ -581,10 +607,17 @@ pub(super) fn worker_loop(
                         row_lanes.push(j);
                     }
                 }
-                decoder
-                    .forward_multi_seq_lanes(&row_tokens, &row_positions, &row_lanes, &mut kv, &[])
-                    .expect("no layer taps asked for")
-                    .logits
+                let out = decoder
+                    .forward_multi_seq_lanes(
+                        &row_tokens,
+                        &row_positions,
+                        &row_lanes,
+                        &mut kv,
+                        &taps,
+                    )
+                    .expect("the draft's layers were checked against the target at startup");
+                features_batch = out.features;
+                out.logits
             } else {
                 first_row.extend(0..active.len());
                 decoder.forward_multi_seq_kv(&tokens, &positions, &mut kv)
@@ -612,6 +645,13 @@ pub(super) fn worker_loop(
                     RowKv::Paged(lease) => *lease.caches_mut() = std::mem::take(&mut paged_refs[j]),
                 }
                 let first = first_row[j];
+                if !taps.is_empty() {
+                    super::speculate::observe_verify(
+                        slot,
+                        positions[j],
+                        &features_batch[first..first + 1 + drafts[j].len()],
+                    );
+                }
                 if drafts[j].is_empty() {
                     slot.logits = std::mem::take(&mut logits_batch[first]);
                     slot.pos += 1;
@@ -620,6 +660,7 @@ pub(super) fn worker_loop(
                     let rows_of = &logits_batch[first..first + 1 + drafts[j].len()];
                     super::speculate::settle(slot, rows_of, &drafts[j], &decode);
                 }
+                super::speculate::forget_rejected(slot);
                 // A pending token is fed next tick, and the budget is
                 // checked after that forward, as for any other token.
                 if slot.pending.is_none()
@@ -885,5 +926,6 @@ pub(super) fn accept(
         abort,
         blocks,
         answer,
+        drafter: None,
     }))
 }

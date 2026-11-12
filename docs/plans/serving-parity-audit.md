@@ -173,7 +173,7 @@ are returned when it ends.
   sliding-window model (`ForkRefused::SlidingWindow`), because two
   sequences recycling out of one page set is a use-after-free that
   reads as another position's tokens.
-- Chunked prefill: `serving/batch/prefill.rs:156`, with a test pinning
+- Chunked prefill: `serving/batch/prefill.rs:178`, with a test pinning
   that chunking does not change the logits.
 - Quantized KV wires: `f16`, `q8_0`, `fp8`, `q4`, the last with a
   Hadamard rotation on K.

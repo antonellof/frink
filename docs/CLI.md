@@ -1489,8 +1489,8 @@ Notes that are frink's own:
   layers, a drafter of another vocabulary size, and a drafter whose KV
   lands on the device (`--device cpu`). A TARGET with recurrent layers
   is served: its state is checkpointed around each verify batch. A
-  DFlash draft is also refused with continuous batching (`-cb` or
-  `-np`), beside the prefix cache and the paged KV store. A model
+  DFlash draft is also refused beside the prefix cache and the paged KV
+  store; in the continuous batch each row taps the target for it. A model
   swapped in through `/admin/models/load` is held to the same drafter.
   `--draft-max` (default 3) and `--draft-p-min` (default 0) are
   `frink run`'s, which are llama.cpp's.
