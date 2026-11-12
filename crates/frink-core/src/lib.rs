@@ -66,6 +66,7 @@ pub mod placement;
 pub mod qstar;
 pub mod recurrent_state;
 pub mod residency;
+pub mod rope_table;
 pub mod summary_stats;
 pub mod tensor;
 pub mod threads;
@@ -110,3 +111,6 @@ pub use weight_matrix::{
     active_backend, cpu_int_dot_kind_supported, cuda_matvec_kind_supported, metal_matvec_kind_name,
     metal_mul_mm_kind_supported, BatchActs, QuantKind, WeightMatrix,
 };
+
+#[cfg(all(test, feature = "vulkan"))]
+mod vulkan_ops_seam;

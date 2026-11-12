@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// out_h = sum_t softmax(scores_h)[t] * v_t: the max and the sum of
+// exponentials are shared-memory reductions, then each invocation owns
+// a strided set of output channels. The same value as the CPU's online
+// softmax, computed in two passes. Bindings: 0 the KV cache, 1 scores
+// [n_heads, seq_len], 2 out [n_heads, head_dim].
+#include "attn_common.glsl"
+layout(std430, binding = 1) readonly buffer S { float scores[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+
+void main() {
+    uint h = attn_head();
+    if (h >= p.n_heads) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint kvh = h / (p.n_heads / p.n_kv_heads);
+    uint row = h * p.seq_len;
+
+    float m = -1.0 / 0.0;
+    for (uint t = tid; t < p.seq_len; t += 64u) m = max(m, scores[row + t]);
+    red[tid] = m;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (tid < s) red[tid] = max(red[tid], red[tid + s]);
+        barrier();
+    }
+    m = red[0];
+    barrier();
+
+    float l = 0.0;
+    for (uint t = tid; t < p.seq_len; t += 64u) l += exp(scores[row + t] - m);
+    red[tid] = l;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        barrier();
+    }
+    l = red[0];
+
+    for (uint d = tid; d < p.head_dim; d += 64u) {
+        float acc = 0.0;
+        for (uint t = 0u; t < p.seq_len; ++t) acc += exp(scores[row + t] - m) * kv_at(p.v_off, t, kvh, d);
+        o[h * p.head_dim + d] = acc / l;
+    }
+}

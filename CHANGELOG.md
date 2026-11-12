@@ -34,6 +34,18 @@ are the ones worth reading twice.
   `docs/KERNELS.md` falls from 17 host fallbacks to 9: the codebook
   kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0.
 
+- **Vulkan layer ops, each one submission-chainable**: RMSNorm (whole
+  row or per head), the residual add, RoPE (Norm and NeoX pairing,
+  partial rotary width), an f16 KV append that rounds to nearest even
+  as llama.cpp's f16 KV does, and GQA decode attention over that cache
+  (#409, step 5a). `frink_vulkan::runtime::ops::Batch` records them,
+  and any matvec between them, as one submission. RoPE's angles come
+  from `frink_core::rope_table::rope_cos_sin`, whose table is held to
+  every CPU rotation bit for bit, because a GPU's `sin` is not the
+  CPU's. Each op is held to its CPU function in
+  `frink-core`'s `vulkan_ops_seam` tests. No model uses them yet; the
+  decoder wiring is the next step.
+
 ### Changed
 
 - **A dense SwiGLU FFN is one Vulkan submission** (#409). Gate and up,

@@ -1,0 +1,323 @@
+//! Each op against a scalar twin written from the CPU function it
+//! replaces. `frink-core`'s seam tests hold the same ops to those
+//! functions themselves.
+
+use super::*;
+use crate::dispatch::tests::{kind_row, pseudo_random, runtime, twin};
+use crate::shaders::matvec_shader;
+
+fn close(what: &str, got: &[f32], want: &[f32], tol: f32) {
+    assert_eq!(got.len(), want.len(), "{what}: length");
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!(
+            (g - w).abs() <= tol * w.abs().max(1.0),
+            "{what}[{i}]: gpu {g} vs twin {w}"
+        );
+    }
+}
+
+fn upload(rt: &mut Runtime, data: &[f32]) -> DeviceBuf {
+    let b = rt.alloc_f32(data.len()).unwrap();
+    rt.write_f32(b, 0, data).unwrap();
+    b
+}
+
+/// ggml's RMSNorm (`ggml_compute_forward_rms_norm_f32`): squares summed
+/// in order in f64.
+fn rms_norm_twin(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
+    let sum: f64 = x.iter().map(|v| (v * v) as f64).sum();
+    let scale = 1.0 / ((sum / x.len() as f64) as f32 + eps).sqrt();
+    x.iter().zip(w).map(|(v, w)| v * scale * w).collect()
+}
+
+#[test]
+fn gpu_rms_norm_matches_its_twin_per_row() {
+    let Some(mut rt) = runtime() else { return };
+    // One 2048-wide row (a hidden state) and eight 128-wide heads
+    // sharing one weight (`rms_norm_per_head`).
+    for (n, rows) in [(2048usize, 1usize), (128, 8), (5, 3)] {
+        let x = pseudo_random(n as u64 * 7 + rows as u64, n * rows);
+        let w: Vec<f32> = pseudo_random(99, n).iter().map(|v| 1.0 + v).collect();
+        let (xb, wb, ob) = (
+            upload(&mut rt, &x),
+            upload(&mut rt, &w),
+            rt.alloc_f32(n * rows).unwrap(),
+        );
+        let mut batch = Batch::new();
+        batch.rms_norm(wb, xb, ob, n, rows, 1e-5);
+        rt.submit_batch(&batch).unwrap();
+        let want: Vec<f32> = x
+            .chunks(n)
+            .flat_map(|r| rms_norm_twin(r, &w, 1e-5))
+            .collect();
+        close(
+            &format!("rms_norm {n}x{rows}"),
+            &rt.read_f32(ob, 0, n * rows).unwrap(),
+            &want,
+            1e-5,
+        );
+    }
+}
+
+#[test]
+fn gpu_add_matches_its_twin() {
+    let Some(mut rt) = runtime() else { return };
+    let n = 1000;
+    let (a, b) = (pseudo_random(1, n), pseudo_random(2, n));
+    let (ab, bb, ob) = (
+        upload(&mut rt, &a),
+        upload(&mut rt, &b),
+        rt.alloc_f32(n).unwrap(),
+    );
+    let mut batch = Batch::new();
+    batch.add(ab, bb, ob, n);
+    rt.submit_batch(&batch).unwrap();
+    let want: Vec<f32> = a.iter().zip(&b).map(|(a, b)| a + b).collect();
+    assert_eq!(rt.read_f32(ob, 0, n).unwrap(), want, "an add is exact");
+}
+
+/// `frink_core::attention::apply_rope_interleaved` and `apply_rope`
+/// (NeoX) over the first `rot_dim` channels, from the same table.
+fn rope_twin(x: &[f32], head_dim: usize, rot_dim: usize, tab: &[f32], neox: bool) -> Vec<f32> {
+    let mut out = x.to_vec();
+    let half = rot_dim / 2;
+    for head in out.chunks_mut(head_dim) {
+        for k in 0..half {
+            let (cs, sn) = (tab[2 * k], tab[2 * k + 1]);
+            let (a, b) = if neox {
+                (k, k + half)
+            } else {
+                (2 * k, 2 * k + 1)
+            };
+            let (xa, xb) = (head[a], head[b]);
+            head[a] = xa * cs - xb * sn;
+            head[b] = xa * sn + xb * cs;
+        }
+    }
+    out
+}
+
+#[test]
+fn gpu_rope_matches_its_twin_for_both_pairings_and_a_partial_width() {
+    let Some(mut rt) = runtime() else { return };
+    let (n_heads, head_dim) = (6usize, 64usize);
+    for (rot_dim, neox) in [(64usize, false), (64, true), (32, false), (48, true)] {
+        let pos = 4093.0f32;
+        let tab: Vec<f32> = (0..rot_dim / 2)
+            .flat_map(|k| {
+                let (s, c) = (pos / 10000f32.powf(2.0 * k as f32 / rot_dim as f32)).sin_cos();
+                [c, s]
+            })
+            .collect();
+        let x = pseudo_random(rot_dim as u64 + neox as u64, n_heads * head_dim);
+        let (tb, xb, ob) = (
+            upload(&mut rt, &tab),
+            upload(&mut rt, &x),
+            rt.alloc_f32(x.len()).unwrap(),
+        );
+        let mut batch = Batch::new();
+        batch.rope(tb, xb, ob, n_heads, head_dim, rot_dim, neox);
+        rt.submit_batch(&batch).unwrap();
+        let want = rope_twin(&x, head_dim, rot_dim, &tab, neox);
+        close(
+            &format!("rope rot {rot_dim} neox {neox}"),
+            &rt.read_f32(ob, 0, x.len()).unwrap(),
+            &want,
+            1e-6,
+        );
+    }
+}
+
+/// The f16 store, bit for bit against `half` (round to nearest even, as
+/// ggml's F16C conversion is), over values that hit every branch: ties,
+/// subnormals, overflow, signed zero, NaN.
+#[test]
+fn gpu_kv_store_rounds_to_f16_as_the_cpu_does() {
+    let Some(mut rt) = runtime() else { return };
+    let mut src = pseudo_random(5, 254);
+    src.extend([
+        1.0 + 2f32.powi(-11),       // a tie, rounds to even (down)
+        1.0 + 3.0 * 2f32.powi(-11), // a tie, rounds to even (up)
+        6.0e-8,                     // f16 subnormal
+        -2.9e-5,                    // f16 subnormal, negative
+        1e-9,                       // underflows to zero
+        65520.0,                    // rounds up to inf
+        -0.0,
+        f32::NAN,
+        65504.0,        // max f16
+        2f32.powi(-14), // min normal
+    ]);
+    let n = src.len();
+    let sb = upload(&mut rt, &src);
+    let cache_words = 3 * n / 2;
+    let cache = rt.alloc_f32(cache_words).unwrap();
+    let mut batch = Batch::new();
+    batch.kv_store(sb, cache, n, n / 2, cache_words);
+    rt.submit_batch(&batch).unwrap();
+    let got = rt.read_f32(cache, n / 2, n / 2).unwrap();
+    for (i, pair) in src.chunks(2).enumerate() {
+        let w = got[i].to_bits();
+        for (half_i, v) in pair.iter().enumerate() {
+            let bits = (w >> (16 * half_i)) as u16;
+            let want = half::f16::from_f32(*v).to_bits();
+            if v.is_nan() {
+                assert!(half::f16::from_bits(bits).is_nan(), "NaN stays NaN");
+            } else {
+                assert_eq!(bits, want, "value {v}: gpu {bits:#06x} vs {want:#06x}");
+            }
+        }
+    }
+    let before = rt.read_f32(cache, 0, n / 2).unwrap();
+    assert!(
+        before.iter().all(|v| v.to_bits() == 0),
+        "words before `dst` untouched"
+    );
+}
+
+/// `causal_gqa_attention_row` without window, sinks, softcap or ALiBi,
+/// over K and V as the f16 cache holds them.
+fn attention_twin(q: &[f32], k: &[f32], v: &[f32], s: AttnShape) -> Vec<f32> {
+    let group = s.n_heads / s.n_kv_heads;
+    let mut out = vec![0f32; s.n_heads * s.head_dim];
+    for h in 0..s.n_heads {
+        let kvh = h / group;
+        let qh = &q[h * s.head_dim..(h + 1) * s.head_dim];
+        let at = |t: usize| (t * s.n_kv_heads + kvh) * s.head_dim;
+        let scores: Vec<f32> = (0..s.seq_len)
+            .map(|t| {
+                qh.iter()
+                    .zip(&k[at(t)..at(t) + s.head_dim])
+                    .map(|(a, b)| a * b)
+                    .sum::<f32>()
+                    * s.scale
+            })
+            .collect();
+        let m = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let p: Vec<f32> = scores.iter().map(|x| (x - m).exp()).collect();
+        let l: f32 = p.iter().sum();
+        for d in 0..s.head_dim {
+            out[h * s.head_dim + d] = (0..s.seq_len).map(|t| p[t] * v[at(t) + d]).sum::<f32>() / l;
+        }
+    }
+    out
+}
+
+fn f16_round(v: &[f32]) -> Vec<f32> {
+    v.iter().map(|x| half::f16::from_f32(*x).to_f32()).collect()
+}
+
+/// The KV append and attention chained in one submission: every
+/// position stored through `kv_store`, then attention over all of them,
+/// for MHA, GQA (4:1) and MQA, at a length past one workgroup.
+#[test]
+fn gpu_attention_over_the_f16_cache_matches_its_twin() {
+    let Some(mut rt) = runtime() else { return };
+    for (n_heads, n_kv_heads, head_dim, seq_len) in [
+        (4usize, 4usize, 64usize, 7usize),
+        (8, 2, 128, 130),
+        (6, 1, 32, 65),
+    ] {
+        let row = n_kv_heads * head_dim;
+        let k = pseudo_random(11 + seq_len as u64, seq_len * row);
+        let v = pseudo_random(23 + seq_len as u64, seq_len * row);
+        let q = pseudo_random(37 + seq_len as u64, n_heads * head_dim);
+        // K at word 0, V after it: halves, two per word.
+        let half_words = seq_len * row / 2;
+        let cache_words = 2 * half_words;
+        let cache = rt.alloc_f32(cache_words).unwrap();
+        let (kb, vb, qb) = (
+            upload(&mut rt, &k),
+            upload(&mut rt, &v),
+            upload(&mut rt, &q),
+        );
+        let scores = rt.alloc_f32(n_heads * seq_len).unwrap();
+        let out = rt.alloc_f32(n_heads * head_dim).unwrap();
+        let shape = AttnShape {
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            seq_len,
+            k_off: 0,
+            v_off: half_words,
+            scale: 1.0 / (head_dim as f32).sqrt(),
+        };
+        let mut batch = Batch::new();
+        batch.kv_store(kb, cache, seq_len * row, 0, cache_words);
+        batch.kv_store(vb, cache, seq_len * row, half_words, cache_words);
+        batch.attention(cache, cache_words, qb, scores, out, shape);
+        let before = rt.submissions();
+        rt.submit_batch(&batch).unwrap();
+        assert_eq!(
+            rt.submissions() - before,
+            1,
+            "store and attend in one submission"
+        );
+        let want = attention_twin(&q, &f16_round(&k), &f16_round(&v), shape);
+        close(
+            &format!("attention {n_heads}/{n_kv_heads}x{head_dim} over {seq_len}"),
+            &rt.read_f32(out, 0, n_heads * head_dim).unwrap(),
+            &want,
+            1e-4,
+        );
+    }
+}
+
+/// Ops feed each other within one submission: norm, a matvec of the
+/// normed vector, and a residual add, against the same three steps on
+/// the host.
+#[test]
+fn gpu_a_batch_chains_norm_matvec_and_residual_in_one_submission() {
+    let Some(mut rt) = runtime() else { return };
+    let (cols, rows) = (256usize, 256usize);
+    let s = matvec_shader("Q8_0").unwrap();
+    let blocks = cols / s.block_elems;
+    let weights: Vec<u8> = (0..rows)
+        .flat_map(|r| kind_row("Q8_0", blocks, 5 + r as u64))
+        .collect();
+    let x = pseudo_random(77, cols);
+    let w: Vec<f32> = pseudo_random(78, cols).iter().map(|v| 1.0 + v).collect();
+    let (xb, wb) = (upload(&mut rt, &x), upload(&mut rt, &w));
+    let (normed, proj, out) = (
+        rt.alloc_f32(cols).unwrap(),
+        rt.alloc_f32(rows).unwrap(),
+        rt.alloc_f32(rows).unwrap(),
+    );
+    let mut batch = Batch::new();
+    batch.rms_norm(wb, xb, normed, cols, 1, 1e-6);
+    batch.matvec(
+        MatvecJob {
+            shader: s,
+            weights: &weights,
+            rows,
+        },
+        (normed, 0),
+        (proj, 0),
+    );
+    batch.add(xb, proj, out, rows);
+    let before = rt.submissions();
+    rt.submit_batch(&batch).unwrap();
+    assert_eq!(rt.submissions() - before, 1);
+
+    let n = rms_norm_twin(&x, &w, 1e-6);
+    let p: Vec<f32> = (0..rows)
+        .map(|r| twin("Q8_0")(&weights[r * blocks * 34..(r + 1) * blocks * 34], &n))
+        .collect();
+    let want: Vec<f32> = x.iter().zip(&p).map(|(a, b)| a + b).collect();
+    close(
+        "norm -> matvec -> add",
+        &rt.read_f32(out, 0, rows).unwrap(),
+        &want,
+        1e-4,
+    );
+}
+
+#[test]
+fn gpu_a_view_past_its_buffer_is_an_error_not_a_dispatch() {
+    let Some(mut rt) = runtime() else { return };
+    let (a, out) = (rt.alloc_f32(8).unwrap(), rt.alloc_f32(16).unwrap());
+    let mut batch = Batch::new();
+    batch.add(a, a, out, 16);
+    assert!(rt.submit_batch(&batch).is_err());
+    assert!(rt.submit_batch(&Batch::new()).is_err(), "an empty batch");
+    assert!(rt.write_f32(a, 4, &[0.0; 5]).is_err());
+}

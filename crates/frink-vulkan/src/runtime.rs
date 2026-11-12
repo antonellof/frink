@@ -35,6 +35,7 @@
 //! every weight the model's matvecs have touched.
 
 mod ffn;
+pub mod ops;
 
 use crate::device::{Context, VulkanError};
 use crate::shaders::MatvecShader;
@@ -42,12 +43,18 @@ use ash::vk;
 use frink_quant::fingerprint::WeightFingerprint;
 use std::collections::HashMap;
 
-/// Bytes of push constants: `rows`, `n_blocks_per_row`, `row_bytes`.
-const PUSH_CONSTANT_BYTES: u32 = 12;
+/// Bytes of push constants every pipeline may read: eight u32 words.
+/// A matvec reads the first three (`rows`, `n_blocks_per_row`,
+/// `row_bytes`); attention reads seven.
+const PUSH_CONSTANT_BYTES: u32 = 32;
 
-/// The most matvecs one submission holds: Q/K/V is three, gate/up two;
-/// eight leaves room without a descriptor pool worth managing.
+/// The most matvecs one [`Runtime::matvec_many`] submission holds: Q/K/V
+/// is three, gate/up two.
 pub const MAX_FUSED: usize = 8;
+
+/// Descriptor sets in the pool: the most dispatches one submission can
+/// hold. A decode layer is about a dozen; this leaves room for a token.
+pub const MAX_DISPATCHES: usize = 512;
 
 /// One matvec of a [`Runtime::matvec_many`] submission.
 #[derive(Clone, Copy)]
@@ -82,7 +89,7 @@ struct Kernel {
 struct Dispatch {
     pipeline: vk::Pipeline,
     set: usize,
-    push: [u8; 12],
+    push: [u8; PUSH_CONSTANT_BYTES as usize],
     grid: (u32, u32),
 }
 
@@ -96,7 +103,7 @@ pub struct Runtime {
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     desc_pool: vk::DescriptorPool,
-    /// One per matvec a submission can hold ([`MAX_FUSED`]).
+    /// One per dispatch a submission can hold ([`MAX_DISPATCHES`]).
     sets: Vec<vk::DescriptorSet>,
     min_offset_align: u64,
     cmd_pool: vk::CommandPool,
@@ -106,6 +113,8 @@ pub struct Runtime {
     x: Option<Buf>,
     y: Option<Buf>,
     weights: HashMap<(usize, usize), ResidentWeight>,
+    /// Buffers handed out by [`Runtime::alloc_f32`], freed in `Drop`.
+    bufs: Vec<Buf>,
     staging_only: bool,
     submissions: u64,
     ctx: Context,
@@ -165,6 +174,7 @@ impl Runtime {
             x: None,
             y: None,
             weights: HashMap::new(),
+            bufs: Vec::new(),
             staging_only: false,
             submissions: 0,
             ctx,
@@ -186,18 +196,18 @@ impl Runtime {
 
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3 * MAX_FUSED as u32)];
+            .descriptor_count(3 * MAX_DISPATCHES as u32)];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(MAX_FUSED as u32)
+            .max_sets(MAX_DISPATCHES as u32)
             .pool_sizes(&pool_sizes);
         // SAFETY: `pool_info` borrows `pool_sizes`, alive across the call.
         rt.desc_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .map_err(VulkanError::vk("vkCreateDescriptorPool"))?;
-        let many_layouts = [set_layout; MAX_FUSED];
+        let many_layouts = [set_layout; MAX_DISPATCHES];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(rt.desc_pool)
             .set_layouts(&many_layouts);
-        // SAFETY: the pool was sized for exactly these MAX_FUSED sets.
+        // SAFETY: the pool was sized for exactly these MAX_DISPATCHES sets.
         rt.sets = unsafe { device.allocate_descriptor_sets(&alloc_info) }
             .map_err(VulkanError::vk("vkAllocateDescriptorSets"))?;
 
@@ -747,6 +757,9 @@ impl Drop for Runtime {
             for (_, w) in self.weights.drain() {
                 free(device, w.buf);
             }
+            for b in self.bufs.drain(..) {
+                free(device, b);
+            }
             for b in [self.x.take(), self.y.take()].into_iter().flatten() {
                 free(device, b);
             }
@@ -896,10 +909,24 @@ fn grid(rows: usize) -> (u32, u32) {
     (gx as u32, rows.div_ceil(gx) as u32)
 }
 
-pub(crate) fn push_constants(rows: usize, n_blocks_per_row: usize, row_bytes: usize) -> [u8; 12] {
-    let mut out = [0u8; 12];
-    for (i, v) in [rows, n_blocks_per_row, row_bytes].iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&(*v as u32).to_le_bytes());
+/// A matvec's push constants: `rows`, `n_blocks_per_row`, `row_bytes`.
+pub(crate) fn push_constants(
+    rows: usize,
+    n_blocks_per_row: usize,
+    row_bytes: usize,
+) -> [u8; PUSH_CONSTANT_BYTES as usize] {
+    push_words(&[rows as u32, n_blocks_per_row as u32, row_bytes as u32])
+}
+
+/// Up to eight u32 push-constant words, little-endian, zero-padded.
+pub(crate) fn push_words(words: &[u32]) -> [u8; PUSH_CONSTANT_BYTES as usize] {
+    assert!(
+        words.len() * 4 <= PUSH_CONSTANT_BYTES as usize,
+        "push constants"
+    );
+    let mut out = [0u8; PUSH_CONSTANT_BYTES as usize];
+    for (i, v) in words.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
     out
 }
@@ -923,9 +950,8 @@ mod tests {
 
     #[test]
     fn push_constants_are_three_little_endian_u32s() {
-        assert_eq!(
-            push_constants(1, 2, 68),
-            [1, 0, 0, 0, 2, 0, 0, 0, 68, 0, 0, 0]
-        );
+        let push = push_constants(1, 2, 68);
+        assert_eq!(push[..12], [1, 0, 0, 0, 2, 0, 0, 0, 68, 0, 0, 0]);
+        assert!(push[12..].iter().all(|b| *b == 0));
     }
 }

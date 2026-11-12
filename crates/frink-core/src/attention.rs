@@ -28,7 +28,7 @@ use crate::kv_store::KvRows;
 ///
 /// The expression is unchanged, so the values are bit-identical to what
 /// the loop produced.
-fn rope_freqs(theta: f32, dim: usize) -> std::rc::Rc<Vec<f32>> {
+pub(crate) fn rope_freqs(theta: f32, dim: usize) -> std::rc::Rc<Vec<f32>> {
     /// Keyed on `(theta bits, dim)`, both of which are fixed per model.
     type FreqTables = std::collections::HashMap<(u32, usize), std::rc::Rc<Vec<f32>>>;
     thread_local! {
