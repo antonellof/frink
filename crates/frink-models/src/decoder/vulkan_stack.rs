@@ -19,7 +19,7 @@
 //! Which layers it may take is `fused_view`'s decision, shared with the
 //! Metal and CUDA stacks. The stack declines what its ops do not
 //! compute, so a layer it cannot serve runs on the host body unchanged:
-//! a norm that is not RMS, sinks, `wo` bias, a sliding window,
+//! sinks, `wo` bias, a sliding window,
 //! an attention softcap, RoPE `mscale`, routed experts, a GeGLU FFN, and
 //! a host cache that is not f16 (`--ctk f32`).
 //!
@@ -36,7 +36,7 @@
 use frink_core::cache::KvCache;
 use frink_core::vulkan_kv::VulkanKvMirror;
 use frink_core::WeightMatrix;
-use frink_vulkan::runtime::ops::{AttnShape, Batch, DeviceBuf};
+use frink_vulkan::runtime::ops::{AttnShape, Batch, DeviceBuf, NormKind};
 use frink_vulkan::runtime::{MatvecJob, Runtime, MAX_DISPATCHES};
 
 use super::fused_view::{FusedAttnCaps, FusedAttnExtras};
@@ -56,10 +56,10 @@ const MAX_SCORE_BYTES: usize = 256 << 20;
 
 /// One layer as the stack runs it: borrowed weights and its RoPE.
 struct StackLayer<'a> {
-    /// The pre-norms' RMS weights; `None` for a layer with no norm
-    /// before the block (the post-norm architectures).
-    attn_norm: Option<&'a [f32]>,
-    ffn_norm: Option<&'a [f32]>,
+    /// The pre-norms; `None` for a layer with no norm before the block
+    /// (the post-norm architectures).
+    attn_norm: Option<PreNorm<'a>>,
+    ffn_norm: Option<PreNorm<'a>>,
     /// RMS weights applied to the block's output before the residual
     /// add, at `post_norm_eps`.
     post_attn_norm: Option<&'a [f32]>,
@@ -86,14 +86,54 @@ struct StackLayer<'a> {
     k_norm: Option<&'a [f32]>,
 }
 
+/// A pre-norm's kind, weight and bias once on the device.
+type BoundNorm = (NormKind, Option<DeviceBuf>, Option<DeviceBuf>);
+
+/// A pre-norm as the device runs it: the norm op, times a weight when
+/// there is one, then a bias when there is one (`NormOp::apply`'s order).
+#[derive(Clone, Copy)]
+struct PreNorm<'a> {
+    kind: NormKind,
+    weight: Option<&'a [f32]>,
+    bias: Option<&'a [f32]>,
+}
+
+impl<'a> PreNorm<'a> {
+    /// `None` for [`NormOp::None`]: the block reads the residual stream.
+    /// Exhaustive, so a new norm has to say how the device runs it.
+    fn of(n: &'a crate::norm::NormOp) -> Option<Self> {
+        use crate::norm::NormOp;
+        let (kind, weight, bias) = match n {
+            NormOp::None => return None,
+            NormOp::Rms(w) => (NormKind::Rms, Some(&w[..]), None),
+            NormOp::RmsNoParams => (NormKind::Rms, None, None),
+            NormOp::RmsBias { weight, bias } => (NormKind::Rms, Some(&weight[..]), Some(&bias[..])),
+            NormOp::LayerNormNoParams => (NormKind::Layer, None, None),
+            NormOp::LayerNorm(w) => (NormKind::Layer, Some(&w[..]), None),
+            NormOp::LayerNormBias { weight, bias } => {
+                (NormKind::Layer, Some(&weight[..]), Some(&bias[..]))
+            }
+        };
+        Some(Self { kind, weight, bias })
+    }
+
+    /// The dispatches it records: the norm, and the bias add.
+    fn ops(self) -> usize {
+        1 + self.bias.is_some() as usize
+    }
+}
+
 impl StackLayer<'_> {
     /// The dispatches this layer records.
     fn ops(&self) -> usize {
-        // The 19 count both pre-norms.
+        // The 19 count both pre-norms as one dispatch each.
         OPS_PER_LAYER - 2
+            + [self.attn_norm, self.ffn_norm]
+                .iter()
+                .flatten()
+                .map(|n| n.ops())
+                .sum::<usize>()
             + [
-                self.attn_norm,
-                self.ffn_norm,
                 self.post_attn_norm,
                 self.post_ffn_norm,
                 self.q_bias,
@@ -178,14 +218,8 @@ impl Decoder {
         if sinks.is_some() || o_bias.is_some() {
             return None;
         }
-        // A pre-norm is RMS with weights or absent; any other kind is
-        // arithmetic the norm op does not do.
-        let pre = |n: &'a crate::norm::NormOp| match n {
-            crate::norm::NormOp::None => Some(None),
-            other => other.rms_weights().map(Some),
-        };
-        let attn_norm = pre(&layer.attn.norm_weight)?;
-        let ffn_norm = pre(&layer.moe.norm_weight)?;
+        let attn_norm = PreNorm::of(&layer.attn.norm_weight);
+        let ffn_norm = PreNorm::of(&layer.moe.norm_weight);
         // SwiGLU is the one activation the stack's FFN has.
         if c.model_ffn_act()
             .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)
@@ -366,6 +400,7 @@ impl Decoder {
         let h = rt.scratch("h", 0, batch * dim)?;
         let h_mid = rt.scratch("h_mid", 0, batch * dim)?;
         let normed = rt.scratch("normed", 0, batch * dim)?;
+        let normed_biased = rt.scratch("normed_biased", 0, batch * dim)?;
         let q = rt.scratch("q", 0, batch * q_dim)?;
         let qr = rt.scratch("qr", 0, batch * q_dim)?;
         let attn = rt.scratch("attn", 0, batch * q_dim)?;
@@ -383,9 +418,10 @@ impl Decoder {
         // and after rotation and its V (read back for the host cache),
         // and its mirror.
         struct Bound {
-            /// Pre-attention, pre-FFN, post-attention and post-FFN norm
-            /// weights, where the layer has them.
-            norms: [Option<DeviceBuf>; 4],
+            /// The pre-attention and pre-FFN norms: kind, weight, bias.
+            pre: [Option<BoundNorm>; 2],
+            /// The post-attention and post-FFN norm weights.
+            post: [Option<DeviceBuf>; 2],
             tab: Option<(DeviceBuf, usize)>,
             /// K and V each move between two buffers, an op at a time.
             k: [DeviceBuf; 2],
@@ -403,12 +439,18 @@ impl Decoder {
         for (i, s) in layers.iter().enumerate() {
             let li = l + i;
             let mut norm = |w: Option<&[f32]>| w.map(|w| rt.constant_f32(w)).transpose();
-            let norms = [
-                norm(s.attn_norm)?,
-                norm(s.ffn_norm)?,
-                norm(s.post_attn_norm)?,
-                norm(s.post_ffn_norm)?,
-            ];
+            let mut pre_of = |n: Option<PreNorm<'_>>| {
+                n.map(|n| {
+                    Ok::<_, frink_vulkan::device::VulkanError>((
+                        n.kind,
+                        norm(n.weight)?,
+                        norm(n.bias)?,
+                    ))
+                })
+                .transpose()
+            };
+            let pre = [pre_of(s.attn_norm)?, pre_of(s.ffn_norm)?];
+            let post = [norm(s.post_attn_norm)?, norm(s.post_ffn_norm)?];
             let tab = match &s.rope {
                 Some((t, rot)) => {
                     let b = rt.scratch("rope", i, t.len())?;
@@ -442,7 +484,8 @@ impl Decoder {
             } = cache;
             let m = VulkanKvMirror::sync(vulkan_attn, rt, hk, hv, rows, kv_dim, need)?;
             bound.push(Bound {
-                norms,
+                pre,
+                post,
                 tab,
                 k,
                 v,
@@ -467,15 +510,23 @@ impl Decoder {
         let mut finals = Vec::with_capacity(layers.len());
         for (s, b) in layers.iter().zip(&bound) {
             // --- attention ---
-            let [pre_attn, pre_ffn, post_attn, post_ffn] = b.norms;
-            // The block's input: normed, or the residual stream itself.
-            let x_attn = match pre_attn {
-                Some(w) => {
-                    ops.rms_norm(w, h, normed, dim, 1, eps);
-                    normed
+            let ([pre_attn, pre_ffn], [post_attn, post_ffn]) = (b.pre, b.post);
+            // The block's input: normed (and biased), or the residual
+            // stream itself.
+            let pre_norm = |ops: &mut Batch<'_>, n: Option<BoundNorm>, src| match n {
+                Some((kind, w, bias)) => {
+                    ops.norm(kind, w, src, normed, dim, 1, eps);
+                    match bias {
+                        Some(bias) => {
+                            ops.add_bias(normed, bias, normed_biased, dim);
+                            normed_biased
+                        }
+                        None => normed,
+                    }
                 }
-                None => h,
+                None => src,
             };
+            let x_attn = pre_norm(&mut ops, pre_attn, h);
             // Q, K and V each start in the first buffer of a pair, and
             // every op that follows writes the other one.
             let (mut qs, mut ks, mut vs) = ([q, qr], b.k, b.v);
@@ -546,13 +597,7 @@ impl Decoder {
             };
             ops.add(h, attn_out, h_mid, dim);
             // --- FFN ---
-            let x_ffn = match pre_ffn {
-                Some(w) => {
-                    ops.rms_norm(w, h_mid, normed, dim, 1, eps);
-                    normed
-                }
-                None => h_mid,
-            };
+            let x_ffn = pre_norm(&mut ops, pre_ffn, h_mid);
             ops.matvec(s.gate, (x_ffn, 0), (gate, 0));
             ops.matvec(s.up, (x_ffn, 0), (up, 0));
             ops.swiglu(gate, up, act, ffn_dim);

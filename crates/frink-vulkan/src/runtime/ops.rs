@@ -71,6 +71,15 @@ use ash::vk;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceBuf(usize);
 
+/// Which mean a norm divides by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormKind {
+    /// `x / sqrt(mean(x^2) + eps)`.
+    Rms,
+    /// `(x - mean) / sqrt(var + eps)`.
+    Layer,
+}
+
 /// The shape of one decode attention: `q` is `[n_heads, head_dim]`, the
 /// cache holds `seq_len` positions of `[n_kv_heads, head_dim]` K at word
 /// `k_off` and V at word `v_off`.
@@ -186,11 +195,31 @@ impl<'w> Batch<'w> {
         rows: usize,
         eps: f32,
     ) {
+        self.norm(NormKind::Rms, Some(w), x, out, n, rows, eps);
+    }
+
+    /// A norm over `rows` rows of `n`: RMS, or LayerNorm (the mean
+    /// subtracted, the divisor the variance), times `w` when there is
+    /// one. A bias is [`Self::add_bias`] after it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn norm(
+        &mut self,
+        kind: NormKind,
+        w: Option<DeviceBuf>,
+        x: DeviceBuf,
+        out: DeviceBuf,
+        n: usize,
+        rows: usize,
+        eps: f32,
+    ) {
         let rows = rows * self.positions;
+        let mode = (kind == NormKind::Layer) as u32 | (w.is_none() as u32) << 1;
+        // Binding 0 is not read without a weight; it must still be a
+        // buffer, and `x` holds at least `n` values.
         self.ops.push(Op::Shader {
             shader: RMS_NORM,
-            views: [(w, 0, n), (x, 0, n * rows), (out, 0, n * rows)],
-            push: words(&[n as u32, rows as u32, eps.to_bits()]),
+            views: [(w.unwrap_or(x), 0, n), (x, 0, n * rows), (out, 0, n * rows)],
+            push: words(&[n as u32, rows as u32, eps.to_bits(), mode]),
             grid: grid(rows),
             depth: 1,
         });

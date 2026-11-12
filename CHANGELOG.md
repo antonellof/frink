@@ -17,6 +17,14 @@ are the ones worth reading twice.
 
 ### Added
 
+- **The Vulkan stack serves every pre-norm kind** (#409). The norm
+  shader gains a LayerNorm mode (the mean subtracted, the divisor the
+  variance, as `ggml_norm`) and a weightless mode, and a norm's bias is
+  the broadcast add after it. So LayerNorm with or without weight and
+  bias (`orion`, `stablelm`, `olmo`), the weightless RMSNorm and the
+  biased RMSNorm run on the device, where only a weighted RMSNorm did.
+  The graph fixtures the stack serves go from 28 to 32.
+
 - **The Vulkan stack serves post-norms and layers with no pre-norm**
   (#409). A norm on a block's output, before the residual add, is the
   RMSNorm op at `post_norm_eps`; a layer whose pre-norm is absent reads

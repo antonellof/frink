@@ -76,6 +76,54 @@ fn gpu_add_matches_its_twin() {
     assert_eq!(rt.read_f32(ob, 0, n).unwrap(), want, "an add is exact");
 }
 
+/// LayerNorm, with and without a weight, and the weightless RMSNorm,
+/// against `frink_models::norm`'s formulas: at a width past one
+/// workgroup, over several rows, with a mean far from zero.
+#[test]
+fn gpu_layer_norm_and_the_weightless_norms_match_their_twins() {
+    let Some(mut rt) = runtime() else { return };
+    let (n, rows, eps) = (300usize, 3usize, 1e-5f32);
+    let x: Vec<f32> = pseudo_random(71, n * rows)
+        .iter()
+        .map(|v| v + 2.5)
+        .collect();
+    let w: Vec<f32> = pseudo_random(73, n).iter().map(|v| 1.0 + v).collect();
+    let (xb, wb) = (upload(&mut rt, &x), upload(&mut rt, &w));
+    let twin = |kind: NormKind, weighted: bool| -> Vec<f32> {
+        x.chunks(n)
+            .flat_map(|row| {
+                let mean = match kind {
+                    NormKind::Layer => row.iter().sum::<f32>() / n as f32,
+                    NormKind::Rms => 0.0,
+                };
+                let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n as f32;
+                let scale = 1.0 / (var + eps).sqrt();
+                row.iter()
+                    .zip(&w)
+                    .map(|(v, w)| (v - mean) * scale * if weighted { *w } else { 1.0 })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    for (kind, weighted) in [
+        (NormKind::Layer, true),
+        (NormKind::Layer, false),
+        (NormKind::Rms, false),
+        (NormKind::Rms, true),
+    ] {
+        let out = rt.alloc_f32(n * rows).unwrap();
+        let mut batch = Batch::new();
+        batch.norm(kind, weighted.then_some(wb), xb, out, n, rows, eps);
+        rt.submit_batch(&batch).unwrap();
+        close(
+            &format!("{kind:?} weighted={weighted}"),
+            &rt.read_f32(out, 0, n * rows).unwrap(),
+            &twin(kind, weighted),
+            1e-5,
+        );
+    }
+}
+
 /// A bias is added to every position's row, and the add is exact.
 #[test]
 fn gpu_a_bias_is_added_to_every_position() {

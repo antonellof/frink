@@ -12,8 +12,8 @@ use frink_core::kv_store::KvDtype;
 /// host cache that is not, and the CPU child is given the same dtype. So
 /// what is left is the order a device kernel accumulates in.
 ///
-/// Measured (2026-11-12, M2 Pro through MoltenVK, the 28 fixtures the
-/// stack serves): min 1.2e-7, p50 3.1e-6, p90 4.3e-4, then the 64-layer
+/// Measured (2026-11-12, M2 Pro through MoltenVK, the 32 fixtures the
+/// stack serves): min 1.2e-7, p50 9.7e-6, p90 4.3e-4, then the 64-layer
 /// `exaone4_32b` pair at 9.0e-4 and `glm4` at 1.1e-3. The tail is where
 /// a norm sits on a block's output: its sum of squares is an f32 tree on
 /// the device and an f64 loop on the CPU.
@@ -37,7 +37,7 @@ const VULKAN_GOLDEN_TOL: f32 = 0.2;
 /// Fixtures the stack served, and agreed, at the measurement above. The
 /// gate fails below it: fewer means a refusal moved and a fixture now
 /// runs on the host, which this gate would otherwise pass in silence.
-const MIN_SERVED: usize = 28;
+const MIN_SERVED: usize = 32;
 
 /// Fixtures whose Vulkan decode is not within rounding of the CPU's,
 /// each with what was measured. The gate fails if this set and the
