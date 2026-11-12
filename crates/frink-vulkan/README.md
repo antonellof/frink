@@ -6,9 +6,9 @@ committed as SPIR-V; `docs/KERNELS.md` is the list. The codebook
 kinds read their grids from one buffer filled from
 `frink_quant::iq_tables`. Weights are uploaded once
 and stay resident. A prefill batch is the same shader dispatched over the
-batch (`Runtime::gemm`), and a decode token of a plain llama-family
-model runs 26 layers per submission, attention included
-(`runtime::ops`). `frink-core` reaches it behind its `vulkan` feature, and
+batch (`Runtime::gemm`), and a decode token or a prefill batch of a
+plain llama-family model runs 26 layers per submission, attention
+included (`runtime::ops`). `frink-core` reaches it behind its `vulkan` feature, and
 only with `--device vulkan` (or `FRINK_VULKAN=1`). The device is
 llama.cpp's `Vulkan0`: the first discrete or integrated GPU, or the
 first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).

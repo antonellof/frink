@@ -396,3 +396,121 @@ fn gpu_a_queued_free_reaches_only_the_runtime_that_owns_the_buffer() {
     let freed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.read_f32(in_a, 0, 8)));
     assert!(freed.is_err(), "a's buffer was not freed by a's submission");
 }
+
+/// A batch recorded for several positions is each position recorded
+/// alone, bit for bit: RoPE with a table per position, the KV append,
+/// causal attention (position z sees the prefix and positions up to its
+/// own), a per-row norm and a matvec, the ops a prefill layer chains.
+/// The prefix is 70 positions, so a later position's scores run past a
+/// workgroup.
+#[test]
+fn gpu_a_batch_of_positions_is_each_position_alone() {
+    let Some(mut rt) = runtime() else { return };
+    let (n_heads, n_kv, hd, rot, prefix, positions) =
+        (4usize, 2usize, 8usize, 6usize, 70usize, 5usize);
+    let (qn, kn) = (n_heads * hd, n_kv * hd);
+    let capacity = prefix + positions;
+    let half_words = capacity * kn / 2;
+    let cache_words = 2 * half_words;
+    let shader = matvec_shader("Q8_0").unwrap();
+    let rows = 7;
+    let weights: Vec<u8> = (0..rows)
+        .flat_map(|r| kind_row("Q8_0", 1, r as u64 + 3))
+        .collect();
+    let job = MatvecJob {
+        shader,
+        weights: &weights,
+        rows,
+    };
+    let norm_w: Vec<f32> = pseudo_random(5, hd).iter().map(|v| 1.0 + v).collect();
+    let q = pseudo_random(41, positions * qn);
+    let k = pseudo_random(43, positions * kn);
+    let v = pseudo_random(47, positions * kn);
+    let tab = pseudo_random(53, positions * rot);
+    let old_k = pseudo_random(59, prefix * kn);
+    let old_v = pseudo_random(61, prefix * kn);
+
+    // One run of `p` positions starting at batch position `at`, over a
+    // cache holding the prefix and the positions before `at`. Answers
+    // the attention output, its norm, and the matvec of the norm.
+    let run = |rt: &mut Runtime, cache: DeviceBuf, at: usize, p: usize| {
+        let s = |x: &[f32], w: usize| x[at * w..(at + p) * w].to_vec();
+        let (qb, kb, vb, tb) = (
+            upload(rt, &s(&q, qn)),
+            upload(rt, &s(&k, kn)),
+            upload(rt, &s(&v, kn)),
+            upload(rt, &s(&tab, rot)),
+        );
+        let wb = upload(rt, &norm_w);
+        let seq = prefix + at + 1;
+        let [qr, kr, out, normed] = [qn, kn, qn, qn].map(|n| rt.alloc_f32(p * n).unwrap());
+        let scores = rt.alloc_f32(p * n_heads * (seq + p - 1)).unwrap();
+        let y = rt.alloc_f32(p * rows).unwrap();
+        let mut batch = Batch::for_positions(p);
+        batch.rope(tb, qb, qr, n_heads, hd, rot, false);
+        batch.rope(tb, kb, kr, n_kv, hd, rot, false);
+        batch.kv_store(kr, cache, kn, (prefix + at) * kn / 2, cache_words);
+        batch.kv_store(
+            vb,
+            cache,
+            kn,
+            half_words + (prefix + at) * kn / 2,
+            cache_words,
+        );
+        batch.attention(
+            cache,
+            cache_words,
+            qr,
+            scores,
+            out,
+            AttnShape {
+                n_heads,
+                n_kv_heads: n_kv,
+                head_dim: hd,
+                seq_len: seq,
+                k_off: 0,
+                v_off: half_words,
+                scale: 1.0 / (hd as f32).sqrt(),
+            },
+        );
+        batch.rms_norm(wb, out, normed, hd, n_heads, 1e-5);
+        batch.matvec(job, (normed, 0), (y, 0));
+        let before = rt.submissions();
+        rt.submit_batch(&batch).unwrap();
+        assert_eq!(rt.submissions() - before, 1);
+        let bits = |b: DeviceBuf, n: usize| -> Vec<u32> {
+            rt.read_f32(b, 0, n)
+                .unwrap()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        (bits(out, p * qn), bits(normed, p * qn), bits(y, p * rows))
+    };
+    let cache_with_prefix = |rt: &mut Runtime| {
+        let cache = rt.alloc_f32(cache_words).unwrap();
+        let (kb, vb) = (upload(rt, &old_k), upload(rt, &old_v));
+        let mut batch = Batch::new();
+        batch.kv_store(kb, cache, prefix * kn, 0, cache_words);
+        batch.kv_store(vb, cache, prefix * kn, half_words, cache_words);
+        rt.submit_batch(&batch).unwrap();
+        cache
+    };
+
+    let together = cache_with_prefix(&mut rt);
+    let (out, normed, y) = run(&mut rt, together, 0, positions);
+    let alone = cache_with_prefix(&mut rt);
+    for z in 0..positions {
+        let (o1, n1, y1) = run(&mut rt, alone, z, 1);
+        assert_eq!(out[z * qn..(z + 1) * qn], o1[..], "attention, position {z}");
+        assert_eq!(normed[z * qn..(z + 1) * qn], n1[..], "norm, position {z}");
+        assert_eq!(y[z * rows..(z + 1) * rows], y1[..], "matvec, position {z}");
+    }
+    // The two caches hold the same rows whichever way they were filled.
+    assert_eq!(
+        rt.read_u32(together, 0, cache_words).unwrap(),
+        rt.read_u32(alone, 0, cache_words).unwrap()
+    );
+    // And a later position did not just repeat the first.
+    assert_ne!(out[..qn], out[qn..2 * qn]);
+}

@@ -244,6 +244,18 @@ impl Decoder {
                 continue;
             }
 
+            // The same on Vulkan: a run of dense layers for the whole
+            // batch in one submission (#409). It declines before touching
+            // any cache.
+            #[cfg(feature = "vulkan")]
+            if let Some((h_out, run_len)) =
+                self.try_vulkan_dense_stack(l, &hidden_batch, start_pos, batch_size, kv_caches)
+            {
+                hidden_batch = h_out;
+                l += run_len;
+                continue;
+            }
+
             let cache = &mut kv_caches[l];
 
             // One-CB dense prefill (RMSNorm→QKV GEMM→attn→O→FFN) when every

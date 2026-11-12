@@ -704,7 +704,7 @@ impl Decoder {
                         hidden = self.embed_token(token_id, pos);
                     }
                     if let Some((h_out, run_len)) =
-                        self.try_vulkan_dense_stack(l, &hidden, pos, kv_caches)
+                        self.try_vulkan_dense_stack(l, &hidden, pos, 1, kv_caches)
                     {
                         hidden = h_out;
                         fused_through = l + run_len;

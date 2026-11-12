@@ -4,8 +4,9 @@ use super::*;
 use frink_core::kv_store::KvDtype;
 
 /// The worst |Vulkan - CPU| logit delta any step may show over a
-/// 32-step greedy decode (host prefill, then the Vulkan row body: the
-/// decode stack where it serves a layer, the matvec offload elsewhere).
+/// 32-step greedy decode (the prefill batch and then the row body, each
+/// on the Vulkan stack where it serves a layer and on the matvec and
+/// GEMM offload elsewhere).
 ///
 /// Both sides keep an f16 KV: the device's is f16, the stack declines a
 /// host cache that is not, and the CPU child is given the same dtype. So
@@ -40,6 +41,27 @@ const MAX_RUN: usize = frink_vulkan::runtime::MAX_DISPATCHES / 19;
 /// A served fixture with F32 weights, which the matvec offload does not
 /// take: with an f32 host KV the stack declines and nothing is submitted.
 const F32_KV_FIXTURE: &str = "smollm3";
+
+/// The prompt prefilled as two batches (two positions, then the rest
+/// over that prefix) gives the logits of one batch, bit for bit: the
+/// second batch attends over a device KV the first one wrote, at a
+/// start position that is not zero.
+fn a_split_prefill_is_the_prefill(d: &Decoder) -> Result<(), String> {
+    let prompt = &common::GRAPH_PROMPT;
+    let mut kv = d.config.new_kv_caches();
+    let whole = d.forward_batch_last(prompt, 0, &mut kv);
+    let mut kv = d.config.new_kv_caches();
+    d.forward_batch_last(&prompt[..2], 0, &mut kv);
+    let split = d.forward_batch_last(&prompt[2..], 2, &mut kv);
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    if bits(&whole) != bits(&split) {
+        return Err(format!(
+            "a prefill split at position 2 differs from the whole one by {:.3e}",
+            common::worst_vs(&split, &whole)
+        ));
+    }
+    Ok(())
+}
 
 fn submissions() -> u64 {
     frink_core::weight_matrix::gpu_backend::vulkan_runtime()
@@ -92,21 +114,26 @@ pub fn run() {
             on_host.push(name);
             continue;
         }
-        // The stand-in for speed, since nothing here is timed: a token
-        // waits once per run of layers, never once per op.
-        let per_token = submitted as usize / (STEPS - 1);
-        if !(submitted as usize).is_multiple_of(STEPS - 1)
-            || per_token > d.layers.len().div_ceil(MAX_RUN)
+        // The stand-in for speed, since nothing here is timed: the
+        // prefill batch and each decode token wait once per run of
+        // layers, never once per op. `STEPS` forward passes: the
+        // prefill, then `STEPS - 1` tokens.
+        let per_pass = submitted as usize / STEPS;
+        if !(submitted as usize).is_multiple_of(STEPS)
+            || per_pass > d.layers.len().div_ceil(MAX_RUN)
         {
             failures.push((
                 name.clone(),
                 format!(
-                    "{submitted} submissions over {} tokens of {} layers; the stack is one \
-                     per {MAX_RUN} layers",
+                    "{submitted} submissions over a prefill and {} tokens of {} layers; \
+                     the stack is one per {MAX_RUN} layers",
                     STEPS - 1,
                     d.layers.len()
                 ),
             ));
+        }
+        if let Err(why) = a_split_prefill_is_the_prefill(&d) {
+            failures.push((name.clone(), why));
         }
         if name == F32_KV_FIXTURE {
             d.config.kv_dtype = KvDtype::F32;

@@ -79,8 +79,8 @@ pipelines are built once. A prefill batch through one of those kinds
 is one dispatch of the same shader over a grid whose depth is the
 batch, each position bit for bit its matvec; a row is decoded again
 for every position, which is left to tune on real hardware. A decode token of a plain llama-family
-dense model runs every layer in ONE submission, or one per 26 layers
-on a deeper model (the decode stack:
+dense model, and a prefill batch of one, runs every layer in ONE
+submission, or one per 26 layers on a deeper model (the stack:
 norm, Q/K/V, RoPE, an f16 KV mirror, attention, `wo`, residual, norm,
 SwiGLU FFN, residual), with each layer's K and V rows returned to the
 host cache, which stays the authority. A layer the stack does not

@@ -1,5 +1,5 @@
-//! The Vulkan decode stack: a run of dense layers for one token in ONE
-//! submission (#409, step 5).
+//! The Vulkan stack: a run of dense layers in ONE submission, for one
+//! decode token or for a prefill batch (#409, steps 5 and 6).
 //!
 //! The per-op path sends Q/K/V, `wo` and the FFN to the device and runs
 //! the norms, RoPE, attention and the residual adds on the host between
@@ -25,6 +25,12 @@
 //!
 //! One submission holds [`MAX_RUN`] layers, so a deeper model waits once
 //! per that many.
+//!
+//! A prefill batch is the same recording over `batch` positions
+//! (`Batch::for_positions`): every buffer holds a row per position, the
+//! batch's K and V are stored before its attention, and position `b`
+//! attends over the prefix and the batch up to itself. A batch whose
+//! score scratch would pass [`MAX_SCORE_BYTES`] is the host's.
 
 use frink_core::cache::KvCache;
 use frink_core::vulkan_kv::VulkanKvMirror;
@@ -40,6 +46,11 @@ use super::{Decoder, ExpertBacking, LayerWeights};
 /// up, SwiGLU, down, add.
 const OPS_PER_LAYER: usize = 19;
 
+/// The most score scratch one prefill batch may ask for: `batch *
+/// n_heads * (start_pos + batch)` f32. Above it the host body runs the
+/// batch, which is a refusal by size and not a different answer.
+const MAX_SCORE_BYTES: usize = 256 << 20;
+
 /// Layers one submission holds.
 const MAX_RUN: usize = MAX_DISPATCHES / OPS_PER_LAYER;
 
@@ -54,13 +65,14 @@ struct StackLayer<'a> {
     gate: MatvecJob<'a>,
     up: MatvecJob<'a>,
     down: MatvecJob<'a>,
-    /// `(cos, sin)` pairs for this token, and the rotated width; `None`
-    /// for a layer llama.cpp does not rotate.
+    /// `(cos, sin)` pairs for each position of the batch, one table
+    /// after another, and the rotated width; `None` for a layer
+    /// llama.cpp does not rotate.
     rope: Option<(Vec<f32>, usize)>,
 }
 
-/// The run's new hidden state, and each layer's rotated K row and V row
-/// for the host cache.
+/// The run's new hidden rows, and each layer's rotated K rows and V
+/// rows (a row per position) for the host cache.
 type StackOut = (Vec<f32>, Vec<(Vec<f32>, Vec<f32>)>);
 
 fn job(m: &WeightMatrix) -> Option<MatvecJob<'_>> {
@@ -68,14 +80,15 @@ fn job(m: &WeightMatrix) -> Option<MatvecJob<'_>> {
 }
 
 impl Decoder {
-    /// Layer `li` as the stack takes it at position `pos`, or `None` for
-    /// a layer or a cache state it does not serve.
+    /// Layer `li` as the stack takes it for `batch` positions from
+    /// `pos`, or `None` for a layer or a cache state it does not serve.
     fn vulkan_stack_layer<'a>(
         &'a self,
         li: usize,
         layer: &'a LayerWeights,
         cache: &KvCache,
         pos: usize,
+        batch: usize,
     ) -> Option<StackLayer<'a>> {
         let c = &self.config;
         if !Self::fused_prefill_dense_layer_eligible(layer, c, self.lora_attached())
@@ -141,10 +154,10 @@ impl Decoder {
         let ex = experts.first()?;
         let rope = c.layer_rope(li).map(|r| {
             let rot = r.rot_dim.unwrap_or(c.head_dim);
-            (
-                frink_core::rope_table::rope_cos_sin(pos, r.theta, rot, r.freq_factors),
-                rot,
-            )
+            let tables = (pos..pos + batch)
+                .flat_map(|p| frink_core::rope_table::rope_cos_sin(p, r.theta, rot, r.freq_factors))
+                .collect();
+            (tables, rot)
         });
         Some(StackLayer {
             attn_norm: layer.attn.norm_weight.rms_weights()?,
@@ -161,25 +174,39 @@ impl Decoder {
     }
 
     /// Runs the longest run of layers the stack serves, starting at `l`,
-    /// for the token at `pos` whose hidden state is `hidden`. Pushes each
-    /// layer's K/V into its cache and answers the new hidden state with
-    /// the run length. `None` -- before touching any cache -- when layer
-    /// `l` is not one it serves, so the host body runs it; a device error
-    /// after admission is reported once and also answers `None`, with
-    /// every host cache untouched.
+    /// over `hidden_rows` (`batch` rows, positions `pos..pos + batch`).
+    /// Pushes each layer's K/V rows into its cache and answers the new
+    /// hidden rows with the run length. `None` -- before touching any
+    /// cache -- when layer `l` is not one it serves, so the host body
+    /// runs it; a device error after admission is reported once and also
+    /// answers `None`, with every host cache untouched.
     pub(crate) fn try_vulkan_dense_stack(
         &self,
         l: usize,
-        hidden: &[f32],
+        hidden_rows: &[f32],
         pos: usize,
+        batch: usize,
         kv_caches: &mut [KvCache],
     ) -> Option<(Vec<f32>, usize)> {
-        if !frink_core::weight_matrix::vulkan_dense_enabled() || hidden.is_empty() {
+        if !frink_core::weight_matrix::vulkan_dense_enabled()
+            || batch == 0
+            || hidden_rows.len() != batch * self.config.hidden_dim
+            // `frink parity --dump-tensors` reads the host body's
+            // intermediates.
+            || crate::tensor_dump::active().is_some()
+        {
+            return None;
+        }
+        let scores = batch
+            .checked_mul(self.config.n_heads)?
+            .checked_mul(pos + batch)?
+            .checked_mul(4)?;
+        if scores > MAX_SCORE_BYTES {
             return None;
         }
         let mut layers = Vec::new();
         for (li, cache) in kv_caches.iter().enumerate().skip(l).take(MAX_RUN) {
-            match self.vulkan_stack_layer(li, self.layer_for(li), cache, pos) {
+            match self.vulkan_stack_layer(li, self.layer_for(li), cache, pos, batch) {
                 Some(s) => layers.push(s),
                 None => break,
             }
@@ -190,34 +217,42 @@ impl Decoder {
         let run = layers.len();
         let rt = frink_core::weight_matrix::gpu_backend::vulkan_runtime()?;
         let mut rt = rt.lock().ok()?;
-        let out = match self.run_vulkan_stack(&mut rt, &layers, l, hidden, pos, kv_caches) {
-            Ok(out) => out,
-            Err(e) => {
-                warn_once(&format!(
-                    "frink: Vulkan decode stack declined, host body runs it: {e}"
-                ));
-                return None;
-            }
-        };
+        let out =
+            match self.run_vulkan_stack(&mut rt, &layers, l, hidden_rows, pos, batch, kv_caches) {
+                Ok(out) => out,
+                Err(e) => {
+                    warn_once(&format!(
+                        "frink: Vulkan stack declined, host body runs it: {e}"
+                    ));
+                    return None;
+                }
+            };
         drop(rt);
         let (new_hidden, rows) = out;
-        for (i, (k_row, v_row)) in rows.iter().enumerate() {
+        let kv_dim = self.config.n_kv_heads * self.config.head_dim;
+        for (i, (k_rows, v_rows)) in rows.iter().enumerate() {
             let li = l + i;
             let cache = &mut kv_caches[li];
-            cache
-                .push(k_row, v_row)
-                .expect("unbounded/planned KvCache growth is infallible");
-            if let Some(m) = cache.vulkan_attn.as_mut() {
-                m.record_push(k_row);
+            for (k_row, v_row) in k_rows.chunks_exact(kv_dim).zip(v_rows.chunks_exact(kv_dim)) {
+                // The residency counts the host FFN records for a dense
+                // layer, a position at a time.
+                self.layer_for(li).moe.record_activations(&[0]);
+                cache
+                    .push(k_row, v_row)
+                    .expect("unbounded/planned KvCache growth is infallible");
+                if let Some(m) = cache.vulkan_attn.as_mut() {
+                    m.record_push(k_row);
+                }
             }
-            // The residency counts the host FFN records for a dense layer.
-            self.layer_for(li).moe.record_activations(&[0]);
+            // After the pushes, as the host bodies do: a prefill batch
+            // read its whole prefix.
             self.evict_layer_kv(li, cache);
         }
         Some((new_hidden, run))
     }
 
     /// The device half: sync the mirrors, record, submit, read back.
+    #[allow(clippy::too_many_arguments)]
     fn run_vulkan_stack(
         &self,
         rt: &mut Runtime,
@@ -225,27 +260,31 @@ impl Decoder {
         l: usize,
         hidden: &[f32],
         pos: usize,
+        batch: usize,
         kv_caches: &mut [KvCache],
     ) -> Result<StackOut, frink_vulkan::device::VulkanError> {
         let c = &self.config;
         let (n_heads, n_kv, hd) = (c.n_heads, c.n_kv_heads, c.head_dim);
         let (dim, q_dim, kv_dim) = (c.hidden_dim, n_heads * hd, n_kv * hd);
         let ffn_dim = layers[0].gate.rows;
+        // What the batch's first position attends over, and the rows the
+        // mirror must hold once the batch is stored.
         let seq = pos + 1;
+        let need = pos + batch;
 
         // Activations, shared by every layer of the run: the residual
         // stream ping-pongs between `h` and `h_mid`.
-        let h = rt.scratch("h", 0, dim)?;
-        let h_mid = rt.scratch("h_mid", 0, dim)?;
-        let normed = rt.scratch("normed", 0, dim)?;
-        let q = rt.scratch("q", 0, q_dim)?;
-        let qr = rt.scratch("qr", 0, q_dim)?;
-        let attn = rt.scratch("attn", 0, q_dim)?;
-        let proj = rt.scratch("proj", 0, dim)?;
-        let gate = rt.scratch("gate", 0, ffn_dim)?;
-        let up = rt.scratch("up", 0, ffn_dim)?;
-        let act = rt.scratch("act", 0, ffn_dim)?;
-        let scores = rt.scratch("scores", 0, n_heads * seq)?;
+        let h = rt.scratch("h", 0, batch * dim)?;
+        let h_mid = rt.scratch("h_mid", 0, batch * dim)?;
+        let normed = rt.scratch("normed", 0, batch * dim)?;
+        let q = rt.scratch("q", 0, batch * q_dim)?;
+        let qr = rt.scratch("qr", 0, batch * q_dim)?;
+        let attn = rt.scratch("attn", 0, batch * q_dim)?;
+        let proj = rt.scratch("proj", 0, batch * dim)?;
+        let gate = rt.scratch("gate", 0, batch * ffn_dim)?;
+        let up = rt.scratch("up", 0, batch * ffn_dim)?;
+        let act = rt.scratch("act", 0, batch * ffn_dim)?;
+        let scores = rt.scratch("scores", 0, batch * n_heads * (seq + batch - 1))?;
         rt.write_f32(h, 0, hidden)?;
 
         // Per layer: the norms' weights, its RoPE table, its K before
@@ -277,9 +316,9 @@ impl Decoder {
                 }
                 None => None,
             };
-            let k = rt.scratch("k", i, kv_dim)?;
-            let kr = rt.scratch("kr", i, kv_dim)?;
-            let v = rt.scratch("v", i, kv_dim)?;
+            let k = rt.scratch("k", i, batch * kv_dim)?;
+            let kr = rt.scratch("kr", i, batch * kv_dim)?;
+            let v = rt.scratch("v", i, batch * kv_dim)?;
             let cache = &mut kv_caches[li];
             let rows = cache.rows();
             let KvCache {
@@ -288,7 +327,7 @@ impl Decoder {
                 vulkan_attn,
                 ..
             } = cache;
-            let m = VulkanKvMirror::sync(vulkan_attn, rt, hk, hv, rows, kv_dim, seq)?;
+            let m = VulkanKvMirror::sync(vulkan_attn, rt, hk, hv, rows, kv_dim, need)?;
             bound.push(Bound {
                 attn_norm,
                 ffn_norm,
@@ -305,25 +344,25 @@ impl Decoder {
         }
 
         let eps = c.rms_norm_eps;
-        let mut batch = Batch::new();
+        let mut ops = Batch::for_positions(batch);
         for (s, b) in layers.iter().zip(&bound) {
             // --- attention ---
-            batch.rms_norm(b.attn_norm, h, normed, dim, 1, eps);
-            batch.matvec(s.q, (normed, 0), (q, 0));
-            batch.matvec(s.k, (normed, 0), (b.k, 0));
-            batch.matvec(s.v, (normed, 0), (b.v, 0));
+            ops.rms_norm(b.attn_norm, h, normed, dim, 1, eps);
+            ops.matvec(s.q, (normed, 0), (q, 0));
+            ops.matvec(s.k, (normed, 0), (b.k, 0));
+            ops.matvec(s.v, (normed, 0), (b.v, 0));
             let (q_in, k_in) = match b.tab {
                 Some((tab, rot)) => {
-                    batch.rope(tab, q, qr, n_heads, hd, rot, self.rope_is_neox());
-                    batch.rope(tab, b.k, b.kr, n_kv, hd, rot, self.rope_is_neox());
+                    ops.rope(tab, q, qr, n_heads, hd, rot, self.rope_is_neox());
+                    ops.rope(tab, b.k, b.kr, n_kv, hd, rot, self.rope_is_neox());
                     (qr, b.kr)
                 }
                 // An unrotated layer's K is its rotated K.
                 None => (q, b.k),
             };
-            batch.kv_store(k_in, b.cache, kv_dim, b.k_word, b.cache_words);
-            batch.kv_store(b.v, b.cache, kv_dim, b.v_word, b.cache_words);
-            batch.attention(
+            ops.kv_store(k_in, b.cache, kv_dim, b.k_word, b.cache_words);
+            ops.kv_store(b.v, b.cache, kv_dim, b.v_word, b.cache_words);
+            ops.attention(
                 b.cache,
                 b.cache_words,
                 q_in,
@@ -339,24 +378,27 @@ impl Decoder {
                     scale: 1.0 / (hd as f32).sqrt(),
                 },
             );
-            batch.matvec(s.o, (attn, 0), (proj, 0));
-            batch.add(h, proj, h_mid, dim);
+            ops.matvec(s.o, (attn, 0), (proj, 0));
+            ops.add(h, proj, h_mid, dim);
             // --- FFN ---
-            batch.rms_norm(b.ffn_norm, h_mid, normed, dim, 1, eps);
-            batch.matvec(s.gate, (normed, 0), (gate, 0));
-            batch.matvec(s.up, (normed, 0), (up, 0));
-            batch.swiglu(gate, up, act, ffn_dim);
-            batch.matvec(s.down, (act, 0), (proj, 0));
-            batch.add(h_mid, proj, h, dim);
+            ops.rms_norm(b.ffn_norm, h_mid, normed, dim, 1, eps);
+            ops.matvec(s.gate, (normed, 0), (gate, 0));
+            ops.matvec(s.up, (normed, 0), (up, 0));
+            ops.swiglu(gate, up, act, ffn_dim);
+            ops.matvec(s.down, (act, 0), (proj, 0));
+            ops.add(h_mid, proj, h, dim);
         }
-        assert!(batch.len() <= OPS_PER_LAYER * layers.len());
-        rt.submit_batch(&batch)?;
+        assert!(ops.len() <= OPS_PER_LAYER * layers.len());
+        rt.submit_batch(&ops)?;
 
-        let new_hidden = rt.read_f32(h, 0, dim)?;
+        let new_hidden = rt.read_f32(h, 0, batch * dim)?;
         let mut rows = Vec::with_capacity(layers.len());
         for (s, b) in layers.iter().zip(&bound) {
             let k_src = if s.rope.is_some() { b.kr } else { b.k };
-            rows.push((rt.read_f32(k_src, 0, kv_dim)?, rt.read_f32(b.v, 0, kv_dim)?));
+            rows.push((
+                rt.read_f32(k_src, 0, batch * kv_dim)?,
+                rt.read_f32(b.v, 0, batch * kv_dim)?,
+            ));
         }
         Ok((new_hidden, rows))
     }

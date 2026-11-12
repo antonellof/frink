@@ -17,6 +17,21 @@ are the ones worth reading twice.
 
 ### Added
 
+- **A Vulkan prefill stack: the layers of a prompt batch in one
+  submission** (#409, step 6). The decode stack takes a batch of
+  positions: the same ops recorded over the batch
+  (`Batch::for_positions`), each buffer holding a row per position.
+  RoPE and attention read their batch position from the dispatch grid;
+  position `b` attends over the prefix and the batch up to itself. So a
+  prefill of a plain llama-family dense model waits once per 26 layers
+  instead of running norms, RoPE and attention on the host between
+  batched matmuls. A batch of several positions is each position alone,
+  bit for bit, and a prompt prefilled in two batches is the prompt
+  prefilled in one. A batch whose score scratch would pass 256 MiB
+  stays on the host. On Llama-3.2-3B Q4_K_M, `frink parity` is MATCH at
+  a 300-token prompt (first-token KL 2.886e-5, the CPU's 2.875e-5) and
+  over 48 decode steps, and the greedy tokens are the CPU's.
+
 - **Vulkan shaders for the codebook kinds: IQ1_S, IQ1_M, IQ2_XXS,
   IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S** (#409, #405). One unit per
   16-value sub-block, the cut ggml's dequants use. The grids and sign
