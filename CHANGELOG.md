@@ -15,6 +15,19 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Llama 3 tool calls written as bare JSON are tool calls.** Llama
+  3.1/3.2 answer a custom tool with `{"name": …, "parameters": {…}}`
+  and no `<|python_tag|>`. The non-streaming path only parsed text
+  holding a known marker, and the streaming parser released the JSON
+  as text before it could be read, so every such call reached the
+  client as `content` with `finish_reason: "stop"` -- on
+  `/v1/chat/completions`, streamed or not, and on `/v1/responses`. A
+  Llama 3 turn that opens with `{` is now parsed as a call (held to the
+  end of the stream when streaming); one naming no offered tool is
+  returned as the text it was.
+
 ## [0.62.0] - 2026-11-12
 
 ### Added
