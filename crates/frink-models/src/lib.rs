@@ -151,7 +151,7 @@ pub use capability::{
     ArchPath, ArchProfile, ArchScope, DecoderFamily, MemoryKind, QkNormStyle,
 };
 pub use config::{deepseek_v4_pro, glm_5_2, kimi_k3, FfnActivation, ModelConfig, RopeLayout};
-pub use decoder::{Decoder, MultiSeqKv};
+pub use decoder::{Decoder, LaneRows, MultiSeqKv};
 pub use device_budget::{BudgetBackend, DeviceBudget};
 pub use draft_model::{DraftModelSpeculator, DraftWeights, VocabMismatch};
 pub use embedding_model::{is_embedding_arch, EmbedError, EmbeddingModel};

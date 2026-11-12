@@ -120,7 +120,11 @@ Each step is its own PR, CPU first, token parity before any backend work.
 9. **Batcher.** Paged block-tail truncation is done
    (`PagedKvCache::truncate`, `PagedLease::can_roll_back`): the private
    loop speculates on the paged store unless a sliding window recycles
-   its pages. What is left: drafting inside `serving/batch/worker.rs`: one drafter pass per
+   its pages. The batched verify forward is done too:
+   `Decoder::forward_multi_seq_lanes` gives a sequence several rows, at
+   consecutive positions, with layer taps, through the one
+   multi-sequence body. What is left: drafting inside
+   `serving/batch/worker.rs`: one drafter pass per
    lane, one batched verify through `forward_multi_seq_kv`, per-lane accept and
    truncate. Paged KV needs block-tail truncation in
    `frink-core/src/cache/paged.rs` and the radix tree must not publish
