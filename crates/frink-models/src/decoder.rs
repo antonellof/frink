@@ -63,7 +63,7 @@ use crate::norm::NormOp;
 pub(crate) use attn_block::KvStep;
 pub use kv_window::{KvWindowPolicy, KV_WINDOW_ENV};
 pub use layer_taps::{LayerTapError, TappedBatch};
-pub use multi_seq::MultiSeqKv;
+pub use multi_seq::{LaneRows, MultiSeqKv};
 #[cfg(feature = "metal")]
 pub use weights::MoePackedQ4Planes;
 pub use weights::{
