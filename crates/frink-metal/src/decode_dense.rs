@@ -24,7 +24,7 @@ use crate::norm::{encode_add_rms_norm, encode_rms_norm};
 use crate::ple::{PerLayerGateMetal, PleInputMetal};
 use crate::timing::{commit_wait_note, SubmitClock};
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandEncoder, MTLCommandQueue};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue};
 
 /// Optional attention epilogue ops applied between the QKV matvecs and
 /// RoPE, in CPU-path order: bias add (Qwen2-family `qkv_bias`), then
@@ -385,7 +385,8 @@ pub fn launch_decode_dense_stack(
     }
 
     let clock = SubmitClock::start();
-    let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+    let mut cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+    let early = crate::timing::early_commit_layer(layers.len());
     // Gemma-style post-norms ("sandwich"), and Gemma-4's per-layer gate
     // and output scale: these layers take the EAGER residual path below,
     // which is what makes concurrent encode safe here.
@@ -449,6 +450,16 @@ pub fn launch_decode_dense_stack(
     // `sandwich` was computed above (also selects serial encoder).
 
     for (layer_idx, layer) in layers.iter().enumerate() {
+        if early == Some(layer_idx) {
+            // Hand the first layers to the GPU and keep encoding. A new
+            // command buffer on the same queue orders every tracked
+            // buffer against the previous one, so the tracker restarts.
+            encoder.endEncoding();
+            cmd_buf.commit();
+            cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+            encoder = compute_encoder_concurrent(&cmd_buf)?;
+            mrs = MemRanges::new();
+        }
         assert_eq!(layer.attn_norm_w.len(), hidden_dim);
         assert_eq!(layer.ffn_norm_w.len(), hidden_dim);
         assert_eq!(layer.o.rows, hidden_dim);

@@ -4189,10 +4189,11 @@ pub fn launch_moe_decode_stack(
         }
 
         let clock = crate::timing::SubmitClock::start();
-        let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+        let mut cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
         // llama.cpp / dense-stack: one Concurrent encoder for the full graph,
         // barriers only via MemRanges (ggml_mem_ranges).
-        let encoder = compute_encoder_concurrent(&cmd_buf)?;
+        let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
+        let early = crate::timing::early_commit_layer(layers.len());
         let mut mrs = MemRanges::new();
 
         let _embd_w = if let Some(e) = embd {
@@ -4217,6 +4218,13 @@ pub fn launch_moe_decode_stack(
         };
 
         for (layer_idx, (layer, kv)) in layers.iter().zip(kvs.iter()).enumerate() {
+            if early == Some(layer_idx) {
+                encoder.endEncoding();
+                cmd_buf.commit();
+                cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+                encoder = compute_encoder_concurrent(&cmd_buf)?;
+                mrs = MemRanges::new();
+            }
             encode_moe_layer_fused(
                 &encoder,
                 &mut mrs,

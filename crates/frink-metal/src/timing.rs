@@ -323,6 +323,45 @@ pub(crate) fn note_wait(
     waited
 }
 
+/// The layer before which a decode stack commits what it has encoded
+/// and opens a second command buffer, so the GPU runs the first layers
+/// while the CPU encodes the rest. llama.cpp does the same
+/// (`ggml_metal_graph_compute`: the first `max(64, n_nodes / 10)` nodes
+/// are committed before the rest are encoded). Without it a token waits
+/// for the whole stack's encoding (530 dispatches, ~1 ms on gpt-oss)
+/// before the GPU starts.
+///
+/// `None` = one command buffer: under `FRINK_METAL_KERNEL_TIMING` (its
+/// spans belong to one command buffer), with `FRINK_METAL_EARLY_COMMIT=0`,
+/// or for a one-layer stack. `FRINK_METAL_EARLY_COMMIT=N` splits before
+/// layer `N`; unset is the first third of the layers, at least one.
+/// Measured on an M5 Max (tg128): gpt-oss-20b 105 tok/s unsplit, 121-129
+/// at an eighth, 146-153 at a third (llama.cpp 154), worse again past
+/// half; Llama-3.2-1B gains 4-10% anywhere from an eighth to a half.
+pub(crate) fn early_commit_layer(n_layers: usize) -> Option<usize> {
+    if crate::kernel_timing::kernel_timing_enabled() {
+        return None;
+    }
+    static SET: std::sync::OnceLock<Option<Option<usize>>> = std::sync::OnceLock::new();
+    let set = *SET.get_or_init(|| {
+        std::env::var("FRINK_METAL_EARLY_COMMIT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.trim().parse::<usize>().ok().filter(|&n| n > 0))
+    });
+    split_layer(set, n_layers)
+}
+
+/// [`early_commit_layer`] without the environment: `set` is `None`
+/// when the variable is unset, `Some(None)` for `0` or garbage.
+fn split_layer(set: Option<Option<usize>>, n_layers: usize) -> Option<usize> {
+    let at = match set {
+        Some(explicit) => explicit?,
+        None => n_layers.div_ceil(3).max(1),
+    };
+    (at < n_layers).then_some(at)
+}
+
 pub(crate) fn commit_wait_note(
     cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     tag: &'static str,
@@ -355,6 +394,25 @@ pub(crate) fn commit_wait_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_decode_split_falls_a_third_of_the_way_in_unless_told_otherwise() {
+        assert_eq!(split_layer(None, 24), Some(8)); // gpt-oss-20b
+        assert_eq!(split_layer(None, 16), Some(6)); // Llama-3.2-1B
+        assert_eq!(split_layer(None, 2), Some(1));
+        assert_eq!(
+            split_layer(None, 1),
+            None,
+            "one layer has nothing to overlap"
+        );
+        assert_eq!(split_layer(Some(None), 24), None, "0 turns it off");
+        assert_eq!(split_layer(Some(Some(4)), 24), Some(4));
+        assert_eq!(
+            split_layer(Some(Some(24)), 24),
+            None,
+            "past the last layer: no split"
+        );
+    }
     use crate::dispatch::EncodeStats;
 
     fn stats(dispatches: u64, barriers: u64) -> EncodeStats {
