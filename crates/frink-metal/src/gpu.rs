@@ -4256,7 +4256,18 @@ pub(crate) fn mul_mm_sg_variant(
     rows: usize,
     batch: usize,
 ) -> (&'static str, usize) {
-    if crate::tensor_mm::has_tensor() {
+    mul_mm_sg_variant_for(crate::tensor_mm::has_tensor(), fn_name, rows, batch)
+}
+
+/// [`mul_mm_sg_variant`] for a device with (`tensor`) or without the
+/// Metal 4 tensor arm, so both answers are testable on any host.
+fn mul_mm_sg_variant_for(
+    tensor: bool,
+    fn_name: &'static str,
+    rows: usize,
+    batch: usize,
+) -> (&'static str, usize) {
+    if tensor {
         // One body for both pipelines: the tensor store clips the edge
         // tile itself, so there is no staging buffer to size for.
         return (fn_name, crate::tensor_mm::SMEM);
@@ -8810,16 +8821,16 @@ mod tests {
     #[test]
     fn mul_mm_sg_variant_picks_the_small_threadgroup_only_on_exact_tiles() {
         assert_eq!(
-            mul_mm_sg_variant("q4_k_mul_mm_sg", 2048, 512),
+            mul_mm_sg_variant_for(false, "q4_k_mul_mm_sg", 2048, 512),
             ("q4_k_mul_mm_sg_a", MUL_MM_SG_SMEM_ALIGNED)
         );
         assert_eq!(
-            mul_mm_sg_variant("q4_k_mul_mm_sg_f16", 8192, 64),
+            mul_mm_sg_variant_for(false, "q4_k_mul_mm_sg_f16", 8192, 64),
             ("q4_k_mul_mm_sg_f16_a", MUL_MM_SG_SMEM_ALIGNED)
         );
         // Ragged in exactly one dim is still ragged.
         for (rows, batch) in [(2048usize, 513usize), (2050, 512), (70, 33), (0, 0)] {
-            let (name, smem) = mul_mm_sg_variant("q4_k_mul_mm_sg", rows, batch);
+            let (name, smem) = mul_mm_sg_variant_for(false, "q4_k_mul_mm_sg", rows, batch);
             if rows.is_multiple_of(64) && batch.is_multiple_of(32) {
                 continue;
             }
@@ -8828,9 +8839,23 @@ mod tests {
         }
         // A kernel with no `_a` sibling must fall back, not be renamed.
         assert_eq!(
-            mul_mm_sg_variant("q4_k_mul_mm_id", 2048, 512),
+            mul_mm_sg_variant_for(false, "q4_k_mul_mm_id", 2048, 512),
             ("q4_k_mul_mm_id", MUL_MM_SG_SMEM_BC)
         );
+    }
+
+    /// The tensor arm has one body for both pipelines (its store clips
+    /// the edge tile), so it never picks `_a` and always asks for the
+    /// half A tile alone.
+    #[test]
+    fn the_tensor_arm_keeps_the_name_and_asks_for_the_a_tile_only() {
+        for (rows, batch) in [(2048usize, 512usize), (2050, 513), (70, 33)] {
+            assert_eq!(
+                mul_mm_sg_variant_for(true, "q4_k_mul_mm_sg", rows, batch),
+                ("q4_k_mul_mm_sg", crate::tensor_mm::SMEM),
+                "{rows}x{batch}"
+            );
+        }
     }
 
     #[test]

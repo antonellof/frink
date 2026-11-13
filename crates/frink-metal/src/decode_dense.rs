@@ -68,6 +68,18 @@ impl AttnExtras<'_> {
     }
 }
 
+/// Which buffer [`launch_decode_dense_stack`] hands back. Named, not
+/// inferred from the length: a vocabulary as wide as the hidden state
+/// (the synthetic fixtures' 512 and 512) used to download the hidden
+/// state in place of the logits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Download {
+    ArgmaxId,
+    Logits,
+    NormedHidden,
+    Hidden,
+}
+
 /// Per-layer launches + norms for [`launch_decode_dense_stack`].
 pub struct DenseLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
@@ -536,7 +548,7 @@ pub fn launch_decode_dense_stack(
 
     // Final norm / lm_head. Sandwich already applied every FFN residual;
     // non-sandwich still has a deferred last-layer `down` to fold in.
-    let (download_n, norm_resident) = if let Some(fnw) = final_norm_w {
+    let (download_n, download) = if let Some(fnw) = final_norm_w {
         assert_eq!(fnw.len(), hidden_dim);
         let fn_buf = resident_f32_buffer(device, fnw)?;
         if sandwich {
@@ -584,24 +596,24 @@ pub fn launch_decode_dense_stack(
                 mrs.begin_op(&encoder, &[logits.as_ref()], &[argmax_idx_buf]);
                 encode_argmax(&encoder, device, logits, argmax_idx_buf, out_l.rows as u32)?;
                 mrs.end_op(&[logits.as_ref()], &[argmax_idx_buf]);
-                (1, false)
+                (1, Download::ArgmaxId)
             } else {
-                (out_l.rows, false)
+                (out_l.rows, Download::Logits)
             }
         } else {
             // final_norm ran but no lm_head — download normalized hidden
             // and mark x_buf resident for the next apply_gpu.
-            (hidden_dim, true)
+            (hidden_dim, Download::NormedHidden)
         }
     } else if sandwich {
-        (hidden_dim, false)
+        (hidden_dim, Download::Hidden)
     } else {
         spans.span(&cmd_buf, &mut encoder, "residual_add")?;
         // No final_norm: still apply the deferred last-layer FFN residual.
         mrs.begin_op(&encoder, &[h_buf, down_buf], &[h_buf]);
         encode_vec_add(&encoder, device, h_buf, down_buf, hidden_dim as u32)?;
         mrs.end_op(&[h_buf, down_buf], &[h_buf]);
-        (hidden_dim, false)
+        (hidden_dim, Download::Hidden)
     };
 
     encoder.endEncoding();
@@ -612,18 +624,19 @@ pub fn launch_decode_dense_stack(
         kv.seq_len = pos + 1;
     }
 
-    if argmax_only && download_n == 1 && output.is_some() {
-        let ptr = argmax_idx_buf.contents();
-        let idx = unsafe { *(ptr.as_ptr() as *const u32) as usize };
-        return Ok(vec![idx as f32]);
-    }
-
-    let src: &ProtocolObject<dyn MTLBuffer> = if norm_resident {
-        x_buf
-    } else if download_n == hidden_dim {
-        h_buf
-    } else {
-        logits_buf.expect("logits buffer when downloading logits")
+    let norm_resident = download == Download::NormedHidden;
+    let src: &ProtocolObject<dyn MTLBuffer> = match download {
+        Download::ArgmaxId => {
+            let ptr = argmax_idx_buf.contents();
+            // SAFETY: `argmax_idx` is a StorageModeShared buffer of at least
+            // one u32, written by the argmax dispatch of the command buffer
+            // waited on above.
+            let idx = unsafe { *(ptr.as_ptr() as *const u32) as usize };
+            return Ok(vec![idx as f32]);
+        }
+        Download::NormedHidden => x_buf,
+        Download::Hidden => h_buf,
+        Download::Logits => logits_buf.expect("logits buffer when downloading logits"),
     };
     let out_ptr = src.contents();
     // SAFETY: `src` is a StorageModeShared buffer allocated for at least
