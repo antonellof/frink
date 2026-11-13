@@ -570,13 +570,34 @@ impl KvCache {
     /// (zero-fill). Used when Metal owns the KV plane and the host cache
     /// only needs matching `seq_len` for sync checks.
     pub fn advance_len(&mut self, n: usize) -> Result<(), KvPoolExhausted> {
-        if n == 0 {
-            return Ok(());
-        }
-        let k_zeros = vec![0f32; self.k_width()];
-        let v_zeros = vec![0f32; self.v_width()];
-        for _ in 0..n {
-            self.push(&k_zeros, &v_zeros)?;
+        // `n` zero rows in bulk, with `push`'s pool accounting: a
+        // block is acquired each time the rows reach the capacity, and
+        // a refusal leaves every row that fitted pushed, as `n` calls
+        // to `push` would. Row by row, the f16 rounding of each zero
+        // row cost a Metal prefill of 512 tokens about 4 ms.
+        let (k_width, v_width) = (self.k_width(), self.v_width());
+        // Rows are counted, not derived from `k.len()`: a cache with no
+        // K width (a recurrent-only layer) still advances its positions.
+        let mut left = n;
+        while left > 0 {
+            let mut take = left;
+            if let Some(state) = &mut self.pool_state {
+                let capacity_positions = self.k.capacity() / k_width;
+                let rows = self.k.len() / k_width;
+                if rows == capacity_positions {
+                    if !state.pool.lock().unwrap().try_acquire(1) {
+                        return Err(KvPoolExhausted);
+                    }
+                    state.blocks_held += 1;
+                    self.k.reserve_exact(state.block_size * k_width);
+                    self.v.reserve_exact(state.block_size * v_width);
+                }
+                take = take.min(self.k.capacity() / k_width - rows);
+            }
+            self.k.extend_zeros(take * k_width);
+            self.v.extend_zeros(take * v_width);
+            self.positions += take;
+            left -= take;
         }
         Ok(())
     }
