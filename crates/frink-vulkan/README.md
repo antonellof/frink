@@ -14,9 +14,8 @@ only with `--device vulkan` (or `FRINK_VULKAN=1`). The device is
 llama.cpp's `Vulkan0`: the first discrete or integrated GPU, or the
 first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).
 
-It began as a GO/NO-GO beachhead; the verdict, its costs and what it did
-not establish are in
-[`docs/plans/archive/vulkan-beachhead-verdict.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/vulkan-beachhead-verdict.md).
+The beachhead verdict is in
+[`vulkan-beachhead-verdict.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/vulkan-beachhead-verdict.md).
 
 ```bash
 cargo test -p frink-vulkan                      # SPIR-V half, no GPU needed
@@ -25,52 +24,32 @@ cargo test -p frink-vulkan --features vulkan    # runs every shader on a real de
 FRINK_REQUIRE_VULKAN=1 cargo test -p frink-vulkan --features vulkan  # a skip is a failure
 ```
 
-The device tests are not `#[ignore]`d: they skip loudly when there is no
-device, so they are free on a driverless machine and automatic
-everywhere else. With `FRINK_REQUIRE_VULKAN=1`, as CI's lavapipe job
-sets, a missing device or a missing `spirv-val` fails the test instead.
+Device tests are not `#[ignore]`d: they skip loudly without a device.
+With `FRINK_REQUIRE_VULKAN=1` (CI's lavapipe job), a missing device or
+`spirv-val` fails instead.
 
 ## Why a separate crate
 
-`CLAUDE.md` says "no new crate for something one crate uses", and
-`frink-core` is this crate's one caller (behind its optional `vulkan`
-feature, in `weight_matrix/gpu_backend.rs`),
-so the rule deserves an answer rather than a precedent.
-
-- `frink-metal` and `frink-cuda` are both separate crates for the same
-  reason: the backend's third-party dependency must be absent from the
-  default build, and the backend's kernels must not enlarge the crate
-  that dispatches to them. `ash` is optional here exactly as `cudarc` is
-  there.
-- The beachhead must not touch `frink-core`. `weight_matrix.rs` is the
-  file `backend-seam-refactor` has to rewrite, and adding a third
-  backend to it *before* that refactor is the copy-a-code-path-to-vary-it
-  mistake `CLAUDE.md` names by name.
-- Gates stay cheap. `cargo test -p frink-vulkan` is under a second; the
-  same tests inside `frink-core` would ride behind that crate's whole
-  suite.
-
-If the verdict had been NO-GO, the honest disposition would be to delete
-this crate rather than leave it as dead code. It is GO, and the crate is
-the evidence, so it stays. It is published to crates.io because
-`frink-core` depends on it: Cargo requires every dependency of a
-published crate to be on the registry, optional ones included.
+As with `frink-metal` and `frink-cuda`: the backend's dependency (`ash`)
+stays out of the default build, its kernels do not enlarge
+`frink-core`, and `cargo test -p frink-vulkan` stays under a second.
+`frink-core` is its one caller (optional `vulkan` feature,
+`weight_matrix/gpu_backend.rs`), which is why it is published:
+Cargo requires every dependency of a published crate on the registry.
 
 ## Getting a Vulkan device on macOS
 
-There is no Vulkan on a stock Mac. Three bottled Homebrew formulae are
-enough, and after them the loader finds the ICD with no environment
+No Vulkan ships on a Mac; these formulae are enough, with no environment
 variable:
 
 ```bash
 brew install molten-vk vulkan-loader glslang spirv-tools
 ```
 
-`glslang` rebuilds the SPIR-V (`shaders/build.sh`), and a test checks
-the committed modules against it when its version matches
-`spv/GENERATOR`. `spirv-tools` supplies `spirv-val`, which the shader
-tests use as an outside authority on whether a module is legal SPIR-V.
-When either is absent the test says so and passes.
+`glslang` rebuilds the SPIR-V (`shaders/build.sh`); a test checks the
+committed modules against it when its version matches `spv/GENERATOR`.
+`spirv-val` (from `spirv-tools`) validates every module. When either is
+absent the test says so and passes.
 
 If `libvulkan` is installed somewhere the dynamic linker does not look,
 set `FRINK_VULKAN_LOADER` to its full path.

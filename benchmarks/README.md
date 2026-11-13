@@ -1,38 +1,22 @@
 # Benchmarks
 
-The published table is **[`RESULTS.md`](RESULTS.md)**. It is generated
-and holds nothing else, so never edit it by hand.
+The published table is **[`RESULTS.md`](RESULTS.md)**, generated from
+receipts; never edit it by hand. Measurements without a receipt and
+before/after studies are in **[`HISTORY.md`](HISTORY.md)**.
 
-Everything a generator cannot produce (measurements taken without a
-receipt, before/after studies against frink itself, and the sections
-that predate the code they describe) is in
-**[`HISTORY.md`](HISTORY.md)**.
-
-Every timed run writes one small JSON file of raw numbers into
-[`receipts/engine/`](receipts/engine/) (kernel) or
-[`receipts/serving/`](receipts/serving/) (HTTP), named
-`{id}_{backend}.json` or `{id}_{backend}_{workload}_{version}.json`.
-Engine receipts are checked in and `RESULTS.md` is rendered from them.
-Serving receipts are checked in by hand. The rest of this repo calls
-them receipts.
+Every timed run writes a JSON receipt of raw numbers to
+[`receipts/engine/`](receipts/engine/) (kernel, rendered into
+`RESULTS.md`) or [`receipts/serving/`](receipts/serving/) (HTTP,
+checked in by hand), named `{id}_{backend}.json` or
+`{id}_{backend}_{workload}_{version}.json`.
 
 The setup follows llama.cpp's [`llama-bench`](https://github.com/ggerganov/llama.cpp/tree/master/tools/llama-bench):
-a native CLI, the `pp512` and `tg128` workloads, compared against
-`llama-bench` on the same GGUF. No HTTP, no chat template, no tokenizer
-and no sampler in the loop.
-
-| | |
-|---|---|
-| Measures | kernels alone |
-| Driver | `frink bench` (Rust) |
-| Compared against | `llama-bench` |
-| Raw numbers | [`receipts/engine/`](receipts/engine/) |
-| Workload | `pp512` / `tg128`, synthetic tokens |
+`frink bench` runs `pp512` and `tg128` on synthetic tokens, compared
+against `llama-bench` on the same GGUF, with no HTTP, chat template,
+tokenizer or sampler in the loop. The suite is [`suite.json`](suite.json).
 
 Host B: Apple M2 Pro, 6 performance and 4 efficiency cores, 32 GiB
 unified memory.
-
-Suite definition: [`suite.json`](suite.json).
 
 ## Run
 
@@ -54,41 +38,30 @@ cargo build -p frink-cli --release --features metal
 ./target/release/frink bench --render
 ```
 
-`--suite` reads [`suite.json`](suite.json) and runs each entry in a
-**fresh child process**. That is required rather than tidy. Backend
-selection reads process-global environment, and the rayon pool is built
-once, so benchmarking several backends inside one process would measure
-the first one's configuration for all of them and say nothing about
-it.
+`--suite` runs each entry in a fresh child process, because backend
+selection reads process-global environment and the rayon pool is built
+once.
 
-`--fit-host` skips an entry two ways: when its `estimated_ram_gb`
-exceeds ~75% of physical RAM (macOS only, since that is where the total
-is read), and when the host does not have `estimated_ram_gb + 2 GiB`
-free right now. `--skip-missing` skips GGUFs absent from `models/`.
+`--fit-host` skips an entry when its `estimated_ram_gb` exceeds ~75% of
+physical RAM (macOS only) or the host lacks `estimated_ram_gb + 2 GiB`
+free. `--skip-missing` skips GGUFs absent from `models/`. A failed run
+keeps the previous receipt. `--render` rewrites the engine table between
+HTML markers and leaves the Open notes alone.
 
-Each run drops its numbers in [`receipts/engine/`](receipts/engine/)
-as `{id}_{backend}.json`. A run that fails leaves the previous receipt
-in place instead of overwriting it. `--render` rewrites the engine table
-in `RESULTS.md` between HTML markers and leaves the Open notes alone.
-
-A gap is a ratio against one llama.cpp build, so each engine receipt
-(schema 3) names the build behind its `llama_tps` in a `llama_cpp`
-field, read from `llama-bench -o json`: `build_commit`, `build_number`,
-`backends`, `cpu_info`, `gpu_info` and the command that ran. A receipt
-with a llama.cpp number and no reported commit or backends is refused
-at write time. `--render` groups rows by machine and llama.cpp build,
-and two builds never share a table or a summary row. Schema-2 receipts
-predate the field and render with the llama.cpp build marked
-**unknown**.
+Each engine receipt (schema 3) names the llama.cpp build behind its
+`llama_tps` in a `llama_cpp` field from `llama-bench -o json`
+(`build_commit`, `build_number`, `backends`, `cpu_info`, `gpu_info`,
+the command). A receipt with a llama.cpp number and no commit or
+backends is refused at write time. Rows are grouped by machine and
+llama.cpp build, and two builds never share a table. Schema-2 receipts
+render with the build marked **unknown**.
 
 ## Batched throughput (`frink batched-bench`)
 
-`frink bench` is one sequence. `frink batched-bench` is
-`llama-batched-bench`: throughput against the number of parallel
-sequences, through the continuous batcher's engine seams
-(`forward_batch_last_host_kv` per prompt, `forward_multi_seq` per
-decode step) with no HTTP. Same ten columns as upstream, so a frink
-table and a llama.cpp table paste side by side.
+`frink batched-bench` is `llama-batched-bench`: throughput against the
+number of parallel sequences through the continuous batcher's engine
+seams (`forward_batch_last_host_kv`, `forward_multi_seq`), no HTTP, with
+upstream's ten columns.
 
 ```bash
 ./target/release/frink batched-bench -m models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf \
@@ -97,80 +70,34 @@ llama-batched-bench -m models/tinyllama-1.1b-chat-v1.0.Q8_0.gguf \
   -c 2048 -npp 128,512 -ntg 128 -npl 1,2,4,8
 ```
 
-It runs under the same contract as `frink bench`: the quiet-host,
-thermal and free-memory bars below (the memory bar counts the largest
-row's KV on top of the weights), one discarded warmup per row that
-must agree with the timed pass on both input and output, and a receipt
-(`--receipt`) that is refused when its `--backend-label` is not the
-backend that ran. `-b`, `-kvu`, `-fa` and `-tb` are refused by name;
-`docs/CLI.md` has the flag table. No batched rows are published in
-`RESULTS.md` yet.
+Same contract as `frink bench`: the host checks below (memory counts the
+largest row's KV), one discarded warmup per row that must match the
+timed pass, and a `--receipt` refused when `--backend-label` is not the
+backend that ran. `-b`, `-kvu`, `-fa` and `-tb` are refused by name
+([`docs/CLI.md`](../docs/CLI.md)). No batched rows are published yet.
 
 ## When a run stops instead of printing a number
 
-Four checks run before the timer starts. Each one exists because the
-number you would otherwise get looks real and measures the wrong thing.
-All four are turned off together by `--max-load 0`, which is the switch
-for "measure anyway, and do not publish this".
+Four checks run before the timer starts; `--max-load 0` turns all of
+them off, for numbers nobody publishes.
 
-**The host is busy.** The 1-minute load average has to be *below*
-`--max-load` (default `2.0`, raw, not divided by core count). Known-good
-rows read 25-45% low under load. Message:
+| Check | Rule |
+|---|---|
+| Host busy | The 1-minute load average must be below `--max-load` (default `2.0`, raw). Rows read 25-45% low under load |
+| Thermal | On macOS, thermal state `serious` or `critical`, or an Intel `CPU_Speed_Limit` under 100%, stops the run; `fair` is recorded. Nothing is read on Linux or Windows. Heating mid-run prints a warning |
+| Free memory | GGUF size plus 2 GiB must be free (`vm_stat` free + inactive on macOS, `MemAvailable` on Linux). In `--suite` the entry is skipped and its old receipt stands |
+| Previous entry | `--suite` waits silently, polling every 5 s for up to 3 minutes, for the load average to drop; past that it skips the entry |
 
-```
-host 1-minute load average is 3.10, above the 2.00 bar: a timed run
-here is noise, not a measurement …
-```
+The load average cannot see one pegged core (on 2026-09-04 `suggestd`
+held ~97% of one core for a day under the bar). Before a run that
+matters, check `ps -eo pcpu,comm | sort -rn | head` and treat any
+process above ~90% as disqualifying.
 
-**A load average cannot see one busy core.** The guard above is
-necessary and not sufficient. Every CPU measurement taken on 2026-09-04
-ran while `suggestd` held ~97% of one core, for over a day, and the
-1-minute load stayed under the 2.0 bar the whole time: one pegged core
-on a six-core box does not move the average enough to trip it. The
-comparison being run that day was thread-scheduling sensitive, which is
-exactly the kind a stolen core distorts unevenly. So before a run that
-matters, check `ps -eo pcpu,comm | sort -rn | head` as well, and treat
-a single process above ~90% as disqualifying even when the guard passes.
-
-**The host is thermally limited.** On macOS, `NSProcessInfo`'s thermal
-state at `serious` or `critical`, or an Intel Mac reporting a
-`CPU_Speed_Limit` under 100%, stops the run: the OS is cutting sustained
-performance, so the timing describes the cooling system. `fair` is
-recorded and does not stop anything, or a laptop would never run one.
-Nothing is read on Linux or Windows, because a temperature in
-`/sys/class/thermal` is not a pressure level and inventing a mapping
-would manufacture exactly the false precision this check exists to
-avoid. A host that starts cool and heats up mid-run finishes and prints
-a warning that the later repetitions did not run under the same
-conditions as the first.
-
-**The model would not fit in free memory.** The GGUF's size on disk is
-the floor on its footprint, so a single-model run needs that plus 2 GiB
-free (`vm_stat` free + inactive pages on macOS, `MemAvailable` on
-Linux). Without this, a model that pages to disk still finishes and
-still reports a real-looking number for work the disk did. In `--suite`
-the same arithmetic skips the entry rather than stopping the whole run,
-which keeps a previous receipt that is stale and says so instead of
-replacing it with a paged one that does not.
-
-**The previous entry is still in the load average.** `--suite` waits
-between entries for the 1-minute average to fall back below the bar,
-polling every 5 seconds for up to 3 minutes. It prints nothing while it
-waits, so a quiet pause between two entry headers is this and not a
-hang. Without the wait the suite locked itself out with its own
-benchmark: a 21-entry run wrote 2 receipts. Past 3 minutes it skips that
-entry and moves on, the same way a missing GGUF is skipped, and the
-entry's previous receipt stands.
-
-A separate set of checks has no override at all, because failing one
-means the two repetitions were not the same experiment: exactly one
-discarded warmup, caches cold before the prompt, identical workload
-digest across repetitions, identical greedy output across repetitions,
-and no `inf`, `NaN` or non-positive rate. One of them counts KV
-positions after a decode run to catch skipped steps, and it runs only
-where the host cache is the record. Under GPU offload the device holds
-the KV and the host struct stays empty, so the receipt records that the
-check did not run rather than that it passed.
+Checks with no override: exactly one discarded warmup, caches cold
+before the prompt, identical workload digest and greedy output across
+repetitions, and no `inf`, `NaN` or non-positive rate. The KV position
+count that catches skipped steps runs only where the host cache is the
+record; under GPU offload the receipt says it did not run.
 
 ### Adding a model
 
@@ -196,26 +123,17 @@ Put the GGUF under `models/` (path is repo-relative), then:
 
 ### Thread counts are not forced, on purpose
 
-Neither engine is pinned to a thread count. That is a correction, not
-an oversight. llama.cpp defaults to `hw.perflevel0.physicalcpu` (6 on
-this host) and degrades sharply above it, because it splits each graph
-node into equal static slices and the 4 efficiency cores then stall
-every barrier. On Host B, `llama-bench` on SmolLM2-135M Q8_0 measures
-346 tok/s at `-t 4` and 176 at `-t 10`.
-
-This suite used to force `-t 10` on both engines, which handicapped
-llama.cpp by 2–4× and flattered frink. **CPU comparisons taken before
-that fix are not usable.** Letting each engine choose its own default is
-the comparison that means something.
+llama.cpp defaults to `hw.perflevel0.physicalcpu` (6 on Host B) and
+degrades above it: `llama-bench` on SmolLM2-135M Q8_0 measures 346
+tok/s at `-t 4` and 176 at `-t 10`. This suite once forced `-t 10` on
+both, handicapping llama.cpp 2-4x; **CPU comparisons taken before that
+fix are not usable.**
 
 ### Run-to-run variance is ±20%
 
-Sequential runs of the *same* binary spread ±20% on this host.
-SmolLM2 `pp512` measured 205, 284 and 306 on three consecutive runs.
-One before/after pair will not resolve a change smaller than that.
-
-For anything under ~20%, **interleave the two binaries** round by round
-in one session and count rounds won, instead of comparing two batches:
+The same binary spreads ±20% on Host B (SmolLM2 `pp512`: 205, 284,
+306). For a change under ~20%, interleave the two binaries in one
+session and count rounds won:
 
 ```bash
 for round in 1 2 3 4; do
@@ -263,20 +181,18 @@ cargo build -p frink-cli --release --features cuda
 ./target/release/frink bench --suite --fit-host --skip-missing --backend cuda
 ```
 
-Record the GPU and driver whenever you quote a CUDA number. CUDA rows
-come from rented hosts; their receipts are the `*_cuda__*.json` files
-under [`receipts/engine/`](receipts/engine/), and `RESULTS.md` renders
-them beside the Metal and CPU rows. The RTX 3090 and RTX 3060 rows
-predate the resident CUDA stack and are marked stale.
+Record the GPU and driver with any CUDA number. CUDA receipts are the
+`*_cuda__*.json` files under [`receipts/engine/`](receipts/engine/); the
+RTX 3090 and RTX 3060 rows predate the resident stack and are marked
+stale.
 
-The current CUDA rows ran on 2026-11-09 on an NVIDIA L40S (48 GB, driver
-580, CUDA 13.0) rented through Hugging Face Jobs, 8 vCPU of an AMD EPYC
-7R13, against llama.cpp at the pin built with CUDA for `sm_89`. Before
-each timed run the job checked frink's CUDA output against its CPU
-output (`frink verify`, 24 greedy tokens) and against llama.cpp
-(`frink parity`): every model matched, gpt-oss-20b at the DRIFT its CPU
-path shows too. [`tools/hf_jobs/cuda_bench.sh`](../tools/hf_jobs/cuda_bench.sh)
-is the whole job, rerunnable with your own token:
+The current rows ran on 2026-11-09 on a rented NVIDIA L40S (48 GB,
+driver 580, CUDA 13.0, 8 vCPU of an AMD EPYC 7R13, via Hugging Face
+Jobs) against llama.cpp at the pin built for `sm_89`. Each timed run was
+preceded by `frink verify` (24 greedy tokens) and `frink parity`; every
+model matched, gpt-oss-20b at the DRIFT its CPU path also shows.
+[`tools/hf_jobs/cuda_bench.sh`](../tools/hf_jobs/cuda_bench.sh) is the
+whole job:
 
 ```bash
 hf jobs run --flavor l40sx1 --timeout 3h --secrets HF_TOKEN \
@@ -286,18 +202,10 @@ hf jobs run --flavor l40sx1 --timeout 3h --secrets HF_TOKEN \
 
 ## Serving (HTTP)
 
-Engine benches measure kernels alone. Serving benches measure a running
-`frink-server` over the OpenAI-compatible HTTP API: chat template,
-tokenizer, sampler, SSE streaming, and (on Metal by default) continuous
-batching.
-
-| | |
-|---|---|
-| Measures | end-to-end HTTP latency and throughput |
-| Driver | `frink serve-bench` |
-| Compared against | nothing yet: no llama.cpp HTTP twin in-tree |
-| Raw numbers | [`receipts/serving/`](receipts/serving/) |
-| Workload | streaming chat/completions, concurrency sweeps |
+`frink serve-bench` measures a running server end to end over HTTP
+(chat template, tokenizer, sampler, SSE), with receipts in
+[`receipts/serving/`](receipts/serving/). There is no llama.cpp HTTP
+twin in-tree to compare against yet.
 
 ```bash
 # install script binary (Metal build on macOS)
@@ -307,18 +215,16 @@ frink serve -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -dev metal -ngl all &
 ./target/release/frink serve-bench --concurrency 16 --json
 ```
 
-Rules for meaningful numbers: see [`docs/CLI.md`](../docs/CLI.md)
-(`serve-bench` section). Temperature 0, exact output length, and
-positional TTFT/TPOT split are enforced in `frink-cli`'s `bench_client`
-module, which `serve-bench` drives.
+Temperature 0, exact output length and the positional TTFT/TPOT split
+are enforced by `bench_client`; the rules are in
+[`docs/CLI.md`](../docs/CLI.md).
 
 ### Reproducing a concurrency sweep
 
-The 0.15.3 continuous-batching receipts and how they were taken are in
-[`HISTORY.md`](HISTORY.md#metal-continuous-batching-0153). Current
-serving numbers are in
-[`RESULTS.md`](RESULTS.md#serving-features-measured). To run the same
-shapes with the in-repo client, start the server as above and run:
+Current serving numbers are in
+[`RESULTS.md`](RESULTS.md#serving-features-measured); the 0.15.3
+receipts are in [`HISTORY.md`](HISTORY.md#metal-continuous-batching-0153).
+The same shapes:
 
 ```bash
 # parallel stream burst, 64 output tokens, two requests per client

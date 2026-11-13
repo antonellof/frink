@@ -4,10 +4,8 @@ Facade crate for [Frink](https://github.com/antonellof/frink), a
 pure-Rust GGUF / MoE inference engine: mmap loaders, quantized CPU +
 Apple Metal + CUDA kernels, and an OpenAI-compatible server.
 
-It contains no logic. It re-exports the workspace under one name, so a
-dependent writes one line instead of six, and so the project is
-findable on crates.io, since the name `frink` belongs to an unrelated
-crate.
+It contains no logic: it re-exports the workspace under one name (the
+`frink` crate on crates.io is unrelated).
 
 ```toml
 [dependencies]
@@ -27,9 +25,8 @@ cargo install frink-cli      # installs the `frink` binary
 cargo install frink-server   # OpenAI-compatible HTTP server
 ```
 
-They are not shipped from this crate on purpose: two crates installing
-a binary called `frink` would fight over the same path in
-`~/.cargo/bin`.
+Not from this crate, so two crates never install a `frink` binary to
+the same path.
 
 ## Features
 
@@ -39,17 +36,10 @@ a binary called `frink` would fight over the same path in
 | `cuda` | CUDA/NVRTC kernels. Builds without a CUDA toolkit; the driver and NVRTC libraries are loaded at run time. |
 | `api` | Re-export `frink-api` (route constants + wire DTOs). |
 
-Neither GPU feature is on by default. `metal` does not build off Apple
-Silicon. `cuda` compiles anywhere, because `cudarc` opens the driver
-and NVRTC with `dlopen`, but it only runs on a machine with an NVIDIA
-GPU and driver.
-
-CUDA timings against llama.cpp are published for an RTX 3090 and an
-RTX 3060 in
-[`benchmarks/RESULTS.md`](https://github.com/antonellof/frink/blob/main/benchmarks/RESULTS.md),
-measured on rented hosts. See
-[`docs/FEATURES.md`](https://github.com/antonellof/frink/blob/main/docs/FEATURES.md)
-for what the CUDA backend covers.
+Neither GPU feature is on by default. `cuda` compiles anywhere
+(`cudarc` opens the driver with `dlopen`) but runs only with an NVIDIA
+GPU and driver. What each backend covers is in
+[`docs/FEATURES.md`](https://github.com/antonellof/frink/blob/main/docs/FEATURES.md).
 
 ## The rest of the workspace
 
@@ -64,17 +54,11 @@ for what the CUDA backend covers.
 | [`frink-api`](https://crates.io/crates/frink-api) | Route constants + wire DTOs |
 | [`frink-metal`](https://crates.io/crates/frink-metal) | Apple Metal kernels |
 | [`frink-cuda`](https://crates.io/crates/frink-cuda) | CUDA/NVRTC kernels |
-| [`frink-vulkan`](https://crates.io/crates/frink-vulkan) | Early Vulkan backend: one Q8_0 compute shader, end to end |
+| [`frink-vulkan`](https://crates.io/crates/frink-vulkan) | Early, opt-in Vulkan backend |
 
 The serving policy (prefix cache, scheduler, output parsers) lives in
-`frink-server`'s `policy` module. It was a crate of its own,
-`frink-edge`, which has been dissolved into `frink-core` and
-`frink-server`.
-
-Speed claims live in
-[`benchmarks/RESULTS.md`](https://github.com/antonellof/frink/blob/main/benchmarks/RESULTS.md),
-measured against llama.cpp on the same host and the same GGUF. That
-table is generated from the raw timing files each run writes, and it
-says so wherever nothing has been measured.
+`frink-server`'s `policy` module. Speed against llama.cpp, same host and
+GGUF, is in
+[`benchmarks/RESULTS.md`](https://github.com/antonellof/frink/blob/main/benchmarks/RESULTS.md).
 
 Apache-2.0.
