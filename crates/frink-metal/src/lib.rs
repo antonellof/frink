@@ -126,6 +126,9 @@ pub mod greedy_fold;
 mod dispatch;
 
 #[cfg(feature = "metal")]
+mod tensor_mm;
+
+#[cfg(feature = "metal")]
 mod mem_ranges;
 
 #[cfg(feature = "metal")]

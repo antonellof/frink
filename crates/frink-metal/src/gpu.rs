@@ -2321,7 +2321,9 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 &crate::gen_kinds::gemm_entries_msl(),
                 1,
             )
-            .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1);
+            .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1)
+            .replacen("// @FRINK_TENSOR_IMPL@", crate::tensor_mm::TENSOR_IMPL_MSL, 1);
+        let src = crate::tensor_mm::gemm_prelude() + &src;
         Box::leak(src.into_boxed_str())
     });
 
@@ -2559,6 +2561,7 @@ struct Q6KDequant {
     }
 };
 
+#ifndef FRINK_METAL_HAS_TENSOR
 template<typename DQ, bool BC_OUT>
 static inline void mul_mm_sg_impl(
     device const uchar* src0,
@@ -2870,6 +2873,9 @@ static inline void mul_mm_sg_impl_f16(
         }
     }
 }
+
+#endif // FRINK_METAL_HAS_TENSOR
+// @FRINK_TENSOR_IMPL@
 
 
 // llama `kernel_mul_mm_id`: simdgroup GEMM with indexed src1 rows and
@@ -4245,6 +4251,11 @@ pub(crate) fn mul_mm_sg_variant(
     rows: usize,
     batch: usize,
 ) -> (&'static str, usize) {
+    if crate::tensor_mm::has_tensor() {
+        // One body for both pipelines: the tensor store clips the edge
+        // tile itself, so there is no staging buffer to size for.
+        return (fn_name, crate::tensor_mm::SMEM);
+    }
     if rows.is_multiple_of(64) && batch.is_multiple_of(32) {
         if let Some(a) = mul_mm_sg_aligned_fn(fn_name) {
             return (a, MUL_MM_SG_SMEM_ALIGNED);
@@ -4300,7 +4311,7 @@ pub(crate) fn encode_mul_mm_sg_f16(
         dispatch_counted(
             enc,
             MTLSize {
-                width: batch_size.div_ceil(32),
+                width: batch_size.div_ceil(crate::tensor_mm::mm_tile().0),
                 height: l.rows.div_ceil(64),
                 depth: 1,
             },
@@ -4375,7 +4386,7 @@ pub(crate) fn encode_mul_mm_sg_offset_ex(
         dispatch_counted(
             enc,
             MTLSize {
-                width: batch_size.div_ceil(32),
+                width: batch_size.div_ceil(crate::tensor_mm::mm_tile().0),
                 height: l.rows.div_ceil(64),
                 depth: 1,
             },
@@ -4601,7 +4612,7 @@ fn launch_k_quant_mul_mm_sg(
         enc.setThreadgroupMemoryLength_atIndex(smem, 0);
 
         let grid = MTLSize {
-            width: batch_size.div_ceil(32),
+            width: batch_size.div_ceil(crate::tensor_mm::mm_tile().0),
             height: rows.div_ceil(64),
             depth: 1,
         };
@@ -5012,7 +5023,10 @@ pub(crate) fn ensure_pipeline(
         } else {
             let src = NSString::from_str(kernel_src);
             let library = device
-                .newLibraryWithSource_options_error(&src, None)
+                .newLibraryWithSource_options_error(
+                    &src,
+                    crate::tensor_mm::compile_options(kernel_src).as_deref(),
+                )
                 .map_err(|e| MetalError::CompileFailed(e.to_string()))?;
             let func_name = NSString::from_str(fn_name);
             let function = library
