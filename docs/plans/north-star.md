@@ -133,6 +133,13 @@ without a rental.
     the replay is measured.
 15. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
     RDNA and CDNA, the Ryzen AI NPU spike (#494, [`amd.md`](amd.md)).
+    Vulkan has run only on MoltenVK and lavapipe. Queued for a real
+    driver (RADV, AMDVLK, or an Intel iGPU if no AMD rental exists):
+    `cargo test -p frink-vulkan --features vulkan` and
+    `FRINK_VULKAN=1 cargo test -p frink-core --features vulkan vulkan -- --test-threads 1`,
+    then any tok/s figure and the default flip, then zero-copy weights
+    (`VK_EXT_external_memory_host`) and subgroup and cooperative-matrix
+    tuning.
 
 ### F. Same commands, same API
 
