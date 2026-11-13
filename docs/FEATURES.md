@@ -49,8 +49,10 @@ Limits that affect model choice:
   stack runs gpt-oss.
 - Gemma-4's dedicated engine has no batched prefill and no resident
   Metal stack; on Metal it is likewise per projection (#626).
-- Some architectures decode differently on Metal than on the CPU
-  (`KNOWN_METAL_DIVERGENCES` in `tests/decode_step_graphs.rs`, #630).
+- The Metal decode agrees with the CPU within rounding on every graph
+  fixture (`tests/decode_step_graphs.rs`). `hrm_text` is
+  listed in `KNOWN_METAL_DIVERGENCES`: it amplifies the half-staged
+  GEMM's rounding as much as an f16 KV does on the CPU alone.
 - A recurrent model gets no prefix-cache reuse, since its state cannot
   be truncated mid-sequence. It can be a speculation target (state
   checkpointed before each verify, replayed after a rejection) on the
