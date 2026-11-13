@@ -235,7 +235,7 @@ that is not part of this repository. Receipts:
 0.15.2 measured similar aggregate throughput at concurrency 8 but returned
 garbled text under continuous batching on Metal until the 0.15.3 host-K/V
 prefill fix. See
-[`docs/plans/archive/metal-parallel-concurrency.md`](../docs/plans/archive/metal-parallel-concurrency.md).
+[`docs/plans/archive/metal-parallel-concurrency.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/metal-parallel-concurrency.md).
 The in-repo `frink serve-bench` sends different prompts from that
 harness, so expect the shape of the results to match rather than the
 exact figures.

@@ -16,7 +16,7 @@ first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).
 
 It began as a GO/NO-GO beachhead; the verdict, its costs and what it did
 not establish are in
-[`docs/plans/archive/vulkan-beachhead-verdict.md`](../../docs/plans/archive/vulkan-beachhead-verdict.md).
+[`docs/plans/archive/vulkan-beachhead-verdict.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/vulkan-beachhead-verdict.md).
 
 ```bash
 cargo test -p frink-vulkan                      # SPIR-V half, no GPU needed

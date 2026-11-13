@@ -2,67 +2,40 @@
 
 Every file in this directory is listed here once.
 
-## The goal
+## The roadmap
 
 - **[`north-star.md`](north-star.md)** is the goal, where the project
-  stands against it, and the only ranking of the work. Open items are
-  GitHub issues.
+  stands against it, and the only ranking of the work. Each item is a
+  GitHub issue.
 
 Decisions live in [`../adr/`](../adr/README.md). A plan here is the
 design of one item in flight. When it lands, its lasting decisions
-become ADRs and the plan moves to `archive/`
+become ADRs and the plan is deleted; git history is the archive
 ([ADR 0007](../adr/0007-issues-plans-adrs.md)).
 
-## Design docs
+## Design docs, one per item in flight
 
 - **[`arch-registry-migration.md`](arch-registry-migration.md)**, one
   file per architecture (#403, ADR 0003): the flow of architecture
-  identity today, the target types, and the steps that each change no
+  identity, the target types, and the steps that each change no
   behaviour.
 - **[`out-of-core-moe.md`](out-of-core-moe.md)**, running a MoE whose
-  weights exceed RAM (#406). The Metal and host expert slots have
-  landed. Asynchronous reads, hotness decay and a run that really
-  exceeds memory have not.
+  weights exceed RAM (#406).
 - **[`amd.md`](amd.md)**, ROCm on RDNA and CDNA, the Ryzen AI NPU spike,
   and Vulkan for every Radeon (#494).
-- **[`dflash2-and-serving.md`](dflash2-and-serving.md)**, DFlash2
-  speculative decoding end to end on every backend, then automatic
-  memory planning, prefix reuse and batching by default, Qwen-family
-  vision and the embedded chat page (#600).
-- **[`dflash-speculative-decoding.md`](dflash-speculative-decoding.md)**,
-  the DFlash2 drafter itself, back from `on-hold/` now that published
-  GGUF drafts exist (#600).
 
 ## Audits
 
+Each is held to the code by a test, so it stays until it is replaced.
+
 - **[`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md)**, the
-  llama.cpp surface at the pinned commit: its new architecture names,
-  the served behaviour that moved upstream, and what was fixed.
-  `tests/oracle_manifest.rs` holds its title to `tools/llama_cpp_pin`,
-  so it stays here until the pin moves and a new audit replaces it.
+  llama.cpp surface at the pinned commit. `tests/oracle_manifest.rs`
+  holds its title to `tools/llama_cpp_pin`; the next pin move replaces
+  it with that pin's audit.
 - **[`serving-parity-audit.md`](serving-parity-audit.md)**, continuous
   batching, paged KV, prefix caching and cache-aware admission read
   against the code, every claim carrying the line that decides it
   (`documented_serving.rs` holds the citations).
-
-## Process
-
-- **[`contribution-workflow.md`](contribution-workflow.md)**, the rule
-  that a completed feature is a branch and a pull request and a defect
-  is a GitHub issue. It also carries the parallel-agent rules and the
-  release recipe.
-
-## History
-
-- **[`archive/`](archive/README.md)** holds superseded plans and dated
-  audits, each with where its open items went.
-- **[`done/`](done/README.md)** holds plans that finished.
-- **[`on-hold/`](on-hold/)** holds work ranked below the goal, each with
-  the condition that brings it back: `frink-ui.md`.
-
-The counts in the `done/` index are derived from the files by
-`crates/frink-models/tests/documented_counts.rs`, because two of them
-had already drifted.
 
 ## The rules that keep being re-learned
 
