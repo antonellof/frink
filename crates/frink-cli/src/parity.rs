@@ -532,11 +532,11 @@ fn print_report(
             // divergence" here would send the reader after a bug that
             // is not there.
             Some(q) => println!(
-                "  same token. The distributions differ by more than summation order, and for \
-                 {q} that is EXPECTED: llama.cpp declares `vec_dot_type = Q8_K` for it, so it \
-                 quantizes the ACTIVATION to 8 bits and accumulates in integers, while frink \
-                 keeps activations in f32. Different arithmetic, with frink on the more \
-                 precise side. See docs/plans/llama-cpp-gap-inventory.md §10."
+                "  same token. The distributions differ by more than summation order. For \
+                 {q}, llama.cpp quantizes the ACTIVATION to Q8_K (`vec_dot_type`) and frink \
+                 does the same, bit for bit; what remains is the order of the integer \
+                 reductions and the repack GEMMs, listed in docs/adr/0009-numerics-follow-ggml.md. \
+                 A WRONG verdict on {q} is a bug, not this."
             ),
             None => println!(
                 "  same token, but the distributions differ by more than accumulation order \
