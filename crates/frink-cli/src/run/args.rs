@@ -327,27 +327,48 @@ pub struct InferArgs {
     #[arg(long = "lora-scaled", value_name = "FILE:SCALE", action = clap::ArgAction::Append)]
     pub lora_scaled: Vec<String>,
 
-    /// Tokens the drafter proposes per verification step (llama.cpp's
-    /// `--draft-max`, also spelled `--draft`).
+    /// Most tokens the drafter proposes per verification step
+    /// (llama.cpp's `--spec-draft-n-max`, default 3). A DFlash draft
+    /// clamps it to its trained block minus the anchor.
+    ///
+    /// `--draft-max`, `--draft` and `--draft-n` are the spellings
+    /// llama.cpp used before it removed them, kept so older command
+    /// lines still run.
     #[arg(
-        long = "draft-max",
-        visible_aliases = ["draft", "draft-n"],
+        long = "spec-draft-n-max",
+        visible_aliases = ["draft-max", "draft", "draft-n"],
         value_name = "N",
-        default_value_t = 5
+        default_value_t = 3
     )]
     pub draft_max: usize,
 
+    /// Fewest tokens a draft must hold to be verified at all
+    /// (llama.cpp's `--spec-draft-n-min`, default 0): a shorter one is
+    /// dropped and the step decodes one token.
+    #[arg(long = "spec-draft-n-min", value_name = "N", default_value_t = 0)]
+    pub draft_min: usize,
+
+    /// Speculative decoding type (llama.cpp's `--spec-type`). Without
+    /// it the type follows the `-md` file, as upstream infers it:
+    /// `draft-dflash` for a `dflash` GGUF, `draft-simple` otherwise.
+    /// `none` turns speculation off. The other upstream types
+    /// (`draft-eagle3`, `draft-mtp`, `draft-dspark`, `ngram-*`) are
+    /// refused by name.
+    #[arg(long = "spec-type", value_name = "TYPE")]
+    pub spec_type: Option<String>,
+
     /// Stop drafting when the drafter's own probability for the token
-    /// it just sampled is below this (llama.cpp's `--draft-p-min`).
+    /// it just chose is below this (llama.cpp's `--spec-draft-p-min`,
+    /// default 0, which never stops early).
     ///
     /// A guessing drafter is worse than none: the target pays for the
     /// position either way, and a rejection also discards every
     /// position after it.
     #[arg(
-        long = "draft-p-min",
-        visible_alias = "spec-draft-p-min",
+        long = "spec-draft-p-min",
+        visible_alias = "draft-p-min",
         value_name = "P",
-        default_value_t = 0.75
+        default_value_t = 0.0
     )]
     pub draft_p_min: f32,
 

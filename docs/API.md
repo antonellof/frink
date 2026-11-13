@@ -305,11 +305,12 @@ opposite block sizes. `/admin/stats` rows carry `acceptance_length` and
 `draft_accept_rate_per_position` for the same reason.
 
 The speculation fields are absent for a request that did not draft: a
-request the continuous-batching worker serves (the default on Metal,
-which has no speculation yet), a grammar-constrained or `json_object` request (verification draws
+recurrent target in the continuous batch (its batched state has no
+checkpoint yet), a grammar-constrained or `json_object` request (verification draws
 through the same grammar machine, and a rejected block would leave it
-advanced over tokens that were never emitted), a paged or recurrent KV
-store (a rejected draft has to be rolled back and neither can), a
+advanced over tokens that were never emitted), a paged lease under a
+sliding window (a recycled page cannot be rolled back into) or a
+recurrent target on the paged store, a
 streamed `n > 1` request (its choices are interleaved a token at a
 time), and a request with no room to draft. An absent field reads as
 "this request did not speculate"; a zero would read as "the drafter was
@@ -955,10 +956,9 @@ This is the supported multi-client path on Metal.
 
 Enable it with `FRINK_CONTINUOUS_BATCHING=1`, `--cont-batching` / `-cb`,
 or `-np N` / `--parallel N` (which also sets `FRINK_CB_MAX_SEQS`).
-Disable it with `FRINK_CONTINUOUS_BATCHING=0` or `--no-cont-batching`.
-When unset on Metal builds with fused attention, continuous batching is
-on by default unless a KV pool or prefix cache forces the private
-decode path.
+It is off by default: the private decode loop serializes requests but
+attends on the device, which one client finds faster. A KV pool or
+prefix cache forces the private loop.
 
 On the contiguous KV path it is mutually exclusive with
 `FRINK_KV_POOL_BLOCKS` and `FRINK_PREFIX_CACHE_ENTRIES`; the paged KV
@@ -1122,8 +1122,9 @@ there are sequences decoding or prefilling, are busy:
 
 Each seat carries the four fields llama.cpp always sends. `n_ctx` is
 the per-request context ceiling and is absent when the model could not
-be priced. `speculative` is `false` because a batched request never
-drafts. Left out, because a seat does not hold them: `id_task`,
+be priced. `speculative` is `true`: a batched row drafts, by prompt
+lookup or with `--model-draft`, unless its request has a grammar or no
+room left. Left out, because a seat does not hold them: `id_task`,
 `n_prompt_tokens`, `n_prompt_tokens_processed`,
 `n_prompt_tokens_cache`, `params` and `next_token`, which llama.cpp
 keeps per slot from the task it last served, and `prompt` and
@@ -1678,8 +1679,9 @@ nothing is called) · the embedding architectures listed above as
 refused by name · multi-GPU, tensor parallel, prefill/decode
 disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained, paged or continuously
-batched requests, so their speculation fields in `usage` are absent ·
+speculative decoding for grammar-constrained requests, recurrent
+targets in the continuous batch, and paged ones under a sliding window,
+so their speculation fields in `usage` are absent ·
 `/infill` on the dedicated engines, and the FIM pad, repo and file
 separator as end-of-generation tokens (see [Infill](#infill-post-infill))
 · `GET /slots` per-task fields, which a batcher seat does not hold.

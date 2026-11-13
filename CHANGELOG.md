@@ -53,6 +53,88 @@ are the ones worth reading twice.
   28. The gate's bound against the CPU became per fixture with the sliding
   windows, above.
 
+## [0.63.0] - 2026-11-13
+
+### Added
+
+- **DFlash and DFlash2 drafts for speculative decoding** (#600).
+  `frink run -m target.gguf -md draft.gguf` now takes a draft GGUF of
+  llama.cpp's `dflash` architecture: a small stack that reads the
+  target's residual stream at the layers it names, injects it into its
+  own KV, and drafts a whole block from `[anchor, mask, ...]` in one
+  non-causal pass. DFlash2's two-tap grouped convolution and candidate
+  selector are both built. The draft's tokens and the scores they were
+  chosen on match libllama's over four drafting rounds on three
+  fixtures (`tests/dflash_graphs.rs`, goldens from
+  `scripts/dflash_reference.cpp`). The DSpark, LiLiCorr and
+  reduced-vocabulary variants refuse by name. The target exposes the
+  inputs of chosen layers through `Decoder::forward_batch_with_taps`.
+- `--spec-type` (`draft-simple`, `draft-dflash`, `none`; the other
+  upstream types refuse by name), `--spec-draft-n-max` and
+  `--spec-draft-n-min`, llama.cpp's spellings at the pin.
+
+### Changed
+
+- **`--spec-draft-n-max` defaults to 3 and `--spec-draft-p-min` to 0**,
+  llama.cpp's defaults at the pin; they were 5 and 0.75. The old
+  spellings `--draft-max` and `--draft-p-min` still work. Output does
+  not change, only how much is drafted.
+- **Continuous batching is opt-in on Metal too.** It was on by default
+  on a Metal build, and its decode attends on the host: Qwen3-8B
+  Q4_K_M with 7.4k tokens of context decoded at 2.5 tok/s on an M2 Pro,
+  where the private loop, attending on the device, does 24.6 (llama.cpp
+  does the same). `-cb`, `-np N` or `FRINK_CONTINUOUS_BATCHING=1` turn
+  it on for many clients; without them concurrent requests serialize.
+- **Host GQA decode attention reads each K/V row once per head group**,
+  not once per query head, and the contiguous kernel spreads its head
+  groups over the cores. Bit-identical; the batched decode above goes
+  from 2.52 to 3.65 tok/s.
+
+### Fixed
+
+- **The prefix cache stored nothing for a greedy request on Metal**,
+  and greedy is the server's default. The Metal decode folds the last
+  projection into an argmax and keeps one id, and the store refused any
+  request without a full logit row, so `FRINK_PREFIX_CACHE_ENTRIES`
+  never hit for a client that sends no temperature. The KV is now
+  stored without the row; an exact repeat recomputes its last position.
+  A restored prefix also rebuilds the Metal arena, which a length check
+  alone could mistake for another conversation's, and prefills its
+  suffix in one batch rather than token by token. Qwen3-8B Q4_K_M,
+  7.4k-token agent prompt on an M2 Pro: follow-up turns 38 s -> 2.3 s,
+  greedy output identical to an uncached run.
+- **The Metal private decode loop answered 500 to every request whose
+  prompt-lookup draft was rejected.** Its KV lives on the device and the
+  host caches stop at the prompt, but the speculative gate only asked
+  whether the store could roll back, so the rollback hit the `truncate`
+  assert. A store whose host rows do not reach the position now steps
+  one token at a time.
+
+- **Speculative decoding on Metal answered from zeroed keys after a
+  rejected draft.** A rollback shortened the host KV cache but not the
+  Metal arena, whose host rows Metal prefill leaves as placeholders, so
+  the next verify rebuilt the arena from those placeholders. Greedy
+  output with a draft model left the plain greedy path two tokens in.
+  `Decoder::truncate_kv` now rewinds the arena with the host rows, for
+  `frink run -md` and for the server's prompt-lookup speculation;
+  `metal_speculation_rewinds_the_device_kv` holds it on a GPU.
+- **Llama 3 tool calls written as bare JSON are tool calls.** Llama
+  3.1/3.2 answer a custom tool with `{"name": …, "parameters": {…}}`
+  and no `<|python_tag|>`. The non-streaming path only parsed text
+  holding a known marker, and the streaming parser released the JSON
+  as text before it could be read, so every such call reached the
+  client as `content` with `finish_reason: "stop"` -- on
+  `/v1/chat/completions`, streamed or not, and on `/v1/responses`. A
+  Llama 3 turn that opens with `{` is now parsed as a call (held to the
+  end of the stream when streaming); one naming no offered tool is
+  returned as the text it was.
+- **A Hermes/Qwen tool call ending a turn is a tool call.** With tools
+  active the server stops on `</tool_call>` and cuts the stop string,
+  and the parser then required that same closer, so the last call of
+  every Hermes/Qwen turn reached the client as text, streamed or not. An
+  unclosed block holding one complete call is now that call; one cut
+  mid-JSON stays text.
+
 ## [0.62.0] - 2026-11-12
 
 ### Added

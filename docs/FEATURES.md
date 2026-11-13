@@ -201,6 +201,18 @@ and the dedicated engines refuse by name; on Metal an adapted model runs
 on the per-matrix path rather than the fused stacks. See
 [`CLI.md`](CLI.md#lora-adapters) and [`API.md`](API.md#lora-adapters).
 
+Speculative decoding on the CLI takes a draft model with `-md`: an
+autoregressive GGUF of the same family, or a DFlash / DFlash2 block
+draft (llama.cpp's `dflash` architecture, picked from the file as
+`--spec-type draft-dflash`). A DFlash draft reads the target's residual
+stream at the layers it names and proposes a whole block in one pass;
+its drafted tokens and lattice scores match libllama on the fixtures
+(`tests/dflash_graphs.rs`), and the target's greedy output with it is
+token for token the output without it, on the CPU and on Metal. The
+server takes the same draft with `--model-draft` and feeds it the
+target's layer inputs from the prompt on. See [`CLI.md`](CLI.md) and
+[`CONFIG.md`](CONFIG.md).
+
 `frink perplexity` is the quality axis: corpus evaluation using
 llama.cpp's method, agreeing with `llama-perplexity` to within a fifth
 of one standard error on five checkpoints. Where the two differ, the gap
@@ -368,12 +380,13 @@ OpenAI-compatible HTTP API:
   json_object` is still the best-effort character mask, and composes
 - Parallel serving (Metal). Multiple concurrent streaming clients
   share one batched decode worker (llama.cpp slots model). Continuous
-  batching is on by default when compatible, and streaming emits
-  tokens incrementally under it. The measured throughput at each
+  batching is opt-in (`-cb` or `-np N`), since its decode attends on
+  the host and one client decodes faster on the private loop; streaming
+  emits tokens incrementally under it. The measured throughput at each
   concurrency is in
   [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured).
   CLI: `-cb`, `-np` / `--parallel N`,
-  `--no-cont-batching` for the serialized private path. See
+  the serialized private path otherwise. See
   [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
 - Cache-aware admission. When a radix prefix cache is configured,
   a waiting job whose prompt is already computed may be admitted ahead
@@ -397,9 +410,15 @@ OpenAI-compatible HTTP API:
   names, and verifies them in one
   batched forward. A drafted token is kept only if it equals the
   sampler's own draw, so the output does not change. Grammar-constrained
-  requests, the continuous-batching worker (the default on Metal) and
-  the paged and recurrent stores do not speculate, and `usage` reports
-  the speculation fields only when it ran
+  requests and a paged lease under a sliding window do not speculate,
+  and `usage` reports the speculation fields only when it ran. The
+  paged store rolls a rejected block back by rewinding its tables. The
+  continuous batch (`--cont-batching`) speculates too: every row's
+  block is verified in one forward, and a row's answer is the one it
+  gets decoded alone. A target with recurrent layers (Mamba, GDN,
+  Lightning) does: its state is checkpointed before each verify batch,
+  and a rejection restores it and replays the committed tokens, as
+  llama.cpp's server does
 - Slot save/restore (llama.cpp's `POST /slots/{id}?action=save|restore`):
   a prompt prefix's KV written to `--slot-save-path` and restored into
   the prefix cache after a restart, so a long system prompt is prefilled

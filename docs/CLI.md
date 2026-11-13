@@ -124,8 +124,9 @@ These have llama.cpp's meaning (differences above): `-m` / `--model`,
 `--grammar-file`, `-j` / `--json-schema`, `-dev` / `--device`,
 `--list-devices`, `-ngl` / `--gpu-layers` / `--n-gpu-layers`, `-ctk` /
 `--ctk` / `--cache-type-k`, `-md` / `-d` / `--model-draft` /
-`--spec-draft-model`, `--draft-max` / `--draft` / `--draft-n`,
-`--draft-p-min` / `--spec-draft-p-min`, `--lora`, `--lora-scaled`,
+`--spec-draft-model`, `--spec-draft-n-max` (old spellings `--draft-max` /
+`--draft` / `--draft-n` kept), `--spec-draft-n-min`, `--spec-type`,
+`--spec-draft-p-min` / `--draft-p-min`, `--lora`, `--lora-scaled`,
 `-sys` / `--system` / `--system-prompt`, `-sysf` /
 `--system-prompt-file` (one trailing newline dropped, as upstream),
 `-jf` / `--json-schema-file`, `-hft` / `--hf-token` (sets `HF_TOKEN`),
@@ -226,13 +227,25 @@ The text is exactly what the target would have written alone: the
 rejection rule is lossless at every temperature, and the drafter can
 only ever save a forward pass.
 
-`--draft-max` (default 5) sets how many tokens the drafter proposes
-per verification step, and `--draft-p-min` (default 0.75) stops it
-early once its own confidence drops. The second setting has a large
-effect: a guessing drafter is worse than no drafter, because the target
-pays for the position either way and a rejection also discards every
-position after it, so proposing a token the drafter does not believe
-in costs twice.
+`--spec-draft-n-max` (default 3, as upstream) sets how many tokens the
+drafter proposes per verification step, `--spec-draft-n-min` (default
+0) drops a draft shorter than that, and `--spec-draft-p-min` (default
+0, never) stops it early once its own confidence drops. A guessing
+drafter is worse than no drafter, because the target pays for the
+position either way and a rejection also discards every position after
+it, so proposing a token the drafter does not believe in costs twice.
+The pre-rename spellings (`--draft-max`, `--draft-p-min`) still work.
+
+A DFlash or DFlash2 draft (a GGUF whose `general.architecture` is
+`dflash`, as llama.cpp's converter writes one) is picked up from the
+file, as upstream picks it: `--spec-type draft-dflash` says so
+explicitly, `draft-simple` asks for an autoregressive draft, `none`
+turns speculation off, and every other upstream type is refused by
+name. A DFlash draft reads the target's residual stream at the layers
+it names and drafts a whole block in one pass;
+`--spec-draft-n-max` is clamped to its trained block minus one. It
+refuses a draft whose widths, token table or target layers do not fit
+the target, and the DSpark, LiLiCorr and reduced-vocabulary variants.
 
 It refuses to run in five cases:
 
@@ -1470,13 +1483,17 @@ Notes that are frink's own:
 - `-md` loads a draft model once, and every request on the private
   decode loop drafts with it, in place of prompt lookup. Its KV is the
   request's own, and the output is the output without it
-  ([`API.md`](API.md#usage-timings)). It is refused at startup, naming why, with
-  continuous batching (on by default on Metal: add `--no-cont-batching`),
-  the paged KV store, a recurrent or dedicated-engine model, a drafter
-  of another vocabulary size, and a drafter whose KV lands on the
-  device (`--device cpu`). A model swapped in through
-  `/admin/models/load` is held to the same drafter. `--draft-max`
-  (default 5) and `--draft-p-min` (default 0.75) are `frink run`'s.
+  ([`API.md`](API.md#usage-timings)). Rows of the continuous batch draft
+  with it too. It is refused at startup, naming why, with
+  a dedicated-engine model, a draft with recurrent
+  layers, a drafter of another vocabulary size, and a drafter whose KV
+  lands on the device (`--device cpu`). A TARGET with recurrent layers
+  is served: its state is checkpointed around each verify batch. A
+  DFlash draft is also refused beside the prefix cache and the paged KV
+  store; in the continuous batch each row taps the target for it. A model
+  swapped in through `/admin/models/load` is held to the same drafter.
+  `--draft-max` (default 3) and `--draft-p-min` (default 0) are
+  `frink run`'s, which are llama.cpp's.
 
 **Environment.** llama-server's own variables (`LLAMA_ARG_MODEL`,
 `LLAMA_ARG_CTX_SIZE`, `LLAMA_ARG_N_GPU_LAYERS`, `LLAMA_API_KEY`, ...)
@@ -1499,10 +1516,13 @@ cargo build --release -p frink-cli --features "serve metal"
   --host 127.0.0.1 --port 8383 -dev metal -ngl all -cb -np 4
 ```
 
-On Metal, continuous batching turns on by default when compatible; use
-`-cb` / `--cont-batching` and `-np` / `--parallel N` (llama.cpp slot
-cap) to set it explicitly. `--no-cont-batching` keeps the private
-decode loop (Metal serializes concurrent requests on that path).
+Continuous batching is off unless `-cb` / `--cont-batching` or
+`-np` / `--parallel N` (llama.cpp's slot cap) asks for it. Without it
+Metal decodes on the private loop, attention on the device, and
+serializes concurrent requests; the batched decode attends on the
+host, which at long context is several times slower for one client
+(Qwen3-8B at 7.4k tokens on an M2 Pro: 24.6 tok/s private, 3.6
+batched).
 
 Without the feature, `frink serve` still exists and explains itself
 rather than reporting an unknown subcommand, since a compiled-out

@@ -1830,17 +1830,13 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
     capabilities.push(if active.as_ref().is_some_and(|a| a.batcher.is_some()) {
         frink_api::Capability::available(
             frink_api::health::capability::CONTINUOUS_BATCHING,
-            if state.continuous_batching_enabled && continuous_batching_env().is_none() {
-                "On by default on Metal. Concurrent requests share one batched decode worker."
-            } else {
-                "Concurrent requests share one batched decode step."
-            },
+            "Concurrent requests share one batched decode step.",
         )
     } else if state.metal_private_decode_gate.is_some() {
         frink_api::Capability::unavailable(
             frink_api::health::capability::CONTINUOUS_BATCHING,
             frink_api::health::reason::DISABLED,
-            "Off; private Metal decodes serialize (one at a time). Set FRINK_CONTINUOUS_BATCHING=1 or --cont-batching for parallel serving.",
+            "Off; private Metal decodes serialize (one at a time). Set --parallel N, --cont-batching or FRINK_CONTINUOUS_BATCHING=1 for parallel serving.",
         )
     } else {
         frink_api::Capability::unavailable(
@@ -3735,6 +3731,7 @@ pub(crate) fn activate_loaded_model(
                     config,
                     Arc::clone(&ceiling),
                     paged_kv.cloned(),
+                    draft.cloned(),
                 ))
             } else {
                 None
@@ -3866,11 +3863,11 @@ fn resolve_continuous_batching_enabled(
     if !continuous_batching_compatible(loaded, kv_pool, prefix_cache, paged_kv) {
         return false;
     }
-    match continuous_batching_env() {
-        Some(true) => true,
-        Some(false) => false,
-        None => metal_private_decode_active(),
-    }
+    // Off unless asked for (`--cont-batching`, `--parallel` or the
+    // env var). On Metal the batched decode attends on the host, about
+    // a tenth of the private loop's speed at long context, so one
+    // client is better served one request at a time.
+    continuous_batching_env() == Some(true)
 }
 
 fn acquire_metal_private_decode_gate(
@@ -3918,7 +3915,7 @@ fn build_app_state(
     } else {
         tracing::info!(
             "Metal private-loop decode will serialize concurrent requests until \
-             continuous batching is enabled (FRINK_CONTINUOUS_BATCHING=1 or --cont-batching)"
+             continuous batching is enabled (--parallel N, --cont-batching or FRINK_CONTINUOUS_BATCHING=1)"
         );
         Some(Arc::new(std::sync::Mutex::new(())))
     };
@@ -4666,12 +4663,6 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
     }
     let enable_cb =
         resolve_continuous_batching_enabled(&loaded, &kv_pool, &prefix_cache, &paged_kv);
-    if enable_cb && continuous_batching_env().is_none() && metal_private_decode_active() {
-        tracing::info!(
-            "continuous batching enabled by default on Metal for safe parallel serving \
-             (set FRINK_CONTINUOUS_BATCHING=0 or --no-cont-batching to use the private path)"
-        );
-    }
     if continuous_batching_env() == Some(true)
         && !continuous_batching_compatible(&loaded, &kv_pool, &prefix_cache, &paged_kv)
         && (kv_pool.is_some() || prefix_cache.is_some())
@@ -4717,7 +4708,7 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
     let detection = health::Detection::spawn();
     // Loaded and checked against the startup model before the port is
     // bound: a drafter that cannot serve is a refusal, not a warning.
-    let draft = server_draft::from_env(&loaded, enable_cb, paged_kv.is_some())?;
+    let draft = server_draft::from_env(&loaded, paged_kv.is_some(), prefix_cache.is_some())?;
 
     let state = Arc::new(build_app_state(
         StartupModels {

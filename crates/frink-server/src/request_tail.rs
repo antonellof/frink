@@ -188,21 +188,22 @@ impl RequestTail<'_> {
             if let Some(pc) = prefix_cache {
                 // Greedy Metal argmax returns a 1-element "logits" vec; that is
                 // not a full pending distribution and must not be stored for
-                // later (possibly non-greedy) prefix restores.
-                if logits.len() == vocab_size {
-                    #[cfg(feature = "metal")]
-                    if let Some(caches) = kv.contiguous_mut() {
-                        decoder.sync_metal_attn_kv_to_host(caches);
-                    }
-                    // `None` only for a paged request, which is refused
-                    // alongside a prefix cache at startup; storing nothing
-                    // is the honest answer either way.
-                    if let Some(caches) = kv.into_contiguous() {
-                        tokens.extend(generated_ids);
-                        pc.lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .store_salted(tokens, caches, logits, cache_salt);
-                    }
+                // later (possibly non-greedy) prefix restores. The KV is
+                // stored all the same: greedy is the server's default, so
+                // skipping it left the cache empty for most clients.
+                let pending = (logits.len() == vocab_size).then_some(logits);
+                #[cfg(feature = "metal")]
+                if let Some(caches) = kv.contiguous_mut() {
+                    decoder.sync_metal_attn_kv_to_host(caches);
+                }
+                // `None` only for a paged request, which is refused
+                // alongside a prefix cache at startup; storing nothing
+                // is the honest answer either way.
+                if let Some(caches) = kv.into_contiguous() {
+                    tokens.extend(generated_ids);
+                    pc.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .store_maybe_logits(tokens, caches, pending, cache_salt);
                 }
             }
         }

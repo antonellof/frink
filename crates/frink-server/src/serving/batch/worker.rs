@@ -337,6 +337,7 @@ pub(super) fn worker_loop(
     budget: Arc<BlockBudget>,
     aborts: Arc<AbortInbox>,
     paged: Option<PagedKvConfig>,
+    draft: Option<crate::server_draft::ServerDraft>,
 ) {
     let mut rows = Rows::default();
     let mut prefills: VecDeque<Prefill> = VecDeque::new();
@@ -421,6 +422,25 @@ pub(super) fn worker_loop(
         // more the busier the server was. `rows.len()` is the decode
         // width, known here because the decode step runs below.
         if let Some(mut prefill) = prefills.pop_front() {
+            // Before the first chunk: built per row, and again after a
+            // preemption, since a draft's state is this row's own and is
+            // not carried. A DFlash draft taps the prompt from here.
+            if prefill.drafter.is_none() {
+                let drafter = config
+                    .speculate
+                    .then(|| {
+                        super::speculate::RowDrafter::for_row(
+                            draft.as_ref(),
+                            &decoder,
+                            &prefill.params,
+                        )
+                    })
+                    .flatten();
+                if let Some(layers) = drafter.as_ref().and_then(|d| d.target_layers()) {
+                    prefill.state.tap(layers);
+                }
+                prefill.drafter = Some(drafter);
+            }
             let budget = step_budget::prefill_budget(
                 config.max_batch_tokens,
                 rows.len(),
@@ -434,7 +454,12 @@ pub(super) fn worker_loop(
                 Ordering::Relaxed,
             );
             if done {
-                rows.insert(prefill.into_slot());
+                let features = prefill.state.take_features();
+                let mut slot = prefill.into_slot();
+                if let Some(drafter) = slot.drafter.as_mut() {
+                    drafter.observe_prompt(&features);
+                }
+                rows.insert(slot);
             } else {
                 prefills.push_back(prefill);
             }
@@ -457,77 +482,51 @@ pub(super) fn worker_loop(
             let Some(slot) = rows.get_mut(uid) else {
                 continue;
             };
-            // Through `sample_step`, the same call the private decode
-            // loop makes. Calling `Sampler` directly here is what
-            // dropped `response_format: {"type": "json_object"}` for
-            // every batched request: an env var the caller cannot see
-            // (`FRINK_CONTINUOUS_BATCHING`) decided a per-request
-            // feature, and the only visible symptom was the final
-            // `validate_json_object_output` turning into a 400.
-            let next = match crate::sample_step::sample_next(
-                &mut slot.answer.sample,
-                &slot.logits,
-                &slot.params,
-                // The row already keeps its prompt, for the radix
-                // publish. The penalties window is the tail of
-                // `prompt ++ generated`, so it needs the same slice.
-                &slot.prompt_ids,
-                &slot.answer.generated_ids,
-                &slot.stop_tokens,
-                // Text, for the grammar and single-token stop
-                // decisions. Lossy per token, which is what those
-                // callers have always had; the EMITTED text below is
-                // what #124 was about and it goes through the row's
-                // own UTF-8 buffer.
-                &|id| String::from_utf8_lossy(&decode(&[id])).into_owned(),
-            ) {
-                Ok(crate::sample_step::Step::Token { id, .. }) => id,
-                // A complete grammar with nothing legal after it: this
-                // row is finished, exactly as the private loop treats
-                // it, and for the same reason.
-                Ok(crate::sample_step::Step::GrammarComplete) => {
-                    slot.finish = Some(FinishReason::Stop);
-                    continue;
-                }
-                // A constraint this row cannot satisfy. It is this
-                // ROW's failure and nobody else's, so it is answered
-                // with an error and the batch carries on -- the same
-                // statement `sample_until_stop` makes by returning
-                // `Err`, which on the private path ends the one
-                // generation it is running.
-                Err(e) => {
-                    slot.fail(e);
-                    continue;
-                }
-            };
-            // Three ways this token ends the answer, and they compose:
-            // the model's own end-of-generation set (not `eos_id`
-            // alone -- gemma-2 ends on `<end_of_turn>`), and a
-            // single-token stop the caller asked for. All of them mean
-            // the token is a terminator and not part of the output.
-            //
-            // `ignore_eos` suppresses the MODEL's set and only that, so
-            // both decode paths agree: a benchmark asking to run past
-            // EOS is not withdrawing its own fence, and the private
-            // `generate` loop makes the same distinction.
-            let model_eos = !slot.params.ignore_eos && slot.stop_tokens.contains(next);
-            if model_eos || slot.answer.stops.is_stop_token(next) {
-                slot.finish = Some(FinishReason::Stop);
+            // A token a speculative block already drew and committed:
+            // fed now, never drawn twice (`super::speculate`).
+            if slot.pending.take().is_some() {
+                active.push(uid);
                 continue;
             }
-            slot.answer.generated_ids.push(next);
-            slot.answer.clock.token();
-            let piece = slot.answer.utf8.push(&decode(&[next]));
-            // An empty piece means the token was the middle of a
-            // character. Nothing to show, and nothing a stop string
-            // could match yet.
-            if !piece.is_empty() && apply_stop_buffer(slot, &piece) {
+            // Moved out, not copied: the forward below replaces them,
+            // and a row that ends here never reads them again.
+            let logits = std::mem::take(&mut slot.logits);
+            let Some(next) = draw(slot, &logits, &decode) else {
+                continue;
+            };
+            if !commit_token(slot, next, &decode) {
                 continue;
             }
             active.push(uid);
         }
 
         if !active.is_empty() {
+            // Each row's speculative block after its newest token, empty
+            // for a row that does not draft (`super::speculate`).
+            let drafts: Vec<Vec<usize>> = active
+                .iter()
+                .map(|&uid| {
+                    super::speculate::draft_block(
+                        rows.get_mut(uid).expect("active row exists"),
+                        &decoder,
+                    )
+                })
+                .collect();
+            // A DFlash row reads the target's layer inputs at every
+            // position it writes, so a batch holding one is tapped, and
+            // goes through the lanes body even on a tick nobody drafts.
+            // Every DFlash row shares the server's one draft, so one
+            // list of layers serves them all.
+            let taps: Vec<usize> = active
+                .iter()
+                .find_map(|&uid| {
+                    rows.get(uid)
+                        .and_then(|s| s.drafter.as_ref())
+                        .and_then(|d| d.target_layers())
+                        .map(<[usize]>::to_vec)
+                })
+                .unwrap_or_default();
+            let speculating = !taps.is_empty() || drafts.iter().any(|d| !d.is_empty());
             // `active[j]` names the row that owns `logits_batch[j]`.
             // The kernel takes slices, so the batch itself is
             // positional -- but the position maps to a *uid*, so the
@@ -580,21 +579,48 @@ pub(super) fn worker_loop(
                 contiguous_refs.len() == active.len() || paged_refs.len() == active.len(),
                 "every row in a batch must share one KV backing"
             );
-            let logits_batch = if paged {
-                let store = Arc::clone(match &rows.get(active[0]).expect("active row exists").kv {
+            let store = paged.then(|| {
+                Arc::clone(match &rows.get(active[0]).expect("active row exists").kv {
                     RowKv::Paged(lease) => lease.store(),
                     RowKv::Contiguous(_) => unreachable!("checked above"),
-                });
-                decoder.forward_multi_seq_kv(
-                    &tokens,
-                    &positions,
-                    &mut MultiSeqKv::Paged {
-                        caches: &mut paged_refs,
-                        stores: &store,
-                    },
-                )
+                })
+            });
+            let mut kv = match &store {
+                Some(store) => MultiSeqKv::Paged {
+                    caches: &mut paged_refs,
+                    stores: store,
+                },
+                None => MultiSeqKv::Contiguous(&mut contiguous_refs),
+            };
+            // `first_row[j]` is where row `active[j]`'s logits start: one
+            // row for its newest token, and one per drafted token after.
+            let mut first_row = Vec::with_capacity(active.len());
+            let mut features_batch: Vec<Vec<f32>> = Vec::new();
+            let mut logits_batch = if speculating {
+                let (mut row_tokens, mut row_positions, mut row_lanes) =
+                    (Vec::new(), Vec::new(), Vec::new());
+                for (j, draft) in drafts.iter().enumerate() {
+                    first_row.push(row_tokens.len());
+                    for (i, &t) in std::iter::once(&tokens[j]).chain(draft).enumerate() {
+                        row_tokens.push(t);
+                        row_positions.push(positions[j] + i);
+                        row_lanes.push(j);
+                    }
+                }
+                let out = decoder
+                    .forward_multi_seq_lanes(
+                        &row_tokens,
+                        &row_positions,
+                        &row_lanes,
+                        &mut kv,
+                        &taps,
+                    )
+                    .expect("the draft's layers were checked against the target at startup");
+                features_batch = out.features;
+                out.logits
             } else {
-                decoder.forward_multi_seq(&tokens, &positions, &mut contiguous_refs)
+                first_row.extend(0..active.len());
+                decoder.forward_multi_seq_kv(&tokens, &positions, &mut kv)
             };
             counters.decode_steps.fetch_add(1, Ordering::Relaxed);
             // Every forward counts; only every Nth emits. The silent
@@ -618,9 +644,29 @@ pub(super) fn worker_loop(
                     RowKv::Contiguous(c) => *c = std::mem::take(&mut contiguous_refs[j]),
                     RowKv::Paged(lease) => *lease.caches_mut() = std::mem::take(&mut paged_refs[j]),
                 }
-                slot.logits = logits_batch[j].clone();
-                slot.pos += 1;
-                if slot.answer.generated_ids.len() >= slot.max_tokens {
+                let first = first_row[j];
+                if !taps.is_empty() {
+                    super::speculate::observe_verify(
+                        slot,
+                        positions[j],
+                        &features_batch[first..first + 1 + drafts[j].len()],
+                    );
+                }
+                if drafts[j].is_empty() {
+                    slot.logits = std::mem::take(&mut logits_batch[first]);
+                    slot.pos += 1;
+                    slot.answer.forwards += 1;
+                } else {
+                    let rows_of = &logits_batch[first..first + 1 + drafts[j].len()];
+                    super::speculate::settle(slot, rows_of, &drafts[j], &decode);
+                }
+                super::speculate::forget_rejected(slot);
+                // A pending token is fed next tick, and the budget is
+                // checked after that forward, as for any other token.
+                if slot.pending.is_none()
+                    && slot.finish.is_none()
+                    && slot.answer.generated_ids.len() >= slot.max_tokens
+                {
                     slot.finish = Some(FinishReason::Length);
                 }
             }
@@ -628,6 +674,81 @@ pub(super) fn worker_loop(
 
         rows.flush_finished(&budget);
     }
+}
+
+/// Draws this row's next token from `logits`, or `None` when the row
+/// ended instead: a complete grammar with nothing legal after it, or a
+/// constraint the row cannot satisfy (the row fails, the batch goes on).
+///
+/// Through `sample_step`, the same call the private decode loop makes.
+/// Calling `Sampler` directly here is what dropped
+/// `response_format: {"type": "json_object"}` for every batched
+/// request: an env var the caller cannot see
+/// (`FRINK_CONTINUOUS_BATCHING`) decided a per-request feature, and the
+/// only visible symptom was the final `validate_json_object_output`
+/// turning into a 400.
+pub(super) fn draw(slot: &mut Slot, logits: &[f32], decode: &DecodeFn) -> Option<usize> {
+    match crate::sample_step::sample_next(
+        &mut slot.answer.sample,
+        logits,
+        &slot.params,
+        // The row already keeps its prompt, for the radix publish. The
+        // penalties window is the tail of `prompt ++ generated`, so it
+        // needs the same slice.
+        &slot.prompt_ids,
+        &slot.answer.generated_ids,
+        &slot.stop_tokens,
+        // Text, for the grammar and single-token stop decisions. Lossy
+        // per token, which is what those callers have always had; the
+        // EMITTED text below is what #124 was about and it goes through
+        // the row's own UTF-8 buffer.
+        &|id| String::from_utf8_lossy(&decode(&[id])).into_owned(),
+    ) {
+        Ok(crate::sample_step::Step::Token { id, .. }) => Some(id),
+        // A complete grammar with nothing legal after it: this row is
+        // finished, exactly as the private loop treats it, and for the
+        // same reason.
+        Ok(crate::sample_step::Step::GrammarComplete) => {
+            slot.finish = Some(FinishReason::Stop);
+            None
+        }
+        // A constraint this row cannot satisfy. It is this ROW's failure
+        // and nobody else's, so it is answered with an error and the
+        // batch carries on -- the same statement `sample_until_stop`
+        // makes by returning `Err`, which on the private path ends the
+        // one generation it is running.
+        Err(e) => {
+            slot.fail(e);
+            None
+        }
+    }
+}
+
+/// Commits a drawn token to this row's answer: ends the row on a
+/// terminator, otherwise appends it and streams its text. Returns
+/// whether the row is still live.
+pub(super) fn commit_token(slot: &mut Slot, next: usize, decode: &DecodeFn) -> bool {
+    // Three ways this token ends the answer, and they compose: the
+    // model's own end-of-generation set (not `eos_id` alone -- gemma-2
+    // ends on `<end_of_turn>`), and a single-token stop the caller asked
+    // for. All of them mean the token is a terminator and not part of
+    // the output.
+    //
+    // `ignore_eos` suppresses the MODEL's set and only that, so both
+    // decode paths agree: a benchmark asking to run past EOS is not
+    // withdrawing its own fence, and the private `generate` loop makes
+    // the same distinction.
+    let model_eos = !slot.params.ignore_eos && slot.stop_tokens.contains(next);
+    if model_eos || slot.answer.stops.is_stop_token(next) {
+        slot.finish = Some(FinishReason::Stop);
+        return false;
+    }
+    slot.answer.generated_ids.push(next);
+    slot.answer.clock.token();
+    let piece = slot.answer.utf8.push(&decode(&[next]));
+    // An empty piece means the token was the middle of a character.
+    // Nothing to show, and nothing a stop string could match yet.
+    !(!piece.is_empty() && apply_stop_buffer(slot, &piece))
 }
 
 /// Feeds `piece` through this row's stop matcher. Returns true when a
@@ -805,5 +926,6 @@ pub(super) fn accept(
         abort,
         blocks,
         answer,
+        drafter: None,
     }))
 }

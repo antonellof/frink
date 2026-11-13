@@ -280,9 +280,9 @@ fn each_layer_s_two_sites_carry_their_own_clamp() {
     // others MoE with a shared expert on each.
     assert_eq!(d.layers[0].moe.n_experts(), 1);
     assert!(d.layers[0].moe.shared_experts.is_empty());
-    for il in 1..4 {
-        assert_eq!(d.layers[il].moe.n_experts(), 4, "layer {il}");
-        assert_eq!(d.layers[il].moe.shared_experts.len(), 1, "layer {il}");
+    for (il, layer) in d.layers.iter().enumerate().take(4).skip(1) {
+        assert_eq!(layer.moe.n_experts(), 4, "layer {il}");
+        assert_eq!(layer.moe.shared_experts.len(), 1, "layer {il}");
     }
 }
 
@@ -411,8 +411,8 @@ fn step35_carries_every_seam_its_verdict_crossed_off() {
     assert_eq!(d.config.moe.expert_weights_scale, 2.5);
     assert!(d.config.moe.norm_topk_prob);
     // The per-head sigmoid attention gate on every layer.
-    for il in 0..4 {
-        assert!(d.layers[il].attn.output_gate.is_some(), "layer {il}");
+    for (il, layer) in d.layers.iter().enumerate().take(4) {
+        assert!(layer.attn.output_gate.is_some(), "layer {il}");
     }
     assert_eq!(d.config.attention_scale, None, "step35.cpp:262");
 }

@@ -238,6 +238,34 @@ impl PagedKvCache {
         self.seq_len
     }
 
+    /// Rolls this sequence back to `new_seq_len` positions: what a
+    /// rejected speculative block needs. The blocks stay in the table,
+    /// since [`Self::push`] writes by POSITION and the next row at
+    /// `new_seq_len` lands in the block that already backs it; so no
+    /// block changes hands and none is released or acquired.
+    ///
+    /// Only for a sequence whose table names each block once, the
+    /// caller's to establish: a sliding window that recycled a block
+    /// behind it ([`Self::append_block`]) aliases it at a later index,
+    /// and rows rolled back there may already back an earlier one.
+    pub fn truncate(&mut self, new_seq_len: usize) {
+        assert!(
+            new_seq_len <= self.seq_len,
+            "truncate target {new_seq_len} must not exceed seq_len {}",
+            self.seq_len
+        );
+        assert!(
+            self.can_truncate_to(new_seq_len),
+            "truncate target {new_seq_len} on a paged sequence holding a recurrent state at {} \
+             positions: a recurrent state cannot be rolled back to a middle position",
+            self.seq_len
+        );
+        if new_seq_len == 0 {
+            self.recurrent = None;
+        }
+        self.seq_len = new_seq_len;
+    }
+
     pub fn block_table(&self) -> &[usize] {
         &self.block_table
     }

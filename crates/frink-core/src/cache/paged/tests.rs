@@ -329,3 +329,49 @@ fn a_gathered_sequence_round_trips_through_the_store() {
     assert_eq!(again.v.to_f32_vec(), flat.v.to_f32_vec());
     assert_eq!(again.positions(), flat.positions());
 }
+
+/// A rejected speculative block is rolled back by `truncate`, and the
+/// rows written next land where a sequence that never wrote the block
+/// would have put them: across a block boundary, with no block taken
+/// or given back.
+#[test]
+fn truncate_rolls_a_block_back_and_the_next_rows_overwrite_it() {
+    let mut store = PagedKvStore::new(/* block_size = */ 2, 8, 1, 1);
+    let row = |v: f32| [v];
+
+    let mut spec = PagedKvCache::new();
+    for v in [1.0, 2.0, 3.0] {
+        spec.push(&mut store, &row(v), &row(v)).unwrap();
+    }
+    // A three-token draft block, spilling into a third block.
+    for v in [90.0, 91.0, 92.0] {
+        spec.push(&mut store, &row(v), &row(v)).unwrap();
+    }
+    let free_before = store.free_block_count();
+    spec.truncate(4);
+    assert_eq!(spec.seq_len(), 4);
+    assert_eq!(
+        store.free_block_count(),
+        free_before,
+        "no block changes hands"
+    );
+    for v in [5.0, 6.0] {
+        spec.push(&mut store, &row(v), &row(v)).unwrap();
+    }
+    assert_eq!(
+        store.free_block_count(),
+        free_before,
+        "the rolled-back block is reused"
+    );
+
+    let mut plain = PagedKvCache::new();
+    for v in [1.0, 2.0, 3.0, 90.0, 5.0, 6.0] {
+        plain.push(&mut store, &row(v), &row(v)).unwrap();
+    }
+    assert_eq!(
+        spec.to_contiguous(&store).k.to_f32_vec(),
+        plain.to_contiguous(&store).k.to_f32_vec()
+    );
+    spec.release(&mut store);
+    plain.release(&mut store);
+}

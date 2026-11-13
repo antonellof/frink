@@ -504,6 +504,16 @@ impl PagedLease {
     /// prefix is exactly the part that is gone -- what it still holds is
     /// a suffix. Publishing anyway would hand the next request a page
     /// whose contents belong to a position a thousand tokens later.
+    /// Whether a speculative block written into this lease can be
+    /// rolled back by truncation. Not when a sliding window recycles
+    /// pages behind it (a recycled page backs two indices of the table,
+    /// and the rows a rollback frees may be another position's), and
+    /// not for a recurrent target, whose paged state has no checkpoint
+    /// yet.
+    pub(crate) fn can_roll_back(&self, decoder: &Decoder) -> bool {
+        !self.slides() && !decoder.config.has_recurrent_layers()
+    }
+
     pub fn has_slid(&self) -> bool {
         self.window.as_ref().is_some_and(|w| w.released > 0)
     }
@@ -992,6 +1002,35 @@ pub(crate) enum Kv {
     Paged(PagedLease),
 }
 
+/// Logit rows, and for each position the layer inputs a DFlash draft
+/// reads, in the order of its `target_layers`.
+type TappedRows = (Vec<Vec<f32>>, Vec<Vec<f32>>);
+
+/// Whether a block of `n` positions written into `caches` can be undone:
+/// by truncation, or for a recurrent target by a checkpoint, which only
+/// a sliding window's reserve bounds.
+fn can_roll_back(decoder: &Decoder, caches: &[KvCache], n: usize) -> bool {
+    let recurrent = decoder.config.has_recurrent_layers();
+    caches.iter().all(|c| {
+        let limit = if recurrent {
+            c.rollback_limit_with_checkpoint()
+        } else {
+            c.rollback_limit()
+        };
+        limit >= n
+    })
+}
+
+/// A recurrent target's caches before a verify batch, and the batch: a
+/// rejection restores the one and replays the committed head of the
+/// other, as llama.cpp's server does
+/// (`tools/server/server-context.cpp:4960-4993` at the pin).
+struct BlockCheckpoint {
+    caches: Vec<frink_core::cache::KvCheckpoint>,
+    start: usize,
+    tokens: Vec<usize>,
+}
+
 impl Kv {
     /// Prefill, returning the last position's logits.
     ///
@@ -1035,6 +1074,79 @@ impl Kv {
         }
     }
 
+    /// [`Self::prefill`] (or [`Self::prefill_scored`] when `scored`)
+    /// that also returns the inputs of `layers` at every prompt
+    /// position, for a DFlash draft. Contiguous only: a DFlash draft is
+    /// refused beside the paged store at startup, so `None` here is a
+    /// drift between the two.
+    fn prefill_tapped(
+        &mut self,
+        decoder: &Decoder,
+        tokens: &[usize],
+        layers: &[usize],
+        scored: bool,
+    ) -> Option<TappedRows> {
+        let Kv::Contiguous(caches) = self else {
+            return None;
+        };
+        if scored {
+            let t = decoder
+                .forward_batch_with_taps(tokens, 0, caches, layers)
+                .ok()?;
+            return Some((t.logits, t.features));
+        }
+        // `FRINK_CHUNKED_PREFILL` chunks as `forward_prompt_batch` does.
+        let chunk = chunked_prefill_tokens().unwrap_or(tokens.len().max(1));
+        let (mut last, mut features) = (Vec::new(), Vec::with_capacity(tokens.len()));
+        let mut pos = 0;
+        for part in tokens.chunks(chunk) {
+            let (l, f) = decoder
+                .forward_batch_last_with_taps(part, pos, caches, layers, false)
+                .ok()?;
+            last = l;
+            features.extend(f);
+            pos += part.len();
+        }
+        Some((vec![last], features))
+    }
+
+    /// [`Self::step`] for a DFlash draft: the batch body over one
+    /// token, which also hands back that position's layer inputs.
+    fn step_tapped(
+        &mut self,
+        decoder: &Decoder,
+        token: usize,
+        pos: usize,
+        layers: &[usize],
+    ) -> Option<(Vec<f32>, Vec<Vec<f32>>)> {
+        let Kv::Contiguous(caches) = self else {
+            return None;
+        };
+        decoder
+            .forward_batch_last_with_taps(&[token], pos, caches, layers, false)
+            .ok()
+    }
+
+    /// [`Self::step_batch`] that also returns each row's layer inputs.
+    fn step_batch_tapped(
+        &mut self,
+        decoder: &Decoder,
+        tokens: &[usize],
+        pos: usize,
+        layers: &[usize],
+    ) -> Option<TappedRows> {
+        let Kv::Contiguous(caches) = self else {
+            return None;
+        };
+        if !can_roll_back(decoder, caches, tokens.len()) {
+            return None;
+        }
+        let t = decoder
+            .forward_batch_with_taps(tokens, pos, caches, layers)
+            .ok()?;
+        Some((t.logits, t.features))
+    }
+
     fn prefill(&mut self, decoder: &Decoder, tokens: &[usize], host_kv: bool) -> Vec<f32> {
         match self {
             Kv::Contiguous(caches) => forward_prompt_batch(decoder, tokens, 0, caches, host_kv),
@@ -1064,15 +1176,18 @@ impl Kv {
     /// caller takes the ordinary path rather than guessing. Three
     /// reasons, all real:
     ///
-    /// * **Paged.** Rejecting a draft means releasing the positions it
-    ///   wrote, and a paged store hands those out through a block
-    ///   table that the radix cache may already have published a
-    ///   prefix of. Undoing that is its own row
-    ///   (`docs/plans/server-speculative-decoding.md`); refusing is the
-    ///   honest answer until it lands.
-    /// * **Recurrent.** A Mamba-style state is a REDUCTION over the
-    ///   whole prefix rather than a row per position, so there is
-    ///   nothing to drop. `KvCache::rollback_limit` is zero for it.
+    /// * **Paged, windowed or recurrent.** A paged lease rolls back by
+    ///   rewinding each table's length (`PagedKvCache::truncate`): the
+    ///   pages stay reserved and the next rows overwrite them, and the
+    ///   radix tree only ever publishes committed rows, at the end. Not
+    ///   when a sliding window recycles pages, nor for a recurrent
+    ///   target, whose paged state has no checkpoint yet
+    ///   (`PagedLease::can_roll_back`).
+    /// * **Recurrent** (served, not refused). A Mamba-style state is a
+    ///   REDUCTION over the whole prefix rather than a row per position,
+    ///   so there is nothing to drop: the engine checkpoints it before
+    ///   the batch and restores and replays instead
+    ///   ([`BlockCheckpoint`]), and only a window bounds the block.
     /// * **Windowed, past the reserve.** A layer that evicts behind its
     ///   sliding window (#61) keeps only `KvWindow::max_rollback`
     ///   positions of headroom for a rejected draft, and a block longer
@@ -1100,12 +1215,34 @@ impl Kv {
                 // Asked BEFORE the forward, not after: a store that
                 // cannot roll back must not be written speculatively
                 // in the first place.
-                if !caches.iter().all(|c| c.rollback_limit() >= tokens.len()) {
+                //
+                // And only when the host rows ARE the history the batch
+                // continues: with Metal attention the KV lives on the
+                // device and the host caches stop at the prompt, so a
+                // rollback to `pos` would name positions they never
+                // held. That store was let through, and every rejected
+                // draft on the Metal private path then hit the
+                // `truncate` assert. Plain stepping is the answer there.
+                if !(caches.iter().all(|c| c.positions() == pos)
+                    && can_roll_back(decoder, caches, tokens.len()))
+                {
                     return None;
                 }
                 Some(decoder.forward_batch(tokens, pos, caches))
             }
-            Kv::Paged(_) => None,
+            Kv::Paged(lease) => {
+                if !lease.can_roll_back(decoder) {
+                    return None;
+                }
+                Some(
+                    decoder
+                        .forward_batch_paged(tokens, pos, &mut lease.caches, &lease.store)
+                        .expect(
+                            "admission reserved the prompt plus max_tokens, and a draft never \
+                             runs past them",
+                        ),
+                )
+            }
         }
     }
 
@@ -1116,18 +1253,52 @@ impl Kv {
         dead_code,
         reason = "called by the speculative loop; see sampling_loop::verify_block"
     )]
-    fn truncate_to(&mut self, pos: usize) -> bool {
+    /// Through `Decoder::truncate_kv`, so the Metal arena rewinds with
+    /// the host rows: rolling back only the host left the arena longer
+    /// than the cache, and the next batch rebuilt it from the host's
+    /// placeholder rows.
+    /// Every cache's [`KvCheckpoint`], for a recurrent target's block.
+    /// `None` for the paged store, which does not speculate.
+    fn checkpoint(&self) -> Option<Vec<frink_core::cache::KvCheckpoint>> {
+        match self {
+            Kv::Contiguous(caches) => Some(caches.iter().map(|c| c.checkpoint()).collect()),
+            Kv::Paged(_) => None,
+        }
+    }
+
+    /// Back to `block`'s checkpoint, then the block's tokens before
+    /// `pos` again: [`Self::truncate_to`] for a recurrent target.
+    fn restore_and_replay(&mut self, decoder: &Decoder, block: &BlockCheckpoint, pos: usize) {
+        let Kv::Contiguous(caches) = self else {
+            unreachable!("a checkpoint is only taken of a contiguous store");
+        };
+        decoder.restore_kv(caches, &block.caches);
+        let kept = &block.tokens[..pos - block.start];
+        if !kept.is_empty() {
+            decoder.forward_batch_last(kept, block.start, caches);
+        }
+    }
+
+    fn truncate_to(&mut self, decoder: &Decoder, pos: usize) -> bool {
         match self {
             Kv::Contiguous(caches) => {
                 if !caches.iter().all(|c| c.can_truncate_to(pos)) {
                     return false;
                 }
-                for c in caches.iter_mut() {
-                    c.truncate(pos);
+                decoder.truncate_kv(caches, pos);
+                true
+            }
+            Kv::Paged(lease) => {
+                if !lease.can_roll_back(decoder)
+                    || !lease.caches.iter().all(|c| c.can_truncate_to(pos))
+                {
+                    return false;
+                }
+                for cache in &mut lease.caches {
+                    cache.truncate(pos);
                 }
                 true
             }
-            Kv::Paged(_) => false,
         }
     }
 
@@ -1707,13 +1878,16 @@ pub(crate) fn forward_prompt_batch(
 /// server's `--model-draft` checkpoint. Either way it is another
 /// drafter, not another engine.
 /// What drafts for one request's speculation.
-enum ServerDrafter {
+enum ServerDrafter<'t> {
     /// An n-gram match over the request's own output: no second
     /// checkpoint, no memory, no load time, and useful exactly where a
     /// coding agent lives, output that quotes its input.
     Lookup(frink_models::speculative::PromptLookupSpeculator),
     /// The server's `--model-draft`, with KV of this request's own.
     Model(Box<frink_models::DraftModelSpeculator>),
+    /// A DFlash `--model-draft`, fed the target's layer inputs at every
+    /// position the engine writes.
+    DFlash(Box<frink_models::dflash::DFlashDrafter<&'t Decoder>>),
 }
 
 struct ServerEngine<'a> {
@@ -1725,7 +1899,11 @@ struct ServerEngine<'a> {
     first_token_at: &'a std::cell::Cell<Option<std::time::Instant>>,
     #[cfg(feature = "metal")]
     kv_offload: bool,
-    drafter: Option<ServerDrafter>,
+    drafter: Option<ServerDrafter<'a>>,
+    /// The last verify batch's checkpoint, on a recurrent target, until
+    /// the next step: a rejection, and a stop inside the block after
+    /// it, both roll back through it.
+    checkpoint: Option<BlockCheckpoint>,
     accepted: usize,
     drafted: usize,
     /// FORWARD PASSES, not speculative rounds.
@@ -1741,6 +1919,27 @@ struct ServerEngine<'a> {
 }
 
 impl ServerEngine<'_> {
+    /// The verify forward, tapped for a DFlash draft.
+    fn batch_forward(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>> {
+        if let Some(ServerDrafter::DFlash(d)) = self.drafter.as_mut() {
+            use frink_models::speculative::Drafter;
+            let layers = d.config().target_layers.clone();
+            let (rows, features) = self
+                .kv
+                .step_batch_tapped(self.decoder, tokens, pos, &layers)?;
+            // Rows a rejection undoes are rolled back with the target
+            // (`truncate`).
+            d.observe_target(pos, &features);
+            self.forwards += 1;
+            self.sync_after_step();
+            return Some(rows);
+        }
+        let rows = self.kv.step_batch(self.decoder, tokens, pos)?;
+        self.forwards += 1;
+        self.sync_after_step();
+        Some(rows)
+    }
+
     fn sync_after_step(&mut self) {
         #[cfg(feature = "metal")]
         if self.kv_offload {
@@ -1753,6 +1952,8 @@ impl ServerEngine<'_> {
 
 impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
     fn step(&mut self, next: usize, pos: usize) -> Vec<f32> {
+        // The block the checkpoint was taken for is settled.
+        self.checkpoint = None;
         if self.first_token_at.get().is_none() {
             self.first_token_at.set(Some(std::time::Instant::now()));
         }
@@ -1765,6 +1966,15 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
             lease.observe_sampled(next, pos + 1, false);
         }
         self.forwards += 1;
+        if let Some(ServerDrafter::DFlash(d)) = self.drafter.as_mut() {
+            let layers = d.config().target_layers.clone();
+            if let Some((l, features)) = self.kv.step_tapped(self.decoder, next, pos, &layers) {
+                use frink_models::speculative::Drafter;
+                d.observe_target(pos, &features);
+                self.sync_after_step();
+                return l;
+            }
+        }
         let l = self.kv.step(self.decoder, next, pos);
         self.sync_after_step();
         l
@@ -1783,33 +1993,65 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
                 sequence.extend_from_slice(history);
                 d.propose(&sequence, &[], max).tokens().to_vec()
             }
+            // The anchor is the last committed token, already fed: the
+            // draft reads the context BEFORE it, as llama.cpp's does.
+            Some(ServerDrafter::DFlash(d)) => {
+                let len = prompt.len() + history.len();
+                let Some(&anchor) = history.last().or(prompt.last()) else {
+                    return Vec::new();
+                };
+                d.draft_after(anchor, len - 1, max)
+                    .into_iter()
+                    .map(|(t, _)| t)
+                    .collect()
+            }
         };
         proposal.truncate(max);
         proposal
     }
 
     fn batch(&mut self, tokens: &[usize], pos: usize) -> Option<Vec<Vec<f32>>> {
-        let rows = self.kv.step_batch(self.decoder, tokens, pos)?;
-        self.forwards += 1;
-        self.sync_after_step();
+        self.checkpoint = None;
+        let checkpoint = if self.decoder.config.has_recurrent_layers() {
+            self.kv.checkpoint().map(|caches| BlockCheckpoint {
+                caches,
+                start: pos,
+                tokens: tokens.to_vec(),
+            })
+        } else {
+            None
+        };
+        let rows = self.batch_forward(tokens, pos)?;
+        self.checkpoint = checkpoint;
         Some(rows)
     }
 
     fn truncate(&mut self, pos: usize) {
-        // `step_batch` refused the stores that cannot do this, so a
-        // failure here would mean the two have drifted apart.
-        //
-        // The call is OUTSIDE the assertion. It used to be the
-        // assertion's argument, and `debug_assert!` does not evaluate
-        // its argument in a release build: every rejected draft in a
-        // release server left its rows in the cache, and the next token
-        // was answered over a history that never happened. A hard
-        // `assert!` because the alternative to stopping is exactly that.
-        let rolled_back = self.kv.truncate_to(pos);
-        assert!(
-            rolled_back,
-            "a store that accepted a speculative batch must be able to roll it back"
-        );
+        if let Some(block) = self.checkpoint.as_ref() {
+            self.kv.restore_and_replay(self.decoder, block, pos);
+            if pos > block.start {
+                self.forwards += 1;
+            }
+        } else {
+            // `step_batch` refused the stores that cannot do this, so a
+            // failure here would mean the two have drifted apart.
+            //
+            // The call is OUTSIDE the assertion. It used to be the
+            // assertion's argument, and `debug_assert!` does not
+            // evaluate its argument in a release build: every rejected
+            // draft in a release server left its rows in the cache, and
+            // the next token was answered over a history that never
+            // happened. A hard `assert!` because the alternative to
+            // stopping is exactly that.
+            let rolled_back = self.kv.truncate_to(self.decoder, pos);
+            assert!(
+                rolled_back,
+                "a store that accepted a speculative batch must be able to roll it back"
+            );
+        }
+        if let Some(ServerDrafter::DFlash(d)) = self.drafter.as_mut() {
+            d.rollback(pos);
+        }
         self.sync_after_step();
     }
 
@@ -2087,6 +2329,16 @@ pub fn generate<'p>(
         .map(|m| m.matched_len)
         .or_else(|| (prefix_cache.is_some() && kv_pool.is_none()).then_some(0));
 
+    // A DFlash draft reads the target's layer inputs at every prompt
+    // position, which only a fresh prefill computes: a restored prefix
+    // brings K/V without them (the prefix cache is refused beside a
+    // DFlash draft at startup, so that is a drift), and a grammar turns
+    // speculation off below. `None` otherwise, and for every other
+    // drafter.
+    let mut dflash_base = (restored.is_none() && params.grammar.is_none() && !params.json_object)
+        .then(|| draft.and_then(|d| d.dflash(decoder)))
+        .flatten();
+
     // One logit row per prompt position, only when the request asked
     // to score the prompt.
     let mut prompt_rows: Vec<Vec<f32>> = Vec::new();
@@ -2108,6 +2360,9 @@ pub fn generate<'p>(
         let caches = &mut *kv
             .contiguous_mut()
             .expect("a restored prefix is contiguous by construction");
+        // The arena still holds the previous request, which need not
+        // be the one these caches came from.
+        decoder.forget_device_kv();
         let suffix = &tokens[m.matched_len..];
         if suffix.is_empty() {
             if let Some(pl) = m.pending_logits {
@@ -2118,10 +2373,11 @@ pub fn generate<'p>(
                 pos = m.matched_len;
                 logits = pl;
             } else {
-                // Rare: our query exactly matches a strict PREFIX of a
-                // longer stored entry (someone else's conversation
-                // continued past this point), so there's no stored
-                // "what comes next" for our shorter query. Back the
+                // Our query exactly matches a strict PREFIX of a longer
+                // stored entry (someone else's conversation continued
+                // past this point), or an entry stored without logits
+                // (a greedy Metal decode keeps only the argmax), so
+                // there's no stored "what comes next". Back the
                 // restored cache off by one position and reprocess
                 // just that last matched token to get real logits,
                 // rather than guessing.
@@ -2134,13 +2390,12 @@ pub fn generate<'p>(
                 pos += 1;
             }
         } else {
-            pos = m.matched_len;
-            let mut l = Vec::new();
-            for &tok in suffix {
-                l = decoder.forward_token(tok, pos, caches);
-                pos += 1;
-            }
-            logits = l;
+            // One batch, as a prefill would: a chat turn's suffix is the
+            // last reply's closing and the new message, often hundreds
+            // of tokens. Host rows kept, since this request stores its
+            // KV again when it finishes.
+            logits = forward_prompt_batch(decoder, suffix, m.matched_len, caches, true);
+            pos = m.matched_len + suffix.len();
         }
     } else {
         kv = match (paged_kv, kv_pool) {
@@ -2185,12 +2440,27 @@ pub fn generate<'p>(
             // When `FRINK_CHUNKED_PREFILL` is set, split long prompts
             // into chunks that reuse the same KV caches.
             pos = tokens.len();
+            let tapped = dflash_base.as_mut().and_then(|d| {
+                use frink_models::speculative::Drafter;
+                let layers = d.config().target_layers.clone();
+                let scored = params.prompt_logprobs.is_some();
+                let (rows, features) = kv.prefill_tapped(decoder, &tokens, &layers, scored)?;
+                d.observe_target(0, &features);
+                Some((rows, scored))
+            });
             // Scoring the prompt needs a logit row per POSITION, which
             // is a separate entry point because it projects the
             // lm_head at every one instead of once
             // (`Kv::prefill_scored`). A request that did not ask keeps
             // the cheap path exactly as it was.
-            if params.prompt_logprobs.is_some() {
+            if let Some((rows, scored)) = tapped {
+                let last = rows.last().cloned().unwrap_or_default();
+                if scored {
+                    tokens_for_scoring = tokens.clone();
+                    prompt_rows = rows;
+                }
+                last
+            } else if params.prompt_logprobs.is_some() {
                 let Some(rows) = kv.prefill_scored(decoder, &tokens) else {
                     // The paged store ran out of pages between
                     // admission and here. Typed rather than a panic:
@@ -2328,6 +2598,7 @@ pub fn generate<'p>(
                 #[cfg(feature = "metal")]
                 kv_offload,
                 drafter: None,
+                checkpoint: None,
                 accepted: 0,
                 drafted: 0,
                 forwards: 0,
@@ -2393,6 +2664,9 @@ pub fn generate<'p>(
                 kv_offload,
                 drafter: (draft_max > 0)
                     .then(|| match draft {
+                        Some(_) if dflash_base.is_some() => dflash_base
+                            .as_ref()
+                            .map(|base| ServerDrafter::DFlash(Box::new(base.clone()))),
                         Some(d) => d
                             .speculator(
                                 &decoder.config,
@@ -2408,6 +2682,7 @@ pub fn generate<'p>(
                         )),
                     })
                     .flatten(),
+                checkpoint: None,
                 accepted: 0,
                 drafted: 0,
                 forwards: 0,
@@ -2948,10 +3223,6 @@ mod tests {
         }
     }
 
-    /// Rejecting a draft means the rows it wrote are gone, and the
-    /// store continues as if they never happened. Checked by walking
-    /// the same tokens again after the rollback and demanding the same
-    /// logits: a stale row left behind would change them.
     /// `--model-draft`: a drafter changes how many forwards an answer
     /// costs and not the answer. The control is the same request drafted
     /// by prompt lookup, which is lossless too, over a prompt it finds no
@@ -2962,7 +3233,9 @@ mod tests {
     fn a_draft_model_changes_the_forward_count_and_not_the_answer() {
         let decoder = small_decoder();
         let draft = crate::server_draft::ServerDraft {
-            weights: frink_models::DraftWeights::new(small_decoder()),
+            kind: crate::server_draft::DraftKind::Model(frink_models::DraftWeights::new(
+                small_decoder(),
+            )),
             max: 4,
             p_min: 0.0,
         };
@@ -3001,6 +3274,160 @@ mod tests {
         }
     }
 
+    /// A recurrent target speculates too: the default prompt-lookup
+    /// drafter's blocks are verified, a rejection restores the caches'
+    /// checkpoint and replays the committed tokens, and the answer is
+    /// plain greedy decoding's. It used to skip every block, since a
+    /// recurrent state cannot be truncated.
+    #[test]
+    fn a_recurrent_target_speculates_and_answers_as_plain_decoding() {
+        // Prompts on which the lookup drafter is right for part of a
+        // block, so the replay after a restore has tokens to replay.
+        for (name, prompt_ids) in [
+            ("mamba2", [32usize, 7, 18, 9, 40, 22, 31, 16]),
+            ("qwen35", [11, 29, 21, 26, 13, 47, 22, 12]),
+            ("jamba", [44, 18, 20, 42, 35, 41, 17, 19]),
+        ] {
+            let path = format!(
+                "{}/../frink-models/tests/fixtures/{name}_tiny.gguf",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+            let mut cfg = frink_models::ModelConfig::from_gguf(&file).expect("fixture config");
+            cfg.kv_dtype = frink_core::kv_store::KvDtype::F32;
+            let decoder = Decoder::from_gguf(&path, cfg).expect("fixture loads");
+            assert!(decoder.config.has_recurrent_layers(), "{name}");
+
+            // Byte ids are token ids, all inside the fixture's 48.
+            let prompt: String = prompt_ids.iter().map(|&b| b as u8 as char).collect();
+            let n = 64;
+
+            let mut caches = decoder.config.new_kv_caches();
+            let mut logits = decoder
+                .forward_batch(&prompt_ids, 0, &mut caches)
+                .pop()
+                .expect("a row");
+            let mut plain = Vec::new();
+            for pos in (prompt_ids.len()..).take(n) {
+                let t = logits
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .expect("a vocabulary")
+                    .0;
+                plain.push(t);
+                logits = decoder.forward_token(t, pos, &mut caches);
+            }
+            let want = ServerTokenizer::Byte.decode(&plain);
+
+            let mut text = String::new();
+            let (_finish, _rows, _ids, _truncated, usage) = generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                &prompt,
+                &greedy_params(n),
+                None,
+                None,
+                None,
+                None,
+                None,
+                |_, s| text.push_str(s),
+            )
+            .expect("generates");
+            assert_eq!(text, want, "{name}: speculation changed the answer");
+            let drafted = usage.draft_tokens.unwrap_or(0);
+            let accepted = usage.accepted_draft_tokens.unwrap_or(0);
+            assert!(
+                accepted > 0 && drafted > accepted,
+                "{name}: no block was both accepted from and rejected, so the replay \
+                 never ran: {usage:?}"
+            );
+        }
+    }
+
+    /// A DFlash `--model-draft` on the server: fed the target's layer
+    /// inputs from the prompt on, it changes how many forwards an
+    /// answer costs and not the answer, greedy or sampled. The fixtures
+    /// are the pair `tests/dflash_graphs.rs` holds to libllama.
+    #[test]
+    fn a_dflash_draft_changes_the_forward_count_and_not_the_answer() {
+        let fixture = |name: &str| {
+            format!(
+                "{}/../frink-models/tests/fixtures/{name}_tiny.gguf",
+                env!("CARGO_MANIFEST_DIR")
+            )
+        };
+        let path = fixture("dflash_target");
+        let file = frink_gguf::GgufFile::open(&path).expect("fixture opens");
+        let mut cfg = frink_models::ModelConfig::from_gguf(&file).expect("fixture config");
+        cfg.kv_dtype = frink_core::kv_store::KvDtype::F32;
+        let decoder = Decoder::from_gguf(&path, cfg).expect("fixture loads");
+        // Byte ids are token ids, so this is `dflash_graphs.rs`'s
+        // ACCEPTING_PROMPT, inside the fixture's 48 tokens: one on which
+        // the random draft is right at least once.
+        let tokenizer = ServerTokenizer::Byte;
+        let prompt = "\u{15}\u{16}\u{b}\u{10}\u{2f}\u{14}";
+        let draft = crate::server_draft::configure(
+            Some(fixture("dflash2_draft")),
+            Some("4".into()),
+            None,
+            Some(&decoder),
+            crate::server_draft::Deployment::default(),
+        )
+        .expect("loads")
+        .expect("configured");
+        let run = |params: &GenerationParams, draft: Option<&crate::server_draft::ServerDraft>| {
+            let mut text = String::new();
+            let (finish, _rows, _ids, _truncated, usage) = generate(
+                &decoder,
+                &tokenizer,
+                &StopTokens::default(),
+                None,
+                prompt,
+                params,
+                None,
+                None,
+                None,
+                None,
+                draft,
+                |_, s| text.push_str(s),
+            )
+            .expect("generates");
+            (text, finish[0].0.clone(), usage)
+        };
+        let mut sampled = greedy_params(40);
+        sampled.sampling.temperature = 0.8;
+        sampled.seed = 7;
+        for params in [greedy_params(40), sampled] {
+            let (plain, plain_finish, plain_usage) = run(&params, None);
+            let (drafted, drafted_finish, usage) = run(&params, Some(&draft));
+            assert_eq!(drafted, plain, "a DFlash draft changed the answer");
+            assert_eq!(drafted_finish, plain_finish);
+            assert!(
+                usage.accepted_draft_tokens.is_some_and(|a| a > 0),
+                "no DFlash draft was accepted, so this proves nothing: {usage:?} vs {plain_usage:?}"
+            );
+        }
+    }
+
+    /// Rejecting a draft means the rows it wrote are gone, and the
+    /// store continues as if they never happened. Checked by walking
+    /// the same tokens again after the rollback and demanding the same
+    /// logits: a stale row left behind would change them.
+    #[test]
+    fn a_store_behind_the_position_refuses_a_speculative_batch() {
+        // The Metal private path keeps KV on the device, so the host
+        // caches can trail `pos`. A batch there could not be rolled
+        // back, so it must not be written at all.
+        let decoder = small_decoder();
+        let mut kv = Kv::Contiguous(decoder.config.new_kv_caches());
+        kv.step_batch(&decoder, &[1, 5], 0).expect("in step");
+        assert!(kv.step_batch(&decoder, &[9, 2], 3).is_none());
+        assert!(kv.step_batch(&decoder, &[9, 2], 2).is_some());
+    }
+
     #[test]
     fn truncate_to_undoes_the_rows_a_rejected_draft_wrote() {
         let decoder = small_decoder();
@@ -3015,7 +3442,7 @@ mod tests {
 
         // Reject the whole draft.
         assert!(
-            kv.truncate_to(committed.len()),
+            kv.truncate_to(&decoder, committed.len()),
             "a contiguous store rolls back"
         );
 
@@ -3038,16 +3465,14 @@ mod tests {
     /// why `step_batch` returns `None` rather than `truncate_to`
     /// failing after the damage is done.
     #[test]
-    fn a_paged_store_refuses_to_speculate_rather_than_failing_to_undo() {
-        // Constructed without a pool: the point is the arm, not the
-        // pages, and `step_batch` decides on the variant alone.
+    fn a_contiguous_store_speculates_and_undoes_it() {
         let decoder = small_decoder();
         let mut kv = Kv::Contiguous(decoder.config.new_kv_caches());
         assert!(
             kv.step_batch(&decoder, &[1], 0).is_some(),
             "the contiguous arm serves speculation"
         );
-        assert!(kv.truncate_to(0), "and can undo it");
+        assert!(kv.truncate_to(&decoder, 0), "and can undo it");
     }
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
@@ -4134,6 +4559,47 @@ mod tests {
     }
 
     #[test]
+    fn an_exact_repeat_of_an_entry_stored_without_logits_recomputes_them() {
+        // A greedy Metal decode leaves only the argmax, so its entry
+        // carries KV and no logit row. A query matching all of it must
+        // back off one position rather than sample from nothing.
+        let decoder = small_decoder();
+        let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
+        let pc = Mutex::new(PrefixCache::new(4));
+        let mut caches = decoder.config.new_kv_caches();
+        for (pos, tok) in [1usize, 2, 3].into_iter().enumerate() {
+            decoder.forward_token(tok, pos, &mut caches);
+        }
+        pc.lock()
+            .unwrap()
+            .store_maybe_logits(vec![1, 2, 3], caches, None, None);
+
+        let run = |cache: Option<&Mutex<PrefixCache>>| {
+            let mut out = String::new();
+            generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                &prompt,
+                &greedy_params(5),
+                None,
+                None,
+                cache,
+                None,
+                None,
+                |_, s| out.push_str(s),
+            )
+            .unwrap();
+            out
+        };
+        let restored = run(Some(&pc));
+        let stats = pc.lock().unwrap().stats();
+        assert_eq!((stats.hits, stats.total_positions_reused), (1, 3));
+        assert_eq!(restored, run(None));
+    }
+
+    #[test]
     fn prefix_cache_exact_repeat_skips_prompt_processing_via_pending_logits() {
         let decoder = small_decoder();
         let prompt = String::from_utf8(vec![1u8, 2, 3]).unwrap();
@@ -4334,6 +4800,74 @@ mod tests {
             anchor_token: None,
             slide_interval: crate::policy::pool_budget::DEFAULT_SWA_EVICTION_INTERVAL,
         }
+    }
+
+    /// The paged store speculates: a rejected block is rolled back by
+    /// rewinding the lease's tables, and the text is the contiguous
+    /// store's, greedy and sampled, with a draft that is right part of
+    /// the time and with prompt lookup. Every page comes back.
+    #[test]
+    fn a_paged_store_speculates_and_answers_as_a_contiguous_one() {
+        let decoder = small_decoder();
+        // One layer of the target's two, with the same seed: right
+        // often enough to be accepted, wrong often enough to be cut.
+        let draft = crate::server_draft::ServerDraft {
+            kind: crate::server_draft::DraftKind::Model(frink_models::DraftWeights::new(
+                Decoder::new_random_small(test_dense_fixture(), 1, 256),
+            )),
+            max: 4,
+            p_min: 0.0,
+        };
+        let config = paged_config(&decoder, /* block_size = */ 4, /* blocks = */ 64);
+        let free_before = config.store.free_groups();
+        let prompt = "abcabcabcabc";
+        let run = |params: &GenerationParams,
+                   paged: Option<&PagedKvConfig>,
+                   draft: Option<&crate::server_draft::ServerDraft>| {
+            let mut text = String::new();
+            let (finish, _rows, _ids, _truncated, usage) = generate(
+                &decoder,
+                &ServerTokenizer::Byte,
+                &StopTokens::default(),
+                None,
+                prompt,
+                params,
+                None,
+                paged,
+                None,
+                None,
+                draft,
+                |_, s| text.push_str(s),
+            )
+            .expect("generates");
+            (text, finish[0].0.clone(), usage)
+        };
+        let mut sampled = greedy_params(32);
+        sampled.sampling.temperature = 0.8;
+        sampled.seed = 7;
+        let mut cut = false;
+        for params in [greedy_params(32), sampled] {
+            for d in [Some(&draft), None] {
+                let (want, want_finish, want_usage) = run(&params, None, d);
+                let (got, got_finish, usage) = run(&params, Some(&config), d);
+                assert_eq!(got, want, "the paged store changed the answer");
+                assert_eq!(got_finish, want_finish);
+                // The same rounds, drafted and accepted alike: the paged
+                // store did not decline a block the contiguous one ran.
+                assert_eq!(
+                    (usage.draft_tokens, usage.accepted_draft_tokens),
+                    (want_usage.draft_tokens, want_usage.accepted_draft_tokens),
+                );
+                let drafted = usage.draft_tokens.unwrap_or(0);
+                let accepted = usage.accepted_draft_tokens.unwrap_or(0);
+                cut |= accepted > 0 && drafted > accepted;
+            }
+        }
+        assert!(
+            cut,
+            "no run both accepted and rejected a draft on the paged store"
+        );
+        assert_eq!(config.store.free_groups(), free_before, "a page leaked");
     }
 
     /// Serving on paged KV must produce the SAME TEXT as serving on
@@ -5299,10 +5833,11 @@ mod tests {
             // What attention sees once this position is written.
             let seq_len = pos + 1;
             let first = seq_len.saturating_sub(window) / block_size;
-            for i in first..=pos / block_size {
+            for (i, group) in lease.groups[first..=pos / block_size].iter().enumerate() {
+                let page = first + i;
                 assert!(
-                    lease.groups[i].is_some(),
-                    "at position {pos} the window reaches page {i}, which was recycled"
+                    group.is_some(),
+                    "at position {pos} the window reaches page {page}, which was recycled"
                 );
             }
         }
@@ -5363,9 +5898,9 @@ mod tests {
         }
         let released = lease.window.as_ref().unwrap().released;
         assert!(released >= locked, "the slide must have passed the prefix");
-        for i in 0..locked / block_size {
+        for (i, group) in lease.groups[..locked / block_size].iter().enumerate() {
             assert!(
-                lease.groups[i].is_some(),
+                group.is_some(),
                 "page {i} of the shared prefix was recycled out from under the tree"
             );
         }

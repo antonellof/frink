@@ -643,6 +643,14 @@ pub struct ToolCallParser {
     /// half. What follows is that broken channel's markup residue, not
     /// content, until the first character that cannot be residue.
     truncated_channel: bool,
+    /// Llama 3 only: whether the stream's head is still undecided
+    /// between prose and a bare-JSON call (`{"name": …}` with no
+    /// `<|python_tag|>`). Cleared by the first non-blank character that
+    /// is not `{`; while set, nothing is released as text.
+    bare_head: bool,
+    /// Llama 3 only: the head was held as a possible bare-JSON call, so
+    /// if it parses to no call it is released as the text it was.
+    held_bare: bool,
 }
 
 #[derive(Debug)]
@@ -697,6 +705,8 @@ impl ToolCallParser {
             channel: Channel::Text,
             synthetic_open: header_open,
             truncated_channel: false,
+            bare_head: format == ToolCallFormat::Llama3,
+            held_bare: false,
         }
     }
 
@@ -832,6 +842,12 @@ impl ToolCallParser {
         // the buffer here because it "looks like a call" would lose
         // every call those two families make.
         let (text, calls) = self.parse_complete(&rest);
+        // A held bare-JSON head that names no offered tool was an
+        // answer that happened to be JSON: it goes out as written.
+        if calls.is_empty() && self.held_bare {
+            self.emit_text(rest, &mut events);
+            return events;
+        }
         if !text.trim().is_empty() {
             events.push(ToolCallEvent::Text(text));
         }
@@ -881,6 +897,21 @@ impl ToolCallParser {
                 }
             }
             None => {
+                // Llama 3 may write its call as bare JSON with no
+                // marker. It has no closing marker either, so a turn
+                // that opens with `{` is held whole and decided at
+                // `finish` -- releasing it piecemeal would deliver the
+                // call to the client as text before it could be read.
+                if self.bare_head {
+                    match self.buffer.trim_start().chars().next() {
+                        None => return false,
+                        Some('{') => {
+                            self.held_bare = true;
+                            return false;
+                        }
+                        Some(_) => self.bare_head = false,
+                    }
+                }
                 // Withhold any trailing run that could still grow into
                 // a marker -- opening OR closing. The closing ones
                 // matter because a streamed invoke grammar leaves its
@@ -1203,7 +1234,17 @@ impl ToolCallParser {
             normal.push_str(&text[cursor..start]);
             let body_start = start + open.len();
             let Some(end) = text[body_start..].find(close).map(|i| i + body_start) else {
-                normal.push_str(&text[start..]);
+                // No closer. When tools are active the server itself
+                // stops generation on `</tool_call>` and the stop string
+                // is cut from the text, so the LAST block of a turn
+                // normally arrives unclosed. A body that is one
+                // complete call is that call; anything else (a block
+                // truncated mid-JSON) stays text, as before.
+                let body = text[body_start..].trim();
+                match self.call_from_json(body, calls.len()) {
+                    Some(call) => calls.push(call),
+                    None => normal.push_str(&text[start..]),
+                }
                 cursor = text.len();
                 break;
             };
@@ -2689,6 +2730,87 @@ mod tests {
         );
         assert_eq!(text, "ok ");
         assert_eq!(calls[0].arguments, r#"{"city":"Oslo"}"#);
+    }
+
+    /// Llama 3.1/3.2 answer a custom tool with bare JSON, no
+    /// `<|python_tag|>`. Streamed at any width, that must still come out
+    /// as a call -- it used to be released as text, chunk by chunk.
+    #[test]
+    fn a_bare_llama_call_streams_as_a_call() {
+        let payload = "{\"name\": \"get_weather\", \"parameters\": {\"city\": \"Rome\"}}";
+        for width in [1, 3, 7, 64] {
+            let mut llama = parser(ToolCallFormat::Llama3);
+            let events = stream(&mut llama, payload, width);
+            assert_eq!(
+                calls_of(&events),
+                vec![(
+                    0,
+                    "get_weather".to_string(),
+                    r#"{"city":"Rome"}"#.to_string()
+                )],
+                "width {width}"
+            );
+            assert!(
+                text_of(&events).trim().is_empty(),
+                "width {width}: {events:?}"
+            );
+        }
+    }
+
+    /// The hold only covers a head that could be a call: JSON naming no
+    /// offered tool, and ordinary prose, come out as written.
+    #[test]
+    fn a_bare_llama_head_that_is_not_a_call_stays_text() {
+        let json = "{\"answer\": 42}";
+        let mut llama = parser(ToolCallFormat::Llama3);
+        let events = stream(&mut llama, json, 2);
+        assert!(calls_of(&events).is_empty());
+        assert_eq!(text_of(&events), json);
+
+        let prose = "Rome is sunny {mostly}.";
+        let mut llama = parser(ToolCallFormat::Llama3);
+        let events = stream(&mut llama, prose, 2);
+        assert!(calls_of(&events).is_empty());
+        assert_eq!(text_of(&events), prose);
+    }
+
+    /// With tools active the server stops on `</tool_call>` and cuts the
+    /// stop string, so a Hermes/Qwen turn's last block arrives with no
+    /// closer. It is still a call -- streamed or not.
+    #[test]
+    fn a_hermes_block_cut_at_its_stop_string_is_a_call() {
+        let text =
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Rome\"}}\n";
+        let qwen = parser(ToolCallFormat::Qwen25);
+        let (rest, calls) = qwen.parse_complete(text);
+        assert!(rest.trim().is_empty(), "{rest:?}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments, r#"{"city":"Rome"}"#);
+
+        for width in [1, 5, 64] {
+            let mut qwen = parser(ToolCallFormat::Qwen25);
+            let events = stream(&mut qwen, text, width);
+            assert_eq!(
+                calls_of(&events),
+                vec![(
+                    0,
+                    "get_weather".to_string(),
+                    r#"{"city":"Rome"}"#.to_string()
+                )],
+                "width {width}"
+            );
+        }
+    }
+
+    /// An unclosed block that is not a whole call -- generation cut
+    /// mid-JSON -- stays text rather than becoming a guessed call.
+    #[test]
+    fn a_truncated_hermes_block_stays_text() {
+        let text = "<tool_call>\n{\"name\": \"get_weather\", \"argum";
+        let qwen = parser(ToolCallFormat::Qwen25);
+        let (rest, calls) = qwen.parse_complete(text);
+        assert!(calls.is_empty());
+        assert_eq!(rest, text);
     }
 
     #[test]

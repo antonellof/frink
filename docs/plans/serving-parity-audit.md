@@ -59,7 +59,7 @@ followed by every token it had generated, then carries on.
   request's whole life before it runs. What can happen is a job
   waiting behind rows that hold large reservations, so the trigger is
   the job admission would take next having waited that many admission
-  passes. `make_room` (`preempt.rs:111`) then evicts the most recently
+  passes. `make_room` (`preempt.rs:113`) then evicts the most recently
   admitted decoding rows, as few as make that job fit under BOTH caps,
   or none if every eligible row together would not.
 - **What survives is one type.** Everything a row has produced that a
@@ -67,7 +67,7 @@ followed by every token it had generated, then carries on.
   sampler's RNG position, the grammar parse, the reasoning budget, the
   stop matcher's withheld tail, the UTF-8 tail, the text already
   streamed, and the clock. The row is split by `Slot::into_parts`
-  (`row.rs:285`), whose destructure has no `..`, so a field added to
+  (`row.rs:300`), whose destructure has no `..`, so a field added to
   `Slot` does not compile until it is classified as carried or
   recomputed. New and resumed jobs go through the same `admit` and
   `accept`; a resumed one differs only in what its prefill runs.
@@ -173,7 +173,7 @@ are returned when it ends.
   sliding-window model (`ForkRefused::SlidingWindow`), because two
   sequences recycling out of one page set is a use-after-free that
   reads as another position's tokens.
-- Chunked prefill: `serving/batch/prefill.rs:156`, with a test pinning
+- Chunked prefill: `serving/batch/prefill.rs:178`, with a test pinning
   that chunking does not change the logits.
 - Quantized KV wires: `f16`, `q8_0`, `fp8`, `q4`, the last with a
   Hadamard rotation on K.
@@ -193,7 +193,7 @@ matched unlocked leaf and cascading into a newly childless parent.
 - Namespaces: `salted.rs` is one tree per caller salt over one page
   pool, with round-robin eviction across namespaces. Two callers with
   byte-identical prompts share nothing.
-- Reclamation is wired on both decode paths: `generate.rs:866` calls
+- Reclamation is wired on both decode paths: `generate.rs:876` calls
   `evict` from `acquire_paged_caches`, which the private loop and the
   batched worker both go through, and the caller retries immediately
   rather than charging reclamation against its deadline.

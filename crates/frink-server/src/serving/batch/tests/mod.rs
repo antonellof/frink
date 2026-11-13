@@ -40,6 +40,7 @@ mod preempt;
 mod queue;
 mod radix;
 mod rows;
+mod speculate;
 mod status;
 
 fn tiny_decoder() -> Arc<Decoder> {
@@ -163,6 +164,8 @@ fn test_slot(max_tokens: usize, seed: u64) -> (Slot, mpsc::Receiver<BatcherEvent
             blocks: 1,
             finish: None,
             error: None,
+            drafter: None,
+            pending: None,
         },
         rx,
     )
