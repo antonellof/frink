@@ -15,16 +15,23 @@
 
 use super::unicode_data as data;
 
-/// The category bits [`super::wordpiece`] reads for one codepoint.
-///
-/// A subset of upstream's `unicode_cpt_flags`: the `\p{N}` and `\p{L}`
-/// bits are not carried, because the WordPiece normalizer never asks.
-/// See [`unicode_data`](super::unicode_data) for why that subset is
-/// what the generated table stores.
+/// The category bits of upstream's `unicode_cpt_flags` for one
+/// codepoint: the low byte, `MASK_CATEGORIES`. The whitespace, case and
+/// NFD bits above it are not carried; whitespace has its own lookup,
+/// [`is_whitespace`], as upstream ORs it on separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CptFlags(u8);
 
 impl CptFlags {
+    /// Upstream's `category_flag()`: every category bit at once, so a
+    /// caller can ask "exactly `\p{N}`" the way `unicode_regex_split`
+    /// does with its `k_ucat_cpt.find(flags.category_flag())`.
+    pub(super) fn category(self) -> u8 {
+        self.0
+    }
+    pub(super) fn is_number(self) -> bool {
+        self.0 & data::NUMBER != 0
+    }
     pub(super) fn is_separator(self) -> bool {
         self.0 & data::SEPARATOR != 0
     }

@@ -38,7 +38,7 @@ own. Checked 2026-11-13, at 0.63.0.
 | Point | Decided by | State |
 |---|---|---|
 | 1. Loads | `frink archs`, `tests/arch_coverage.rs`, the triage in [`MODELS.md`](../MODELS.md) | Every text-generation architecture llama.cpp names runs or refuses by name. A few refuse as unaudited and need new code (#538). |
-| 2. Same tokens | `frink parity` and CI's oracle job (`scripts/oracle.sh`); the render census for prompts | Every served architecture matches on its fixtures. Pure Q2_K and Q3_K checkpoints are WRONG on the CPU (#584), and eight regex-sequence pre-tokenizers tokenize differently (#624). The chat-prompt differences left are listed deviations |
+| 2. Same tokens | `frink parity` and CI's oracle job (`scripts/oracle.sh`); the render census for prompts | Every served architecture matches on its fixtures. Pure Q2_K and Q3_K checkpoints are WRONG on the CPU (#584). The chat-prompt differences left are listed deviations |
 | 3. Backend | [`KERNELS.md`](../KERNELS.md), generated and drift-tested | Every kind has a kernel on CPU, Metal and CUDA. Some CUDA kinds have never run on a GPU (#405). Vulkan serves a decode and prefill stack for its kinds, opt-in (#409) |
 | 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Many published rows predate the current code (#542) |
 | 5. Same command | `crates/frink-cli/src/llama_flags.rs`, which pins the gap | The common flags work. A tail of `llama-cli` / `llama-server` flags and `LLAMA_ARG_*` variables is still unaccepted (#404) |
@@ -62,23 +62,19 @@ oracle makes each of these cheap to verify.
    line, while Q4_1, Q5_1 and IQ4_NL match. Suspect the 2- and 3-bit
    dot paths in `frink-quant` or the Q8_K activation ggml feeds them.
    Every backend that copies the CPU's arithmetic inherits it.
-2. **Pre-tokenizers that are regex sequences upstream** (#624): eight
-   `tokenizer.ggml.pre` types, `deepseek-v3` among them, load and
-   tokenize differently from llama.cpp. Implement the sequence, or
-   refuse them by name until it exists.
-3. **The listed numeric deviations** ([ADR 0009](../adr/0009-numerics-follow-ggml.md)),
+2. **The listed numeric deviations** ([ADR 0009](../adr/0009-numerics-follow-ggml.md)),
    largest first: CPU attention under 64 query rows and in decode.
 
 ### B. The reference
 
-4. **Keep the oracle on llama.cpp's head.** Move `tools/llama_cpp_pin`
+3. **Keep the oracle on llama.cpp's head.** Move `tools/llama_cpp_pin`
    when upstream adds architectures or changes served behaviour, run
    `scripts/oracle.sh`, and replace
    [`parity-audit-2026-10-28.md`](parity-audit-2026-10-28.md) with the
    new pin's audit (its title is held to the pin by
    `tests/oracle_manifest.rs`). The scheduled `--report-only` run
    against master says when.
-5. **Every quant kind on every backend, and a test that says which do
+4. **Every quant kind on every backend, and a test that says which do
    not** (#405). The matrix is generated; the open half is receipts and
    `frink inspect-plan` naming a host fallback. Draft PR #619 adds CUDA
    routed-expert kernels for every kind: decide first whether it should
@@ -89,47 +85,47 @@ oracle makes each of these cheap to verify.
 The backend at parity. Everything here can be checked on our own Mac,
 without a rental.
 
-6. **Verify what landed untested on Metal.** On a Mac:
+5. **Verify what landed untested on Metal.** On a Mac:
    `cargo test -p frink-metal --features metal -- --ignored` and
    `cargo test -p frink-models --features metal -- --ignored`; then
    `frink-server` with a draft model and with a DFlash draft, once on
    the private loop and once with `--cont-batching`: several
    temperature-0 requests return the same text as without the draft,
    and `usage` reports accepted draft tokens (#600, #533).
-7. **Re-measure the stale Metal rows** (#542), on a quiet host, by a
+6. **Re-measure the stale Metal rows** (#542), on a quiet host, by a
    person (ADR 0006).
-8. **MoE larger than memory** (#406,
+7. **MoE larger than memory** (#406,
    [`out-of-core-moe.md`](out-of-core-moe.md)): the decode top-k path
    serves a stored expert; the packed `mul_mv_id` path and the Metal
    prefill MoE paths are still resident-only, then asynchronous reads
    and a run that really exceeds memory.
-9. **Bonsai PTQ1_0 prefill** (#540): decode is at parity, the prefill
+8. **Bonsai PTQ1_0 prefill** (#540): decode is at parity, the prefill
    GEMM is not.
 
 ### D. Architectures
 
-10. **One file per architecture** (#403,
+9. **One file per architecture** (#403,
    [`arch-registry-migration.md`](arch-registry-migration.md)): step
    9c (`step35`, `mimo2`, `lfm3`), then the audited list, the catalog
    and the layer plan derived from the registry.
-11. **The architectures that refuse as unaudited** (#538), each as one
+10. **The architectures that refuse as unaudited** (#538), each as one
     file with a libllama golden and a greedy decode, or a refusal with
     its reason in [`MODELS.md`](../MODELS.md).
-12. **Multimodal** (#407): the Qwen-family projector first (`--mmproj`,
+11. **Multimodal** (#407): the Qwen-family projector first (`--mmproj`,
     image input on chat completions, Responses and Messages), every
     other projector type refused by name. The largest group of models
     llama.cpp serves and frink does not.
 
 ### E. CUDA and other GPUs (one batched rental)
 
-13. **CUDA to parity**: decode (#133), prefill (#259), and the kinds
+12. **CUDA to parity**: decode (#133), prefill (#259), and the kinds
     that have never run on a GPU (#405). The largest speed gap, on the
     hardware most people own.
-14. **Run the queued CUDA hardware tests**: the commands in the bodies
+13. **Run the queued CUDA hardware tests**: the commands in the bodies
     of #606, #613, #615, #578 and #619. CUDA graph decode replay
     (`FRINK_CUDA_GRAPH=1`, #537) stays off until its test passes and
     the replay is measured.
-15. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
+14. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
     RDNA and CDNA, the Ryzen AI NPU spike (#494, [`amd.md`](amd.md)).
     Vulkan has run only on MoltenVK and lavapipe. Queued for a real
     driver (RADV, AMDVLK, or an Intel iGPU if no AMD rental exists):
@@ -141,7 +137,7 @@ without a rental.
 
 ### F. Same commands, same API
 
-16. **The flag and `LLAMA_ARG_*` tail** (#404), including automatic
+15. **The flag and `LLAMA_ARG_*` tail** (#404), including automatic
     memory planning (`--fit` and family, pricing target, draft and every
     slot) and `--cache-reuse`: implement, or refuse by name.
 
@@ -150,24 +146,24 @@ without a rental.
 Speculation inside the continuous batch has landed (#614, #615) and
 DFlash drafts with it (#606, #608).
 
-17. **Drafters still missing**: multi-token-prediction heads as a
+16. **Drafters still missing**: multi-token-prediction heads as a
     drafter (#533), recurrent targets drafting in the batch (needs a
     batched checkpoint), and per-token recurrent snapshots so a partial
     accept does not replay.
-18. **Scheduling**: preemption on by default after a measurement
+17. **Scheduling**: preemption on by default after a measurement
     (#408), and a request priority (#541).
-19. **Memory**: sliding-window eviction in the paged store and the pool
+18. **Memory**: sliding-window eviction in the paged store and the pool
     (#61); KV quantization on the host and CUDA stores (#535); the disk
     KV tier wired into serving, or deleted (#536); continuous batching
     on by default off Metal once a receipt exists.
 
 ### H. Reach
 
-20. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
+19. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
     quantizing a BF16 checkpoint while loading it (#539).
-21. **CPU decode scheduling** (#27): a persistent worker pool in place
+20. **CPU decode scheduling** (#27): a persistent worker pool in place
     of a fork-join per operation, and the quiet-host receipt.
-22. **Container images** for CPU and CUDA (#544). Small; lands whenever
+21. **Container images** for CPU and CUDA (#544). Small; lands whenever
     someone wants it.
 
 **Not now:** tensor, pipeline and multi-node parallelism,

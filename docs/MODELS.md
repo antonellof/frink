@@ -120,7 +120,7 @@ is the last move's audit).
 
 | Architecture | What is missing |
 |---|---|
-| `flint` | Its `flint` pre-tokenizer is a sequence of two regexes, which the tokenizer cannot express. The graph itself is served seams |
+| `flint` | Its `flint` pre-tokenizer, a sequence of three regexes, is refused until a libllama tokenization has checked it (the sequence machinery of #624 can run it). The graph itself is served seams |
 | `beam` | A scaled residual (`h / sqrt(i) + r * sqrt((i - 1) / i)`) and a power-form attention temperature |
 | `maion-coder` | A latent MoE (the experts run between `ffn_latent_down` and `ffn_latent_up`) |
 | `k2-horizon` | A grouped RMS norm, a base-2 softplus attention gate, and value experts (MoVA) |
