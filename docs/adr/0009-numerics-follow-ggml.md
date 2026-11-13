@@ -61,6 +61,6 @@ pin, CPU, BLAS off, on an M2 Pro (#476).
 
 | Where | llama.cpp | frink | Measured |
 |---|---|---|---|
-| CPU attention, under 64 query rows and in decode | flash attention rounds Q to f16; on ARM the K·Q dot and the V accumulator run in f16 (`vfmaq_f16`) | Q and both accumulators in f32 over the f16 cache | `kqv_out-0` 8e-4 relative on Llama-3.2-1B Q4_K_M, 6-token prompt, with Q/K/V matching to 2e-7. From 64 rows llama.cpp takes a tiled f32 path and the step is gone |
+| CPU attention, under 64 query rows and in decode | flash attention rounds Q to f16; on ARM the K·Q dot and the V accumulator run in f16 (`vfmaq_f16`) | Q and both accumulators in f32 over the f16 cache | `kqv_out-0` 8e-4 relative on Llama-3.2-1B Q4_K_M, 6-token prompt, with Q/K/V matching to 2e-7. From 64 rows llama.cpp takes a tiled f32 path and the step is gone. On pure Q2_K it alone puts decode over the WRONG line: worst KL 1.8e-2 with every projection matching to 1e-7, while an f16 against an f32 cache moves frink's own first token by KL 1.0e-2 on that file (#584) |
 | RoPE | `ggml_rope_cache_init`'s angles | frink's own | 2-5e-7 relative on bit-identical Q/K |
 | K-quant and MXFP4 GEMMs | the build's repack kernel (`q4_K_8x4` portable, `8x8` with i8mm) | its own reduction order | from bit-identical inputs, Q4_K rows 1.1e-7 relative (median), what the two llama.cpp builds measure against each other; Q6_K rows 6e-8, where the two builds agree bit for bit. Q8_0 rows are bit-identical |
