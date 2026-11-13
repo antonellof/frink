@@ -2874,8 +2874,6 @@ static inline void mul_mm_sg_impl_f16(
     }
 }
 
-#endif // FRINK_METAL_HAS_TENSOR
-// @FRINK_TENSOR_IMPL@
 
 
 // llama `kernel_mul_mm_id`: simdgroup GEMM with indexed src1 rows and
@@ -3176,6 +3174,9 @@ static inline void mul_mm_id_impl_f16(
         }
     }
 }
+
+#endif // FRINK_METAL_HAS_TENSOR
+// @FRINK_TENSOR_IMPL@
 
 #define MUL_MM_ID_ENTRY(NAME, DQ)                                           \
 kernel void NAME(                                                           \

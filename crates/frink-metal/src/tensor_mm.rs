@@ -242,6 +242,174 @@ static inline void mul_mm_sg_impl_f16(
     mul_mm_tensor_impl<DQ, half>(src0, src1, dst, n_rows, n_cols, batch,
                                  row_bytes, shmem, tgpig, tiitg);
 }
+// Eight activations as half, from either activation type.
+static inline half2x4 mm_load_b8(device const float* y) {
+    return half2x4(*(device const float2x4*)y);
+}
+static inline half2x4 mm_load_b8(device const half* y) {
+    return *(device const half2x4*)y;
+}
+
+// llama `kernel_mul_mm_id`, tensor arm: the simdgroup tile (64 rows x 32
+// gathered tokens) with both operands staged row-major in threadgroup
+// memory and the product taken by two 16-token `matmul2d` halves, the
+// upper one skipped when the expert did not fill it. The result goes
+// through the same `[token][row]` f32 staging the simdgroup arm uses,
+// then is scattered by `ids`.
+template<typename DQ, typename T1>
+static inline void mul_mm_id_tensor_impl(
+    device const uchar* src0,
+    device const T1* src1,
+    device float* dst,
+    device const int* ids,
+    device const uint* tpe,
+    uint expert_stride,
+    uint n_rows,
+    uint n_cols,
+    uint top_k,
+    uint ids_stride,
+    uint row_bytes,
+    uint src1_per_slot,
+    threadgroup char* shmem,
+    uint3 tgpig,
+    ushort tiitg,
+    ushort tiisg,
+    ushort sgitg
+) {
+    threadgroup half* sa = (threadgroup half*)(shmem);
+    threadgroup half* sb = (threadgroup half*)(shmem + 4096);
+    threadgroup float* sc = (threadgroup float*)(shmem);
+
+    constexpr short NR0 = 64;
+    constexpr short NR1 = 32;
+    constexpr short NR1H = NR1 / 2;
+    constexpr short NK  = 32;
+    constexpr short NL0 = NK / 16;
+    constexpr short NL1 = NK / 8;
+    constexpr short NL  = DQ::NL;
+
+    const uint im = tgpig.z;
+    const int r0 = int(tgpig.y) * NR0;
+    const int r1 = int(tgpig.x) * NR1;
+
+    const int neh1 = int(tpe[im]);
+    if (r1 >= neh1) {
+        return;
+    }
+
+    const short nr0 = (int(n_rows) - r0 < NR0) ? short(int(n_rows) - r0) : NR0;
+    const short nr1 = (neh1 - r1 < NR1) ? short(neh1 - r1) : NR1;
+
+    const short lr0 = (short(tiitg) / NL0) < nr0 ? (short(tiitg) / NL0) : nr0 - 1;
+    const short lr1 = (short(tiitg) / NL1) < nr1 ? (short(tiitg) / NL1) : nr1 - 1;
+
+    const short il0 = short(tiitg) % NL0;
+    short il = il0;
+
+    const int id = ids[im * ids_stride + r1 + lr1];
+    const int src1_row = src1_per_slot != 0u ? id : (id / int(top_k));
+
+    device const uchar* x = src0 + (size_t)im * expert_stride + (size_t)row_bytes * (r0 + lr0);
+
+    const short iy = 8 * (short(tiitg) % NL1);
+    device const T1* y = src1 + (size_t)src1_row * n_cols + iy;
+
+    auto tA  = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>(sa, dextents<int32_t, 2>(NK, NR0));
+    auto tB0 = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>(sb, dextents<int32_t, 2>(NK, NR1H));
+    auto tB1 = tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline>(sb + NR1H * NK, dextents<int32_t, 2>(NK, NR1H));
+
+    mpp::tensor_ops::matmul2d<
+        mpp::tensor_ops::matmul2d_descriptor(NR1H, NR0, NK, false, true, false,
+            mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate),
+        execution_simdgroups<4>> mm;
+
+    auto cT0 = mm.get_destination_cooperative_tensor<decltype(tA), decltype(tB0), float>();
+    auto cT1 = mm.get_destination_cooperative_tensor<decltype(tA), decltype(tB1), float>();
+
+    const bool has_hi = nr1 > NR1H;
+
+    for (uint loop_k = 0; loop_k < n_cols; loop_k += NK) {
+        float4x4 temp_a;
+        DQ::get(x, il, temp_a);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+#pragma clang loop unroll(full)
+        for (short i = 0; i < 16; i++) {
+            const short sx = 2 * il0 + i / 8;
+            const short sy = (short(tiitg) / NL0) / 8;
+            const short lx = i % 8;
+            const short ly = (short(tiitg) / NL0) % 8;
+            *(sa + NK * (8 * sy + ly) + 8 * sx + lx) = half(temp_a[i / 4][i % 4]);
+        }
+
+        {
+            const short sx = short(tiitg) % NL1;
+            const short sy = (short(tiitg) / NL1) / 8;
+            const short ly = (short(tiitg) / NL1) % 8;
+            *(threadgroup half2x4*)(sb + NK * (8 * sy + ly) + 8 * sx) = mm_load_b8(y);
+        }
+
+        il = (il + 2 < NL) ? il + 2 : il % 2;
+        if (il < 2) {
+            x += DQ::BLOCK_BYTES;
+        }
+        y += NK;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        auto sA  = tA.slice(0, 0);
+        auto sB0 = tB0.slice(0, 0);
+        mm.run(sB0, sA, cT0);
+        if (has_hi) {
+            auto sB1 = tB1.slice(0, 0);
+            mm.run(sB1, sA, cT1);
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    auto tC0 = tensor<threadgroup float, dextents<int32_t, 2>, tensor_inline>(sc, dextents<int32_t, 2>(NR0, NR1H));
+    cT0.store(tC0);
+    if (has_hi) {
+        auto tC1 = tensor<threadgroup float, dextents<int32_t, 2>, tensor_inline>(sc + NR1H * NR0, dextents<int32_t, 2>(NR0, NR1H));
+        cT1.store(tC1);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (short j = sgitg; j < nr1; j += 4) {
+        const int sid = ids[im * ids_stride + r1 + j];
+        device float* D = dst + (size_t)sid * n_rows + r0;
+        device float4* D4 = (device float4*)D;
+        threadgroup float* C = sc + j * NR0;
+        threadgroup float4* C4 = (threadgroup float4*)C;
+        int i = int(tiisg);
+        for (; i < nr0 / 4; i += 32) {
+            D4[i] = C4[i];
+        }
+        i = (4 * (nr0 / 4)) + int(tiisg);
+        for (; i < nr0; i += 32) {
+            D[i] = C[i];
+        }
+    }
+}
+
+#define FRINK_MM_ID_ARGS src0, src1, dst, ids, tpe, expert_stride, n_rows, n_cols, top_k, \
+    ids_stride, row_bytes, src1_per_slot, shmem, tgpig, tiitg, tiisg, sgitg
+#define FRINK_MM_ID_PARAMS(T1) device const uchar* src0, device const T1* src1, \
+    device float* dst, device const int* ids, device const uint* tpe, uint expert_stride, \
+    uint n_rows, uint n_cols, uint top_k, uint ids_stride, uint row_bytes, \
+    uint src1_per_slot, threadgroup char* shmem, uint3 tgpig, ushort tiitg, \
+    ushort tiisg, ushort sgitg
+
+template<typename DQ>
+static inline void mul_mm_id_impl(FRINK_MM_ID_PARAMS(float)) {
+    mul_mm_id_tensor_impl<DQ, float>(FRINK_MM_ID_ARGS);
+}
+
+template<typename DQ>
+static inline void mul_mm_id_impl_f16(FRINK_MM_ID_PARAMS(half)) {
+    mul_mm_id_tensor_impl<DQ, half>(FRINK_MM_ID_ARGS);
+}
 #endif
 "#;
 
