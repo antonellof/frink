@@ -1,18 +1,17 @@
 # Configuration
 
-Prefer CLI flags ([CLI.md](CLI.md)). Environment variables are for server
-deployments and advanced tuning. Flags override env when both are set.
+Prefer CLI flags ([CLI.md](CLI.md)); a flag overrides its variable.
+Environment variables are for server deployments and advanced tuning.
 
-Everything Frink reads from the environment is listed here. Three
-namespaces, and the prefix tells you which:
+Everything Frink reads from the environment is listed here, in three
+namespaces:
 
 - `FRINK_*`: operator configuration. Sections
   [Server](#server) through [Kernel-lookup registry](#kernel-lookup-registry).
-- `FRINK_METAL_*_TIMING` / `_BARRIER_LOG`: Metal instrumentation. They
-  print numbers and change nothing else. See
+- `FRINK_METAL_*_TIMING` / `_BARRIER_LOG`: Metal instrumentation that
+  prints numbers and changes nothing else. See
   [Metal instrumentation](#metal-instrumentation).
-- `FRINK_TEST_*`: fixtures that point an `#[ignore]`d test at a local
-  checkpoint. Not configuration; see
+- `FRINK_TEST_*`: fixtures for `#[ignore]`d tests. See
   [Test and development fixtures](#test-and-development-fixtures).
 
 llama-server's own `LLAMA_ARG_*` variables are read as the flags they
@@ -22,19 +21,19 @@ are declared on; see [CLI.md](CLI.md#server-flags).
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_MODEL_PATH` | GGUF path (or Kimi dir); same as `-m`. An encoder-only checkpoint (WordPiece / `bert`) is accepted here and serves `/v1/embeddings`; the generating routes then answer 501 naming the model |
-| `FRINK_EMBEDDING_MODEL_PATH` | An encoder served alongside a generative model in one process, which the single active-model slot cannot express. Wins over an active encoder, since explicit config beats a hot-swap |
-| `FRINK_MODEL_DIR` | Extra directory `GET /admin/models` scans, and the one `POST /admin/download` writes into. Without it, the directory holding `FRINK_MODEL_PATH` is used; with neither, downloads are refused (`412`) rather than guessing a location |
-| `FRINK_MODEL_NAME` | What the served model is called in `/v1/models` and every response's `model` field. Same as `--alias` |
+| `FRINK_MODEL_PATH` | GGUF path (or Kimi dir); same as `-m`. An encoder-only checkpoint (WordPiece / `bert`) serves `/v1/embeddings`, and the generating routes answer 501 naming the model |
+| `FRINK_EMBEDDING_MODEL_PATH` | An encoder served alongside a generative model in one process. Wins over an active encoder |
+| `FRINK_MODEL_DIR` | Extra directory `GET /admin/models` scans and `POST /admin/download` writes into. Default: the directory holding `FRINK_MODEL_PATH`; with neither, downloads are refused (`412`) |
+| `FRINK_MODEL_NAME` | The model name in `/v1/models` and every response's `model` field. Same as `--alias` |
 | `FRINK_ADDR` | Bind address, e.g. `127.0.0.1:8383`. `--host` / `--port` win over it |
-| `FRINK_LORA` | Comma-separated `path:scale` LoRA adapter specs, what `--lora` / `--lora-scaled` lower to. Read at every model load, so a hot-swapped checkpoint gets the same adapters or is refused by name |
+| `FRINK_LORA` | Comma-separated `path:scale` LoRA specs, what `--lora` / `--lora-scaled` set. Applied at every model load, hot-swaps included, or the checkpoint is refused by name |
 | `FRINK_LORA_INIT_WITHOUT_APPLY` | `1`, load the adapters at scale 0 until `POST /lora-adapters` sets them (`--lora-init-without-apply`) |
-| `FRINK_ENDPOINT_SLOTS` | `0` refuses `GET /slots`, as llama.cpp does without `--slots`. Default on. `--slots` / `--no-slots` set it |
+| `FRINK_ENDPOINT_SLOTS` | `0` refuses `GET /slots`. Default on. `--slots` / `--no-slots` set it |
 | `FRINK_SPM_INFILL` | `1` assembles `/infill` prompts suffix first (`--spm-infill`) |
-| `FRINK_LOGICAL_BATCH` | The `n_batch` `/infill` budgets its prompt with. Set by `-b`; default 2048, llama.cpp's |
-| `FRINK_EXIT_ON_STDIN_CLOSE` | `1`, exit on stdin EOF (same as `--exit-on-stdin-close`); off by default so a `/dev/null` stdin does not stop the server |
-| `FRINK_TOKIO_WORKERS` | `frink-server` async worker threads (default `2`), so the HTTP runtime does not oversubscribe the decode pool. `--threads-http` sets it |
-| `FRINK_CACHE` | Where `-hf` puts downloaded checkpoints. Default `$XDG_CACHE_HOME/frink`, else `~/.cache/frink`; models go under `hub/<owner>__<repo>/`. llama.cpp spells this `LLAMA_CACHE` |
+| `FRINK_LOGICAL_BATCH` | The `n_batch` `/infill` budgets its prompt with. Set by `-b`; default 2048 |
+| `FRINK_EXIT_ON_STDIN_CLOSE` | `1`, exit on stdin EOF (`--exit-on-stdin-close`). Off by default so a `/dev/null` stdin does not stop the server |
+| `FRINK_TOKIO_WORKERS` | `frink-server` async worker threads (default `2`). `--threads-http` sets it |
+| `FRINK_CACHE` | Where `-hf` puts downloads. Default `$XDG_CACHE_HOME/frink`, else `~/.cache/frink`; models go under `hub/<owner>__<repo>/`. llama.cpp spells this `LLAMA_CACHE` |
 
 ## Hugging Face
 
@@ -48,210 +47,188 @@ Read by `-hf`, `frink download`, `frink pull` and `POST /admin/download`
 
 ## Backends
 
-Usually set by `-dev` / `-ngl`. Set these only when embedding Frink as a
-library or overriding the CLI.
+Usually set by `-dev` / `-ngl`. Set these when embedding Frink as a
+library or overriding the CLI. The `FRINK_CUDA_*` A/B levers are read
+once per process, and any value other than the ones listed is the
+default.
 
 | Variable | Purpose |
 |---|---|
 | `FRINK_METAL` | `1` / `0` / `auto`, Metal offload |
-| `FRINK_METAL_ATTN` | `1` / `0`, fused Metal attention with the KV cache resident on the device. Selecting a device with `-dev` / `-ngl` sets it to `1` on Metal unless it is already set, so `FRINK_METAL_ATTN=0 -ngl 99` is the unfused Metal path. `-dev cpu`, `-dev cuda` and `-dev vulkan` set it to `0` |
-| `FRINK_CTK` | KV cache type, what `-ctk` / `--ctk` sets; the values and which backend serves which are under [`--ctk` on each backend](CLI.md#completion-flags). `--ctk` wins when given. `frink parity`, `frink bench` and `frink-server` read it too |
+| `FRINK_METAL_ATTN` | `1` / `0`, fused Metal attention with the KV cache on the device. `-dev` / `-ngl` set it to `1` on Metal unless already set (so `FRINK_METAL_ATTN=0 -ngl 99` is the unfused Metal path); `-dev cpu`, `-dev cuda` and `-dev vulkan` set it to `0` |
+| `FRINK_CTK` | KV cache type, what `-ctk` / `--ctk` sets (`--ctk` wins); values per backend under [`--ctk` on each backend](CLI.md#completion-flags). `frink parity`, `frink bench` and `frink-server` read it too |
 | `FRINK_CUDA` | `1` / `0` / `auto` (build with `--features cuda`) |
-| `FRINK_CUDA_MUL_MM` | Which body runs the batched prefill GEMM. By default, on `sm_80` and up, Q8_0 and Q4_K weights take the int8 GEMM (llama.cpp's MMQ: activations quantized to q8_1 once per input, `mma.m16n8k32.s8`), and every other kind takes the f16 tensor-core body. `tc` keeps every kind on the f16 tensor-core body, and `simt` on the f32 SIMT one. An A/B lever, read once per process |
-| `FRINK_CUDA_PREFILL_ATTN` | `simt` keeps a prefill batch's attention on the f32 SIMT kernel where the device (`sm_80`+) would take the tensor-core kernel (`frink_cuda::prefill_attn_tc`: f16 Q, K, V and probabilities, f32 accumulation, head widths 64, 128 and 256). An A/B lever, read once per process. Anything other than `simt` is the default. Other head widths and older devices take the SIMT kernel either way |
-| `FRINK_CUDA_MOE_MMQ` | `1` runs a routed prefill batch's expert projections on the int8 grouped GEMM (Q8_0, Q4_K and MXFP4 experts, `sm_80` and up) instead of the f16 tensor-core grouped GEMM. Off by default: on an A100 it measured 6 to 8% slower on Qwen3-30B-A3B and gpt-oss-20b. Read once per process |
-| `FRINK_CUDA_MMQ_COLS` | `64` or `128` holds every dense int8 prefill GEMM at that token tile. By default Q8_0 takes 128 tokens where those tiles still fill every multiprocessor once and 64 otherwise, and the other kinds take 64. An A/B lever, read once per process |
-| `FRINK_CUDA_MATVEC` | Which CUDA decode matvecs run, read once per process. Unset (or `dp4a`), Q4_K, Q6_K, Q8_0 and MXFP4 decode the way llama.cpp's CUDA decode does (`mmvq`): the activation is quantized once to q8_1 and each row is dotted against it four int8 pairs at a time with `dp4a`, at llama.cpp's launch geometry for the device. One quantization serves every matvec that reads the same vector (Q, K and V; gate and up; a routed layer's router and experts). This puts decode on llama.cpp CUDA's rounding (ADR 0009). The other kinds run the f32 coalesced matvecs. `wide` keeps every kind on those f32 kernels, and `narrow` does too at one block per warp per loop trip: A/B levers, not tuning knobs. Any other value is the default |
-| `FRINK_CUDA_MATVEC_WPR` | `1`, `2`, `4` or `8` holds every coalesced decode matvec at that many warps per output row (Q5_K and the other kinds without a dp4a kernel; every kind under `FRINK_CUDA_MATVEC=wide` or `narrow`). Unset, a row gets as many warps as it has trips of its blocks, up to 4, and 8 for a long row of a matrix of at most 8192 rows (`matvec_kinds::coalesced::wpr_for`). An A/B lever, read once per process; any other value is the default rule |
-| `FRINK_CUDA_DECODE` | `host` keeps every CUDA decode token on the per-op path: each projection its own synchronous round trip, with the norms, RoPE, the attention and the residual adds on the host between them. The default runs a decode token's dense layers through the resident stack (`frink_cuda::prefill`, the one the batched prefill takes) at one row: matvec projections, attention over the sequence's device KV mirror, one download per run of layers. An A/B lever, read once per process; anything other than `host` / `off` / `0` is the default |
-| `FRINK_CUDA_DEVICE_ROUTE` | `0`, route every CUDA decode token's MoE layers on the host (the router's logits downloaded, the experts picked there) instead of on the device. The default routes a layer on the device when its gating is plain softmax top-k (optionally renormalised) or gpt-oss's, its experts share one coalesced matvec kind, and it has at most 256 experts and 16 active. Prefill batches route on the host either way. An A/B lever, read once per process |
-| `FRINK_CUDA_GQA` | `1`, serve the per-token GQA reduction from the CUDA `gqa_decode` kernel instead of the host path, falling back to the host on any launch error. Off by default: the kernel's numerical parity is gated on hardware tests that need a real GPU |
-| `FRINK_CUDA_GRAPH` | `1` replays a CUDA decode token of the resident stack from a CUDA graph. The token's kernels are captured once and replayed at every position: the position and the input are written into fixed device buffers before each replay, so a token costs two small uploads, one graph launch and the stack's one download instead of a host call per kernel. A run of layers captures after one eager token in which every routed layer routed on the device, and again after its KV mirror grows (from 256 rows, doubling); a prefill batch, a run with a layer routed on the host, and a device below `sm_70` or without stream-ordered allocation run eagerly. A capture that fails says why once on stderr, and that run decodes eagerly. Unset or `0` runs every token eagerly; any other value is refused by name (the resident decode declines and says why). Read once per process. Off by default: its hardware test (`prefill::decode_graph`, the replay held to the eager run bit for bit) has not run on a GPU yet |
-| `FRINK_CUDA_COUNT` | `1`, print to stderr how many host waits, host-to-device, device-to-host and device-to-device copies each CUDA decode token and prefill step made, the first time a step of its kind is seen and again whenever the count changes. Every copy and wait in `frink-cuda` goes through one counted door (`frink_cuda::xfer`); the counting is always on and costs a relaxed atomic add per transfer, so a counted run measures the same binary. Process-wide: two requests decoding at once are counted together |
-| `FRINK_CUDA_TIME` | `1`, print to stderr where each CUDA prefill step's host wall time went (describing the layers, enqueueing them, the wait for the stack's one download, pushing K/V into the host caches, the logits), and the same means per decode token every 64 tokens, `token` being the whole gap between two tokens |
-| `FRINK_VULKAN` | `1` / `0` / `auto` (build with `--features vulkan`). `--device vulkan` sets it to `1`; `--device cpu`, `none` and `-ngl 0` set it to `0`. **Unset is off**: the Vulkan path (matvecs, a prefill GEMM and a decode stack for the kinds in `docs/KERNELS.md`) is correct and not yet measured against the CPU, so it is opt-in |
-| `GGML_VK_VISIBLE_DEVICES` | llama.cpp's variable, read the same way: comma- or space-separated indices into the loader's device list. Unset is every discrete and integrated GPU. frink runs on the first one. The `-dev` row of [CLI.md](CLI.md#deliberate-differences-from-llamacpp) lists the checks it does not make |
-| `FRINK_VULKAN_LOADER` | Path to a `libvulkan` the loader should use. Only needed when the platform default is not found; the error names this variable |
-| `FRINK_HIP_LIB` · `FRINK_HIPRTC_LIB` | Paths to `libamdhip64` and `libhiprtc` for `frink-rocm`, overriding its search. `frink-rocm` is not a backend yet |
-| `FRINK_KV_WINDOW` | On by default: a sliding-window layer's contiguous host KV keeps its last `window` rows plus slack instead of the whole context, as llama.cpp's `swa_full = false` does. `0` keeps every row. See [`FRINK_KV_WINDOW`](#frink_kv_window) below |
-| `FRINK_CPU_THREADS` | Worker threads; same as `-t`. Default: performance cores (`hw.perflevel0.physicalcpu` on macOS), matching llama.cpp, not logical cores |
-| `FRINK_CPU_POOL` | An A/B override, not the decision. Unset, a single-token CPU decode step picks ONE scheduler for all of its regions from its widest layer matvec (LM head excluded): at least `par::policy::SPIN_MIN_OP_MACS` multiply-accumulates (`rows x cols`) runs the whole step on a persistent pool parked on a spin-then-park barrier, the shape llama.cpp's `ggml_threadpool` uses; anything smaller forks and joins with rayon. Every other operation (prefill, engines that do not report a layer width, GPU backends) is chosen per operation by the same constant. `spin` / `persistent` / `1` / `on` pins the pool at every size; `rayon` / `0` / `off` pins fork-join at every size. The pool is not uniformly better: it wins at 3B and 8B and loses at 135M on a 20-core Cortex-A725, and the crossover constant is bracketed by those measurements (see its doc comment). Output is token-identical on all settings, which is tested |
-| `FRINK_CPU_POOL_SPIN_US` | Microseconds a `spin` worker spins before parking. Default 100. A pool that never parks burns a core per thread on an idle server |
-| `FRINK_CPU_INT_DOT` | int8×int8 matvec + repacked GEMV/GEMM. On by default in `frink` / `frink-server`; `0` opts out. Off in the library so golden cross-validation stays reference-exact. It is the master switch, not the whole rule: which half of the tier a workload takes is per architecture. aarch64 takes both halves. x86_64 with AVX2+FMA takes the batched GEMM (prefill) and leaves decode on the AVX2 f32 dot, because the int8 matvec measured 4x to 8.8x slower there, while the batch half has AVX2 kernels for Q4_K, Q5_K, Q6_K, Q8_0 and Q4_0. An x86 host without AVX2 takes neither. Either half repacks weights into the interleaved layout, so the retained copies are bounded by `FRINK_REPACK_CACHE_BYTES` |
-| `FRINK_METAL_FA_VEC` | `0`, disable llama-style FA-vec for decode and prefill and fall back to the online-softmax GQA kernel. Default on for `head_dim` in {64, 96, 128, 256}; other widths take the online-softmax kernel either way. Prefill at 64 / 128 / 256 with at least 8 new tokens takes the simdgroup-MMA `flash_attn_ext` kernel, which is not separately switchable |
-| `FRINK_METAL_SCRATCH_BUDGET_BYTES` | Ceiling on the pooled Metal scratch buffers (default 768 MiB). Past it a returned buffer is dropped rather than kept for reuse. Lower it on a small machine where the pool competes with the weights |
-| `FRINK_METAL_WEIGHT_CACHE_BYTES` | Ceiling on the resident Metal weight-buffer cache. Default is effectively unlimited, which is right on unified memory; cap it on a small machine. An unparseable value also means unlimited |
+| `FRINK_CUDA_MUL_MM` | Batched prefill GEMM body. Default on `sm_80`+: Q8_0 and Q4_K take the int8 GEMM (llama.cpp's MMQ), other kinds the f16 tensor-core body. `tc` keeps every kind on the tensor-core body, `simt` on the f32 SIMT one |
+| `FRINK_CUDA_PREFILL_ATTN` | `simt` keeps prefill attention on the f32 SIMT kernel where an `sm_80`+ device would take the tensor-core kernel (head widths 64, 128, 256) |
+| `FRINK_CUDA_MOE_MMQ` | `1` runs routed prefill expert projections on the int8 grouped GEMM (Q8_0, Q4_K, MXFP4; `sm_80`+) instead of the f16 tensor-core grouped GEMM. Off by default (slower on an A100) |
+| `FRINK_CUDA_MMQ_COLS` | `64` or `128` holds every dense int8 prefill GEMM at that token tile. Default: Q8_0 takes 128 where those tiles fill every multiprocessor, else 64; other kinds 64 |
+| `FRINK_CUDA_MATVEC` | CUDA decode matvecs. Unset (or `dp4a`): Q4_K, Q6_K, Q8_0 and MXFP4 decode as llama.cpp's `mmvq` does (activation quantized once to q8_1, `dp4a` dots, llama.cpp's launch geometry), putting decode on llama.cpp CUDA's rounding (ADR 0009); other kinds run f32 coalesced matvecs. `wide` keeps every kind on the f32 kernels, `narrow` too at one block per warp per loop trip |
+| `FRINK_CUDA_MATVEC_WPR` | `1`, `2`, `4` or `8` warps per output row for every coalesced decode matvec. Unset: one warp per trip of a row's blocks up to 4, and 8 for a long row of a matrix of at most 8192 rows (`matvec_kinds::coalesced::wpr_for`) |
+| `FRINK_CUDA_DECODE` | `host` keeps every CUDA decode token on the per-op path (each projection a synchronous round trip, the rest on the host). Default: dense layers run through the resident stack at one row, with one download per run of layers. `off` / `0` mean the default |
+| `FRINK_CUDA_DEVICE_ROUTE` | `0` routes every CUDA decode token's MoE layers on the host. Default: on the device when gating is plain softmax top-k (optionally renormalised) or gpt-oss's, the experts share one matvec kind, and there are at most 256 experts and 16 active. Prefill routes on the host either way |
+| `FRINK_CUDA_GQA` | `1` serves the per-token GQA reduction from the CUDA `gqa_decode` kernel, falling back to the host on a launch error. Off by default until its hardware tests run |
+| `FRINK_CUDA_GRAPH` | `1` replays a CUDA decode token of the resident stack from a captured CUDA graph (position and input written to fixed buffers before each replay). A run of layers captures after one eager token with every routed layer on the device, and again when its KV mirror grows (from 256 rows, doubling). Prefill, a run with a host-routed layer, and a device below `sm_70` or without stream-ordered allocation run eagerly; a failed capture says why once on stderr. Unset or `0` is eager; any other value is refused by name. Off by default until its hardware test (`prefill::decode_graph`) runs on a GPU |
+| `FRINK_CUDA_COUNT` | `1` prints to stderr the host waits and the H2D, D2H and D2D copies each CUDA decode token and prefill step made, when first seen and whenever the count changes. Counting is always on (`frink_cuda::xfer`), so a counted run measures the same binary. Process-wide |
+| `FRINK_CUDA_TIME` | `1` prints where each CUDA prefill step's host wall time went (describing, enqueueing, waiting for the download, pushing K/V to the host, logits), and the same means per decode token every 64 tokens |
+| `FRINK_VULKAN` | `1` / `0` / `auto` (build with `--features vulkan`). `--device vulkan` sets `1`; `--device cpu`, `none` and `-ngl 0` set `0`. **Unset is off**: the Vulkan path (kinds in `docs/KERNELS.md`) is correct but not yet measured against the CPU |
+| `GGML_VK_VISIBLE_DEVICES` | llama.cpp's variable, read the same way: comma- or space-separated indices into the loader's device list. Unset is every discrete and integrated GPU; frink runs on the first. The `-dev` row of [CLI.md](CLI.md#deliberate-differences-from-llamacpp) lists the checks it does not make |
+| `FRINK_VULKAN_LOADER` | Path to a `libvulkan`, when the platform default is not found (the error names this variable) |
+| `FRINK_HIP_LIB` · `FRINK_HIPRTC_LIB` | Paths to `libamdhip64` and `libhiprtc` for `frink-rocm`, which is not a backend yet |
+| `FRINK_KV_WINDOW` | On by default: a sliding-window layer's host KV keeps its last `window` rows plus slack, as llama.cpp's `swa_full = false`. `0` keeps every row. See [`FRINK_KV_WINDOW`](#frink_kv_window) |
+| `FRINK_CPU_THREADS` | Worker threads; same as `-t`. Default: performance cores (`hw.perflevel0.physicalcpu` on macOS), as llama.cpp |
+| `FRINK_CPU_POOL` | A/B override of the CPU scheduler. Unset: a single-token decode step uses a persistent spin-then-park pool (as llama.cpp's `ggml_threadpool`) when its widest layer matvec (LM head excluded) is at least `par::policy::SPIN_MIN_OP_MACS` multiply-accumulates, else rayon fork-join; other operations choose per operation by the same constant. `spin` / `persistent` / `1` / `on` pins the pool, `rayon` / `0` / `off` pins fork-join. Output is token-identical on all settings |
+| `FRINK_CPU_POOL_SPIN_US` | Microseconds a `spin` worker spins before parking (default 100) |
+| `FRINK_CPU_INT_DOT` | int8×int8 matvec + repacked GEMV/GEMM. On by default in `frink` / `frink-server` (`0` opts out), off in the library so golden cross-validation stays reference-exact. aarch64 takes both halves; x86_64 with AVX2+FMA takes only the batched GEMM (Q4_K, Q5_K, Q6_K, Q8_0, Q4_0) and keeps decode on the AVX2 f32 dot; x86 without AVX2 takes neither. Repacked copies are bounded by `FRINK_REPACK_CACHE_BYTES` |
+| `FRINK_METAL_FA_VEC` | `0` disables FA-vec attention for decode and prefill, falling back to the online-softmax GQA kernel. Default on for `head_dim` in {64, 96, 128, 256}. Prefill at 64 / 128 / 256 with at least 8 new tokens takes the simdgroup-MMA `flash_attn_ext` kernel, not separately switchable |
+| `FRINK_METAL_SCRATCH_BUDGET_BYTES` | Ceiling on pooled Metal scratch buffers (default 768 MiB); past it a returned buffer is dropped |
+| `FRINK_METAL_WEIGHT_CACHE_BYTES` | Ceiling on the resident Metal weight-buffer cache. Default (and any unparseable value) is unlimited; cap it on a small machine |
 | `FRINK_CPU_KV_OFFLOAD` | `1`, sync Metal KV to host after each decode step |
 
 ## Tuning
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_CONTINUOUS_BATCHING` | `1` turns on the batched decode worker, `0` keeps the private decode loop; unset is off on every backend. `--cont-batching` / `-cb` and `--parallel N` set it to `1`, `--no-cont-batching` to `0`. Asked for beside a KV pool or `FRINK_PREFIX_CACHE_ENTRIES` (without paged KV), or on a dedicated engine (Kimi, MLA, GLM-5.2), the server refuses to start and names the conflict; paged KV composes with it |
-| `FRINK_CB_MAX_SEQS` | Continuous batching: cap on in-flight sequences (llama.cpp `-np`). CLI: `-np N` / `--parallel N`. Default: unlimited. Reported as `frink_scheduler_max_seqs` on `/metrics` |
-| `FRINK_CB_PREFILL_CHUNK`, `FRINK_CHUNKED_PREFILL` | Prompt tokens per forward pass, on the batch scheduler and the private decode loop respectively. On the scheduler the chunk is a scheduling quantum, the granularity at which a long prompt yields to in-flight decodes, since each tick runs one chunk plus one batched decode step. On the private loop it is the batch shape of each `forward_batch`. `-b` / `-ub` set both from one value (the smaller of the two flags, llama.cpp's own rule). Defaults: 128 on the scheduler, unchunked on the private loop |
-| `FRINK_CB_MAX_QUEUE` | Continuous batching: requests allowed to wait for admission (default `512`). Past it, new requests get `503` + `Retry-After` instead of queueing without bound |
-| `FRINK_CB_MAX_BATCH_TOKENS` | Continuous batching: tokens one tick may run, prompt and generated together (default `256`). The prefill chunk is sized against this minus the number of rows decoding in the same tick, so admitting a prompt costs the rows already answering less as the batch widens. It can only ever make a chunk smaller than `FRINK_CB_PREFILL_CHUNK`, and a floor of 16 prompt tokens per tick keeps a saturated batch from deadlocking |
-| `FRINK_CB_KV_BLOCKS` | Continuous batching: total KV blocks the scheduler may hand out. Unset means it is *derived* at load alongside `FRINK_CB_MAX_CONTEXT`, or absent when the model cannot be priced. Admission is `blocks_needed <= blocks_free`, where a request needs `ceil((prompt + max_tokens) / block_size)` blocks reserved for its whole lifetime |
-| `FRINK_CB_KV_BLOCK_SIZE` | Continuous batching: token positions per KV block (default `256`). The admission quantum. A request bigger than the whole budget gets `400` (`code: device_memory_budget_exceeded`), not `503`, because retrying cannot fix it |
-| `FRINK_CB_PREEMPT_AFTER_TICKS` | Continuous batching: admission passes the next job may wait before the most recently admitted decoding rows are preempted to make room for it (unset: no preemption; `0`: as soon as it does not fit). An evicted row keeps its output, sampler state and stop hold-back, returns to the front of the queue, and is prefilled again from prompt plus generated tokens, so its client sees one unbroken stream. Each row is preempted at most 4 times. Rows on a sliding-window paged lease are never evicted. Each eviction costs a re-prefill; `/metrics` reports the count as `frink_scheduler_preempted_total` |
-| `FRINK_CB_MAX_CONTEXT` | Token positions (prompt + `max_tokens`) any one request may ask for, on both decode paths. `-c` sets it. Over it, `400` with `code: context_length_exceeded`, `estimated_bytes` and `limit_bytes`. Unset means the ceiling is *derived* at load from weights + per-token KV against the device budget, capped at the model's trained context; unset and unpriceable (no device-budget probe, or a header the planner cannot read) means no ceiling |
-| `FRINK_MODEL_DRAFT` | A draft GGUF for speculative decoding, what `-md` / `--model-draft` sets. What it serves and what it refuses is under [Server flags](CLI.md#server-flags) |
-| `FRINK_DRAFT_MAX` | Tokens the draft proposes per verification step. CLI: `--draft-max`. Default: `3`, llama.cpp's |
-| `FRINK_DRAFT_P_MIN` | The draft stops a block at a token whose own probability is below this, between 0 and 1. CLI: `--draft-p-min`. Default: `0`, llama.cpp's |
-| `FRINK_SLOT_SAVE_PATH` | Directory for slot files (`POST /slots/{id}?action=save\|restore`). CLI: `--slot-save-path DIR`. Unset means the route refuses with a 501 naming the flag. Requires `FRINK_PREFIX_CACHE_ENTRIES`, which is where a restored slot lives |
-| `FRINK_CHAT_TEMPLATE` | A chat template in place of the checkpoint's: Jinja source, or `chatml`. Refused at load if it cannot render one user turn. CLI: `--chat-template`, `--chat-template-file`. Default: the GGUF's own |
-| `FRINK_CHAT_TEMPLATE_KWARGS` | Template variables for every render, as a JSON object, under whatever a request sets. CLI: `--chat-template-kwargs`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`. Default: `{"preserve_reasoning": true}`, llama.cpp's, which a value here that sets the key replaces |
-| `FRINK_REASONING_BUDGET` | Server default for `reasoning_budget_tokens`: `-1` unrestricted, `0` end the thought as it opens, `N` tokens of thought before the closer is forced. CLI: `--reasoning-budget N`. Default: `-1` |
-| `FRINK_PREFILL_ASSISTANT` | Whether a trailing assistant message is continued by default (`continue_final_message` auto). `0`/`false` off. CLI: `--prefill-assistant` / `--no-prefill-assistant`. Default: on, as llama.cpp |
-| `FRINK_SSE_ORPHAN_TIMEOUT_MS` | How long a streaming send waits for a client to make room before the stream is declared abandoned and the generation cancelled (default `30000`). `0` disables the deadline. Guards against a client that is neither reading nor disconnected pinning a blocking thread and the model handle it holds |
-| `FRINK_KV_POOL_BLOCKS` | KV block-pool size (blocks). Bounds how much KV all requests may hold; each request still owns a private contiguous buffer |
+| `FRINK_CONTINUOUS_BATCHING` | `1` turns on the batched decode worker, `0` keeps the private decode loop; unset is off. `-cb` / `--cont-batching` and `--parallel N` set `1`, `--no-cont-batching` `0`. Beside a KV pool or `FRINK_PREFIX_CACHE_ENTRIES` (without paged KV), or on a dedicated engine (Kimi, MLA, GLM-5.2), the server refuses to start, naming the conflict; paged KV composes with it |
+| `FRINK_CB_MAX_SEQS` | Cap on in-flight sequences (`-np N` / `--parallel N`). Default unlimited. Reported as `frink_scheduler_max_seqs` on `/metrics` |
+| `FRINK_CB_PREFILL_CHUNK`, `FRINK_CHUNKED_PREFILL` | Prompt tokens per forward pass, on the batch scheduler and the private loop respectively. On the scheduler it is the granularity at which a long prompt yields to decodes. `-b` / `-ub` set both (the smaller of the two). Defaults: 128 on the scheduler, unchunked on the private loop |
+| `FRINK_CB_MAX_QUEUE` | Requests allowed to wait for admission (default `512`); past it, `503` + `Retry-After` |
+| `FRINK_CB_MAX_BATCH_TOKENS` | Tokens one tick may run, prompt and generated together (default `256`). The prefill chunk shrinks by the rows decoding in the same tick, never below 16 prompt tokens |
+| `FRINK_CB_KV_BLOCKS` | Total KV blocks the scheduler may hand out. Unset: derived at load alongside `FRINK_CB_MAX_CONTEXT`, or absent when the model cannot be priced. A request reserves `ceil((prompt + max_tokens) / block_size)` blocks for its lifetime |
+| `FRINK_CB_KV_BLOCK_SIZE` | Token positions per KV block (default `256`). A request bigger than the whole budget gets `400` (`code: device_memory_budget_exceeded`), not `503` |
+| `FRINK_CB_PREEMPT_AFTER_TICKS` | Admission passes the next job may wait before the most recently admitted decoding rows are preempted for it (unset: never; `0`: as soon as it does not fit). An evicted row keeps its output and sampler state and is re-prefilled from prompt plus generated tokens, so its stream is unbroken. Each row is preempted at most 4 times. Rows on a sliding-window paged lease are never evicted. Counted as `frink_scheduler_preempted_total` on `/metrics` |
+| `FRINK_CB_MAX_CONTEXT` | Token positions (prompt + `max_tokens`) one request may ask for, on both decode paths; `-c` sets it. Over it, `400` with `code: context_length_exceeded`, `estimated_bytes` and `limit_bytes`. Unset: derived at load from weights + per-token KV against the device budget, capped at the trained context; no ceiling when the model cannot be priced |
+| `FRINK_MODEL_DRAFT` | Draft GGUF for speculative decoding, what `-md` / `--model-draft` sets; see [Server flags](CLI.md#server-flags) |
+| `FRINK_DRAFT_MAX` | Tokens drafted per verification step (`--draft-max`). Default `3` |
+| `FRINK_DRAFT_P_MIN` | Stop a draft block at a token below this probability (`--draft-p-min`). Default `0` |
+| `FRINK_SLOT_SAVE_PATH` | Directory for slot files (`POST /slots/{id}?action=save\|restore`), what `--slot-save-path DIR` sets. Unset, the route answers 501. Requires `FRINK_PREFIX_CACHE_ENTRIES` |
+| `FRINK_CHAT_TEMPLATE` | A chat template in place of the checkpoint's: Jinja source, or `chatml`. Set by `--chat-template` / `--chat-template-file` |
+| `FRINK_CHAT_TEMPLATE_KWARGS` | JSON object of template variables for every render, under a request's own. Set by `--chat-template-kwargs`, `-rea`, `--reasoning-effort`, `--reasoning-preserve`. Default `{"preserve_reasoning": true}` |
+| `FRINK_REASONING_BUDGET` | Default `reasoning_budget_tokens`: `-1` unrestricted (default), `0` end the thought at once, `N` tokens. `--reasoning-budget N` |
+| `FRINK_PREFILL_ASSISTANT` | Continue a trailing assistant message by default. `0`/`false` off. `--prefill-assistant` / `--no-prefill-assistant`. Default on |
+| `FRINK_SSE_ORPHAN_TIMEOUT_MS` | How long a streaming send waits for a stalled client before the generation is cancelled (default `30000`; `0` disables) |
+| `FRINK_KV_POOL_BLOCKS` | KV block-pool size (blocks). Bounds the KV all requests may hold; each request still owns a private buffer |
 | `FRINK_KV_POOL_BLOCK_SIZE` | Tokens per KV pool block |
-| `FRINK_KV_POOL_QUEUE_TIMEOUT_MS` | How long a request waits for free KV before it is rejected (default `0`, reject at once). Applies to both the pool and paged KV |
-| `FRINK_KV_BYTE_BUDGET` | Byte ceiling for the KV block pool, independent of block count. Exclusive with `FRINK_KV_POOL_BLOCKS` |
-| `FRINK_PAGED_KV_BLOCKS` | Blocks per layer of real paged KV: shared page storage many requests read through a block table, rather than a private buffer each. `frink-server` only. Mutually exclusive with `FRINK_KV_POOL_BLOCKS`/`FRINK_KV_BYTE_BUDGET` and with `FRINK_PREFIX_CACHE_ENTRIES`; setting an excluded pair stops the server with an error naming both. Turns on [prefix sharing](#sharing-pages-between-prompts) |
-| `FRINK_PAGED_KV_BLOCK_SIZE` | Positions per paged-KV block. Must be set together with `FRINK_PAGED_KV_BLOCKS`, or the server stops |
-| `FRINK_PAGED_KV_SLIDE_INTERVAL` | Decode steps between window slides on a paged store (default 128). Only applies when *every* layer of the served model slides by the same window, because a page group holds one block in each layer, so a single full-attention layer disables sliding entirely. A smaller number returns pages sooner and costs a page operation more often |
-| `FRINK_PREFIX_CACHE_ENTRIES` | Prefix-cache capacity for the private decode loop: whole KV snapshots in an LRU list, reported under `GET /cache/stats`. Each entry is a full copy of a conversation's KV (Qwen3-8B: about 1 GiB per 7k tokens), so a single agent client wants 1 or 2. A follow-up chat turn reuses the last one and prefills only the new message, greedy requests on Metal included. Keeps the private loop (continuous batching is not started) and is refused beside paged KV, which shares prefixes through its own radix tree instead |
+| `FRINK_KV_POOL_QUEUE_TIMEOUT_MS` | How long a request waits for free KV before rejection (default `0`). Applies to the pool and paged KV |
+| `FRINK_KV_BYTE_BUDGET` | Byte ceiling for the KV block pool. Exclusive with `FRINK_KV_POOL_BLOCKS` |
+| `FRINK_PAGED_KV_BLOCKS` | Blocks per layer of paged KV: shared pages read through a block table. `frink-server` only. Exclusive with `FRINK_KV_POOL_BLOCKS`/`FRINK_KV_BYTE_BUDGET` and `FRINK_PREFIX_CACHE_ENTRIES` (the server stops naming both). Turns on [prefix sharing](#sharing-pages-between-prompts) |
+| `FRINK_PAGED_KV_BLOCK_SIZE` | Positions per paged-KV block. Required with `FRINK_PAGED_KV_BLOCKS` |
+| `FRINK_PAGED_KV_SLIDE_INTERVAL` | Decode steps between window slides on a paged store (default 128). Applies only when *every* layer slides by the same window |
+| `FRINK_PREFIX_CACHE_ENTRIES` | Prefix-cache capacity for the private decode loop: whole KV snapshots in an LRU, reported under `GET /cache/stats`. Each entry is a full copy (Qwen3-8B: about 1 GiB per 7k tokens), so a single agent client wants 1 or 2. A follow-up turn reuses the last one, greedy Metal requests included. Keeps the private loop and is refused beside paged KV |
 | `FRINK_EXPERT_CACHE_BYTES` | MoE expert-streaming cache budget; see [Expert streaming](#expert-streaming) |
 | `FRINK_SSD_STREAMING` | `1`, stream MoE experts from disk; `0`, never. Unset decides at load; see [Expert streaming](#expert-streaming) |
-| `FRINK_REPACK_CACHE_BYTES` | Bytes the interleaved-weight (`repack`) cache may retain. `0` disables it, which makes every CPU matvec rebuild its interleaved copy per call (correct and slower), the way to run a memory-constrained host. Unset, the budget is derived from what the host says is available, less the standard fit headroom, less whatever `FRINK_EXPERT_CACHE_BYTES` has committed, divided by four. The expert budget is subtracted from the same pool, because on unified memory a repacked byte and an expert byte are the same RAM. The cache evicts least-recently-used entries to stay under its budget, and a matrix that does not fit is packed uncached |
+| `FRINK_REPACK_CACHE_BYTES` | Bytes the interleaved-weight (`repack`) cache may retain, evicting least-recently-used. `0` disables it (every CPU matvec repacks per call). Unset: a quarter of available memory less the fit headroom and `FRINK_EXPERT_CACHE_BYTES` |
 | `FRINK_GPU_VRAM_BUDGET_BYTES` | Cap GPU-resident MoE experts (`0` = CPU experts on Metal) |
 | `FRINK_DEVICE_BUDGET_BYTES` | Override the probed memory budget the pre-load KV check plans against (Metal `recommendedMaxWorkingSetSize` / free VRAM / host RAM minus a reserve). For container limits and shared GPUs |
-| `FRINK_PIN_BUDGET_GB` | Override the page-locking budget expert-bank placement plans against. Unset means no cap on plain Linux; on WSL, where WDDM-backed CUDA caps pinning near half of RAM *shared across processes*, it defaults to 40% of physical RAM |
-| `FRINK_BENCHBW_PATH` | Explicit path to this host's measured bandwidth profile (`frink bench-bw`). Otherwise one file per GPU uuid under `$XDG_CACHE_HOME/frink/benchbw/`, then the legacy `benchbw.json`. A file that exists but does not parse yields no profile rather than falling through, so a corrupt per-card profile never borrows another card's numbers |
-| `FRINK_DECODE_LOG_INTERVAL` | Decode forwards between two batch status lines (default 40). `0` logs every forward. An unparseable value takes the default rather than failing a server's start over a log setting |
-| `FRINK_ACCOUNTING_OUTBOX` | Directory accounting receipts are written to, atomically and idempotently by receipt id, before `POST /v1/admin/prepare-stop` answers. Unset means no outbox and no persistence step |
-| `FRINK_INSTANCE_ID` | Names this engine generation for the receipt id. Unset falls back to the pid plus the process's wall-clock start, which is stable for the life of the process and different in the next one |
+| `FRINK_PIN_BUDGET_GB` | Override the page-locking budget for expert-bank placement. Unset: no cap on plain Linux; 40% of physical RAM on WSL |
+| `FRINK_BENCHBW_PATH` | Path to this host's bandwidth profile (`frink bench-bw`). Otherwise one file per GPU uuid under `$XDG_CACHE_HOME/frink/benchbw/`, then the legacy `benchbw.json`. A file that does not parse yields no profile |
+| `FRINK_DECODE_LOG_INTERVAL` | Decode forwards between batch status lines (default 40; `0` logs every one; unparseable takes the default) |
+| `FRINK_ACCOUNTING_OUTBOX` | Directory accounting receipts are written to, atomically and idempotently by receipt id, before `POST /v1/admin/prepare-stop` answers. Unset: no outbox |
+| `FRINK_INSTANCE_ID` | Names this engine generation for the receipt id. Unset: the pid plus the process's start time |
 | `FRINK_QOS_LOG` | `1`, log each rayon worker's macOS QoS class at pool start |
-| `NO_COLOR` | Any value turns off the ANSI colour in `frink run` / `frink cli` output. Colour is off by default whenever stderr is not a terminal, so a pipe never receives escape codes |
+| `NO_COLOR` | Any value turns off ANSI colour in `frink run` / `frink cli`. Colour is also off whenever stderr is not a terminal |
 | `FRINK_COLOR` | `1`, force ANSI colour on even when stderr is not a terminal |
-| `FRINK_QUIET` | Any value drops the `loaded in ...` line (load time, tokenizer, context size) that `frink run` prints to stderr before generating. The banner and the prompt echo still print |
+| `FRINK_QUIET` | Any value drops the `loaded in ...` line `frink run` prints to stderr |
 
 ### Expert streaming
 
-Streaming is off by default and turns itself on only when the weights
-will not fit. It is strictly slower than running resident, so it is a
-way to run a model that otherwise could not run at all, not a default.
-The automatic decision compares the checkpoint's size against the host's
-available memory, reserves 4 GiB for the KV cache and activations, and
-if the weights still do not fit it enables streaming and logs the two
-figures and the cache size it chose.
-
-`FRINK_SSD_STREAMING=0` refuses that: it forces resident loading even
-when the weights do not fit, because an operator who says so may know
-something the probe does not. `FRINK_EXPERT_CACHE_BYTES` sets the
-budget explicitly and also wins over the automatic choice. A host whose
-available memory cannot be determined resolves to resident rather than
-to streaming.
+Off by default; it turns itself on only when the weights will not fit
+(checkpoint size against available memory, less 4 GiB for KV and
+activations), and logs both figures and the cache size it chose. It is
+slower than running resident. `FRINK_SSD_STREAMING=0` forces resident
+loading anyway; `FRINK_EXPERT_CACHE_BYTES` sets the budget explicitly
+and wins over the automatic choice. A host whose available memory is
+unknown resolves to resident.
 
 The budget buys whole slots of the largest expert's size; the load
 line says how many (`frink: expert store: N of M routed experts
-resident`). Experts the router picks most often stay resident, and a
-miss colder than every resident expert is read without being cached.
-On Metal the slots are one Shared buffer the GPU reads in place, so the
-budget is not counted a second time by `FRINK_METAL_WEIGHT_CACHE_BYTES`.
-A streamed layer still takes the per-layer Metal top-k launch rather
-than the packed whole-stack decode, so streaming costs speed on Metal
-even when every expert fits the budget.
+resident`). The most-picked experts stay resident, and a miss colder
+than every resident expert is read uncached. On Metal the slots are one
+Shared buffer, not counted again by `FRINK_METAL_WEIGHT_CACHE_BYTES`,
+and a streamed layer takes the per-layer top-k launch instead of the
+packed whole-stack decode.
 
 ### Sharing pages between prompts
 
-Turning paged KV on also turns on a radix prefix cache over the same
-pages. There is no separate switch, because sharing means two sequences
-pointing at one page rather than one of them holding a copy, and only
-the paged store can do that.
+Paged KV also turns on a radix prefix cache over the same pages; there
+is no separate switch. Each prompt is matched against a tree of
+computed prefixes keyed by page; the matched pages are locked and
+reference-counted, so many conversations off one system prompt hold one
+copy of its KV. Reuse shows as `usage.cached_tokens`. There is no
+aggregate hit rate on `/v1/stats` or `/metrics` and no eviction knob:
+back pressure is the page store running out plus
+`FRINK_KV_POOL_QUEUE_TIMEOUT_MS`.
 
-Each new prompt is matched against a tree of already-computed prefixes,
-keyed by page. The matched prefix is locked for the request's life and
-its page groups have their reference counts raised, so a thousand
-conversations off one system prompt hold one copy of its KV rather than
-a thousand. What the request reused shows up as `usage.cached_tokens`.
-There is no aggregate hit rate on `/v1/stats` or `/metrics`, and no
-eviction knob: back pressure comes from the page store running out and
-`FRINK_KV_POOL_QUEUE_TIMEOUT_MS` turning waiting requests away.
-
-The tree is keyed by token ids and shared across the deployment, so a
-request that wants its prefixes to itself sends `cache_salt`: a
-namespace is a whole tree there, the pages stay one pool, and eviction
-takes from each namespace in turn rather than by a global LRU, so one
-busy caller cannot evict every quiet one.
-
-This is a different mechanism from `FRINK_PREFIX_CACHE_ENTRIES`, which
-stores whole contiguous KV snapshots and copies them. The two cannot be
-on at once.
+A request that sends `cache_salt` gets its own tree (same page pool);
+eviction takes from each namespace in turn. This is a different
+mechanism from `FRINK_PREFIX_CACHE_ENTRIES` (whole copied snapshots);
+the two cannot be on at once.
 
 ## Security and transport
 
 Everything except `/health` sits behind `FRINK_API_KEY` when it is
-set, including `/admin/*`, `/metrics` and `/cache/stats`. A Prometheus
-scraper pointed at a keyed server gets a `401`.
+set, including `/admin/*`, `/metrics` and `/cache/stats`.
 
 | Var | Effect |
 |---|---|
-| `FRINK_API_KEY` | Bearer token (`Authorization: Bearer <key>`) required by every route except `/health`. Also gates the whole `/admin` control surface, which can swap models and write files. `--api-key` / `--api-key-file` set it |
-| `FRINK_ALLOW_UNAUTHENTICATED_REMOTE` | `1`, permit binding a non-loopback address with no API key. Without it the server refuses to start in that configuration, on purpose: an unauthenticated model endpoint on a LAN address is an open proxy |
-| `FRINK_TLS_CERT` / `FRINK_TLS_KEY` | PEM cert and key. Set both or neither; setting one alone is a startup error. Unset means plain HTTP. `--ssl-cert-file` / `--ssl-key-file` set them |
-| `FRINK_CORS_ORIGINS` | Comma-separated exact origins. `*` is rejected on purpose, because a wildcard plus a bearer token is a credential-leak shape. Required to serve Frink Studio (`ui/`) from another origin: set it to that origin exactly. `ui/`'s dev server proxies the API instead, so `npm run dev` needs none of this |
-| `FRINK_RATE_LIMIT_PER_MINUTE` | Global request cap. A non-integer value is a startup error, not a silent default |
+| `FRINK_API_KEY` | Bearer token (`Authorization: Bearer <key>`) required by every route except `/health`, the `/admin` control surface included. `--api-key` / `--api-key-file` set it |
+| `FRINK_ALLOW_UNAUTHENTICATED_REMOTE` | `1`, permit binding a non-loopback address with no API key. Without it the server refuses to start that way |
+| `FRINK_TLS_CERT` / `FRINK_TLS_KEY` | PEM cert and key; both or neither (one alone is a startup error). Unset is plain HTTP. `--ssl-cert-file` / `--ssl-key-file` set them |
+| `FRINK_CORS_ORIGINS` | Comma-separated exact origins; `*` is rejected. Needed to serve Frink Studio (`ui/`) from another origin; `ui/`'s dev server (`npm run dev`) proxies the API instead |
+| `FRINK_RATE_LIMIT_PER_MINUTE` | Global request cap. A non-integer value is a startup error |
 | `FRINK_JOURNAL_PATH` | Where the process-lifecycle journal is written |
-| `FRINK_CONVERSATIONS_DIR` | Where server-side conversations are stored, one JSON file each (default `./frink-conversations`). Created on first write. Nothing is evicted: the caps refuse with a reason rather than dropping an older conversation |
+| `FRINK_CONVERSATIONS_DIR` | Where server-side conversations are stored, one JSON file each (default `./frink-conversations`). Nothing is evicted; the caps refuse with a reason |
 
 ## Kernel-lookup registry
 
-Every kernel lookup the model will make is resolved once at load and
-recorded; the registry is then sealed, and a later lookup that misses and
-takes a fallback warns once with its call site. See
-`frink_core::kernel_registry`.
+Every kernel lookup is resolved once at load and recorded; the registry
+is then sealed, and a later miss that takes a fallback warns once with
+its call site (`frink_core::kernel_registry`).
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_KERNEL_REGISTRY` | `1`, print the whole load-time kernel table (one line per backend × op × quant kind, with the tensor role and the fallback). `0`, record nothing. Default: record, print only the misses that will run off the selected accelerator |
-| `FRINK_ALLOW_UNKNOWN_TENSORS` | `1`, load a checkpoint that carries tensors this build never reads, with a warning, instead of refusing. An unread tensor is a missing term of the graph (gpt-oss attention sinks, `exp_probs_b`), so the default is refusal: a wrong answer is worse than no answer |
-| `FRINK_ALLOW_MULTIPLE_INSTANCES` | `1`, start even though another frink process is already holding a model. Default is refusal; see [One model at a time](CLI.md#one-model-at-a-time). `--allow-multiple-instances` on `frink` / `frink-server` does the same for one run |
-| `FRINK_INSTANCE_DIR` | Where the running-instance registry lives (default `$XDG_CACHE_HOME/frink/instances`, else `~/.cache/frink/instances`). One small file per live process, pruned when its pid is gone |
-| `FRINK_STRICT_KERNELS` | `1`, refuse to load a model whose weights have no kernel on the selected accelerator, instead of running it on a slower path. Set this in CI and in benchmark harnesses so a number cannot be published for a backend it was not taken on |
-| `FRINK_ALLOW_UNAUDITED_ARCH` | Run an architecture that has never been verified against llama.cpp. Off by default: such a model is refused rather than run on the shared generic-GQA path, which assumes plain GQA and was already wrong for gpt2, mpt, refact, bloom and jais. Set it to compare the output against llama.cpp yourself |
+| `FRINK_KERNEL_REGISTRY` | `1`, print the whole load-time kernel table (backend × op × quant kind, with tensor role and fallback). `0`, record nothing. Default: print only misses that run off the selected accelerator |
+| `FRINK_ALLOW_UNKNOWN_TENSORS` | `1`, load a checkpoint carrying tensors this build never reads, with a warning. Default is refusal, since an unread tensor is a missing term of the graph |
+| `FRINK_ALLOW_MULTIPLE_INSTANCES` | `1`, start even though another frink process holds a model. See [One model at a time](CLI.md#one-model-at-a-time); `--allow-multiple-instances` does the same for one run |
+| `FRINK_INSTANCE_DIR` | Where the running-instance registry lives (default `$XDG_CACHE_HOME/frink/instances`, else `~/.cache/frink/instances`) |
+| `FRINK_STRICT_KERNELS` | `1`, refuse a model whose weights have no kernel on the selected accelerator instead of running a slower path. Set it in CI and benchmark harnesses |
+| `FRINK_ALLOW_UNAUDITED_ARCH` | Run an architecture never verified against llama.cpp on the shared generic-GQA path. Off by default (refused); set it to compare against llama.cpp yourself |
 
 ## Metal instrumentation
 
-These print numbers and change nothing else: no kernel is selected
-differently, no output moves. They exist so a Metal change can be
-attributed rather than guessed at, without a GPU capture.
+These print numbers and change nothing else.
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_METAL_MM_TIMING` | `1`, accumulate wall-clock setup / GPU-wait / readback microseconds across the prefill GEMM paths and print the totals. This is how long the host waited, which is what a `pp512` number is made of |
-| `FRINK_METAL_GPU_TIMING` | `1`, accumulate GPU-clock milliseconds per tagged submission (`moe-decode/tok`, `dense-decode/tok`, `prefill-dense-stack`) from the command buffer's own timestamps, and print a running mean. Unlike the row above, it excludes host stalls |
-| `FRINK_METAL_KERNEL_TIMING` | `1`, attribute the dense decode stack's GPU time to dispatch kinds (matvec, attention, norm, RoPE, ...) and print a table. Apple GPUs sample the timestamp counter only at encoder boundaries, so every op group gets its own sampled encoder while this is on: the small-kernel rows carry an encoder boundary each and the between-encoder gaps are their own row. Compare ratios between two builds or two models measured the same way |
-| `FRINK_METAL_BARRIER_LOG` | `1`, log the running barriers-per-op ratio from `MemRanges`. `1.00` means the pass is fully serialised; lower means dispatches are overlapping |
+| `FRINK_METAL_MM_TIMING` | `1`, total the host's wall-clock setup / GPU-wait / readback microseconds across the prefill GEMM paths |
+| `FRINK_METAL_GPU_TIMING` | `1`, running mean of GPU-clock milliseconds per tagged submission (`moe-decode/tok`, `dense-decode/tok`, `prefill-dense-stack`), excluding host stalls |
+| `FRINK_METAL_KERNEL_TIMING` | `1`, attribute the dense decode stack's GPU time to dispatch kinds (matvec, attention, norm, RoPE, ...). Each op group gets its own sampled encoder while on, so compare ratios between runs measured the same way |
+| `FRINK_METAL_BARRIER_LOG` | `1`, log the running barriers-per-op ratio from `MemRanges` (`1.00` is fully serialised) |
 
 ## Test and development fixtures
 
-Not configuration. `FRINK_TEST_*` exists so an `#[ignore]`d test can find
-a checkpoint that is too large to commit, and points at a local file or
-directory. `cargo test --workspace` passes with none of them set; the
-tests that read them skip instead.
+`FRINK_TEST_*` points an `#[ignore]`d test at a local checkpoint too
+large to commit. `cargo test --workspace` passes with none set; the
+tests that read them skip.
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_TEST_MODELS_DIR` | Root the real-GGUF sweeps scan (default `models`). Read by `bos_policy`, `chat_template_real_gguf`, `paged_metal_parity` and `model_swap_isolation`. A git worktree has no `models/` of its own, which is what this is for. Unrelated to `FRINK_MODEL_DIR`, which is server config |
+| `FRINK_TEST_MODELS_DIR` | Root the real-GGUF sweeps scan (default `models`), for `bos_policy`, `chat_template_real_gguf`, `paged_metal_parity` and `model_swap_isolation`; useful in a worktree. Unrelated to `FRINK_MODEL_DIR` |
 | `FRINK_TEST_GEMMA2_GGUF` | Gemma-2 GGUF for the Metal quality gate |
 | `FRINK_TEST_QWEN2MOE_GGUF` | Qwen2-MoE GGUF for the "capital of France" check |
 | `FRINK_TEST_SMOLLM2_GGUF` | SmolLM2 GGUF for the same check on Metal |
 | `FRINK_TEST_PAGED_PARITY_GGUF` | GGUF for the paged-vs-contiguous KV parity test |
 | `FRINK_TEST_RECEIPT_CHECKPOINT` | The pinned Llama-3.1 Q4_K_M GGUF the checkpoint-receipt test hashes |
 | `FRINK_TEST_KIMI_SHARD_DIR` · `FRINK_TEST_KIMI_MOE_SHARD_DIR` · `FRINK_TEST_KIMI_TOKENIZER_PATH` | Kimi shards and tokenizer for the real-data tests |
-| `FRINK_TEST_INSPECT_PATH` | A real `.gguf` for the tensor-table dump in `frink-gguf` (a print, not an assertion) |
-| `FRINK_TEST_CHAT_TEMPLATE_NOW` | Pins the clock chat templates read (`strftime_now`, `date_string`, `datetime`) to Unix seconds, read as UTC, so a template that stamps the date renders the same string every run. Unset, they read local time, as llama.cpp's do. The only one of these read from library code rather than a test |
-| `FRINK_REQUIRE_VULKAN` | `1` turns a Vulkan test's "no device, skipped" into a failure, as CI's lavapipe job sets it |
+| `FRINK_TEST_INSPECT_PATH` | A real `.gguf` for the tensor-table dump in `frink-gguf` |
+| `FRINK_TEST_CHAT_TEMPLATE_NOW` | Pins the clock chat templates read (`strftime_now`, `date_string`, `datetime`) to these Unix seconds, as UTC. Unset, local time. The only one read from library code |
+| `FRINK_REQUIRE_VULKAN` | `1` turns a Vulkan test's "no device, skipped" into a failure (CI's lavapipe job) |
 
-Two more that are development tools rather than deployment settings:
+Development tools:
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_LLAMA_LOGITS` | Path to a locally built `llama_logits` reference dumper for `frink parity`. Otherwise `target/llama_logits`, then `.local-scripts/llama_logits`. `--dumper` is the flag form |
-| `FRINK_PRESET` | Only consulted when `FRINK_MODEL_PATH` is unset, and then only to name which architecture sketch `frink-server` should build random weights for (default `glm-5.2`). It logs a warning saying so. A served model never reaches this path |
+| `FRINK_LLAMA_LOGITS` | Path to a `llama_logits` reference dumper for `frink parity` (`--dumper`). Otherwise `target/llama_logits`, then `.local-scripts/llama_logits` |
+| `FRINK_PRESET` | With `FRINK_MODEL_PATH` unset only: the architecture sketch `frink-server` builds random weights for (default `glm-5.2`), with a warning |
 
 ## Removed
 
@@ -270,14 +247,12 @@ only path.
 
 ## `FRINK_KV_WINDOW`
 
-A sliding-window layer only ever attends over its last `window`
-positions, so the rows before that are dead weight. The contiguous host
-store drops them, per layer, so an alternating model (Gemma-2/3,
-gpt-oss) evicts in its windowed layers and keeps everything in its
-full-attention ones. The windowed layers are the ones
-`attention.sliding_window_pattern` or the file's per-layer array names.
-
-What it saves, on Gemma-3-4B at 32768 tokens of host f32 KV:
+A sliding-window layer only attends over its last `window` positions,
+so the contiguous host store drops older rows per layer: an alternating
+model (Gemma-2/3, gpt-oss) evicts in its windowed layers (those
+`attention.sliding_window_pattern` or the per-layer array names) and
+keeps everything in its full-attention ones. On Gemma-3-4B at 32768
+tokens of host f32 KV:
 
 | | bytes |
 |---|---|
@@ -285,84 +260,32 @@ What it saves, on Gemma-3-4B at 32768 tokens of host f32 KV:
 | Default, at rest | 1,678,098,432 |
 | Default, admission ceiling (prefill peak) | 1,962,934,272 |
 
-The peak is not the full 9.13 GiB because prefill evicts per layer: one
-layer holds the whole prompt at a time rather than all 34 at once. Five
-of the 34 layers are full attention and still hold everything, which is
-most of what remains.
+A windowed layer's rows cycle between `window + reserve` and
+`window + slack` (half a window of slack, half of it a rollback
+reserve). Admission and `--ctx-size auto` price each windowed layer at
+the top of that cycle (`KvWindow::max_rows`, via `KvBudget`), so a run
+with the switch on is offered the context it can really carry. Output
+is token-identical with it on or off.
 
-A windowed layer's resident rows cycle between `window + reserve` and
-`window + slack`: half a window of slack, so the drain moves a block of
-rows every few hundred tokens rather than the whole window every token,
-and half of that slack held back as a rollback reserve (below). The
-ceiling prices each windowed layer at the top of that cycle
-(`KvWindow::max_rows`) rather than at the instantaneous count, which
-oscillates. That costs 1.5% against a number that already carries a
-whole layer's prompt, and in return the cost never falls as the context
-grows, which is what `--ctx-size auto`'s search for the largest fitting
-context needs.
+How state that moves backwards is handled:
 
-Output is token-identical with it on or off, asserted on identical logit
-vectors as well as identical token ids, on gemma-2-2b-it-Q4_K_M with its
-real SWA layout and real quantized tensors, and on synthetic fixtures
-that decode several windows past the end, through rejected speculative
-drafts and through forks.
-
-How each thing that moves a KV cache backwards or sideways is handled:
-
-- **Speculative decoding.** A rejected draft is rolled back with a
-  truncate, and a cache that has just drained to `window` rows cannot
-  roll back without leaving the next query reading across a hole. So a
-  drain keeps a reserve of a quarter window, and every speculative
-  caller (the server's prompt-lookup drafter, `--model-draft`) bounds
-  its draft by what the caches say they can roll back
-  (`KvCache::rollback_limit`) before it writes. On Gemma-3's 1024-token
-  window that is 257 positions; a window too small for the server's
-  5-token draft simply decodes without speculating.
-- **The prefix cache** stores windowed caches, at O(window) for their
-  windowed layers, and reuses one only for a match it can still truncate
-  to. The next turn of a chat, which extends the stored sequence, keeps
-  hitting. A request that diverges further back than the reserve is a
-  miss, counted as `refused_windowed` in the prefix-cache stats, rather
-  than a history with a hole in it.
-- **`n > 1`** forks clone the post-prefill caches, and a clone carries
-  its window and its rows, so each fork drains on its own.
-- **Slot files** hold a whole history, so a slot save's prefill keeps
-  every row.
+- **Speculative decoding.** Every speculative caller (the prompt-lookup
+  drafter, `--model-draft`) bounds its draft by
+  `KvCache::rollback_limit`. A window too small for the server's
+  5-token draft decodes without speculating.
+- **The prefix cache** stores windowed caches and reuses one only for a
+  match it can still truncate to; a request diverging further back than
+  the reserve is a miss, counted as `refused_windowed`.
+- **`n > 1`** forks clone the caches, window included.
+- **Slot files** hold a whole history, so a slot save keeps every row.
 - **Context shift** is refused before any of this matters.
 
-It turns itself off in two cases rather than guessing:
-
-- Under `FRINK_METAL_ATTN`, which Metal turns on by default, because
-  five sites treat Metal's own sequence length and the host cache's
-  resident rows as interchangeable. They are equal only while nothing
-  evicts, and the Metal attention kernels index the device KV linearly
-  from row 0. A Metal run with `FRINK_METAL_ATTN=0` attends on the host
-  and evicts as the CPU does.
-- On a draft model's decoder, which rolls its cache back arbitrarily far
-  during speculative verification.
-
-And two stores do not evict at all, so they cost what they always did:
-the paged store (`FRINK_PAGED_KV_BLOCKS`), whose page groups hold one
-block in every layer, and the KV pool (`FRINK_KV_POOL_BLOCKS`), which
-reserves the whole context up front. The paged prefill's scratch copy
-never evicts either, because the scatter reads it back by offset.
-
-Admission and `--ctx-size auto` price what the switch really keeps.
-`KvBudget` carries the same per-layer residency the stores evict with,
-so a run with the switch on is offered the context it can really carry
-instead of one divided by every layer's full per-token cost. On
-gemma-2-2b-it-Q4_K_M (window 4096 on 13 of 26 layers) against a
-3.72 GiB budget, `ctx auto` reads 6912 tokens with the switch off and
-7680 with it on; the same header at a 32768 context prices its KV line
-at 6.50 GiB off and 4.06 GiB on.
-
-What is still priced at the full number, because no store evicts there
-yet: the paged store and the pool
-([#61](https://github.com/antonellof/frink/issues/61)), which is also why
-the server's own pre-load ceiling prices the unwindowed number, and the
-prompt region while a prefill batch is being written.
-
-The byte figures inside a *context-length* refusal
-(`ContextCeiling::bytes_for`) are still the unwindowed ones. That only
-affects the message: the refusal itself is decided by the position
-ceiling above, which does account for the window.
+It turns itself off under `FRINK_METAL_ATTN` (on by default on Metal;
+`FRINK_METAL_ATTN=0` attends on the host and evicts as the CPU does),
+and on a draft model's decoder. The paged store
+(`FRINK_PAGED_KV_BLOCKS`) and the KV pool (`FRINK_KV_POOL_BLOCKS`) do
+not evict, and are still priced at the full number
+([#61](https://github.com/antonellof/frink/issues/61)), as is the
+server's own pre-load ceiling. The byte figures in a context-length
+refusal (`ContextCeiling::bytes_for`) are the unwindowed ones; the
+decision itself uses the windowed ceiling.
