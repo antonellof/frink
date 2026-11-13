@@ -1244,8 +1244,8 @@ impl ModelConfig {
         }
 
         // The architecture's own `load_arch_hparams` / `load_arch_tensors`
-        // throws that no table states (`HparamRules::load_checks`).
-        if let Some(reason) = (facts.rules.load_checks)(file, &arch, n_layers) {
+        // throws that no table states (`HparamRules::refusal`).
+        if let Some(reason) = facts.rules.refusal(file, &arch, n_layers) {
             return Err(LoadError::UnsupportedFeature(arch.clone(), reason));
         }
 

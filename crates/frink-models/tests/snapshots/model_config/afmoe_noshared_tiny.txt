@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/afmoe_noshared_tiny.gguf
+config: REFUSED: architecture 'afmoe' requires unimplemented feature: `afmoe.expert_shared_count` is absent; afmoe.cpp:7 reads it as a REQUIRED key

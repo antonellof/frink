@@ -63,6 +63,7 @@ SWA_WINDOW = 3
 SWA_PATTERN = 2
 ROPE_BASE = 10000.0
 ROPE_BASE_SWA = 5000.0
+MODEL_ROPE_BASE = 40000.0
 # Four orders larger than the post-norm literal of 1e-8, so the two
 # epsilons cannot be swapped without moving the logits.
 RMS_EPS = 1e-3
@@ -70,7 +71,7 @@ LOGIT_SCALE = 0.5
 FINAL_SOFTCAP = 8.0
 
 
-def main(out_path: str) -> None:
+def main(out_path: str, variant: str = "") -> None:
     n_layer = 4
     rng = np.random.default_rng(0x9115)
 
@@ -88,10 +89,20 @@ def main(out_path: str) -> None:
     w.add_key_length(HEAD_DIM)
     w.add_value_length(HEAD_DIM)
     w.add_layer_norm_rms_eps(RMS_EPS)
-    w.add_rope_freq_base(ROPE_BASE)
-    w.add_rope_freq_base_swa(ROPE_BASE_SWA)
+    # `--model-rope`: no `rope.freq_base_swa` and a model base that is
+    # not llama.cpp's 10000 default, so a reader that falls back to the
+    # default rotates the sliding layers differently from
+    # `muse-glimmer.cpp:9-10`, which seeds them from the model's (#620).
+    if variant == "--model-rope":
+        w.add_rope_freq_base(MODEL_ROPE_BASE)
+    else:
+        w.add_rope_freq_base(ROPE_BASE)
+        w.add_rope_freq_base_swa(ROPE_BASE_SWA)
     w.add_rope_dimension_count(HEAD_DIM)
-    w.add_sliding_window(SWA_WINDOW)
+    # `muse-glimmer.cpp:5` reads the window REQUIRED: `--no-window`
+    # leaves it out, and libllama refuses the file (#620).
+    if variant != "--no-window":
+        w.add_sliding_window(SWA_WINDOW)
     w.add_sliding_window_pattern(SWA_PATTERN)
     w.add_logit_scale(LOGIT_SCALE)
     w.add_final_logit_softcapping(FINAL_SOFTCAP)
@@ -145,4 +156,7 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "muse-glimmer-fixture.gguf")
+    main(
+        sys.argv[1] if len(sys.argv) > 1 else "muse-glimmer-fixture.gguf",
+        sys.argv[2] if len(sys.argv) > 2 else "",
+    )

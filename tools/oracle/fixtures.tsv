@@ -9,6 +9,7 @@
 # outcomes are defined in tools/oracle/parity.py. A non-`match` row says
 # why on its own line end; one naming an issue is a known divergence,
 # not a pass. tests/oracle_manifest.rs fails if a fixture has no row.
+afmoe_noshared_tiny                      both-fail                    make_afmoe_fixture.py OUT --no-shared-count  # refusal evidence: afmoe.cpp:7 reads expert_shared_count REQUIRED (#620)
 afmoe_tiny                               match                        make_afmoe_fixture.py OUT
 apertus_qknorm_bias_tiny                 match                        make_apertus_fixture.py OUT --qk-norm-bias
 apertus_scalar_tiny                      match                        make_apertus_fixture.py OUT --scalar
@@ -66,6 +67,7 @@ exaone4_tiny                             match                        make_exaon
 exaone_moe_array_flipped_tiny            match                        make_exaone_moe_fixture.py OUT --window-array disagree
 exaone_moe_array_tiny                    match                        make_exaone_moe_fixture.py OUT --window-array agree
 exaone_moe_mtp_tiny                      match                        make_exaone_moe_fixture.py OUT --window-array agree --mtp
+exaone_moe_nogating_tiny                 both-fail                    make_exaone_moe_fixture.py OUT --no-gating-func  # refusal evidence: exaone-moe.cpp:16 reads expert_gating_func REQUIRED (#620)
 exaone_moe_tiny                          match                        make_exaone_moe_fixture.py OUT
 exaone_tiny                              match                        make_exaone_fixture.py OUT
 falcon_40b_tiny                          match                        make_falcon_fixture.py OUT --40b
@@ -119,6 +121,7 @@ jina_bert_v3_tiny                        refused                      make_jina_
 kolibri1_no_bias_tiny                    both-fail                    make_kolibri1_fixture.py OUT --no-bias  # refusal evidence: exp_probs_b is REQUIRED upstream (kolibri1.cpp:54)
 kolibri1_softmax_tiny                    match                        make_kolibri1_fixture.py OUT --softmax
 kolibri1_tiny                            match                        make_kolibri1_fixture.py OUT
+laguna_nodense_tiny                      both-fail                    make_laguna_fixture.py OUT --no-dense-lead  # refusal evidence: laguna.cpp:14 reads leading_dense_block_count REQUIRED (#620)
 laguna_swa_rot_tiny                      match                        make_laguna_fixture.py OUT --swa-rot
 laguna_swa_tiny                          match                        make_laguna_fixture.py OUT --swa
 laguna_swa_yarn_tiny                     refused                      make_laguna_fixture.py OUT --swa-yarn
@@ -174,6 +177,8 @@ mistral3_yarn_logmul_tiny                match                        make_mistr
 mistral3_yarn_tiny                       match                        make_mistral3_fixture.py OUT --yarn
 mpt_posembd_tiny                         match                        make_alibi_fixture.py OUT --arch mpt --pos-embd
 mpt_tiny                                 match                        make_alibi_fixture.py OUT --arch mpt --clamp
+muse_glimmer_model_rope_tiny             match                        make_muse_glimmer_fixture.py OUT --model-rope
+muse_glimmer_nowindow_tiny               both-fail                    make_muse_glimmer_fixture.py OUT --no-window  # refusal evidence: muse-glimmer.cpp:5 reads the window REQUIRED (#620)
 muse_glimmer_tiny                        match                        make_muse_glimmer_fixture.py OUT
 nanbeige_loop1_tiny                      match                        make_nanbeige_fixture.py OUT --loops 1
 nanbeige_skipnorm_tiny                   match                        make_nanbeige_fixture.py OUT --skip-loop-norm

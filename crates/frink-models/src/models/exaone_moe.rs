@@ -9,8 +9,8 @@
 //! - **Routing read from the file**: `expert_weights_scale`,
 //!   `expert_weights_norm`; NextN blocks (`:47`).
 //!
-//! `expert_gating_func` is read REQUIRED (`:16`) and defaulted here,
-//! a divergence from the pin not fixed here.
+//! - **`expert_gating_func` REQUIRED** (`:16`): a file without it is
+//!   refused by name (#620), not defaulted to softmax.
 //!
 //! Evidence: `tests/no_rope_layer_graphs.rs`, against libllama.
 
@@ -49,6 +49,7 @@ pub const FACTS: ArchFacts = ArchFacts {
     },
     rules: HparamRules {
         rope_layers,
+        required_keys: &[("expert_gating_func", "exaone-moe.cpp:16")],
         ..HparamRules::LEGACY
     },
     ..ArchFacts::DEFAULT

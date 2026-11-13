@@ -106,6 +106,7 @@ fn assert_rules_agree(name: &str, a: HparamRules, b: HparamRules) {
         rope_layers: ra,
         load_checks: ca,
         weightless_qk_norm: qa,
+        required_keys: ka,
     } = a;
     let HparamRules {
         swa_window_override: wb,
@@ -113,7 +114,9 @@ fn assert_rules_agree(name: &str, a: HparamRules, b: HparamRules) {
         rope_layers: rb,
         load_checks: cb,
         weightless_qk_norm: qb,
+        required_keys: kb,
     } = b;
+    assert_eq!(ka, kb, "{name}: required_keys");
     for n_experts in [0, 1, 16, 128] {
         assert_eq!(
             qa(name, n_experts),
@@ -359,6 +362,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 rope_layers: crate::rope_layers::rope_layers,
                 load_checks: def.map_or(super::no_load_checks, |f| f.rules.load_checks),
                 weightless_qk_norm: crate::weightless_qk_norm::weightless_qk_norm,
+                required_keys: def.map_or(&[], |f| f.rules.required_keys),
             },
         };
         assert_same(name, ArchFacts::of(name), want);

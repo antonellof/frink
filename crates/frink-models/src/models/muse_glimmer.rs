@@ -1,19 +1,17 @@
 //! `muse-glimmer`: `src/models/muse-glimmer.cpp` at the pinned commit.
 //!
-//! - **Standard SWA, period 4** (`:13`), the window REQUIRED (`:4`).
+//! - **Standard SWA, period 4** (`:12-13`), the window REQUIRED (`:5`)
+//!   and refused when absent (#620), the sliding layers' RoPE base
+//!   seeded from the model's before `rope.freq_base_swa` is read as
+//!   optional (`:9-10`; the scale is not seeded).
 //! - **RoPE on the sliding layers only, NoPE on the full ones** (`:88`,
 //!   [`rope_layers`]).
 //! - **A weightless RMS on the token embeddings** (`:69`) and a LITERAL
 //!   `1e-8` epsilon at the post-norm sites (`:63`).
 //! - **A per-element sigmoid gate on the attention output** (`:46,
 //!   100-135`, [`crate::attn_gate::MUSE_GLIMMER`]).
-//! - **`logit_scale` REQUIRED and multiplied** (`:8,186`) and the two
+//! - **`logit_scale` REQUIRED and multiplied** (`:7,186`) and the two
 //!   logit softcaps.
-//!
-//! `:7` seeds the sliding layers' RoPE base from the model's, which the
-//! legacy table did not say and frink does not do, and the window is
-//! REQUIRED and not refused when absent. Both are divergences from the
-//! pin, carried over unchanged.
 //!
 //! Evidence: `tests/muse_glimmer_graphs.rs`, against libllama.
 
@@ -35,6 +33,8 @@ pub const FACTS: ArchFacts = ArchFacts {
             period: 4,
             dense_first: false,
         }),
+        window_required: Some("muse-glimmer.cpp:5"),
+        rope_base_follows_model: true,
         pattern_key_read: PatternKeyRead::ArrayThenScalar,
         ..ArchFacts::DEFAULT.swa
     },

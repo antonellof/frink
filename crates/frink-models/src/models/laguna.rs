@@ -10,12 +10,14 @@
 //! - **Routing read from the file**, SIGMOID when the gating key is
 //!   absent (`:55-56`); YaRN's beta keys read (`:10`).
 //!
-//! `leading_dense_block_count` is read REQUIRED (`:4`) and defaulted
-//! here, a divergence from the pin not fixed here.
+//! - **`leading_dense_block_count` REQUIRED** (`:14`): a file without
+//!   it is refused by name (#620), not given zero dense layers.
 //!
 //! Evidence: `tests/gated_attention_graphs.rs`, against libllama.
 
-use super::facts::{ArchFacts, MoeFacts, ScalingFacts, SwaFacts, TensorFacts, TopologyFacts};
+use super::facts::{
+    ArchFacts, HparamRules, MoeFacts, ScalingFacts, SwaFacts, TensorFacts, TopologyFacts,
+};
 use super::ModelDef;
 use crate::capability::SwaPattern;
 use crate::swa_layers::PatternKeyRead;
@@ -48,6 +50,10 @@ pub const FACTS: ArchFacts = ArchFacts {
     tensors: TensorFacts {
         attn_gate: Some(crate::attn_gate::LAGUNA),
         ..ArchFacts::DEFAULT.tensors
+    },
+    rules: HparamRules {
+        required_keys: &[("leading_dense_block_count", "laguna.cpp:14")],
+        ..HparamRules::LEGACY
     },
     ..ArchFacts::DEFAULT
 };

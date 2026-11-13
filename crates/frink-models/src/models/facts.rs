@@ -267,6 +267,11 @@ pub struct HparamRules {
     /// value the graph throws on, a REQUIRED tensor the generic loader
     /// treats as optional. `(file, arch, n_layers)`; `None` loads.
     pub load_checks: fn(&dyn TensorSource, &str, usize) -> Option<String>,
+    /// The keys `load_arch_hparams` reads with `get_key` and no `false`,
+    /// which no table states: `(key after "{arch}.", llama.cpp line)`.
+    /// A file without one does not load upstream, so it is refused here
+    /// ([`Self::refusal`]) rather than defaulted.
+    pub required_keys: &'static [(&'static str, &'static str)],
     /// `weightless_qk_norm(arch, n_experts)`: Q and K normed with no
     /// weight (`llama4.cpp:43`).
     pub weightless_qk_norm: fn(&str, usize) -> bool,
@@ -285,7 +290,20 @@ impl HparamRules {
         rope_layers: crate::rope_layers::rope_layers_from_table,
         load_checks: no_load_checks,
         weightless_qk_norm: crate::weightless_qk_norm::no_weightless_qk_norm,
+        required_keys: &[],
     };
+
+    /// Why the architecture's own `load_arch_hparams` /
+    /// `load_arch_tensors` would throw on `file`: the first absent
+    /// [`Self::required_keys`] entry, then [`Self::load_checks`]. `None`
+    /// loads.
+    pub fn refusal(&self, file: &dyn TensorSource, arch: &str, n_layers: usize) -> Option<String> {
+        self.required_keys
+            .iter()
+            .find(|(k, _)| file.metadata(&format!("{arch}.{k}")).is_none())
+            .map(|(k, line)| format!("`{arch}.{k}` is absent; {line} reads it as a REQUIRED key"))
+            .or_else(|| (self.load_checks)(file, arch, n_layers))
+    }
 }
 
 impl ArchFacts {

@@ -221,9 +221,10 @@ eligibility test so a new field forces a Metal decision.
   keeps the family's half. Rows also left the SWA layout and follow
   lists, the pattern-reader census, `rope_layers`, `attn_gate`,
   `layer_shapes`, the gating, expert-weights, YaRN-beta, NextN and
-  multiplier tables. Divergences found and not fixed (three REQUIRED
-  MoE keys defaulted, `muse-glimmer`'s SWA RoPE base and REQUIRED
-  window) are listed in the PR for an issue.
+  multiplier tables. The divergences it found (three REQUIRED MoE keys
+  defaulted, `muse-glimmer`'s SWA RoPE base and REQUIRED window) were
+  fixed in #620, which added `HparamRules::required_keys`: a REQUIRED
+  key no table states is a row there, not a `load_checks` function.
 
 What step 2 changed about the target design:
 
