@@ -16,6 +16,7 @@
 mod backend;
 pub mod iq_encode;
 pub mod quant_encode;
+pub mod synthetic_gptoss;
 pub mod synthetic_llama;
 #[allow(unused_imports)]
 pub use backend::{backend, pin_backend, tolerance, Backend, METAL_GOLDEN_TOL};

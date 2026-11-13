@@ -42,11 +42,11 @@ run end to end on a real checkpoint, so they are not in the table.
 
 Limits that affect model choice:
 
-- On Metal, gpt-oss and Llama 4 run on the host path (no Metal kernel
-  for attention sinks; Llama 4's chunked window does not fit the fused
-  launches), one command buffer per projection and per token, which is
-  two orders of magnitude behind llama.cpp (#627). CUDA's resident
-  stack runs gpt-oss.
+- On Metal, Llama 4 runs on the host path: its chunked window does not
+  fit the fused launches. gpt-oss runs on the fused stacks (#627): one
+  command buffer per decode token and per prefill chunk, with its sinks,
+  biases, sliding window and clamped SwiGLU on the device. CUDA's
+  resident stack runs it too.
 - Gemma-4's dedicated engine has no batched prefill and no resident
   Metal stack; on Metal it is likewise per projection (#626).
 - The Metal decode agrees with the CPU within rounding on every graph
@@ -68,7 +68,7 @@ Limits that affect model choice:
 | Backend | Capabilities |
 |---|---|
 | **CPU** | Dense and MoE. An integer dot against quantized activations for every weight kind (ggml's `vec_dot_type`, ADR 0009), with AVX2 and NEON bodies; on by default where it measured faster (aarch64), `FRINK_CPU_INT_DOT` overrides. Interleaved Q4_Kx8 / Q8_0x4 GEMV, a Q8_0x4 batch GEMM for prefill, and a thread pool sized to the performance cores |
-| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill. On an M5 the prefill GEMMs (dense and MoE) and prefill flash attention run on the GPU's matrix units through the Metal 4 tensor API, as llama.cpp's tensor kernels do (`FRINK_METAL_TENSOR`); quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
+| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill. Every decode and prefill attention kernel (the tensor one included) takes attention sinks and a sliding window, so a windowed layer's prefill chunk may be any length; the MoE decode stack and the prefill stack carry gpt-oss's `wo` bias, router bias, expert biases and clamped SwiGLU. On an M5 the prefill GEMMs (dense and MoE) and prefill flash attention run on the GPU's matrix units through the Metal 4 tensor API, as llama.cpp's tensor kernels do (`FRINK_METAL_TENSOR`); quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
 | **CUDA** | Resident weights and a resident stack for prefill and decode (`--features cuda`): norms, QKV bias, QK norm, RoPE, attention, SwiGLU or GeGLU and residuals on the device, K/V rows back to the host cache through page-locked memory. Prefill multiplies `Q8_0` and `Q4_K` on the int8 tensor cores and the other kinds on the f16 ones, and a prefill batch's attention runs on the tensor cores at head widths 64, 128 and 256 (`sm_80` and up). Decode matvecs for `Q4_K`, `Q6_K`, `Q8_0` and `MXFP4` dot a q8_1 activation with `dp4a`, as llama.cpp does. Routed MoE layers route on the device for plain softmax and gpt-oss routing, and a prefill batch's experts run as one grouped GEMM per projection. gpt-oss runs with its sinks, biases and clamped SwiGLU on the device. `FRINK_CUDA_GRAPH=1` replays a decode token from a CUDA graph; it is off by default and has not run on a GPU |
 | **Vulkan** | Matvec, prefill GEMM and embedding gather for every weight kind, resident weights, and a decode and prefill stack (`--features vulkan`, opt-in with `--device vulkan` or `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
 

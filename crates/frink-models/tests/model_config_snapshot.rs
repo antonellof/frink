@@ -359,16 +359,17 @@ fn decoder_digest(d: &Decoder, out: &mut String) {
     match &d.gpt_oss {
         Some(g) => {
             for (l, layer) in g.layers.iter().enumerate() {
-                let biases: Vec<f32> = layer
-                    .expert_bias
-                    .iter()
-                    .flat_map(|b| b.gate.iter().chain(&b.up).chain(&b.down).copied())
+                // Expert by expert, gate then up then down: the digest
+                // the per-expert vectors this table once held gave.
+                let biases: Vec<f32> = (0..layer.expert_bias.n_experts())
+                    .filter_map(|e| layer.expert_bias.expert(e))
+                    .flat_map(|b| b.gate.iter().chain(b.up).chain(b.down).copied())
                     .collect();
                 let _ = writeln!(
                     out,
                     "dec.gpt_oss[{l}]: router_bias {} expert_bias n={} {}",
                     vec_digest(&layer.router_bias),
-                    layer.expert_bias.len(),
+                    layer.expert_bias.n_experts(),
                     vec_digest(&biases)
                 );
             }

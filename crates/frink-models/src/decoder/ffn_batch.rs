@@ -466,7 +466,9 @@ impl Decoder {
                 frink_moe::run_expert_oai(
                     normed2,
                     ex,
-                    &oai.expert_bias[eid],
+                    oai.expert_bias
+                        .expert(eid)
+                        .expect("the loader checked one bias row per expert"),
                     frink_moe::SWIGLU_OAI_ALPHA,
                     frink_moe::SWIGLU_OAI_LIMIT,
                 )

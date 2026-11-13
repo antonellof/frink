@@ -124,7 +124,7 @@ impl Decoder {
             && self
                 .layers
                 .iter()
-                .all(|l| self.layer_supports_metal_attn(l));
+                .all(|l| self.layer_supports_metal_stack_attn(l));
 
         #[cfg(not(feature = "metal"))]
         let use_metal_attn = false;
@@ -234,7 +234,6 @@ impl Decoder {
                             .metal_prefill_dense_stack_run_len(
                                 l,
                                 start_pos,
-                                batch_size,
                                 kv_caches,
                                 Some(metal_kvs.as_slice()),
                             )
@@ -309,8 +308,7 @@ impl Decoder {
                     self.lora_attached(),
                 )
             {
-                let swa_fits = self.metal_prefill_dense_swa_fits(l, start_pos, batch_size);
-                if swa_fits {
+                {
                     if let Some(guard) = metal_kv_guard.as_mut() {
                         if let Some(metal_kvs) = guard.as_mut() {
                             // POSITIONS: compared against `start_pos`.
@@ -348,6 +346,7 @@ impl Decoder {
                                         post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
                                         extras: self.metal_attn_extras(layer),
                                         rope: self.metal_layer_rope(l),
+                                        window: self.config.layer_sliding_window(l),
                                         layer_idx: l as u32,
                                         per_layer: None,
                                         out_scale: None,
@@ -532,10 +531,16 @@ impl Decoder {
                             // block always ropes, so such a layer takes the
                             // CPU body below rather than a rotation the
                             // checkpoint never trained.
+                            // A per-layer launch: it attends without
+                            // sinks and projects `wo` on the host without
+                            // its bias, so a layer carrying either (or
+                            // gpt-oss's FFN after it) is the host body's
+                            // when no stack took it.
                             if let (true, Some(layer_rope)) = (
                                 metal_kvs[l].seq_len == cache.positions()
                                     && start_pos == cache.positions()
-                                    && swa_fits,
+                                    && swa_fits
+                                    && self.layer_supports_metal_attn(layer),
                                 self.metal_layer_rope(l),
                             ) {
                                 let prefill_res = {

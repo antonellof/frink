@@ -71,7 +71,7 @@ impl Shape {
 
 /// A deterministic, sign-balanced fill. A 64-bit LCG is enough: the
 /// weights only have to be fixed, not good.
-fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
+pub fn fill(seed: u64, n: usize, scale: f32) -> Vec<f32> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..n)
         .map(|_| {

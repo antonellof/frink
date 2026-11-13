@@ -124,6 +124,7 @@ pub(crate) fn encode(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
+    mask: crate::attn::AttnMask<'_>,
 ) -> Result<(), MetalError> {
     if !crate::tensor_mm::has_tensor() || n_kv_heads == 0 || !n_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::CommandFailed);
@@ -159,6 +160,7 @@ pub(crate) fn encode(
         );
         encoder.setThreadgroupMemoryLength_atIndex(smem(head_dim), 0);
     }
+    mask.bind(encoder, q);
     dispatch_counted(
         encoder,
         MTLSize {
@@ -176,7 +178,8 @@ pub(crate) fn encode(
 }
 
 /// llama `kernel_flash_attn_ext_tensor<half, half4, D, D>` with mask =
-/// causal-from-positions, no sinks, no ALiBi. The host splices the
+/// causal-from-positions (and, with `window`, llama's standard sliding
+/// window), llama's sinks epilogue, no ALiBi. The host splices the
 /// tensor define and headers in front.
 const BODY: &str = r#"
 using namespace metal;
@@ -192,6 +195,9 @@ kernel void gqa_prefill_fa_tensor(
         device       float * dst  [[buffer(3)]],
         constant uint4     & args [[buffer(4)]],
         constant float2    & fargs [[buffer(5)]],
+        device const float * sinks [[buffer(10)]],
+        constant uint      & has_sinks [[buffer(11)]],
+        constant uint      & window [[buffer(12)]],
         threadgroup  char  * shmem [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]],
@@ -267,6 +273,13 @@ kernel void gqa_prefill_fa_tensor(
     // The first key that the tile's first query does not see: blocks
     // wholly below it need no mask (llama's blk = 2).
     const int kv_full  = kv_prefix + iq1 + 1;
+    // Sliding window (`window` keys, the query's own included): the first
+    // key the tile's first query sees, and the first key its LAST query
+    // sees. Blocks wholly below the first are skipped; blocks below the
+    // second need the mask.
+    const int win      = int(window);
+    const int win_lo   = win > 0 ? max(kv_full - win, 0) : 0;
+    const int win_hi   = win > 0 ? kv_end - win : 0;
 
     auto tq = tensor(sq, dextents<int32_t, 2>(DK, Q));
     auto ts = tensor(ss, dextents<int32_t, 2>(C,  Q));
@@ -297,11 +310,11 @@ kernel void gqa_prefill_fa_tensor(
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (int ic0 = 0, ic = 0; ic < kv_end; ++ic0, ic += C) {
+    for (int ic0 = 0, ic = (win_lo/C)*C; ic < kv_end; ++ic0, ic += C) {
         // the last block reads only the rows that exist; the rest are keys
         // past kv_valid, which every query masks
         const int nc = min(int(C), kv_valid - ic);
-        const bool need_mask = ic + C > kv_full;
+        const bool need_mask = ic + C > kv_full || ic < win_hi;
 
         // Q*K^T
         {
@@ -334,7 +347,8 @@ kernel void gqa_prefill_fa_tensor(
             if (need_mask) {
                 const int clen = min(kv_prefix + iq1 + j + 1, kv_valid);
                 FOR_UNROLL (short ii = 0; ii < NC; ++ii) {
-                    if (ic + ii*NW + tiisg >= clen) {
+                    const int key = ic + ii*NW + tiisg;
+                    if (key >= clen || (win > 0 && key + win < clen)) {
                         s[ii] = -INFINITY;
                     }
                 }
@@ -401,8 +415,20 @@ kernel void gqa_prefill_fa_tensor(
     FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
         const short j = jj*NSG + sgitg;
 
+        // the sink only adds to the denominator - its rescale of O is folded into the final scale
+        float ms = 1.0f;
+
+        if (has_sinks != 0) {
+            const float s = sinks[iq2];
+            const float m = max(M[jj], s);
+
+            ms = exp(M[jj] - m);
+
+            S[jj] = S[jj]*ms + exp(s - m);
+        }
+
         if (tiisg == 0) {
-            sr[j] = S[jj] == 0.0f ? 0.0f : 1.0f/S[jj];
+            sr[j] = S[jj] == 0.0f ? 0.0f : ms/S[jj];
         }
     }
 
@@ -591,6 +617,7 @@ mod tests {
             t.n_q as u32,
             t.prefix as u32,
             t.softcap.unwrap_or(0.0),
+            crate::attn::AttnMask::default(),
         );
         enc.endEncoding();
         res.expect("tensor prefill");

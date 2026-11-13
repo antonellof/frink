@@ -136,6 +136,9 @@ mod tensor_mm;
 #[cfg(feature = "metal")]
 mod fa_tensor;
 
+#[cfg(all(test, feature = "metal"))]
+mod attn_mask_tests;
+
 #[cfg(feature = "metal")]
 mod mem_ranges;
 
@@ -150,6 +153,11 @@ mod kernel_bench;
 
 #[cfg(feature = "metal")]
 mod moe_ids;
+
+/// gpt-oss's routed FFN additions (router and expert biases, the
+/// clamped SwiGLU), encoded by the MoE decode and prefill stacks.
+#[cfg(feature = "metal")]
+pub mod moe_oai;
 
 #[cfg(feature = "metal")]
 pub use dispatch::{metal_encode_stats, metal_encode_stats_reset, EncodeStats};

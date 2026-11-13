@@ -32,7 +32,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Jamba (`jamba`), Mamba and FalconMamba (`mamba`), Mamba-2 (`mamba2`), Falcon-H1 (`falcon-h1`), PLaMo-2 (`plamo2`) | Recurrent |
 | PLaMo (`plamo`), PLaMo-3 (`plamo3`) | |
 | LFM2 (`lfm2`), LFM2-MoE (`lfm2moe`) | A file declaring `attention.sliding_window` is refused by name, and so is an LFM2-d1 decision head (`decision.block_count`) |
-| gpt-oss (`gpt-oss`) | Runs in CUDA's resident stack (sinks, biases and its clamped SwiGLU on the device). Metal runs it on the host path: no Metal kernel implements attention sinks |
+| gpt-oss (`gpt-oss`) | Runs in CUDA's resident stack and in Metal's MoE decode stack and prefill stack, with its sinks, biases, sliding window and clamped SwiGLU on the device (#627) |
 | GPT-2 (`gpt2`), GPT-NeoX / Pythia (`gptneox`), StarCoder (`starcoder`), StarCoder2 (`starcoder2`), CodeShell (`codeshell`), Jais-2 (`jais2`), Falcon (`falcon`), StableLM (`stablelm`) | StableLM-2-12B is refused: it needs a per-head QK LayerNorm |
 | BLOOM (`bloom`), MPT (`mpt`), Refact (`refact`), Jais (`jais`) | ALiBi in place of RoPE |
 | BitNet (`bitnet`), Apertus (`apertus`), Mellum (`mellum`), Nanbeige (`nanbeige`), Talkie (`talkie`), Arcee (`arcee`), Deci (`deci`), OpenELM (`openelm`), Maincoder (`maincoder`) | |

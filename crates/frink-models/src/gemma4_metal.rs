@@ -226,6 +226,9 @@ impl Gemma4Engine {
                 post_ffn_norm: Some(&l.ffn_post_norm),
                 extras: self.layer_extras(il)?,
                 rope: Some(self.layer_rope(il)),
+                // The decode stack slides its windows; this stack serves
+                // only chunks inside every window (see the caller).
+                window: None,
                 layer_idx: il as u32,
                 per_layer: match (
                     &l.per_layer_inp_gate,
