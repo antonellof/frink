@@ -458,9 +458,8 @@ for frink. Verdicts:
 | `TIE-FLIP` | top-1 differs, but llama's own top-2 margin is under the observed noise, so a tie swapped rather than the graph being wrong |
 | `WRONG` | the graphs disagree, and the command exits non-zero |
 
-On a quantized file, `WRONG` does not say which side moved (llama.cpp
-quantizes activations to 8 bits, frink keeps f32); the dequantized file
-arbitrates:
+On a quantized file, `WRONG` does not say which side moved; the
+dequantized file arbitrates:
 
 ```bash
 PYTHONPATH=$LLAMA/gguf-py python3 scripts/dequantize_gguf.py model-Q8_0.gguf /tmp/model-f32.gguf
@@ -474,10 +473,12 @@ PYTHONPATH=$LLAMA/gguf-py python3 scripts/dequantize_gguf.py model-Q8_0.gguf /tm
 path. `FRINK_CTK=f32` runs an f32 K/V cache on BOTH sides; the dumper
 reads the same variable.
 
-`parity` leaves the integer-dot tier off unless `FRINK_CPU_INT_DOT=1`,
-while `frink run` and the server turn it on where it wins. Set it to
-compare the path they take; only then does frink quantize activations
-the way llama.cpp's CPU backend does.
+`parity` takes the integer-dot tier wherever `frink run` and the server
+do, so frink quantizes activations to `Q8_0` / `Q8_K` the way
+llama.cpp's CPU backend does, and prints which activations prefill and
+decode used (`frink activations prefill int8, decode int8`).
+`FRINK_CPU_INT_DOT=0` compares the f32 path instead. On x86 the decode
+half stays f32, as in `frink run`.
 
 ### Per layer (`--dump-tensors`)
 

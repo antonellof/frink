@@ -122,6 +122,19 @@ pub struct ParityArgs {
 }
 
 pub fn run(args: ParityArgs) -> anyhow::Result<()> {
+    // frink's side runs the arithmetic `frink run` and the server run:
+    // the integer-dot tier wherever they turn it on. Without this the
+    // library default held, every CPU matmul dotted f32 activations
+    // against dequantized weights, and the comparison was of a path no
+    // user takes. On a pure Q2_K file that path differs from llama.cpp's
+    // Q8_K one by 3.6e-3 relative at `Qcur-0` and 1.9e-2 at `Vcur-0`,
+    // from bit-identical inputs (#584). `FRINK_CPU_INT_DOT=0` still
+    // selects the f32 path, as it does for `frink run`.
+    //
+    // SAFETY: `main` has started no thread before dispatching here; the
+    // rayon pool and the backends start in the prefill below.
+    unsafe { frink_core::weight_matrix::default_cpu_int_dot_on() };
+
     let path = crate::pull::resolve_model_path(&args.model)?;
 
     // Resolved before anything expensive runs: a missing dumper is the
@@ -184,6 +197,7 @@ pub fn run(args: ParityArgs) -> anyhow::Result<()> {
     // Say which side frink ran on rather than leaving it to the
     // environment: a Metal-vs-llama-CPU verdict has two possible causes
     // and must not be read as one.
+    println!("{}", int_dot_line());
     let backend = frink_core::weight_matrix::active_backend();
     if backend != frink_core::kernel_registry::Backend::Cpu {
         eprintln!(
@@ -610,6 +624,25 @@ fn print_wrong_line(quant: &DominantQuant, references: &[Reference], band: &Band
 
 /// Resolves every `--dumper`, or falls back to the single one the
 /// environment and the tree offer.
+/// Which activations frink's CPU matmuls took on this run, per workload
+/// shape: int8 (`Q8_0` / `Q8_K`, as llama.cpp's CPU backend) or f32. A
+/// verdict means something different under each, so the report says.
+fn int_dot_line() -> String {
+    use frink_core::weight_matrix::{cpu_int_dot_for, IntDotShape};
+    let side = |shape| {
+        if cpu_int_dot_for(shape) {
+            "int8"
+        } else {
+            "f32"
+        }
+    };
+    format!(
+        "frink activations prefill {}, decode {} (FRINK_CPU_INT_DOT, as `frink run` sets it)",
+        side(IntDotShape::BatchGemm),
+        side(IntDotShape::Matvec)
+    )
+}
+
 fn dumper_paths(explicit: &[String]) -> anyhow::Result<Vec<PathBuf>> {
     if !explicit.is_empty() {
         return explicit
