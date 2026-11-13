@@ -309,8 +309,7 @@ impl Decoder {
                     self.lora_attached(),
                 )
             {
-                let swa_fits = self.metal_prefill_dense_swa_fits(l, start_pos, batch_size);
-                if swa_fits {
+                if let Some(window) = self.metal_prefill_window(l, start_pos, batch_size) {
                     if let Some(guard) = metal_kv_guard.as_mut() {
                         if let Some(metal_kvs) = guard.as_mut() {
                             // POSITIONS: compared against `start_pos`.
@@ -349,6 +348,7 @@ impl Decoder {
                                         extras: self.metal_attn_extras(layer),
                                         rope: self.metal_layer_rope(l),
                                         layer_idx: l as u32,
+                                        window,
                                         per_layer: None,
                                         out_scale: None,
                                     };
@@ -515,13 +515,10 @@ impl Decoder {
                 #[cfg(feature = "metal")]
                 {
                     let mut did_metal_prefill = false;
-                    // The Metal prefill kernel is full-causal: only safe on a
-                    // SWA layer while every causal position is still inside
-                    // the window. Longer prompts fall back to CPU attention.
-                    let swa_fits = match self.config.layer_sliding_window(l) {
-                        Some(window) => start_pos + batch_size <= window,
-                        None => true,
-                    };
+                    // The Metal prefill kernels take one window per batch;
+                    // a chunked layer straddling a chunk boundary falls
+                    // back to CPU attention.
+                    let window = self.metal_prefill_window(l, start_pos, batch_size);
                     // Metal prefill applies attn softcap in FA-vec / legacy GQA.
                     if let Some(guard) = metal_kv_guard.as_mut() {
                         if let Some(metal_kvs) = guard.as_mut() {
@@ -532,10 +529,10 @@ impl Decoder {
                             // block always ropes, so such a layer takes the
                             // CPU body below rather than a rotation the
                             // checkpoint never trained.
-                            if let (true, Some(layer_rope)) = (
+                            if let (true, Some(window), Some(layer_rope)) = (
                                 metal_kvs[l].seq_len == cache.positions()
-                                    && start_pos == cache.positions()
-                                    && swa_fits,
+                                    && start_pos == cache.positions(),
+                                window,
                                 self.metal_layer_rope(l),
                             ) {
                                 let prefill_res = {
@@ -550,6 +547,7 @@ impl Decoder {
                                         layer_rope,
                                         start_pos,
                                         self.config.attn_logit_softcap,
+                                        window,
                                         false,
                                     )
                                     .map(

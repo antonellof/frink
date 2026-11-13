@@ -10,6 +10,7 @@
 //! |-------------------------------------------|-------------------------------------|
 //! | shared-KV layers (`shared_kv_layers`)     | `LayerKv::Shared { slot }`          |
 //! | SWA 256-wide / full 512-wide heads        | per-slot `MetalKvBuffers` geometry  |
+//! | sliding window (`is_masked_swa` STANDARD) | `window`, decode and prefill        |
 //! | `rope_freqs` on full layers only          | per-layer `LayerRope`               |
 //! | `f_attention_scale = 1.0`                 | folded into the Q norm (below)      |
 //! | weightless RMSNorm on V                   | `AttnExtras::v_norm` of ones        |
@@ -23,12 +24,11 @@
 //! multiplying the Q norm's weight by the same factor before it is the
 //! same arithmetic, and it costs no dispatch.
 //!
-//! What stays off the device: a sliding layer's prefill attention has no
-//! window in the batched kernels, so a prompt chunk is batched only while
-//! every key it reads is inside the window (`start + batch <= window`),
-//! and the rest of the prompt runs through the decode stack one token at
-//! a time. The token embedding and its per-layer row are gathered on the
-//! host, as llama.cpp does for the per-layer table.
+//! The whole prompt is batched: the prefill attention kernels take the
+//! sliding window, so a chunk past the window needs no per-token
+//! fallback. What stays off the device: the token embedding and its
+//! per-layer row are gathered on the host, as llama.cpp does for the
+//! per-layer table.
 
 use frink_core::matmul::{rms_norm, softcap_inplace};
 use frink_core::weight_matrix::WeightMatrix;
@@ -74,14 +74,20 @@ fn rope() -> MetalRope {
     MetalRope::new(MetalRopeLayout::Neox)
 }
 
-/// A batched launch for `m`: the quantized GEMM, or f32 rows.
+/// A batched launch for `m`: the quantized GEMM, or f32 rows (which
+/// the GEMM takes 32 columns at a time; any other width stays on the
+/// host).
 fn prefill_mat(m: &WeightMatrix) -> Option<PrefillMatMetal<'_>> {
     match m {
-        WeightMatrix::F32(t) => Some(PrefillMatMetal::F32 {
-            weights: &t.data,
-            rows: t.shape[0],
-            cols: t.shape[1],
-        }),
+        WeightMatrix::F32(t) => {
+            let (rows, cols) = (t.shape[0], t.shape[1]);
+            frink_metal::gpu::f32_mul_mm_sg_launch(&t.data, rows, cols)?;
+            Some(PrefillMatMetal::F32 {
+                weights: &t.data,
+                rows,
+                cols,
+            })
+        }
         _ => m.mul_mm_sg_launch().map(PrefillMatMetal::Quant),
     }
 }
@@ -227,6 +233,7 @@ impl Gemma4Engine {
                 extras: self.layer_extras(il)?,
                 rope: Some(self.layer_rope(il)),
                 layer_idx: il as u32,
+                window: self.hp.is_swa_layer(il).then_some(self.hp.sliding_window),
                 per_layer: match (
                     &l.per_layer_inp_gate,
                     &l.per_layer_proj,
@@ -482,19 +489,11 @@ impl Gemma4Engine {
             return (0, Vec::new());
         };
         let hp = &self.hp;
-        let any_swa = (0..hp.n_layer).any(|il| hp.is_swa_layer(il));
         let mut done = 0usize;
         let mut last_hidden: Option<Vec<f32>> = None;
         while done < tokens.len() {
             let pos = start_pos + done;
-            // The batched attention has no window: a chunk may only read
-            // keys a sliding layer would also read.
-            let room = if any_swa {
-                hp.sliding_window.saturating_sub(pos)
-            } else {
-                usize::MAX
-            };
-            let n = (tokens.len() - done).min(PREFILL_CHUNK).min(room);
+            let n = (tokens.len() - done).min(PREFILL_CHUNK);
             if n < PREFILL_MIN {
                 break;
             }

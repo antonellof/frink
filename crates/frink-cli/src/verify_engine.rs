@@ -187,21 +187,22 @@ fn forced_logits(
     Ok(rows)
 }
 
-/// Token by token through an [`Engine`], keeping the rows from the
-/// last prompt position on.
+/// The prompt through [`Engine::prefill`], then the forced tokens one
+/// at a time, keeping the rows from the last prompt position on.
+///
+/// `prefill`, not a token loop: it is what `frink run` sends a prompt
+/// through, so an engine with a batched prefill (Gemma-4 on Metal) is
+/// checked on that path and not only on its decode body.
 fn engine_rows<E: Engine + ?Sized>(
     engine: &E,
     prompt: &[usize],
     forced: &[usize],
 ) -> Vec<Vec<f32>> {
     let mut state = engine.new_state();
-    let first = prompt.len().saturating_sub(1);
     let mut rows = Vec::with_capacity(forced.len() + 1);
-    for (pos, &tok) in prompt.iter().chain(forced).enumerate() {
-        let logits = engine.forward_token(tok, pos, &mut state);
-        if pos >= first {
-            rows.push(logits);
-        }
+    rows.push(engine.prefill(prompt, 0, &mut state));
+    for (pos, &tok) in (prompt.len()..).zip(forced) {
+        rows.push(engine.forward_token(tok, pos, &mut state));
     }
     rows
 }

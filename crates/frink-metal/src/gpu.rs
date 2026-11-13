@@ -2394,6 +2394,21 @@ struct Q4KDequant {
     }
 };
 
+// llama `dequantize_f32` for `kernel_mul_mm_f32_f32`: plain f32 rows,
+// taken 32 at a time (NL = 2, `il` selects the low or high 16). The GEMM
+// rounds them to half in its tile, as llama's f32 mul_mm does. Scalar
+// loads: a row is only 4-byte aligned.
+struct F32Dequant {
+    static constexpr constant short NL = 2;
+    static constexpr constant short BLOCK_BYTES = 128;
+    static inline void get(device const uchar* xb, short il, thread float4x4& reg) {
+        device const float* p = (device const float*)(xb) + 16 * il;
+        for (short i = 0; i < 16; ++i) {
+            reg[i / 4][i % 4] = p[i];
+        }
+    }
+};
+
 // llama `dequantize_q8_0`. GGUF layout: half d, then 32 int8 quants.
 // 32-element block, so NL = 2: `il` selects the low or high 16.
 struct Q8_0Dequant {
@@ -3330,6 +3345,7 @@ MUL_MM_SG_F16_ENTRY(q8_0_mul_mm_sg_f16, Q8_0Dequant)
 MUL_MM_SG_F16_ENTRY(q4_0_mul_mm_sg_f16, Q4_0Dequant)
 MUL_MM_SG_F16_ENTRY(q5_0_mul_mm_sg_f16, Q5_0Dequant)
 MUL_MM_SG_F16_ENTRY(iq4_xs_mul_mm_sg_f16, IQ4XSDequant)
+MUL_MM_SG_F16_ENTRY(f32_mul_mm_sg_f16, F32Dequant)
 // @FRINK_GET_ROWS@
 "#;
 
@@ -3665,6 +3681,37 @@ pub fn mul_mm_sg_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
         "MXFP4" => Some(("mxfp4_mul_mm_sg", 17, 32)),
         _ => crate::gen_kinds::gemm_meta(kind, false),
     }
+}
+
+/// The half-activation GEMM over plain f32 weights, llama
+/// `kernel_mul_mm_f32_f32` (weights and activations rounded to half in
+/// the tile, f32 accumulation), or `None` when `cols` is not a whole
+/// number of its 32-wide blocks. Not a [`mul_mm_sg_meta`] row: no GGUF
+/// quant kind is f32, and only the f16-activation entry exists.
+pub fn f32_mul_mm_sg_launch(
+    weights: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Option<MulMmSgLaunch<'_>> {
+    if cols == 0 || !cols.is_multiple_of(32) || weights.len() != rows * cols {
+        return None;
+    }
+    // SAFETY: an initialised `[f32]` is `4 * len` initialised bytes, and
+    // `u8` has no alignment requirement; the view borrows `weights`.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            weights.as_ptr() as *const u8,
+            std::mem::size_of_val(weights),
+        )
+    };
+    Some(MulMmSgLaunch {
+        weights: bytes,
+        rows,
+        row_bytes: cols * 4,
+        fn_name: "f32_mul_mm_sg",
+        block_bytes: 128,
+        block_elems: 32,
+    })
 }
 
 /// MoE indexed simdgroup GEMM (`kernel_mul_mm_id_*`).
@@ -4217,6 +4264,7 @@ pub(crate) fn mul_mm_sg_aligned_fn(fn_name: &str) -> Option<&'static str> {
         "q6_k_mul_mm_sg_f16" => "q6_k_mul_mm_sg_f16_a",
         "q8_0_mul_mm_sg_f16" => "q8_0_mul_mm_sg_f16_a",
         "q4_0_mul_mm_sg_f16" => "q4_0_mul_mm_sg_f16_a",
+        "f32_mul_mm_sg_f16" => "f32_mul_mm_sg_f16_a",
         "q5_0_mul_mm_sg_f16" => "q5_0_mul_mm_sg_f16_a",
         "iq4_xs_mul_mm_sg_f16" => "iq4_xs_mul_mm_sg_f16_a",
         "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_a",
@@ -4247,6 +4295,7 @@ pub(crate) fn mul_mm_sg_f16_fn(fn_name: &str) -> Option<&'static str> {
         "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_f16",
         "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
         "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
+        "f32_mul_mm_sg" => "f32_mul_mm_sg_f16",
         _ => return crate::gen_kinds::f16_fn(fn_name),
     })
 }

@@ -24,7 +24,9 @@
 //!
 //! Scope:
 //! - `LLAMA_ROPE_TYPE_NORM` (interleaved) or `NEOX` ± Llama-3 freq factors
-//! - Full-causal GQA (no sliding window); online-softmax kernels
+//! - Causal GQA, with or without a sliding window (llama.cpp's
+//!   `LLAMA_SWA_TYPE_STANDARD`; a chunked window is not one); online-softmax
+//!   kernels
 //! - Prefill dense stack supports QKV bias + QK-norm via [`AttnExtras`]
 //!   (same order as CPU: bias → norm → RoPE)
 //!
@@ -41,10 +43,11 @@
 //! stack needs no host `dequant_row` upload.
 //!
 //! `FRINK_METAL_FA_VEC=0` disables llama-style FA-vec decode **and** prefill
-//! (default **on** for `head_dim` in {64,96,128,256}). Other head dims keep
+//! (default **on** for `head_dim` in {64,96,128,256,512}). Other head dims keep
 //! legacy online-softmax GQA. Prefill at `head_dim` 64/128/256 with `n_q >= 8`
 //! goes further and takes the simdgroup-MMA `flash_attn_ext` kernel, or on
-//! an M5 the tensor-API one (`crate::fa_tensor`) where llama picks it; the
+//! an M5 (64/128/256/512) the tensor-API one (`crate::fa_tensor`) where llama
+//! picks it; the
 //! parity tests reach a specific one through [`PrefillAttnKernel`], not an
 //! environment variable.
 //!
@@ -338,6 +341,7 @@ kernel void "#,
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     uint2 tid_tg [[thread_position_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]],
@@ -357,6 +361,11 @@ kernel void "#,
 
     uint causal_len = kv_prefix_len + qi + 1u;
     if (causal_len == 0u) return;
+    // Sliding window (`window > 0`): llama `is_masked_swa`, STANDARD, masks
+    // key p when (kv_prefix_len + qi) - p >= window, so the first visible
+    // key is causal_len - window. Chunks start on a C boundary below it.
+    const uint kv_lo = (window > 0u && causal_len > window) ? causal_len - window : 0u;
+    const uint kv_lo_c = (kv_lo / C) * C;
 
     uint tid = tid_tg.x;
     uint tg = tg_size.x;
@@ -387,7 +396,7 @@ kernel void "#,
     float M = -INFINITY;
 
     for (uint ic0 = sgitg; ; ic0 += nsg) {
-        uint ic = ic0 * C;
+        uint ic = kv_lo_c + ic0 * C;
         if (ic >= causal_len) break;
         uint chunk = min(C, causal_len - ic);
 
@@ -395,7 +404,8 @@ kernel void "#,
         for (uint cc = 0; cc < C; cc++) {
             scores[cc] = -INFINITY;
         }
-        for (uint cc = 0; cc < chunk; cc++) {
+        // Keys below the window keep -INFINITY: P = 0, no P·V share.
+        for (uint cc = (ic < kv_lo) ? kv_lo - ic : 0u; cc < chunk; cc++) {
             device const half4* k4 =
                 (device const half4*)(k_cache + ((ic + cc) * n_kv_heads + kv_h) * D);
             float partial = own ? dot(sq4[tiisg], float4(k4[tiisg])) : 0.0f;
@@ -553,6 +563,7 @@ kernel void "#,
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]],
     ushort sgitg [[simdgroup_index_in_threadgroup]],
@@ -642,9 +653,15 @@ kernel void "#,
         max_causal = max(max_causal, kv_prefix_len + qi0 + j + 1u);
     }
     if (max_causal == 0u) return;
+    // Sliding window (`window > 0`, llama `is_masked_swa` STANDARD): row j
+    // sees keys [clen - window, clen). The tile's first query has the
+    // lowest bound, so chunks start on the C boundary below it.
+    const uint clen0 = kv_prefix_len + qi0 + 1u;
+    const uint ic_start =
+        (window > 0u && clen0 > window) ? ((clen0 - window) / C) * C : 0u;
 
     for (uint ic0 = 0u; ; ic0++) {
-        const uint ic = ic0 * C;
+        const uint ic = ic_start + ic0 * C;
         if (ic >= max_causal) break;
 
         // Q·Kᵀ — 8x8 MMA. Simdgroup `sgitg` owns key blocks
@@ -697,10 +714,11 @@ kernel void "#,
             float2 s2 = ss2[tiisg] * scale;
             if (softcap > 0.0f) s2 = softcap * tanh(s2 / softcap);
             const uint clen = kv_prefix_len + qi0 + j + 1u;
+            const uint lo = (window > 0u && clen > window) ? clen - window : 0u;
             const uint c0 = ic + 2u * uint(tiisg);
             // `cc >= chunk` is subsumed: it implies ic+cc >= max_causal >= clen.
-            if (c0 >= clen) s2[0] = -INFINITY;
-            if (c0 + 1u >= clen) s2[1] = -INFINITY;
+            if (c0 >= clen || c0 < lo) s2[0] = -INFINITY;
+            if (c0 + 1u >= clen || c0 + 1u < lo) s2[1] = -INFINITY;
 
             const float m = M[jj];
             M[jj] = simd_max(max(m, max(s2[0], s2[1])));
@@ -787,11 +805,23 @@ const GQA_PREFILL_FA_EXT_MMA_D128_KERNEL_SRC: &str =
 const GQA_PREFILL_FA_EXT_MMA_D256_KERNEL_SRC: &str =
     gqa_prefill_fa_ext_mma_src!("gqa_prefill_fa_ext_mma_d256", "256");
 
-const GQA_PREFILL_FA_VEC_D256_KERNEL_SRC: &str = r#"
+/// FA-vec prefill for the wide heads: `D4 = D/4` float4 columns over 32
+/// lanes, so each lane owns `NL = D4/32` of them, two at d=256
+/// (Gemma-2/3) and four at d=512 (Gemma-4's full-attention layers).
+/// Every lane-owned column is walked with the same `l < NL` loop, so no
+/// width can drop part of a head (this kernel was once cloned from the
+/// d=128 one, where one float4 per lane is right, and at d=256 kept only
+/// the first 128 dims).
+macro_rules! gqa_prefill_fa_vec_wide_src {
+    ($name:literal, $d:literal) => {
+        concat!(
+            r#"
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void gqa_prefill_fa_vec_d256(
+kernel void "#,
+            $name,
+            r#"(
     device const float* q [[buffer(0)]],
     device const half* k_cache [[buffer(1)]],
     device const half* v_cache [[buffer(2)]],
@@ -802,15 +832,19 @@ kernel void gqa_prefill_fa_vec_d256(
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     uint2 tid_tg [[thread_position_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]],
     threadgroup float* shared [[threadgroup(0)]]
 ) {
-    constexpr uint D = 256u;
-    constexpr uint D4 = 64u;
+    constexpr uint D = "#,
+            $d,
+            r#"u;
+    constexpr uint D4 = D / 4u;
     constexpr uint C = 32u;
     constexpr uint NW = 32u;
+    constexpr uint NL = D4 / NW;
     constexpr uint SG_F = C + D;
 
     uint h = tgpig.x;
@@ -819,6 +853,9 @@ kernel void gqa_prefill_fa_vec_d256(
 
     uint causal_len = kv_prefix_len + qi + 1u;
     if (causal_len == 0u) return;
+    // Sliding window: see `gqa_prefill_fa_vec`.
+    const uint kv_lo = (window > 0u && causal_len > window) ? causal_len - window : 0u;
+    const uint kv_lo_c = (kv_lo / C) * C;
 
     uint tid = tid_tg.x;
     uint tg = tg_size.x;
@@ -838,13 +875,9 @@ kernel void gqa_prefill_fa_vec_d256(
     for (uint i = tid; i < D4; i += tg) {
         sq4[i] = q4[i];
     }
-    // D=256 is 64 float4 spread over 32 lanes, so each lane owns *two*
-    // of them: tiisg and tiisg+NW. Touching only the first truncated both
-    // the Q.K dot and the output to the first 128 of 256 head dims. This
-    // kernel was cloned from the d=128 one, where one float4 per lane is
-    // exactly right; at d=256 it silently dropped half of every head.
-    so4[tiisg] = float4(0.0f);
-    so4[tiisg + NW] = float4(0.0f);
+    for (uint l = 0u; l < NL; l++) {
+        so4[tiisg + l * NW] = float4(0.0f);
+    }
     ss[tiisg] = 0.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -852,7 +885,7 @@ kernel void gqa_prefill_fa_vec_d256(
     float M = -INFINITY;
 
     for (uint ic0 = sgitg; ; ic0 += nsg) {
-        uint ic = ic0 * C;
+        uint ic = kv_lo_c + ic0 * C;
         if (ic >= causal_len) break;
         uint chunk = min(C, causal_len - ic);
 
@@ -860,11 +893,14 @@ kernel void gqa_prefill_fa_vec_d256(
         for (uint cc = 0; cc < C; cc++) {
             scores[cc] = -INFINITY;
         }
-        for (uint cc = 0; cc < chunk; cc++) {
+        // Keys below the window keep -INFINITY: P = 0, no P·V share.
+        for (uint cc = (ic < kv_lo) ? kv_lo - ic : 0u; cc < chunk; cc++) {
             device const half4* k4 =
                 (device const half4*)(k_cache + ((ic + cc) * n_kv_heads + kv_h) * D);
-            float partial = dot(sq4[tiisg], float4(k4[tiisg]))
-                          + dot(sq4[tiisg + NW], float4(k4[tiisg + NW]));
+            float partial = 0.0f;
+            for (uint l = 0u; l < NL; l++) {
+                partial += dot(sq4[tiisg + l * NW], float4(k4[tiisg + l * NW]));
+            }
             float sc = simd_sum(partial) * scale;
             if (softcap > 0.0f) {
                 sc = softcap * tanh(sc / softcap);
@@ -878,21 +914,26 @@ kernel void gqa_prefill_fa_vec_d256(
         float vs = (s_lane == -INFINITY) ? 0.0f : exp(s_lane - M2);
         S = S * ms + simd_sum(vs);
         ss[tiisg] = vs;
-        so4[tiisg] *= ms;
-        so4[tiisg + NW] *= ms;
+        for (uint l = 0u; l < NL; l++) {
+            so4[tiisg + l * NW] *= ms;
+        }
         M = M2;
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
-        float4 lo0 = float4(0.0f);
-        float4 lo1 = float4(0.0f);
+        float4 lo[NL];
+        for (uint l = 0u; l < NL; l++) {
+            lo[l] = float4(0.0f);
+        }
         for (uint cc = 0; cc < chunk; cc++) {
             device const half4* v4 =
                 (device const half4*)(v_cache + ((ic + cc) * n_kv_heads + kv_h) * D);
-            lo0 += float4(v4[tiisg]) * ss[cc];
-            lo1 += float4(v4[tiisg + NW]) * ss[cc];
+            for (uint l = 0u; l < NL; l++) {
+                lo[l] += float4(v4[tiisg + l * NW]) * ss[cc];
+            }
         }
-        so4[tiisg] += lo0;
-        so4[tiisg + NW] += lo1;
+        for (uint l = 0u; l < NL; l++) {
+            so4[tiisg + l * NW] += lo[l];
+        }
     }
 
     if (tiisg == 0u) {
@@ -918,8 +959,9 @@ kernel void gqa_prefill_fa_vec_d256(
                 ss0[0] = S0 * a0 + S1 * a1;
                 ss0[1] = Mn;
             }
-            so0[tiisg] = so0[tiisg] * a0 + so1[tiisg] * a1;
-            so0[tiisg + NW] = so0[tiisg + NW] * a0 + so1[tiisg + NW] * a1;
+            for (uint l = 0u; l < NL; l++) {
+                so0[tiisg + l * NW] = so0[tiisg + l * NW] * a0 + so1[tiisg + l * NW] * a1;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -929,11 +971,21 @@ kernel void gqa_prefill_fa_vec_d256(
         threadgroup float4* so0 = (threadgroup float4*)(ss0 + C);
         float inv = (ss0[0] == 0.0f) ? 0.0f : (1.0f / ss0[0]);
         device float4* out4 = (device float4*)(out + (qi * n_heads + h) * D);
-        out4[tiisg] = so0[tiisg] * inv;
-        out4[tiisg + NW] = so0[tiisg + NW] * inv;
+        for (uint l = 0u; l < NL; l++) {
+            out4[tiisg + l * NW] = so0[tiisg + l * NW] * inv;
+        }
     }
 }
-"#;
+"#
+        )
+    };
+}
+
+const GQA_PREFILL_FA_VEC_D256_KERNEL_SRC: &str =
+    gqa_prefill_fa_vec_wide_src!("gqa_prefill_fa_vec_d256", "256");
+/// Gemma-4's full-attention layers.
+const GQA_PREFILL_FA_VEC_D512_KERNEL_SRC: &str =
+    gqa_prefill_fa_vec_wide_src!("gqa_prefill_fa_vec_d512", "512");
 
 // Multi-token causal GQA prefill: one threadgroup per (query token, head).
 // Query `qi` at absolute cache index `kv_prefix_len + qi` attends over
@@ -959,6 +1011,7 @@ kernel void gqa_prefill(
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    constant uint& window [[buffer(10)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     uint2 tid_tg [[thread_position_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]],
@@ -990,7 +1043,9 @@ kernel void gqa_prefill(
         my_acc[d] = 0.0f;
     }
 
-    for (uint t = tid; t < causal_len; t += tg) {
+    // Sliding window: the first visible key (llama `is_masked_swa`).
+    uint kv_lo = (window > 0u && causal_len > window) ? causal_len - window : 0u;
+    for (uint t = kv_lo + tid; t < causal_len; t += tg) {
         device const half* k_t =
             k_cache + (t * n_kv_heads + kv_h) * head_dim;
         float dot = 0.0f;
@@ -1705,6 +1760,10 @@ fn warm_gqa_prefill_pipeline(
                 GQA_PREFILL_FA_VEC_D256_KERNEL_SRC,
                 "gqa_prefill_fa_vec_d256",
             ),
+            512 => (
+                GQA_PREFILL_FA_VEC_D512_KERNEL_SRC,
+                "gqa_prefill_fa_vec_d512",
+            ),
             _ => return Err(MetalError::CommandFailed),
         };
         ensure_pipeline(device, src, name)?;
@@ -1943,6 +2002,7 @@ fn encode_gqa_prefill_with_kv(
     n_q: u32,
     kv_prefix_len: u32,
     attn_softcap: Option<f32>,
+    window: u32,
 ) -> Result<(), MetalError> {
     let total_seq = kv_prefix_len + n_q;
     if kv.dtype.needs_f16_scratch() {
@@ -1983,6 +2043,7 @@ fn encode_gqa_prefill_with_kv(
             n_q,
             kv_prefix_len,
             attn_softcap,
+            window,
             PrefillAttnKernel::Auto,
             true,
         );
@@ -2004,6 +2065,7 @@ fn encode_gqa_prefill_with_kv(
             n_q,
             kv_prefix_len,
             attn_softcap,
+            window,
             PrefillAttnKernel::Auto,
             false,
         );
@@ -2062,10 +2124,11 @@ fn gqa_prefill_threadgroup_size(seq_len: u32, head_dim: u32) -> u32 {
 }
 
 /// FA-vec prefill head dims: 64 (SmolLM2 / TinyLlama / Llama-3.2-1B),
-/// 96, 128 (Llama-3), 256 (Gemma-2/3). Anything else falls back to the
-/// legacy per-thread-accumulator `gqa_prefill`.
+/// 96, 128 (Llama-3), 256 (Gemma-2/3), 512 (Gemma-4 full attention).
+/// Anything else falls back to the legacy per-thread-accumulator
+/// `gqa_prefill`.
 fn gqa_prefill_fa_vec_supported(head_dim: u32) -> bool {
-    matches!(head_dim, 64 | 96 | 128 | 256)
+    matches!(head_dim, 64 | 96 | 128 | 256 | 512)
 }
 
 /// llama `kernel_flash_attn_ext` dispatch: QN=8, C=64, NSG=4 (128 threads/TG).
@@ -2086,6 +2149,7 @@ fn encode_gqa_prefill_fa_ext(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
+    window: u32,
 ) -> Result<(), MetalError> {
     const QN: u32 = 8;
     const C: u32 = 64;
@@ -2141,6 +2205,12 @@ fn encode_gqa_prefill_fa_ext(
         );
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        let mut win = window;
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut win as *mut u32 as *mut _).unwrap(),
+            4,
+            10,
+        );
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -2159,6 +2229,19 @@ fn encode_gqa_prefill_fa_ext(
     Ok(())
 }
 
+/// A layer's sliding window as the prefill kernels take it: `0` = full
+/// causal. A window of zero keys would mask everything, so it is not a
+/// window anyone can ask for.
+fn window_u32(window: Option<usize>) -> u32 {
+    match window {
+        Some(w) => {
+            assert!(w > 0, "a sliding window of zero keys");
+            u32::try_from(w).unwrap_or(u32::MAX)
+        }
+        None => 0,
+    }
+}
+
 /// Which prefill attention kernel [`encode_gqa_prefill`] encodes.
 ///
 /// Production only ever asks for [`PrefillAttnKernel::Auto`]: there is one
@@ -2172,8 +2255,8 @@ pub enum PrefillAttnKernel {
     /// Best kernel for the shape. The only thing production asks for.
     Auto,
     /// llama `flash_attn_ext_tensor`, the Metal 4 tensor-API kernel
-    /// (`crate::fa_tensor`). `head_dim` 64, 128 or 256 on a device that
-    /// runs the tensor API; anything else is an error, not a fallback.
+    /// (`crate::fa_tensor`). `head_dim` 64, 128, 256 or 512 on a device
+    /// that runs the tensor API; anything else is an error, not a fallback.
     Tensor,
     /// llama `flash_attn_ext`, simdgroup-MMA score + P·V. `head_dim` 64,
     /// 128 or 256 with `n_q >= 8`; other shapes fall through to FA-vec.
@@ -2181,6 +2264,9 @@ pub enum PrefillAttnKernel {
     FaExt,
     /// llama-style FA-vec, every `head_dim` with a specialized kernel.
     FaVec,
+    /// The per-thread-accumulator `gqa_prefill`, what a width FA-vec does
+    /// not cover (or `FRINK_METAL_FA_VEC=0`) runs.
+    Legacy,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2197,6 +2283,7 @@ fn encode_gqa_prefill_fa_vec(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
+    window: u32,
     kernel: PrefillAttnKernel,
     kv_dequantized: bool,
 ) -> Result<(), MetalError> {
@@ -2218,6 +2305,7 @@ fn encode_gqa_prefill_fa_vec(
             n_q,
             kv_prefix_len,
             softcap,
+            window,
         );
     }
     // llama flash_attn_ext (MMA Q·Kᵀ + P·V, QN=8/C=64) for d=64, d=128 and
@@ -2237,6 +2325,7 @@ fn encode_gqa_prefill_fa_vec(
             n_q,
             kv_prefix_len,
             softcap,
+            window,
         );
     }
     let pipe = match head_dim {
@@ -2255,6 +2344,11 @@ fn encode_gqa_prefill_fa_vec(
             device,
             GQA_PREFILL_FA_VEC_D256_KERNEL_SRC,
             "gqa_prefill_fa_vec_d256",
+        )?,
+        512 => ensure_pipeline(
+            device,
+            GQA_PREFILL_FA_VEC_D512_KERNEL_SRC,
+            "gqa_prefill_fa_vec_d512",
         )?,
         _ => return Err(MetalError::CommandFailed),
     };
@@ -2288,6 +2382,12 @@ fn encode_gqa_prefill_fa_vec(
         );
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        let mut win = window;
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut win as *mut u32 as *mut _).unwrap(),
+            4,
+            10,
+        );
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -2426,6 +2526,7 @@ fn encode_gqa_prefill(
     n_q: u32,
     kv_prefix_len: u32,
     attn_softcap: Option<f32>,
+    window: u32,
     kernel: PrefillAttnKernel,
     kv_dequantized: bool,
 ) -> Result<(), MetalError> {
@@ -2444,9 +2545,13 @@ fn encode_gqa_prefill(
             n_q,
             kv_prefix_len,
             softcap,
+            window,
         );
     }
-    if metal_fa_vec_enabled() && gqa_prefill_fa_vec_supported(head_dim) {
+    if kernel != PrefillAttnKernel::Legacy
+        && metal_fa_vec_enabled()
+        && gqa_prefill_fa_vec_supported(head_dim)
+    {
         return encode_gqa_prefill_fa_vec(
             encoder,
             device,
@@ -2460,6 +2565,7 @@ fn encode_gqa_prefill(
             n_q,
             kv_prefix_len,
             softcap,
+            window,
             kernel,
             kv_dequantized,
         );
@@ -2495,6 +2601,12 @@ fn encode_gqa_prefill(
         );
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        let mut win = window;
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut win as *mut u32 as *mut _).unwrap(),
+            4,
+            10,
+        );
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -4212,6 +4324,11 @@ pub struct PrefillDenseLayerMetal<'a> {
     pub rope: Option<LayerRope<'a>>,
     /// Layer index for [`PrefillCbCache`] keying only.
     pub layer_idx: u32,
+    /// Sliding-window size for this layer (`None` = full causal): query
+    /// at position `p` reads keys `(p - window, p]`, llama.cpp's
+    /// `LLAMA_SWA_TYPE_STANDARD`. A chunked window is not this; see
+    /// [`DenseLayerMetal::window`].
+    pub window: Option<usize>,
     /// Gemma-4's per-layer embedding gate; see
     /// [`DenseLayerMetal::per_layer`].
     pub per_layer: Option<PerLayerGateMetal<'a, PrefillMatMetal<'a>>>,
@@ -4521,6 +4638,7 @@ fn encode_prefill_dense_layer(
         batch as u32,
         start_pos as u32,
         attn_softcap,
+        window_u32(layer.window),
     )?;
 
     spans.span(cmd_buf, encoder, "pf_attn_to_f16")?;
@@ -5127,6 +5245,9 @@ pub fn launch_prefill_attn_block(
     rope: LayerRope<'_>,
     start_pos: usize,
     attn_softcap: Option<f32>,
+    // Sliding window (`None` = full causal); see
+    // [`PrefillDenseLayerMetal::window`].
+    window: Option<usize>,
     return_kv: bool,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), MetalError> {
     // Exhaustive destructure, no `..`: adding a third half to a
@@ -5214,6 +5335,7 @@ pub fn launch_prefill_attn_block(
         n_q as u32,
         start_pos as u32,
         attn_softcap,
+        window_u32(window),
     );
     encoder.endEncoding();
     prefill_result?;
@@ -5264,11 +5386,13 @@ pub fn launch_gqa_prefill_host(
         n_q,
         kv_prefix_len,
         None,
+        None,
     )
 }
 
-/// [`launch_gqa_prefill_host`] with an attention-logit softcap, so the
-/// Gemma prefill path can be checked against the CPU reference.
+/// [`launch_gqa_prefill_host`] with an attention-logit softcap and a
+/// sliding window, so the Gemma prefill path can be checked against the
+/// CPU reference. Query `i` sits at cache index `kv_prefix_len + i`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_gqa_prefill_host_ex(
     q: &[f32],
@@ -5280,6 +5404,7 @@ pub fn launch_gqa_prefill_host_ex(
     n_q: usize,
     kv_prefix_len: usize,
     attn_softcap: Option<f32>,
+    window: Option<usize>,
 ) -> Result<Vec<f32>, MetalError> {
     launch_gqa_prefill_host_kernel(
         q,
@@ -5291,6 +5416,7 @@ pub fn launch_gqa_prefill_host_ex(
         n_q,
         kv_prefix_len,
         attn_softcap,
+        window,
         PrefillAttnKernel::Auto,
     )
 }
@@ -5314,6 +5440,7 @@ pub fn launch_gqa_prefill_host_kernel(
     n_q: usize,
     kv_prefix_len: usize,
     attn_softcap: Option<f32>,
+    window: Option<usize>,
     kernel: PrefillAttnKernel,
 ) -> Result<Vec<f32>, MetalError> {
     let total_seq = kv_prefix_len + n_q;
@@ -5351,6 +5478,7 @@ pub fn launch_gqa_prefill_host_kernel(
         n_q as u32,
         kv_prefix_len as u32,
         attn_softcap,
+        window_u32(window),
         kernel,
         false,
     );
@@ -5855,6 +5983,7 @@ mod tests {
                 n_q,
                 kv_prefix_len,
                 softcap,
+                None,
                 PrefillAttnKernel::FaVec,
             )
             .expect("metal gqa prefill fa-vec d256");
@@ -5928,6 +6057,7 @@ mod tests {
                 n_q,
                 kv_prefix_len,
                 softcap,
+                None,
             )
             .expect("fa_ext prefill");
             let mut max_diff = 0f32;
@@ -5974,6 +6104,7 @@ mod tests {
                 n_q,
                 kv_prefix_len,
                 softcap,
+                None,
                 kernel,
             )
             .expect("prefill")
@@ -6047,6 +6178,7 @@ mod tests {
                     n_q,
                     kv_prefix_len,
                     softcap,
+                    None,
                     kernel,
                 )
                 .expect("fa_ext")
@@ -6136,6 +6268,7 @@ mod tests {
                     n_q,
                     kv_prefix_len,
                     softcap,
+                    None,
                     kernel,
                 )
                 .expect("d128 prefill")
@@ -6239,6 +6372,7 @@ mod tests {
                     n_q,
                     kv_prefix_len,
                     softcap,
+                    None,
                     kernel,
                 )
                 .expect("d256 prefill")
@@ -6354,6 +6488,7 @@ mod tests {
             },
             start_pos,
             None,
+            None,
             true,
         )
         .expect("prefill attn");
@@ -6440,6 +6575,7 @@ mod tests {
             },
             0,
             None,
+            None,
             false,
         )
         .expect("f16 prefill");
@@ -6456,6 +6592,7 @@ mod tests {
                 freq_factors: None,
             },
             0,
+            None,
             None,
             false,
         )
@@ -6521,11 +6658,12 @@ mod tests {
             layer_rope,
             0,
             None,
+            None,
             false,
         )
         .expect("f16 prefill");
         let (attn_t4, _, _) = launch_prefill_attn_block(
-            &q, &k, &v, &mut kv_t4, n_heads, n_q, rope, layer_rope, 0, None, false,
+            &q, &k, &v, &mut kv_t4, n_heads, n_q, rope, layer_rope, 0, None, None, false,
         )
         .expect("q4 prefill");
         assert_eq!(attn_f16.len(), attn_t4.len());
@@ -7094,6 +7232,7 @@ mod tests {
             extras: AttnExtras::default(),
             rope,
             layer_idx,
+            window: None,
             per_layer: None,
             out_scale: None,
         }

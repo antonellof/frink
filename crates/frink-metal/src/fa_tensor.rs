@@ -21,6 +21,11 @@
 //!   so `matmul2d` never reads past the cache, and the rows it does not
 //!   read sit at keys every real query masks anyway.
 //!
+//! A sliding window (`window > 0`) is llama's `is_masked_swa` for
+//! `LLAMA_SWA_TYPE_STANDARD`: query position `p` masks key `p0` when
+//! `p - p0 >= window`. The blocks wholly below the tile's first visible
+//! key are skipped, which is again what the `blk` prepass marks 0.
+//!
 //! Selection ([`selected`]) is llama's `ggml_metal_op_flash_attn_ext_use_tensor`
 //! for an f16 cache.
 
@@ -32,24 +37,32 @@ use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLDevice, MTLSize};
 use std::ptr::NonNull;
 use std::sync::LazyLock;
 
-/// Queries per threadgroup (llama `OP_FLASH_ATTN_EXT_TENSOR_NQPSG`).
-const NQPTG: u32 = 32;
+/// Queries per threadgroup (llama `OP_FLASH_ATTN_EXT_TENSOR_NQPSG`, and
+/// `_NQPSG_LARGE` from `dk >= 512` so the queries fit in threadgroup
+/// memory).
+fn nqptg(head_dim: u32) -> u32 {
+    if head_dim >= 512 {
+        16
+    } else {
+        32
+    }
+}
 /// KV rows per block (llama `OP_FLASH_ATTN_EXT_TENSOR_NCPSG`).
 const NCPSG: u32 = 64;
 /// Simdgroups per threadgroup (llama `OP_FLASH_ATTN_EXT_TENSOR_NSG`).
 const NSG: u32 = 8;
 
-/// The head widths frink instantiates. llama's list also has 192/128,
-/// 512 and 576/512; frink's prefill caches have `DK == DV` and its FA
-/// paths stop at 256, so those widths stay on the paths they use today.
+/// The head widths frink instantiates. llama's list also has 192/128
+/// and 576/512; frink's prefill caches have `DK == DV`, so those stay on
+/// the paths they use today.
 pub(crate) fn supported(head_dim: u32) -> bool {
-    matches!(head_dim, 64 | 128 | 256)
+    matches!(head_dim, 64 | 128 | 256 | 512)
 }
 
 /// llama `ggml_metal_op_flash_attn_ext_use_tensor` for frink's shapes:
 /// the device runs the tensor API, the batch is not a vec batch
 /// (`ne01 < 20`), the width is instantiated, and the work clears llama's
-/// small-work cutoff (`ceil(n_q / 32) * n_heads * D >= 8192`; below it
+/// small-work cutoff (`ceil(n_q / nqptg) * n_heads * D >= 8192`; below it
 /// the half8x8 kernel, frink's `fa_ext`, is faster).
 ///
 /// `kv_dequantized` is a cache that reaches attention through the f16
@@ -67,14 +80,14 @@ fn shape_selected(head_dim: u32, n_heads: u32, n_q: u32, kv_dequantized: bool) -
     if n_q < 20 || !supported(head_dim) || (kv_dequantized && n_q < 32) {
         return false;
     }
-    let work = u64::from(n_q.div_ceil(NQPTG)) * u64::from(n_heads) * u64::from(head_dim);
+    let work = u64::from(n_q.div_ceil(nqptg(head_dim))) * u64::from(n_heads) * u64::from(head_dim);
     work >= 8192
 }
 
 /// Threadgroup bytes (llama: queries f16, scores f32, probabilities f16,
 /// row scale f32, rescale flag i32, padded to 16).
 fn smem(head_dim: u32) -> usize {
-    let q = NQPTG as usize;
+    let q = nqptg(head_dim) as usize;
     let c = NCPSG as usize;
     let raw = q * head_dim as usize * 2 + q * c * (4 + 2) + q * 4 + 4;
     raw.div_ceil(16) * 16
@@ -85,6 +98,7 @@ fn pipeline_name(head_dim: u32) -> Result<&'static str, MetalError> {
         64 => "gqa_prefill_fa_tensor_d64",
         128 => "gqa_prefill_fa_tensor_d128",
         256 => "gqa_prefill_fa_tensor_d256",
+        512 => "gqa_prefill_fa_tensor_d512",
         _ => return Err(MetalError::CommandFailed),
     })
 }
@@ -107,9 +121,10 @@ pub(crate) fn warm(
     Ok(name)
 }
 
-/// Encode causal prefill attention through the tensor kernel. The caller
-/// has checked [`crate::tensor_mm::has_tensor`]; an unsupported width is
-/// an error, never a silent fallback.
+/// Encode causal prefill attention through the tensor kernel, over the
+/// last `window` keys of each query when `window > 0`. The caller has
+/// checked [`crate::tensor_mm::has_tensor`]; an unsupported width is an
+/// error, never a silent fallback.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
@@ -124,6 +139,7 @@ pub(crate) fn encode(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
+    window: u32,
 ) -> Result<(), MetalError> {
     if !crate::tensor_mm::has_tensor() || n_kv_heads == 0 || !n_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::CommandFailed);
@@ -139,6 +155,7 @@ pub(crate) fn encode(
     encoder.setComputePipelineState(&pipe.0);
     let mut args: [u32; 4] = [n_heads, n_kv_heads, n_q, kv_prefix_len];
     let mut fargs: [f32; 2] = [scale, softcap];
+    let mut win = window;
     // SAFETY: the bound buffers outlive the command buffer (the callers
     // hold them across commit/wait or in the stack scratch), and the
     // `setBytes` sources are locals copied by Metal before the call returns.
@@ -157,12 +174,17 @@ pub(crate) fn encode(
             std::mem::size_of_val(&fargs),
             5,
         );
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut win as *mut u32 as *mut _).unwrap(),
+            4,
+            6,
+        );
         encoder.setThreadgroupMemoryLength_atIndex(smem(head_dim), 0);
     }
     dispatch_counted(
         encoder,
         MTLSize {
-            width: n_q.div_ceil(NQPTG) as usize,
+            width: n_q.div_ceil(nqptg(head_dim)) as usize,
             height: n_heads as usize,
             depth: 1,
         },
@@ -183,7 +205,8 @@ using namespace metal;
 
 #define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
-// args: n_heads, n_kv_heads, n_q, kv_prefix_len; fargs: scale, softcap.
+// args: n_heads, n_kv_heads, n_q, kv_prefix_len; fargs: scale, softcap;
+// window: sliding window in keys, 0 = full causal.
 template<short DK, short DV, short Q, short C, short NSG>
 kernel void gqa_prefill_fa_tensor(
         device const float * q    [[buffer(0)]],
@@ -192,6 +215,7 @@ kernel void gqa_prefill_fa_tensor(
         device       float * dst  [[buffer(3)]],
         constant uint4     & args [[buffer(4)]],
         constant float2    & fargs [[buffer(5)]],
+        constant uint      & window [[buffer(6)]],
         threadgroup  char  * shmem [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]],
@@ -267,6 +291,12 @@ kernel void gqa_prefill_fa_tensor(
     // The first key that the tile's first query does not see: blocks
     // wholly below it need no mask (llama's blk = 2).
     const int kv_full  = kv_prefix + iq1 + 1;
+    // Sliding window: query iq1 + j sees keys >= kv_prefix + iq1 + j + 1 - win.
+    // Blocks wholly below the first query's first key are skipped; blocks
+    // below the last query's first key need the mask.
+    const int win      = int(window);
+    const int kv_lo0   = win > 0 ? max(kv_full - win, 0) : 0;
+    const int kv_lo1   = win > 0 ? max(kv_end - win, 0) : 0;
 
     auto tq = tensor(sq, dextents<int32_t, 2>(DK, Q));
     auto ts = tensor(ss, dextents<int32_t, 2>(C,  Q));
@@ -297,11 +327,11 @@ kernel void gqa_prefill_fa_tensor(
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (int ic0 = 0, ic = 0; ic < kv_end; ++ic0, ic += C) {
+    for (int ic0 = kv_lo0/C, ic = ic0*C; ic < kv_end; ++ic0, ic += C) {
         // the last block reads only the rows that exist; the rest are keys
         // past kv_valid, which every query masks
         const int nc = min(int(C), kv_valid - ic);
-        const bool need_mask = ic + C > kv_full;
+        const bool need_mask = ic + C > kv_full || ic < kv_lo1;
 
         // Q*K^T
         {
@@ -333,8 +363,10 @@ kernel void gqa_prefill_fa_tensor(
             // so the columns the last block did not read are -INF there too.
             if (need_mask) {
                 const int clen = min(kv_prefix + iq1 + j + 1, kv_valid);
+                const int lo   = win > 0 ? kv_prefix + iq1 + j + 1 - win : 0;
                 FOR_UNROLL (short ii = 0; ii < NC; ++ii) {
-                    if (ic + ii*NW + tiisg >= clen) {
+                    const int col = ic + ii*NW + tiisg;
+                    if (col >= clen || col < lo) {
                         s[ii] = -INFINITY;
                     }
                 }
@@ -427,6 +459,7 @@ typedef decltype(gqa_prefill_fa_tensor<64, 64, 32, 64, 8>) gqa_prefill_fa_tensor
 template [[host_name("gqa_prefill_fa_tensor_d64")]]  kernel gqa_prefill_fa_tensor_t gqa_prefill_fa_tensor<64,  64,  32, 64, 8>;
 template [[host_name("gqa_prefill_fa_tensor_d128")]] kernel gqa_prefill_fa_tensor_t gqa_prefill_fa_tensor<128, 128, 32, 64, 8>;
 template [[host_name("gqa_prefill_fa_tensor_d256")]] kernel gqa_prefill_fa_tensor_t gqa_prefill_fa_tensor<256, 256, 32, 64, 8>;
+template [[host_name("gqa_prefill_fa_tensor_d512")]] kernel gqa_prefill_fa_tensor_t gqa_prefill_fa_tensor<512, 512, 16, 64, 8>;
 "#;
 
 #[cfg(test)]
@@ -450,12 +483,17 @@ mod tests {
         assert!(shape_selected(128, 32, 33, false)); // 2 * 32 * 128 = 8192
         assert!(!shape_selected(64, 32, 65, false)); // 3 * 32 * 64 = 6144
         assert!(shape_selected(256, 32, 20, false)); // 1 * 32 * 256 = 8192
-                                                     // A cache that went through the f16 scratch needs 32 queries.
+                                                     // d=512 tiles 16 queries (llama's NQPSG_LARGE): 64 queries over
+                                                     // 4 heads are 4 tiles, 8192; at 32 per tile they would be 4096.
+        assert!(shape_selected(512, 4, 64, false));
+        assert!(!shape_selected(512, 4, 48, false)); // 3 * 4 * 512 = 6144
+        assert!(shape_selected(512, 8, 20, false)); // 2 * 8 * 512 = 8192
+                                                    // A cache that went through the f16 scratch needs 32 queries.
         assert!(!shape_selected(128, 64, 31, true));
         assert!(shape_selected(128, 64, 32, true));
         // Widths the kernel is not instantiated at.
         assert!(!shape_selected(96, 128, 512, false));
-        assert!(!shape_selected(512, 128, 512, false));
+        assert!(!shape_selected(576, 128, 512, false));
     }
 
     struct Case {
@@ -468,6 +506,17 @@ mod tests {
         /// Scale keys up with position, so the running max moves by more
         /// than 8 between blocks and the lazy O rescale runs.
         ramp: bool,
+        /// Sliding window in keys (llama `is_masked_swa`, STANDARD).
+        window: Option<usize>,
+    }
+
+    impl Case {
+        const fn w(self, window: usize) -> Case {
+            Case {
+                window: Some(window),
+                ..self
+            }
+        }
     }
 
     const fn c(
@@ -487,12 +536,25 @@ mod tests {
             prefix,
             softcap,
             ramp,
+            window: None,
         }
     }
 
     /// n_q off the 32-query tile, kv_prefix_len > 0, caches off the
-    /// 64-row block and exactly on it, GQA ratios 1/2/4/8, softcap.
+    /// 64-row block and exactly on it, GQA ratios 1/2/4/8, softcap; d=512
+    /// off its 16-query tile; and sliding windows that bind, on and off
+    /// the 64-key block, narrower than one tile's query span, and of one
+    /// key.
     const CASES: &[Case] = &[
+        c(8, 2, 512, 40, 9, None, false),
+        c(8, 1, 512, 17, 0, Some(30.0), true),
+        c(4, 4, 512, 70, 130, None, true).w(48),
+        c(8, 2, 64, 40, 9, None, false).w(16),
+        c(16, 2, 128, 100, 70, Some(50.0), true).w(64),
+        c(4, 2, 128, 300, 200, None, true).w(100),
+        c(8, 4, 256, 65, 130, None, true).w(37),
+        c(8, 1, 256, 600, 0, None, false).w(512),
+        c(4, 1, 256, 40, 9, Some(50.0), false).w(1),
         c(8, 2, 64, 40, 9, None, false),
         c(4, 4, 64, 64, 0, Some(30.0), false),
         c(4, 2, 64, 64, 64, None, true),
@@ -532,10 +594,12 @@ mod tests {
         let mut out = vec![0f32; t.n_q * t.n_heads * t.d];
         for i in 0..t.n_q {
             let clen = t.prefix + i + 1;
+            // The first key `is_masked_swa` leaves visible.
+            let lo = t.window.map_or(0, |w| clen.saturating_sub(w));
             for h in 0..t.n_heads {
                 let kh = h / group;
                 let qh = &q[(i * t.n_heads + h) * t.d..][..t.d];
-                let mut s: Vec<f64> = (0..clen)
+                let mut s: Vec<f64> = (lo..clen)
                     .map(|p| {
                         let kp = &k[(p * t.n_kv_heads + kh) * t.d..][..t.d];
                         let dot: f64 = qh.iter().zip(kp).map(|(a, b)| f64::from(*a) * r(*b)).sum();
@@ -553,8 +617,8 @@ mod tests {
                     sum += *x;
                 }
                 for dd in 0..t.d {
-                    let acc: f64 = (0..clen)
-                        .map(|p| s[p] * r(v[(p * t.n_kv_heads + kh) * t.d + dd]))
+                    let acc: f64 = (lo..clen)
+                        .map(|p| s[p - lo] * r(v[(p * t.n_kv_heads + kh) * t.d + dd]))
                         .sum();
                     out[(i * t.n_heads + h) * t.d + dd] = (acc / sum) as f32;
                 }
@@ -591,6 +655,7 @@ mod tests {
             t.n_q as u32,
             t.prefix as u32,
             t.softcap.unwrap_or(0.0),
+            t.window.map_or(0, |w| w as u32),
         );
         enc.endEncoding();
         res.expect("tensor prefill");
@@ -611,6 +676,7 @@ mod tests {
             t.n_q,
             t.prefix,
             t.softcap,
+            t.window,
             kernel,
         )
         .expect("prefill")
@@ -650,7 +716,7 @@ mod tests {
                 let (d, i) = max_rel_diff(&want, &got);
                 assert!(
                     d <= 4e-3,
-                    "d={} heads={}/{} n_q={} pre={} sc={:?} poison={poison}: \
+                    "d={} heads={}/{} n_q={} pre={} sc={:?} win={:?} poison={poison}: \
                      max rel diff {d} at {i} (cpu {} gpu {})",
                     t.d,
                     t.n_heads,
@@ -658,6 +724,7 @@ mod tests {
                     t.n_q,
                     t.prefix,
                     t.softcap,
+                    t.window,
                     want[i],
                     got[i]
                 );
@@ -673,7 +740,8 @@ mod tests {
         if !tensor_device() {
             return;
         }
-        for t in CASES.iter().filter(|t| t.n_q >= 8) {
+        // fa_ext is instantiated at 64, 128 and 256 only.
+        for t in CASES.iter().filter(|t| t.n_q >= 8 && t.d <= 256) {
             let (q, k, v) = inputs(t);
             let ext = run_named(t, &q, &k, &v, PrefillAttnKernel::FaExt);
             let ten = run_named(t, &q, &k, &v, PrefillAttnKernel::Tensor);
@@ -716,5 +784,45 @@ mod tests {
         let auto = run_named(&small, &q, &k, &v, PrefillAttnKernel::Auto);
         let ext = run_named(&small, &q, &k, &v, PrefillAttnKernel::FaExt);
         assert_eq!(auto, ext, "Auto left fa_ext under llama's cutoff");
+    }
+    /// Every prefill kernel frink can name, against the same f64
+    /// reference, on every case: the windowed ones are where a kernel
+    /// that ignores `window` (or masks one key too many or too few at
+    /// `clen - window`) goes red. Needs only Metal; the tensor arm is
+    /// covered by `tensor_prefill_matches_cpu`. FA-vec and the legacy
+    /// kernel run f32 Q against f16 K/V, so they hold to 1e-4; `fa_ext`
+    /// is held to the same bound as before its window.
+    #[test]
+    #[ignore = "needs Metal"]
+    fn every_named_prefill_kernel_matches_cpu_with_windows() {
+        std::env::set_var("FRINK_METAL_FA_VEC", "1");
+        for t in CASES {
+            let (q, k, v) = inputs(t);
+            let want = cpu(t, &q, &k, &v);
+            let mut kernels = vec![
+                (PrefillAttnKernel::FaVec, 1e-4),
+                (PrefillAttnKernel::Legacy, 1e-4),
+            ];
+            if t.d <= 256 && t.n_q >= 8 {
+                kernels.push((PrefillAttnKernel::FaExt, 2e-3));
+            }
+            for (kernel, tol) in kernels {
+                let got = run_named(t, &q, &k, &v, kernel);
+                let (d, i) = max_rel_diff(&want, &got);
+                assert!(
+                    d <= tol,
+                    "{kernel:?} d={} heads={}/{} n_q={} pre={} win={:?}: \
+                     max rel diff {d} at {i} (cpu {} gpu {})",
+                    t.d,
+                    t.n_heads,
+                    t.n_kv_heads,
+                    t.n_q,
+                    t.prefix,
+                    t.window,
+                    want[i],
+                    got[i]
+                );
+            }
+        }
     }
 }

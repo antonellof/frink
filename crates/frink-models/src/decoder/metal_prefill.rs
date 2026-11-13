@@ -12,7 +12,7 @@ use super::{Decoder, ExpertBacking, LayerWeights};
 impl Decoder {
     /// Dense layer eligible for the one-CB `mul_mm_sg` prefill stack.
     /// QKV bias / QK-norm are applied on-GPU via [`AttnExtras`] (same as
-    /// decode); SWA fit is checked separately.
+    /// decode); the window is [`Self::metal_prefill_window`].
     #[cfg(feature = "metal")]
     pub(super) fn metal_prefill_dense_layer_eligible(
         layer: &LayerWeights,
@@ -22,16 +22,21 @@ impl Decoder {
         Self::fused_prefill_dense_layer_eligible(layer, config, lora_attached)
     }
 
+    /// The window the Metal prefill kernels take for this batch on layer
+    /// `layer_idx`: `Some(None)` full causal, `Some(Some(w))` a sliding
+    /// window, `None` when the batch needs one window per query (a
+    /// chunked layer whose queries straddle a chunk boundary,
+    /// `crate::chunked_swa`), which the kernels do not take.
     #[cfg(feature = "metal")]
-    pub(super) fn metal_prefill_dense_swa_fits(
+    pub(super) fn metal_prefill_window(
         &self,
         layer_idx: usize,
         start_pos: usize,
         batch_size: usize,
-    ) -> bool {
-        match self.config.layer_sliding_window(layer_idx) {
-            Some(window) => start_pos + batch_size <= window,
-            None => true,
+    ) -> Option<Option<usize>> {
+        match self.config.batch_window(layer_idx, start_pos, batch_size) {
+            crate::config::BatchWindow::Uniform(window) => Some(window),
+            crate::config::BatchWindow::PerQuery => None,
         }
     }
 
@@ -115,7 +120,10 @@ impl Decoder {
         for li in start..self.layers.len() {
             let layer = &self.layers[li];
             let cache = &kv_caches[li];
-            if !self.metal_prefill_dense_swa_fits(li, start_pos, batch_size) {
+            if self
+                .metal_prefill_window(li, start_pos, batch_size)
+                .is_none()
+            {
                 break;
             }
             // POSITIONS: compared against `start_pos`, and against
@@ -193,6 +201,10 @@ impl Decoder {
                 extras: self.metal_attn_extras(layer),
                 rope: self.metal_layer_rope(li),
                 layer_idx: li as u32,
+                // The run-length check above saw a uniform window.
+                window: self
+                    .metal_prefill_window(li, start_pos, batch_size)
+                    .flatten(),
                 per_layer: None,
                 out_scale: None,
             });

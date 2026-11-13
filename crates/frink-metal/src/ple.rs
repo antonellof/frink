@@ -16,13 +16,12 @@
 //! command buffer like every other dense model's, rather than a parallel
 //! stack of its own (ADR 0004). This module only holds what those two
 //! stacks need and nothing else does: the descriptions, the three small
-//! kernels, the batched f32 GEMM the prefill takes for f32 weights, and
-//! the plane the per-layer inputs live in.
+//! kernels, and the plane the per-layer inputs live in.
 
 use crate::dispatch::dispatch_counted;
 use crate::gpu::{
-    encode_matvec, encode_mul_mm_sg_f16, ensure_pipeline, resident_f32_buffer,
-    resident_weight_buffer, MatvecLaunch, MetalError, MulMmSgLaunch,
+    encode_matvec, encode_mul_mm_sg_f16, ensure_pipeline, f32_mul_mm_sg_launch,
+    resident_f32_buffer, resident_weight_buffer, MatvecLaunch, MetalError, MulMmSgLaunch,
 };
 use crate::mem_ranges::MemRanges;
 use objc2::rc::Retained;
@@ -32,10 +31,12 @@ use std::ptr::NonNull;
 use std::sync::Mutex;
 
 /// A weight the PREFILL stack multiplies a whole batch by: a quantized
-/// GEMM (`mul_mm_sg`, which reads a half activation) or plain f32 rows,
-/// which no `mul_mm_sg` kernel takes. Gemma-4 E2B ships its per-layer
-/// gate and projection as F32 and `per_layer_model_proj` as BF16 (which
-/// the loader widens to f32), so the f32 arm is the common one there.
+/// GEMM (`mul_mm_sg`) or plain f32 rows, which go through the same GEMM
+/// with llama's `kernel_mul_mm_f32_f32` dequantizer
+/// ([`crate::gpu::f32_mul_mm_sg_launch`]). Either reads a half
+/// activation. Gemma-4 E2B ships its per-layer gate and projection as
+/// F32 and `per_layer_model_proj` as BF16 (which the loader widens to
+/// f32), so the f32 arm is the common one there.
 #[derive(Clone, Copy)]
 pub enum PrefillMatMetal<'a> {
     Quant(MulMmSgLaunch<'a>),
@@ -52,11 +53,6 @@ impl PrefillMatMetal<'_> {
             Self::Quant(l) => l.rows,
             Self::F32 { rows, .. } => *rows,
         }
-    }
-
-    /// Whether the GEMM reads a half activation.
-    fn wants_half(&self) -> bool {
-        matches!(self, Self::Quant(_))
     }
 }
 
@@ -159,39 +155,6 @@ typedef decltype(ple_gelu_mul_rows<float>) ple_gelu_mul_rows_t;
 template [[host_name("ple_gelu_mul_rows_f32")]] kernel ple_gelu_mul_rows_t ple_gelu_mul_rows<float>;
 typedef decltype(ple_gelu_mul_rows<half>) ple_gelu_mul_rows_h_t;
 template [[host_name("ple_gelu_mul_rows_f16")]] kernel ple_gelu_mul_rows_h_t ple_gelu_mul_rows<half>;
-
-// out[t, r] = dot(w[r, :], x[t, :]) for f32 weights and activations.
-// Four simdgroups per threadgroup, one output row each; the token index
-// is the FASTER grid axis, so threadgroups in flight share a weight row
-// and the (much smaller) activation plane stays in cache while the
-// weights stream once.
-kernel void ple_f32_mm(
-    device const float* w [[buffer(0)]],
-    device const float* x [[buffer(1)]],
-    device float* out [[buffer(2)]],
-    constant uint& cols [[buffer(3)]],
-    constant uint& rows [[buffer(4)]],
-    constant uint& n_tokens [[buffer(5)]],
-    uint2 tgpig [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]]
-) {
-    const uint t = tgpig.x;
-    const uint r = tgpig.y * 4u + sg;
-    if (t >= n_tokens || r >= rows) {
-        return;
-    }
-    device const float* wr = w + (size_t)r * cols;
-    device const float* xr = x + (size_t)t * cols;
-    float acc = 0.0f;
-    for (uint i = lane; i < cols; i += 32u) {
-        acc += wr[i] * xr[i];
-    }
-    acc = simd_sum(acc);
-    if (lane == 0u) {
-        out[(size_t)t * rows + r] = acc;
-    }
-}
 "#;
 
 fn set_u32(enc: &ProtocolObject<dyn MTLComputeCommandEncoder>, v: u32, idx: usize) {
@@ -300,45 +263,6 @@ fn encode_gelu_mul_rows(
     set_u32(enc, up_stride, 5);
     set_u32(enc, up_off, 6);
     dispatch_1d(enc, total as usize);
-    Ok(())
-}
-
-/// `out[t, :] = w · x[t, :]` for f32 weights, `n_tokens` rows.
-#[allow(clippy::too_many_arguments)]
-fn encode_f32_mm(
-    enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    w: &ProtocolObject<dyn MTLBuffer>,
-    x: &ProtocolObject<dyn MTLBuffer>,
-    out: &ProtocolObject<dyn MTLBuffer>,
-    cols: u32,
-    rows: u32,
-    n_tokens: u32,
-) -> Result<(), MetalError> {
-    let pipe = ensure_pipeline(device, PLE_KERNEL_SRC, "ple_f32_mm")?;
-    enc.setComputePipelineState(&pipe.0);
-    // SAFETY: binds live buffers the dispatch below reads and writes.
-    unsafe {
-        enc.setBuffer_offset_atIndex(Some(w), 0, 0);
-        enc.setBuffer_offset_atIndex(Some(x), 0, 1);
-        enc.setBuffer_offset_atIndex(Some(out), 0, 2);
-    }
-    set_u32(enc, cols, 3);
-    set_u32(enc, rows, 4);
-    set_u32(enc, n_tokens, 5);
-    dispatch_counted(
-        enc,
-        MTLSize {
-            width: n_tokens as usize,
-            height: (rows as usize).div_ceil(4),
-            depth: 1,
-        },
-        MTLSize {
-            width: 128,
-            height: 1,
-            depth: 1,
-        },
-    );
     Ok(())
 }
 
@@ -453,7 +377,7 @@ impl PleInputMetal<'_, MatvecLaunch<'_>> {
 }
 
 /// Batched `out = m · x` for the prefill stack, staging `x` through the
-/// half plane when the weight is quantized.
+/// half plane unless it is already half.
 #[allow(clippy::too_many_arguments)]
 fn encode_prefill_mat(
     enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
@@ -467,44 +391,29 @@ fn encode_prefill_mat(
     cols: usize,
     batch: usize,
 ) -> Result<(), MetalError> {
-    match m {
-        PrefillMatMetal::Quant(l) => {
-            let src = if x_is_half {
-                x
-            } else {
-                mrs.begin_op(enc, &[x], &[half]);
-                crate::elem::encode_f32_to_f16(enc, device, x, half, (batch * cols) as u32)?;
-                mrs.end_op(&[x], &[half]);
-                half
-            };
-            let w = resident_weight_buffer(device, l.weights)?;
-            mrs.begin_op(enc, &[src], &[out]);
-            encode_mul_mm_sg_f16(enc, device, l, &w, src, out, batch)?;
-            mrs.end_op(&[src], &[out]);
-        }
+    let l = match *m {
+        PrefillMatMetal::Quant(l) => l,
         PrefillMatMetal::F32 {
             weights,
             rows,
             cols: w_cols,
         } => {
-            assert!(!x_is_half, "the f32 GEMM reads f32 activations");
-            assert_eq!(*w_cols, cols);
-            assert_eq!(weights.len(), rows * w_cols);
-            let w = resident_f32_buffer(device, weights)?;
-            mrs.begin_op(enc, &[x], &[out]);
-            encode_f32_mm(
-                enc,
-                device,
-                &w.buffer,
-                x,
-                out,
-                cols as u32,
-                *rows as u32,
-                batch as u32,
-            )?;
-            mrs.end_op(&[x], &[out]);
+            assert_eq!(w_cols, cols);
+            f32_mul_mm_sg_launch(weights, rows, w_cols).ok_or(MetalError::CommandFailed)?
         }
-    }
+    };
+    let src = if x_is_half {
+        x
+    } else {
+        mrs.begin_op(enc, &[x], &[half]);
+        crate::elem::encode_f32_to_f16(enc, device, x, half, (batch * cols) as u32)?;
+        mrs.end_op(&[x], &[half]);
+        half
+    };
+    let w = resident_weight_buffer(device, l.weights)?;
+    mrs.begin_op(enc, &[src], &[out]);
+    encode_mul_mm_sg_f16(enc, device, &l, &w, src, out, batch)?;
+    mrs.end_op(&[src], &[out]);
     Ok(())
 }
 
@@ -654,10 +563,8 @@ impl PerLayerGateMetal<'_, PrefillMatMetal<'_>> {
         encode_prefill_mat(
             enc, mrs, device, &self.gate, s.h, false, half, s.gate, hidden_dim, batch,
         )?;
-        // The gated product feeds `proj`, so it is written in whatever
-        // precision that GEMM reads.
-        let to_half = self.proj.wants_half();
-        let act = if to_half { half } else { s.act };
+        // The gated product feeds `proj`, which reads half.
+        let act = half;
         mrs.begin_op(enc, &[s.gate, plane], &[act]);
         encode_gelu_mul_rows(
             enc,
@@ -665,7 +572,7 @@ impl PerLayerGateMetal<'_, PrefillMatMetal<'_>> {
             s.gate,
             plane,
             act,
-            to_half,
+            true,
             n as u32,
             batch as u32,
             (ple_layers * n) as u32,
@@ -673,7 +580,7 @@ impl PerLayerGateMetal<'_, PrefillMatMetal<'_>> {
         )?;
         mrs.end_op(&[s.gate, plane], &[act]);
         encode_prefill_mat(
-            enc, mrs, device, &self.proj, act, to_half, half, s.out, n, batch,
+            enc, mrs, device, &self.proj, act, true, half, s.out, n, batch,
         )?;
         self.encode_tail(enc, mrs, device, s, hidden_dim, batch, rms_eps)
     }

@@ -199,6 +199,10 @@ fn the_stacks_describe_every_gemma4_layer() {
         );
         assert_eq!(l.out_scale, Some(0.6 + 0.05 * il as f32));
     }
+    let prefill = e.prefill_layers().expect("prefill layers");
+    for (il, l) in prefill.iter().enumerate() {
+        assert_eq!(l.window, e.hp.is_swa_layer(il).then_some(WINDOW));
+    }
     // The attention scale folded into Q's norm, as the host's `compensate`.
     let aux = e.device_aux();
     let hd = e.hp.head_dim(4) as f32;
@@ -262,8 +266,8 @@ fn metal_prefill_matches_the_host_body() {
     let got = e.decode_on_metal(5, short.len(), &mut dev).expect("decode");
     assert_close("decode after prefill", &next, &got);
 
-    // Past the window: the batched part stops at the window and the
-    // decode stack takes the rest.
+    // Past the window: the whole prompt is still one batch, its sliding
+    // layers masking the keys a query has slid past.
     let long = tokens(2 * WINDOW + 3);
     let mut host = e.new_state();
     let mut want = Vec::new();
@@ -271,14 +275,24 @@ fn metal_prefill_matches_the_host_body() {
         want = e.forward_token_host(t, pos, &mut host);
     }
     let mut dev = e.new_state();
-    let (done, partial) = e.prefill_on_metal(&long, 0, &mut dev);
-    assert_eq!(done, WINDOW, "a chunk may not read past a sliding window");
-    assert!(partial.is_empty(), "no logits until the prompt is done");
-    let mut got = Vec::new();
-    for (pos, &t) in long.iter().enumerate().skip(done) {
-        got = e.decode_on_metal(t, pos, &mut dev).expect("decode");
-    }
+    let (done, got) = e.prefill_on_metal(&long, 0, &mut dev);
+    assert_eq!(done, long.len(), "batched past the window");
     assert_close("prefill past the window", &want, &got);
+
+    // A second batch that starts past the window, on a prefix the first
+    // one wrote: its first query's window begins inside the old rows.
+    let split = WINDOW + 3;
+    let mut dev = e.new_state();
+    let (done, _) = e.prefill_on_metal(&long[..split], 0, &mut dev);
+    assert_eq!(done, split);
+    let (done, got) = e.prefill_on_metal(&long[split..], split, &mut dev);
+    assert_eq!(done, long.len() - split);
+    assert_close("second batch past the window", &want, &got);
+    // ...and decoding on from it reads the right rows.
+    let n = long.len();
+    let next = e.forward_token_host(7, n, &mut host);
+    let got = e.decode_on_metal(7, n, &mut dev).expect("decode");
+    assert_close("decode after a windowed prefill", &next, &got);
 }
 
 /// The device KV goes back to the host intact: a state that leaves the
