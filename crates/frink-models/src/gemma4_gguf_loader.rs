@@ -316,6 +316,8 @@ pub fn load_gemma4_engine(file: &impl TensorSource) -> Result<Gemma4Engine, Load
             rope_freqs,
         },
         hp,
+        // llama.cpp's default; callers set the run's `--ctk` over it.
+        kv_dtype: frink_core::kv_store::KvDtype::F16,
         #[cfg(feature = "metal")]
         device_aux: Default::default(),
     };
@@ -642,6 +644,18 @@ mod tests {
         let logits = engine.forward_token(0, 0, &mut state);
         assert_eq!(logits.len(), vocab);
         assert!(logits.iter().all(|x| x.is_finite()));
+        // The host caches store what `kv_dtype` says: llama.cpp's f16
+        // from the loader, and whatever a run's `--ctk` sets over it
+        // (#634: they were f32 whatever `--ctk` said).
+        use frink_core::kv_store::KvDtype;
+        let dtypes = |s: &crate::gemma4_engine::Gemma4DecodeState| -> Vec<KvDtype> {
+            s.kv.iter().flatten().map(|c| c.k.dtype()).collect()
+        };
+        assert_eq!(engine.kv_dtype, KvDtype::F16);
+        assert_eq!(dtypes(&state), vec![KvDtype::F16; 2]);
+        let mut engine = engine;
+        engine.kv_dtype = KvDtype::F32;
+        assert_eq!(dtypes(&engine.new_state()), vec![KvDtype::F32; 2]);
         let _ = std::fs::remove_file(&path);
     }
     /// A MoE Gemma-4 checkpoint is refused by NAME, not by a missing

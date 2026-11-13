@@ -470,6 +470,15 @@ PYTHONPATH=$LLAMA/gguf-py python3 scripts/dequantize_gguf.py model-Q8_0.gguf /tm
 # KL(f32.llama || q8.frink) is frink's; KL(f32.llama || f32.frink) is the graph.
 ```
 
+Two dumpers do not settle it either when both libllama builds run the
+same 8-bit activation quantizers: their spread then misses what a
+flipped quant step does. Gemma-4-E2B Q4_K_M on a 1343-token prose
+prompt (#634) read `WRONG` at KL 1.2e-1 against two references 1.1e-3
+apart, and its decode steps up to 1.3e-1. On the dequantized file the
+same prompt is KL 2.8e-6, and 8.2e-5 over 16 decode steps; llama.cpp's
+own quantization loss there is 3.7e-2 and frink's 2.8e-2. The graph
+was right; `attention_scale = 1` amplifies each engine's flips.
+
 `LLAMA_LOGITS_FLASH_ATTN=0` keeps the reference off its flash-attention
 path. `FRINK_CTK=f32` runs an f32 K/V cache on BOTH sides; the dumper
 reads the same variable.

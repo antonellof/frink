@@ -82,6 +82,8 @@ frink_real_test                          ref-fails                    -  # NumPy
 frink_real_test_split-00001-of-00003     ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
 frink_real_test_split-00002-of-00003     ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
 frink_real_test_split-00003-of-00003     ref-fails                    -  # NumPy-reference fixture (ADR 0011 leaves those alone); libllama cannot load it
+gemma4_kv_as_v_tiny                      match                        make_gemma4_fixture.py OUT --no-full-attn-v
+gemma4_tiny                              match                        make_gemma4_fixture.py OUT
 gemma_tiny                               match                        make_gemma_fixture.py OUT
 glm4_mrope_tiny                          refused                      make_glm4_fixture.py OUT --mrope
 glm4_tiny                                match                        make_glm4_fixture.py OUT

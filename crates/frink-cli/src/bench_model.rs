@@ -299,7 +299,9 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             let ServedEngine::Gemma4(engine) = served else {
                 anyhow::bail!("expected ServedEngine::Gemma4 for arch {arch}");
             };
-            let engine = *engine;
+            let mut engine = *engine;
+            // The store the generic arm above keeps, for the same reason.
+            engine.kv_dtype = frink_models::host_kv_dtype_from_env(active_budget_backend());
             let load_s = load_t.elapsed().as_secs_f64();
             let params_b = estimate_gemma4_params(&engine);
             // pp* runs `Engine::prefill`, as `frink run` does: batched on

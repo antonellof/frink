@@ -168,8 +168,9 @@ impl Gemma4Engine {
         let mut out = Vec::with_capacity(self.hp.n_layer);
         for (il, l) in self.weights.layers.iter().enumerate() {
             let a = &l.attn;
-            // Without `attn_v` llama.cpp uses the raw K as V; the host
-            // body does not, so neither stack claims such a file.
+            // Without `attn_v` llama.cpp uses the raw K as V, and so
+            // does the host body; the stacks have no arm for it, so
+            // neither claims such a file.
             let kv = self.layer_kv(il, || {
                 Some((mv(a.k_proj.as_ref()?)?, mv(a.v_proj.as_ref()?)?))
             })?;

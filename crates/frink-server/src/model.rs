@@ -577,7 +577,8 @@ fn load_gemma4_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<Gemm
     let ServedEngine::Gemma4(engine) = served else {
         anyhow::bail!("expected ServedEngine::Gemma4 for architecture {arch}");
     };
-    let engine = *engine;
+    let mut engine = *engine;
+    engine.kv_dtype = crate::budget::server_host_kv_dtype();
 
     let tokenizer = tokenizer_from_gguf(file)?;
     // The whole EOG set, not `eos_token_id` alone: see

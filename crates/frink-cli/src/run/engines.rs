@@ -162,7 +162,9 @@ pub(super) fn run_gemma4_infer(
     let ServedEngine::Gemma4(engine) = served else {
         anyhow::bail!("expected ServedEngine::Gemma4");
     };
-    let engine = *engine;
+    let mut engine = *engine;
+    // The host store the banner announced (`run::host_kv_dtype_for`).
+    engine.kv_dtype = super::host_kv_dtype_for(&args);
     eprintln!("frink: loaded in {:.2}s", load_t.elapsed().as_secs_f64());
 
     let mut tokens = tokenizer.encode(&prompt, SpecialTokens::Parse);

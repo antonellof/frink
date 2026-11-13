@@ -124,6 +124,15 @@ pub struct Gemma4Weights {
 pub struct Gemma4Engine {
     pub weights: Gemma4Weights,
     pub hp: Gemma4Hparams,
+    /// What the host body's K/V caches store their rows as: a RUN
+    /// choice, set by the caller from `--ctk` and the backend through
+    /// `kv_budget::host_kv_dtype`, exactly as `ModelConfig::kv_dtype` is
+    /// for the generic decoder. The loader starts it at llama.cpp's f16.
+    ///
+    /// The body used to build f32 caches whatever `--ctk` said, which
+    /// ADR 0009 names as a deviation from llama.cpp, while the Metal
+    /// stacks it hands rows to and from stored f16 (#634).
+    pub kv_dtype: frink_core::kv_store::KvDtype,
     /// What the Metal stacks read that the file does not hold as such:
     /// the Q norm with the attention scale folded in, and V's weightless
     /// norm spelled as ones. Built on first use. See `crate::gemma4_metal`.
@@ -232,7 +241,7 @@ impl Gemma4Engine {
             .map(|il| {
                 if self.hp.has_kv(il) {
                     let hd = self.hp.head_dim(il);
-                    Some(KvCache::new(self.hp.n_kv_heads, hd))
+                    Some(KvCache::new(self.hp.n_kv_heads, hd).with_dtype(self.kv_dtype))
                 } else {
                     None
                 }
@@ -351,13 +360,13 @@ impl Gemma4Engine {
                     .k_proj
                     .as_ref()
                     .expect("has_kv layer missing attn_k");
-                let mut k = k_proj.apply(&attn_in);
+                let k_raw = k_proj.apply(&attn_in);
                 let k_norm = layer
                     .attn
                     .k_norm
                     .as_ref()
                     .expect("has_kv layer missing attn_k_norm");
-                k = rms_norm_per_head(&k, k_norm, head_dim, hp.rms_norm_eps);
+                let mut k = rms_norm_per_head(&k_raw, k_norm, head_dim, hp.rms_norm_eps);
                 for h in 0..n_kv {
                     let slice = &mut k[h * head_dim..(h + 1) * head_dim];
                     match freq {
@@ -366,9 +375,11 @@ impl Gemma4Engine {
                     }
                 }
 
+                // Without `attn_v`, V is K's projection before K's norm
+                // and RoPE (`gemma4.cpp`: `Vcur = Kcur` ahead of both).
                 let mut v = match layer.attn.v_proj.as_ref() {
                     Some(vp) => vp.apply(&attn_in),
-                    None => k.clone(),
+                    None => k_raw,
                 };
                 // ggml_rms_norm without weight on V
                 v = rms_norm_per_head(&v, &vec![1.0; head_dim], head_dim, hp.rms_norm_eps);

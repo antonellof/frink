@@ -158,7 +158,10 @@ fn forced_logits(
         let ServedEngine::Gemma4(engine) = served else {
             anyhow::bail!("expected Gemma4Engine for gemma4 checkpoint");
         };
-        return Ok(engine_rows(engine.as_ref(), prompt, forced));
+        let mut engine = *engine;
+        // Like for like with the dumper, as for the generic decoder below.
+        engine.kv_dtype = frink_models::host_kv_dtype_from_env(frink_models::BudgetBackend::Cpu);
+        return Ok(engine_rows(&engine, prompt, forced));
     }
     // The MLA engine (`deepseek2` / `mistral4` / `plm`) has one body,
     // token by token, so its prefill is a decode loop; the distribution

@@ -134,6 +134,9 @@ fn fixture() -> Gemma4Engine {
     Gemma4Engine {
         weights,
         hp,
+        // The device's store, so the host body rounds K and V as the
+        // stacks do.
+        kv_dtype: frink_core::kv_store::KvDtype::F16,
         device_aux: Default::default(),
     }
 }
@@ -212,8 +215,9 @@ fn the_stacks_describe_every_gemma4_layer() {
     );
 }
 
-/// llama.cpp reads K as V when a layer has no `attn_v`; the host body
-/// does not, so the stacks must not claim such a file at all.
+/// llama.cpp reads the raw K as V when a layer has no `attn_v`, as the
+/// host body does; the stacks have no arm for it, so they must not
+/// claim such a file at all.
 #[test]
 fn a_kv_layer_without_attn_v_stays_on_the_host() {
     let mut e = fixture();
