@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/muse_glimmer_nowindow_tiny.gguf
+config: REFUSED: architecture 'muse-glimmer' requires unimplemented feature: `muse-glimmer.attention.sliding_window` is absent or zero, and llama.cpp reads it as a REQUIRED key for this architecture (src/models/muse-glimmer.cpp:5); every real export writes it, and a file without it does not load upstream

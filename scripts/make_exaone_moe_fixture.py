@@ -112,7 +112,7 @@ RMS_EPS = 1e-5
 EXPERT_WEIGHTS_SCALE = 2.5
 
 
-def main(out_path: str, window_array: str | None, mtp: bool) -> None:
+def main(out_path: str, window_array: str | None, mtp: bool, no_gating: bool = False) -> None:
     rng = np.random.default_rng(0xE4A0E)
     n_mtp = 1 if mtp else 0
     block_count = N_LAYER + n_mtp
@@ -154,7 +154,10 @@ def main(out_path: str, window_array: str | None, mtp: bool) -> None:
     w.add_expert_weights_scale(EXPERT_WEIGHTS_SCALE)
     w.add_expert_weights_norm(True)
     # LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID; REQUIRED at exaone-moe.cpp:18.
-    w.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
+    # `exaone-moe.cpp:16` reads the gating REQUIRED: `--no-gating-func`
+    # leaves it out, and libllama refuses the file (#620).
+    if not no_gating:
+        w.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
     w.add_file_type(gguf.LlamaFileType.ALL_F32)
 
     # Minimal SPM-flavoured vocab: llama.cpp needs tokens/scores/types to
@@ -257,5 +260,6 @@ if __name__ == "__main__":
     ap.add_argument("out", nargs="?", default="exaone-moe-fixture.gguf")
     ap.add_argument("--window-array", choices=["agree", "disagree"], default=None)
     ap.add_argument("--mtp", action="store_true")
+    ap.add_argument("--no-gating-func", action="store_true")
     args = ap.parse_args()
-    main(args.out, args.window_array, args.mtp)
+    main(args.out, args.window_array, args.mtp, args.no_gating_func)

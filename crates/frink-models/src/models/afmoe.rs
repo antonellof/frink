@@ -12,8 +12,8 @@
 //!   `expert_weights_norm`, and SIGMOID when the gating key is absent
 //!   (`:29-30`).
 //!
-//! `expert_shared_count` is read REQUIRED (`:7`) and defaulted here,
-//! a divergence from the pin not fixed here.
+//! - **`expert_shared_count` REQUIRED** (`:7`): a file without it is
+//!   refused by name (#620), not given one shared expert.
 //!
 //! Evidence: `tests/gated_attention_graphs.rs`, against libllama.
 
@@ -55,6 +55,7 @@ pub const FACTS: ArchFacts = ArchFacts {
     },
     rules: HparamRules {
         rope_layers,
+        required_keys: &[("expert_shared_count", "afmoe.cpp:7")],
         ..HparamRules::LEGACY
     },
     ..ArchFacts::DEFAULT

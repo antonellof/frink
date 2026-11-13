@@ -108,6 +108,59 @@ const MUSE_GOLDEN: [f32; 48] = [
     1.4545946,
 ];
 
+/// llama.cpp's logits for `muse_glimmer_model_rope_tiny.gguf`: no
+/// `rope.freq_base_swa`, and a model base of 40000.
+const MUSE_MODEL_ROPE_GOLDEN: [f32; 48] = [
+    -0.100504115,
+    -0.40182212,
+    -0.5604231,
+    -0.26441166,
+    -0.17193611,
+    1.9690315,
+    -1.1904131,
+    -1.2478329,
+    -0.92188555,
+    -1.4425671,
+    0.3839948,
+    0.06537763,
+    -0.58088875,
+    -0.15531826,
+    0.22807035,
+    0.564688,
+    -0.41174614,
+    2.238981,
+    -1.4073485,
+    0.31482646,
+    0.81780016,
+    0.6750342,
+    -0.49312443,
+    -0.029511407,
+    0.96263444,
+    -1.4099817,
+    -1.8114544,
+    0.030218637,
+    -0.5281251,
+    0.4714654,
+    -0.002144128,
+    0.9775923,
+    0.6108659,
+    -0.69871265,
+    0.60058403,
+    0.8626212,
+    -0.3903285,
+    0.053309068,
+    -0.10057827,
+    -1.0163633,
+    1.5581827,
+    0.025838643,
+    0.48601562,
+    0.6675662,
+    -0.87789446,
+    -1.631405,
+    0.9940433,
+    1.3795036,
+];
+
 #[test]
 fn muse_glimmer_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match(MUSE, &MUSE_GOLDEN);
@@ -163,4 +216,30 @@ fn the_scalar_pattern_decides_which_layers_slide_and_rotate() {
         .filter(|il| d.config.layer_sliding_window(*il).is_some())
         .count();
     assert_eq!(sliding, 2, "a period of 2 over four layers");
+}
+
+/// **The sliding layers rotate at the MODEL's base when the file has no
+/// `rope.freq_base_swa`** (#620).
+///
+/// `muse-glimmer.cpp:9-10` seed the sliding layers' base from the
+/// model's before reading the key as optional; only the sliding layers
+/// rotate here (`:88`), so the base reaches every rotated position. A
+/// reader that fell back to llama.cpp's 10000 default rotates them
+/// differently, which the second half shows libllama does not do.
+#[test]
+fn muse_glimmer_without_a_swa_rope_base_matches_llama_cpp() {
+    assert_all_three_paths_match("muse_glimmer_model_rope", &MUSE_MODEL_ROPE_GOLDEN);
+    let d = load_graph_fixture("muse_glimmer_model_rope");
+    assert_eq!(d.config.rope_theta_swa, Some(40_000.0));
+    let mut defaults = load_graph_fixture("muse_glimmer_model_rope");
+    defaults.config.rope_theta_swa = Some(10_000.0);
+    let mut kv = graph_caches(&defaults);
+    let worst = worst_vs(
+        &defaults.forward_batch_last(&GRAPH_PROMPT, 0, &mut kv),
+        &MUSE_MODEL_ROPE_GOLDEN,
+    );
+    assert!(
+        worst > 1e-2,
+        "rotating the sliding layers at 10000 moved only {worst}"
+    );
 }

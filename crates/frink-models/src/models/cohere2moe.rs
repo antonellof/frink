@@ -17,8 +17,9 @@
 //! - The shared-norm parallel residual (`:222-266`) and `logit_scale`
 //!   REQUIRED and multiplied (`:14`).
 //!
-//! - **Two refusals no table states** ([`load_checks`], #464):
-//!   `leading_dense_block_count` is REQUIRED (`:15`), and `:4-9` throw
+//! - **Two refusals no table states** (#464):
+//!   `leading_dense_block_count` is REQUIRED (`:15`,
+//!   `HparamRules::required_keys`), and `:4-9` throw ([`load_checks`])
 //!   `missing Cohere2 MoE norm epsilon` when neither
 //!   `attention.layer_norm_epsilon` nor `attention.layer_norm_rms_epsilon`
 //!   is present.
@@ -66,12 +67,6 @@ pub fn load_checks(file: &dyn TensorSource, arch: &str, _n_layers: usize) -> Opt
             key("attention.layer_norm_rms_epsilon")
         ));
     }
-    if file.metadata(&key("leading_dense_block_count")).is_none() {
-        return Some(format!(
-            "`{}` is absent; cohere2moe.cpp:15 reads it as a REQUIRED key",
-            key("leading_dense_block_count")
-        ));
-    }
     None
 }
 
@@ -117,6 +112,7 @@ pub const FACTS: ArchFacts = ArchFacts {
     rules: HparamRules {
         rope_layers,
         load_checks,
+        required_keys: &[("leading_dense_block_count", "cohere2moe.cpp:15")],
         ..HparamRules::LEGACY
     },
     ..ArchFacts::DEFAULT

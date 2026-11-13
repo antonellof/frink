@@ -75,6 +75,13 @@ pub const FACTS: ArchFacts = ArchFacts {
     rules: HparamRules {
         rope_layers,
         load_checks,
+        required_keys: &[
+            ("attention.layer_norm_rms_epsilon", "kolibri1.cpp:4"),
+            ("expert_shared_count", "kolibri1.cpp:6"),
+            ("expert_shared_feed_forward_length", "kolibri1.cpp:7"),
+            ("expert_weights_norm", "kolibri1.cpp:8"),
+            ("expert_gating_func", "kolibri1.cpp:9"),
+        ],
         ..HparamRules::LEGACY
     },
     ..ArchFacts::DEFAULT
@@ -97,25 +104,9 @@ fn rope_layers(_: &str, _: usize, _: bool, _: usize) -> RopeLayers {
 }
 
 /// The throws in `load_arch_hparams` / `load_arch_tensors` that no table
-/// states.
+/// states, beyond the REQUIRED keys (`HparamRules::required_keys`).
 fn load_checks(file: &dyn TensorSource, arch: &str, n_layers: usize) -> Option<String> {
     let key = |s: &str| format!("{arch}.{s}");
-    let required = |k: &str, line: &str| {
-        file.metadata(&key(k)).is_none().then(|| {
-            format!(
-                "`{}` is absent; kolibri1.cpp:{line} reads it as a REQUIRED key",
-                key(k)
-            )
-        })
-    };
-    if let Some(r) = required("attention.layer_norm_rms_epsilon", "4")
-        .or_else(|| required("expert_shared_count", "6"))
-        .or_else(|| required("expert_shared_feed_forward_length", "7"))
-        .or_else(|| required("expert_weights_norm", "8"))
-        .or_else(|| required("expert_gating_func", "9"))
-    {
-        return Some(r);
-    }
     let shared = file.metadata_u64(&key("expert_shared_count"));
     let shexp = file.metadata_u64(&key("expert_shared_feed_forward_length"));
     if shared != Some(1) || shexp == Some(0) {
@@ -207,7 +198,7 @@ mod tests {
 
     #[test]
     fn a_complete_file_passes() {
-        assert_eq!(load_checks(&file(&[]), "kolibri1", 1), None);
+        assert_eq!(FACTS.rules.refusal(&file(&[]), "kolibri1", 1), None);
     }
 
     #[test]
@@ -244,7 +235,7 @@ mod tests {
             (&[], 2, "blk.1.attn_q_norm.weight"),
         ];
         for (i, (set, layers, want)) in cases.into_iter().enumerate() {
-            let got = load_checks(&file(set), "kolibri1", layers);
+            let got = FACTS.rules.refusal(&file(set), "kolibri1", layers);
             assert!(
                 got.as_deref().is_some_and(|r| r.contains(want)),
                 "case {i}: {got:?} should name {want:?}"

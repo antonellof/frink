@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/exaone_moe_nogating_tiny.gguf
+config: REFUSED: architecture 'exaone-moe' requires unimplemented feature: `exaone-moe.expert_gating_func` is absent; exaone-moe.cpp:16 reads it as a REQUIRED key

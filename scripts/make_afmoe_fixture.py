@@ -81,7 +81,7 @@ RMS_EPS = 1e-5
 EXPERT_WEIGHTS_SCALE = 2.5
 
 
-def main(out_path: str) -> None:
+def main(out_path: str, no_shared_count: bool = False) -> None:
     rng = np.random.default_rng(0xAF0E)
 
     def rnd(*shape: int) -> np.ndarray:
@@ -104,7 +104,10 @@ def main(out_path: str) -> None:
     w.add_sliding_window(SWA_WINDOW)
     w.add_expert_count(N_EXPERT)
     w.add_expert_used_count(N_EXPERT_USED)
-    w.add_expert_shared_count(N_EXPERT_SHARED)
+    # `afmoe.cpp:7` reads the count REQUIRED: `--no-shared-count` leaves
+    # it out, and libllama refuses the file (#620).
+    if not no_shared_count:
+        w.add_expert_shared_count(N_EXPERT_SHARED)
     w.add_expert_feed_forward_length(N_FF_EXP)
     w.add_leading_dense_block_count(N_DENSE_LEAD)
     w.add_expert_weights_scale(EXPERT_WEIGHTS_SCALE)
@@ -180,4 +183,7 @@ def main(out_path: str) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "afmoe-fixture.gguf")
+    main(
+        sys.argv[1] if len(sys.argv) > 1 else "afmoe-fixture.gguf",
+        no_shared_count="--no-shared-count" in sys.argv[2:],
+    )

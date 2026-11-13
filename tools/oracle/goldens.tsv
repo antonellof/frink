@@ -98,6 +98,7 @@ minimax_01_graphs.rs:MINIMAX_01_UNIT_SCALE_GOLDEN logits $F/minimax_01_unit_scal
 minimax_m2_graphs.rs:MINIMAX_M2_GOLDEN logits $F/minimax_m2_tiny.gguf @GRAPH
 moe_routing_bias.rs:GOLDEN_LOGITS logits $F/dots1_tiny.gguf @GRAPH
 muse_glimmer_graphs.rs:MUSE_GOLDEN logits $F/muse_glimmer_tiny.gguf @GRAPH
+muse_glimmer_graphs.rs:MUSE_MODEL_ROPE_GOLDEN logits $F/muse_glimmer_model_rope_tiny.gguf @GRAPH
 nemotron_h_graphs.rs:NH_GOLDEN logits $F/nemotron_h_tiny.gguf @GRAPH
 nemotron_h_graphs.rs:NH_BIASES_GOLDEN logits $F/nemotron_h_biases_tiny.gguf @GRAPH
 nemotron_h_graphs.rs:NH_OUTPUT_GOLDEN logits $F/nemotron_h_output_tiny.gguf @GRAPH

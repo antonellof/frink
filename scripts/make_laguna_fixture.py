@@ -123,7 +123,10 @@ def main(out_path: str, variant: str) -> None:
     w.add_expert_used_count(N_EXPERT_USED)
     w.add_expert_feed_forward_length(N_FF_EXP)
     w.add_expert_shared_feed_forward_length(N_FF_SHEXP)
-    w.add_leading_dense_block_count(N_DENSE_LEAD)
+    # `laguna.cpp:14` reads the count REQUIRED: `--no-dense-lead` leaves
+    # it out, and libllama refuses the file (#620).
+    if variant != "--no-dense-lead":
+        w.add_leading_dense_block_count(N_DENSE_LEAD)
     w.add_expert_weights_scale(EXPERT_WEIGHTS_SCALE)
     w.add_expert_weights_norm(True)
     w.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
