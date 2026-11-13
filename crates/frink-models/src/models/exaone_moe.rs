@@ -9,8 +9,8 @@
 //! - **Routing read from the file**: `expert_weights_scale`,
 //!   `expert_weights_norm`; NextN blocks (`:47`).
 //!
-//! `expert_gating_func` is read REQUIRED (`:16`) and defaulted here
-//! (#475).
+//! `expert_gating_func` is read REQUIRED (`:16`) and defaulted here,
+//! a divergence from the pin not fixed here.
 //!
 //! Evidence: `tests/no_rope_layer_graphs.rs`, against libllama.
 

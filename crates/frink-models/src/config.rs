@@ -213,9 +213,9 @@ pub struct ModelConfig {
     /// The epsilon the POST-attention and POST-FFN norms run at.
     ///
     /// Equal to [`Self::rms_norm_eps`] for every architecture but the
-    /// one whose graph writes a literal (`crate::norm::
-    /// POST_NORM_EPS_LITERAL`, `muse-glimmer.cpp:63`). Set by the
-    /// loader from that table so the two cannot be given different
+    /// one whose graph writes a literal (`NormFacts::
+    /// post_norm_eps_literal`, `muse-glimmer.cpp:63`). Set by the
+    /// loader from that row so the two cannot be given different
     /// answers by two callers, and read through
     /// [`Self::post_norm_eps`].
     pub post_norm_eps: f32,

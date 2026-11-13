@@ -11,7 +11,7 @@
 //!   absent (`:55-56`); YaRN's beta keys read (`:10`).
 //!
 //! `leading_dense_block_count` is read REQUIRED (`:4`) and defaulted
-//! here (#475).
+//! here, a divergence from the pin not fixed here.
 //!
 //! Evidence: `tests/gated_attention_graphs.rs`, against libllama.
 

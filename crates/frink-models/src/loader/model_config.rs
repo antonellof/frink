@@ -1293,7 +1293,7 @@ impl ModelConfig {
             vocab_size,
             rope_theta,
             rms_norm_eps,
-            // `crate::norm::POST_NORM_EPS_LITERAL`: the architecture's, which
+            // `NormFacts::post_norm_eps_literal`: the architecture's, which
             // is the model's for all but one graph of 155.
             post_norm_eps: crate::norm::post_norm_eps_for(
                 facts.norm.post_norm_eps_literal,

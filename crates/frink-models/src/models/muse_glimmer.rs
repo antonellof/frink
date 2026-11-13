@@ -12,7 +12,8 @@
 //!
 //! `:7` seeds the sliding layers' RoPE base from the model's, which the
 //! legacy table did not say and frink does not do, and the window is
-//! REQUIRED and not refused when absent (#475). Carried over unchanged.
+//! REQUIRED and not refused when absent. Both are divergences from the
+//! pin, carried over unchanged.
 //!
 //! Evidence: `tests/muse_glimmer_graphs.rs`, against libllama.
 

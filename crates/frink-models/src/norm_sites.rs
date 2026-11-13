@@ -84,8 +84,7 @@ pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] =
 /// HRM-Text file.
 pub const NO_OUTPUT_NORM: &[&str] = &["hrm_text"];
 
-/// Does this architecture norm its embeddings without a weight? See
-/// [`WEIGHTLESS_EMBEDDING_NORM`].
+/// Does this architecture norm its embeddings without a weight?
 ///
 /// A row of the architecture's `crate::models` definition:
 /// `muse-glimmer` (`muse-glimmer.cpp:69`) is the one graph with it.

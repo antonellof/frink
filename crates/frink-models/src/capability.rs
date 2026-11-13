@@ -1585,9 +1585,9 @@ const NORM_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
     ),
     // `muse-glimmer` was HERE for one PR, NEW CODE on two norm facts,
     // and is audited now: the WEIGHTLESS embedding norm is
-    // `norm_sites::WEIGHTLESS_EMBEDDING_NORM` with `NormOp::
+    // `TensorFacts::weightless_embedding_norm` with `NormOp::
     // RmsNoParams` at the site `bloom`'s weighted one already had, and
-    // the post-norm epsilon literal is `norm::POST_NORM_EPS_LITERAL`
+    // the post-norm epsilon literal is `NormFacts::post_norm_eps_literal`
     // read through `ModelConfig::post_norm_eps()` at the three host
     // post-norm sites, with the fused Metal launches and the CUDA
     // prefill refusing a model whose two epsilons differ. The rest was
@@ -3470,7 +3470,6 @@ pub fn swa_window_override(arch: &str, n_layers: usize) -> SwaWindowOverride {
 pub fn swa_window_override_from_table(arch: &str, _n_layers: usize) -> SwaWindowOverride {
     match arch {
         "phi3" => SwaWindowOverride::Drop,
-        // smallthinker.cpp:8.
         _ => SwaWindowOverride::Honour,
     }
 }
@@ -3833,7 +3832,7 @@ pub fn gemma_27b_attention_scale(
 /// Metadata keys that, when present with a nonzero value, require math
 /// frink's generic decoder does not implement *unless* the architecture
 /// profile opts into those features (Gemma family), or the architecture
-/// is named in [`LOGIT_SOFTCAP_ARCHITECTURES`] for the softcaps. Derived
+/// states `ScalingFacts::logit_softcap` for the softcaps. Derived
 /// from the facts: [`crate::models::ArchFacts::unsupported_feature_keys`].
 pub fn unsupported_feature_keys(arch: &str) -> Vec<(String, &'static str)> {
     crate::models::ArchFacts::of(arch).unsupported_feature_keys(arch)

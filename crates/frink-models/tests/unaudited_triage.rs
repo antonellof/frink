@@ -599,10 +599,11 @@ fn smallthinker_is_audited_and_carries_no_stale_verdict() {
     assert!(is_audited_generic("smallthinker"));
     assert!(unaudited_triage("smallthinker").is_none());
     // The seam's own census agrees about which row it serves.
-    assert!(frink_models::router_input::ROUTER_INPUT_TABLE
-        .iter()
-        .any(|(name, input, _)| *name == "smallthinker"
-            && *input == frink_models::router_input::RouterInput::RawLayerInput));
+    // (`smallthinker` states it in `frink_models::models::smallthinker`.)
+    assert_eq!(
+        frink_models::router_input::router_input("smallthinker"),
+        frink_models::router_input::RouterInput::RawLayerInput
+    );
     // `arctic`'s verdict used to say it shares `smallthinker`'s shape,
     // then that the seam "does not reach it"; it reaches it now as a
     // third variant, `NormedLayerInput`, and the row is audited
@@ -1165,11 +1166,13 @@ fn the_gated_attention_seam_closed_two_rows_and_narrowed_the_third() {
         "step35.cpp:96 creates the gate TENSOR_NOT_REQUIRED"
     );
     // The census names the three, so the verdicts and the table cannot
-    // drift apart about which rows carry the op.
+    // drift apart about which rows carry the op. `afmoe` and `laguna`
+    // state theirs in `frink_models::models` (#403 step 9b).
+    assert!(ATTN_GATE_ARCHS.iter().any(|(n, _)| *n == "step35"));
     for arch in ["afmoe", "laguna", "step35"] {
         assert!(
-            ATTN_GATE_ARCHS.iter().any(|(n, _)| *n == arch),
-            "`{arch}` is not in ATTN_GATE_ARCHS"
+            attn_gate_spec(arch).is_some(),
+            "`{arch}` has no attention gate"
         );
     }
     // `mimo2`'s sinks are a tensor-presence fact and the row closed on

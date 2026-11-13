@@ -10,13 +10,13 @@
 //!      norm -- the only other one of the 155 graphs -- has a weight,
 //!      and every other weightless RMS upstream is a LAYER slot, so
 //!      the pair (this site, no weight) did not exist here:
-//!      `norm_sites::WEIGHTLESS_EMBEDDING_NORM` is the table and
+//!      `TensorFacts::weightless_embedding_norm` is the row and
 //!      `NormOp::RmsNoParams` the function.
 //!   2. **A post-norm epsilon that is a LITERAL** (`:63`, `const float
 //!      post_norm_eps = 1e-8f`, with the comment "Different to
 //!      f_norm_rms_eps for post-attn / post-FFN norms"), used at
 //!      `:140-141,166-167` while `:90,153` use the model's.
-//!      `norm::POST_NORM_EPS_LITERAL` is the table and
+//!      `NormFacts::post_norm_eps_literal` is the row and
 //!      `ModelConfig::post_norm_eps()` the one accessor the three host
 //!      post-norm sites read; the fused Metal launches and the CUDA
 //!      prefill refuse a model whose two epsilons differ, because each

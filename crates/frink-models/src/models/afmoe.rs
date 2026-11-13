@@ -12,8 +12,8 @@
 //!   `expert_weights_norm`, and SIGMOID when the gating key is absent
 //!   (`:29-30`).
 //!
-//! `expert_shared_count` is read REQUIRED (`:7`) and defaulted here
-//! (#475).
+//! `expert_shared_count` is read REQUIRED (`:7`) and defaulted here,
+//! a divergence from the pin not fixed here.
 //!
 //! Evidence: `tests/gated_attention_graphs.rs`, against libllama.
 

@@ -208,6 +208,22 @@ eligibility test so a new field forces a Metal decision.
   9b is `afmoe`, `exaone-moe`, `laguna`, `smallthinker`, `muse-glimmer`;
   9c `step35`, `mimo2`, `lfm3`. `gemma3n`, `gemma-embedding` and
   `dflash` stay in the legacy tables until audited (risk 3).
+- Step 9b: `models/afmoe.rs`, `exaone_moe.rs`, `laguna.rs`,
+  `smallthinker.rs`, `muse_glimmer.rs`. New fact:
+  `NormFacts::post_norm_eps_literal` (`muse-glimmer.cpp:63`), read by
+  the loader through `norm::post_norm_eps_for`. `POST_NORM_EPS_LITERAL`,
+  `WEIGHTLESS_EMBEDDING_NORM` and `LOGIT_SOFTCAP_ARCHITECTURES`
+  (muse-glimmer's rows, `grok`'s already moved) are deleted, and so is
+  `swa_layers_unscaled_rope_from_table` (laguna only). `uses_reglu`
+  and `router_input` answer through `ArchFacts::of` with a
+  `_from_table` twin where a table remains. `afmoe`'s
+  `sqrt(n_embd)` embedding scale is its own row; the capability lookup
+  keeps the family's half. Rows also left the SWA layout and follow
+  lists, the pattern-reader census, `rope_layers`, `attn_gate`,
+  `layer_shapes`, the gating, expert-weights, YaRN-beta, NextN and
+  multiplier tables. Divergences found and not fixed (three REQUIRED
+  MoE keys defaulted, `muse-glimmer`'s SWA RoPE base and REQUIRED
+  window) are listed in the PR for an issue.
 
 What step 2 changed about the target design:
 

@@ -96,16 +96,21 @@ fn the_qwen_rows_no_fixture_reaches_are_pinned() {
 fn the_registry_pattern_readers_are_pinned() {
     use crate::swa_layers::PatternKeyRead;
     let callers = [
-        "cohere2",    // cohere2.cpp:5
-        "cohere2moe", // cohere2moe.cpp:28
-        "exaone4",    // exaone4.cpp:7
-        "gemma2",     // gemma2.cpp:6
-        "gemma3",     // gemma3.cpp:7
-        "mellum",     // mellum.cpp:16
-        "plamo3",     // plamo3.cpp:9
-        "gpt-oss",    // openai-moe.cpp:9
-        "llama4",     // llama4.cpp:19
-        "olmo2",      // olmo2.cpp:9
+        "cohere2",      // cohere2.cpp:5
+        "cohere2moe",   // cohere2moe.cpp:28
+        "exaone4",      // exaone4.cpp:7
+        "gemma2",       // gemma2.cpp:6
+        "gemma3",       // gemma3.cpp:7
+        "mellum",       // mellum.cpp:16
+        "plamo3",       // plamo3.cpp:9
+        "gpt-oss",      // openai-moe.cpp:9
+        "llama4",       // llama4.cpp:19
+        "olmo2",        // olmo2.cpp:9
+        "afmoe",        // afmoe.cpp:17
+        "exaone-moe",   // exaone-moe.cpp:6
+        "laguna",       // laguna.cpp:42
+        "smallthinker", // smallthinker.cpp:9
+        "muse-glimmer", // muse-glimmer.cpp:13
     ];
     for name in registry_names() {
         let want = if callers.contains(&name) {

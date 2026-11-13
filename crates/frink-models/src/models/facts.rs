@@ -155,7 +155,8 @@ pub struct NormFacts {
 pub struct ScalingFacts {
     /// `scalar_multipliers::multiplier_support`.
     pub multipliers: MultiplierSupport,
-    /// `capability::LOGIT_SOFTCAP_ARCHITECTURES`.
+    /// Both logit softcaps outside the Gemma family (`grok`,
+    /// `muse-glimmer`).
     pub logit_softcap: bool,
     /// `capability::embeddings_scaled_by_sqrt_n_embd` for the row's own
     /// family.
@@ -408,9 +409,8 @@ impl ArchFacts {
                 default_layout: crate::capability::default_swa_layout_from_table(arch),
                 window_required: crate::swa_geometry::window_required_from_table(arch),
                 rope_base_required: crate::swa_geometry::swa_rope_base_required(arch),
-                layers_unscaled_rope: crate::swa_geometry::swa_layers_unscaled_rope_from_table(
-                    arch,
-                ),
+                // No table: `olmo2` and `laguna` are in `crate::models`.
+                layers_unscaled_rope: None,
                 full_layers_rotate_half: crate::swa_geometry::full_layers_rotate_half(arch),
                 layers_drop_rope_factors: crate::swa_geometry::swa_layers_drop_rope_factors(arch),
                 rope_base_follows_model: crate::capability::swa_rope_base_follows_model_from_table(
