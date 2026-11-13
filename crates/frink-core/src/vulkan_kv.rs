@@ -92,24 +92,32 @@ impl VulkanKvMirror {
         self.v_off() + pos * self.kv_width / 2
     }
 
-    /// Make `slot` a mirror of exactly `rows` host rows with room for
-    /// `need` positions, rebuilding it from `k` and `v` when it is absent,
-    /// too small, or no longer the host's history.
+    /// Make `slot` a mirror of `positions` positions with room for
+    /// `need`, rebuilding it from `k` and `v` when it is absent, too
+    /// small, or no longer the host's history. The host holds the last
+    /// `host_rows_held` of those positions, all of them unless its
+    /// window evicts.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync<'s>(
         slot: &'s mut Option<Self>,
         rt: &mut Runtime,
         k: &KvBuf,
         v: &KvBuf,
-        rows: usize,
+        host_rows_held: usize,
+        positions: usize,
         kv_width: usize,
         need: usize,
     ) -> Result<&'s mut Self, VulkanError> {
         assert_eq!(kv_width % 2, 0, "f16 pairs need an even KV width");
+        assert!(host_rows_held <= positions, "more rows than positions");
+        // The host's rows are the LAST `host_rows_held` positions: a
+        // windowed cache has evicted the ones before them.
+        let (rows, first) = (host_rows_held, positions - host_rows_held);
         let valid = slot.as_ref().is_some_and(|m| {
             m.owner == rt.id()
                 && m.kv_width == kv_width
                 && m.capacity >= need
-                && m.rows == rows
+                && m.rows == positions
                 && (rows == 0 || m.last_k == host_rows(k, kv_width, rows - 1, rows))
         });
         if !valid {
@@ -119,13 +127,17 @@ impl VulkanKvMirror {
                 buf,
                 owner: rt.id(),
                 capacity,
-                rows,
+                rows: positions,
                 kv_width,
                 last_k: Vec::new(),
             };
             if rows > 0 {
-                rt.write_u32(buf, 0, &host_rows(k, kv_width, 0, rows))?;
-                rt.write_u32(buf, m.v_off(), &host_rows(v, kv_width, 0, rows))?;
+                // Each row at its position's slot. The slots before
+                // `first` stay zero and are never read: a layer whose
+                // cache evicts attends only inside its window, which
+                // the host keeps.
+                rt.write_u32(buf, m.k_word(first), &host_rows(k, kv_width, 0, rows))?;
+                rt.write_u32(buf, m.v_word(first), &host_rows(v, kv_width, 0, rows))?;
                 m.last_k = host_rows(k, kv_width, rows - 1, rows);
             }
             // The old mirror, if any, drops here and is queued for free.
@@ -179,7 +191,7 @@ mod tests {
         let (k, v) = (flat(&[0, 1, 2]), flat(&[10, 11, 12]));
         let mut slot = None;
 
-        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k, &v, 3, w, 4).unwrap();
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k, &v, 3, 3, w, 4).unwrap();
         let first = m.buf();
         assert_eq!(rt.read_u32(first, 0, 6).unwrap(), host_rows(&k, w, 0, 3));
         let v_off = slot.as_ref().unwrap().v_off();
@@ -189,20 +201,20 @@ mod tests {
         );
 
         // Unchanged host rows: the same buffer, nothing rewritten.
-        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k, &v, 3, w, 4).unwrap();
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k, &v, 3, 3, w, 4).unwrap();
         assert_eq!(m.buf(), first);
 
         // The device and the host both took row 3: still the same buffer.
         m.record_push(&row(3));
         let (k4, v4) = (flat(&[0, 1, 2, 3]), flat(&[10, 11, 12, 13]));
-        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k4, &v4, 4, w, 5).unwrap();
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k4, &v4, 4, 4, w, 5).unwrap();
         assert_eq!(m.buf(), first);
 
         // The host truncated to two rows and grew back to four with
         // another history: the count matches and the newest K row does
         // not.
         let (k_other, v_other) = (flat(&[0, 1, 7, 8]), flat(&[10, 11, 17, 18]));
-        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_other, &v_other, 4, w, 5).unwrap();
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_other, &v_other, 4, 4, w, 5).unwrap();
         let rebuilt = m.buf();
         assert_ne!(rebuilt, first, "a mirror of another history was kept");
         assert_eq!(
@@ -214,7 +226,7 @@ mod tests {
         // the count tells them apart, and the mirror's row 1 is not the
         // host's.
         let (k_short, v_short) = (flat(&[0, 8]), flat(&[10, 18]));
-        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_short, &v_short, 2, w, 3).unwrap();
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_short, &v_short, 2, 2, w, 3).unwrap();
         assert_eq!(m.rows(), 2);
         let short = m.buf();
         assert_ne!(
@@ -225,5 +237,26 @@ mod tests {
             rt.read_u32(short, 0, 4).unwrap(),
             host_rows(&k_short, w, 0, 2)
         );
+        // A windowed host cache: five positions, of which it kept the
+        // last two. They sit at their positions' slots, K and V alike,
+        // and the mirror counts positions.
+        let (k_tail, v_tail) = (flat(&[3, 4]), flat(&[13, 14]));
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_tail, &v_tail, 2, 5, w, 6).unwrap();
+        assert_eq!(m.rows(), 5);
+        let (buf, at_k, at_v) = (m.buf(), m.k_word(3), m.v_word(3));
+        assert_eq!(
+            rt.read_u32(buf, at_k, 4).unwrap(),
+            host_rows(&k_tail, w, 0, 2)
+        );
+        assert_eq!(
+            rt.read_u32(buf, at_v, 4).unwrap(),
+            host_rows(&v_tail, w, 0, 2)
+        );
+        // Kept while the host's newest row and position count hold...
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_tail, &v_tail, 2, 5, w, 6).unwrap();
+        assert_eq!(m.buf(), buf);
+        // ...and not when the same rows are another position count.
+        let m = VulkanKvMirror::sync(&mut slot, &mut rt, &k_tail, &v_tail, 2, 4, w, 6).unwrap();
+        assert_ne!(m.buf(), buf, "a mirror of other positions was kept");
     }
 }

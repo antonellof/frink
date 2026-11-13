@@ -162,6 +162,7 @@ fn the_vulkan_attention_over_its_f16_cache_is_the_cpu_attention() {
             k_off: 0,
             v_off: half_words,
             scale: 1.0 / (hd as f32).sqrt(),
+            window: None,
         },
     );
     rt.submit_batch(&b).unwrap();
