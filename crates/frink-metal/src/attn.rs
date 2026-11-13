@@ -54,7 +54,7 @@ pub use crate::decode_dense::{
 pub(crate) use crate::dispatch::dispatch_counted;
 use crate::elem::{
     encode_act_mul_f32_to_f16, encode_argmax, encode_f32_to_f16, encode_silu_mul, encode_vec_add,
-    encode_vec_add_at, warm_prefill_elem_pipelines,
+    encode_vec_add_rows, warm_prefill_elem_pipelines,
 };
 use crate::embd::encode_get_rows;
 use crate::fa_vec_decode::{encode_gqa_fa_vec, gqa_fa_vec_supported};
@@ -69,7 +69,7 @@ use crate::mem_ranges::MemRanges;
 use crate::moe_ids::MoeIdsLog;
 use crate::norm::{
     encode_add_rms_norm, encode_add_rms_norm_batch, encode_add_rms_norm_f32_to_f16_batch,
-    encode_rms_norm, encode_rms_norm_at, encode_rms_norm_batch, encode_rms_norm_f32_to_f16_batch,
+    encode_rms_norm, encode_rms_norm_batch, encode_rms_norm_f32_to_f16_batch,
     encode_rms_norm_per_head_batch,
 };
 use objc2::rc::Retained;
@@ -2503,42 +2503,15 @@ fn encode_attn_extras_batch(
     }
     if let Some(bb) = resident.q_bias.as_ref() {
         debug_assert_eq!(extras.q_bias.map(|b| b.len()), Some(q_rows));
-        for t in 0..batch {
-            encode_vec_add_at(
-                encoder,
-                device,
-                q_buf,
-                t * q_rows * 4,
-                &bb.buffer,
-                q_rows as u32,
-            )?;
-        }
+        encode_vec_add_rows(encoder, device, q_buf, &bb.buffer, q_rows as u32, batch as u32)?;
     }
     if let Some(bb) = resident.k_bias.as_ref() {
         debug_assert_eq!(extras.k_bias.map(|b| b.len()), Some(k_rows));
-        for t in 0..batch {
-            encode_vec_add_at(
-                encoder,
-                device,
-                k_buf,
-                t * k_rows * 4,
-                &bb.buffer,
-                k_rows as u32,
-            )?;
-        }
+        encode_vec_add_rows(encoder, device, k_buf, &bb.buffer, k_rows as u32, batch as u32)?;
     }
     if let Some(bb) = resident.v_bias.as_ref() {
         debug_assert_eq!(extras.v_bias.map(|b| b.len()), Some(v_rows));
-        for t in 0..batch {
-            encode_vec_add_at(
-                encoder,
-                device,
-                v_buf,
-                t * v_rows * 4,
-                &bb.buffer,
-                v_rows as u32,
-            )?;
-        }
+        encode_vec_add_rows(encoder, device, v_buf, &bb.buffer, v_rows as u32, batch as u32)?;
     }
     // Q/K norm style is inferred from the weight LENGTH, and that is
     // sound rather than a guess: `loader.rs`'s `refined_qk_norm` derives
@@ -2564,20 +2537,16 @@ fn encode_attn_extras_batch(
             )?;
         } else {
             debug_assert_eq!(w.len(), q_rows, "Q norm weight must be head_dim or q_rows");
-            for t in 0..batch {
-                let off = t * q_rows * 4;
-                encode_rms_norm_at(
-                    encoder,
-                    device,
-                    q_buf,
-                    off,
-                    &wb.buffer,
-                    q_buf,
-                    off,
-                    q_rows as u32,
-                    rms_eps,
-                )?;
-            }
+            encode_rms_norm_batch(
+                encoder,
+                device,
+                q_buf,
+                &wb.buffer,
+                q_buf,
+                q_rows as u32,
+                batch as u32,
+                rms_eps,
+            )?;
         }
     }
     if let (Some(w), Some(wb)) = (extras.k_norm, resident.k_norm.as_ref()) {
@@ -2594,20 +2563,16 @@ fn encode_attn_extras_batch(
             )?;
         } else {
             debug_assert_eq!(w.len(), k_rows, "K norm weight must be head_dim or k_rows");
-            for t in 0..batch {
-                let off = t * k_rows * 4;
-                encode_rms_norm_at(
-                    encoder,
-                    device,
-                    k_buf,
-                    off,
-                    &wb.buffer,
-                    k_buf,
-                    off,
-                    k_rows as u32,
-                    rms_eps,
-                )?;
-            }
+            encode_rms_norm_batch(
+                encoder,
+                device,
+                k_buf,
+                &wb.buffer,
+                k_buf,
+                k_rows as u32,
+                batch as u32,
+                rms_eps,
+            )?;
         }
     }
     Ok(())
@@ -4256,7 +4221,9 @@ fn resident_prefill_dense_layer(
 
 #[allow(clippy::too_many_arguments)]
 fn encode_prefill_dense_layer(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     mrs: &mut MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     layer: &PrefillDenseLayerMetal<'_>,
@@ -4291,6 +4258,7 @@ fn encode_prefill_dense_layer(
     let kv_v = kv.v.as_ref();
 
     // attn_norm: h → half_act (f32→f16 already folded into the norm).
+    spans.span(cmd_buf, encoder, "pf_attn_norm")?;
     mrs.begin_op(encoder, &[h_buf], &[half_act]);
     encode_rms_norm_f32_to_f16_batch(
         encoder,
@@ -4305,6 +4273,7 @@ fn encode_prefill_dense_layer(
     mrs.end_op(&[h_buf], &[half_act]);
 
     // Q ∥ K ∥ V — one Concurrent set (shared src, disjoint dsts).
+    spans.span(cmd_buf, encoder, "pf_qkv")?;
     mrs.begin_op(encoder, &[half_act], &[q_buf, k_buf, v_buf]);
     encode_mul_mm_sg_f16(
         encoder,
@@ -4336,6 +4305,7 @@ fn encode_prefill_dense_layer(
     mrs.end_op(&[half_act], &[q_buf, k_buf, v_buf]);
 
     // QKV bias / QK-norm, in place on q/k/v.
+    spans.span(cmd_buf, encoder, "pf_attn_extras")?;
     mrs.begin_op(encoder, &[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
     encode_attn_extras_batch(
         encoder,
@@ -4364,6 +4334,7 @@ fn encode_prefill_dense_layer(
     // them, which is what `ggml` does when the graph never builds the
     // `ggml_rope_ext` node.
     if let Some((rope_theta, ff_buf)) = rope {
+        spans.span(cmd_buf, encoder, "pf_rope")?;
         mrs.begin_op(encoder, &[q_buf, k_buf], &[q_buf, k_buf]);
         encode_rope_batch(
             encoder,
@@ -4395,10 +4366,12 @@ fn encode_prefill_dense_layer(
     let kv_width = n_kv_heads * head_dim;
     let token_elems = (batch * kv_width) as u32;
     let offset = (kv.seq_len * kv_width) as u32;
+    spans.span(cmd_buf, encoder, "pf_kv_append")?;
     mrs.begin_op(encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
     encode_kv_store_append(encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
     mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
 
+    spans.span(cmd_buf, encoder, "pf_attention")?;
     encode_gqa_prefill_with_kv(
         encoder,
         mrs,
@@ -4414,6 +4387,7 @@ fn encode_prefill_dense_layer(
         attn_softcap,
     )?;
 
+    spans.span(cmd_buf, encoder, "pf_attn_to_f16")?;
     mrs.begin_op(encoder, &[attn_buf], &[half_act]);
     encode_f32_to_f16(
         encoder,
@@ -4424,6 +4398,7 @@ fn encode_prefill_dense_layer(
     )?;
     mrs.end_op(&[attn_buf], &[half_act]);
 
+    spans.span(cmd_buf, encoder, "pf_o_proj")?;
     mrs.begin_op(encoder, &[half_act], &[o_buf]);
     encode_mul_mm_sg_f16(
         encoder,
@@ -4456,6 +4431,7 @@ fn encode_prefill_dense_layer(
     // also routes on the f32 activations, so it keeps the f32 `x2` write and
     // converts separately.
     let ffn_is_moe = matches!(layer.ffn, PrefillFfnMetal::Moe(_));
+spans.span(cmd_buf, encoder, "pf_ffn_norm")?;
     if resident.post_attn_w.is_none() && !ffn_is_moe {
         mrs.begin_op(encoder, &[h_buf, o_buf], &[h_buf, half_act]);
         encode_add_rms_norm_f32_to_f16_batch(
@@ -4540,6 +4516,7 @@ fn encode_prefill_dense_layer(
             },
         ) => {
             // gate ∥ up
+            spans.span(cmd_buf, encoder, "pf_gate_up")?;
             mrs.begin_op(encoder, &[half_act], &[gate_buf, up_buf]);
             encode_mul_mm_sg_f16(encoder, device, gate, gate_w, half_act, gate_buf, batch)?;
             encode_mul_mm_sg_f16(encoder, device, up, up_w, half_act, up_buf, batch)?;
@@ -4547,17 +4524,20 @@ fn encode_prefill_dense_layer(
 
             // SwiGLU/GeGLU straight to f16 — the staging convert is folded in.
             let ffn_elems = (batch * gate.rows) as u32;
+            spans.span(cmd_buf, encoder, "pf_glu")?;
             mrs.begin_op(encoder, &[gate_buf, up_buf], &[half_act]);
             encode_act_mul_f32_to_f16(
                 encoder, device, gate_buf, up_buf, half_act, ffn_elems, gelu_ffn,
             )?;
             mrs.end_op(&[gate_buf, up_buf], &[half_act]);
 
+            spans.span(cmd_buf, encoder, "pf_down")?;
             mrs.begin_op(encoder, &[half_act], &[down_buf]);
             encode_mul_mm_sg_f16(encoder, device, down, down_w, half_act, down_buf, batch)?;
             mrs.end_op(&[half_act], &[down_buf]);
         }
         (PrefillFfnMetal::Moe(moe), PrefillFfnResident::Moe { packed, router_w }) => {
+            spans.span(cmd_buf, encoder, "pf_moe_ffn")?;
             crate::gpu::encode_moe_prefill_ffn(
                 encoder, mrs, device, moe, packed, router_w, x2_buf, half_act, down_buf, batch,
             )?;
@@ -4581,6 +4561,7 @@ fn encode_prefill_dense_layer(
         mrs.end_op(&[down_buf], &[down_buf]);
     }
 
+    spans.span(cmd_buf, encoder, "pf_residual")?;
     mrs.begin_op(encoder, &[h_buf, down_buf], &[h_buf]);
     encode_vec_add(
         encoder,
@@ -4737,15 +4718,19 @@ pub fn launch_prefill_dense_stack(
     let setup_us = t_setup.elapsed().as_micros();
     let clock = crate::timing::SubmitClock::start();
     let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
-    let encoder = compute_encoder_concurrent(&cmd_buf)?;
+    let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
     // One tracker for the whole stack: layer N+1's first dispatch only
     // barriers when it actually touches something layer N left dirty.
     let mut mrs = MemRanges::new();
+    let mut spans = crate::kernel_timing::SpanClock::begin(device, 16 * layers.len() + 2);
+    spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
     for (layer_idx, (layer, kv)) in layers.iter().zip(kvs.iter()).enumerate() {
         let resident = resident_prefill_dense_layer(device, layer, hidden_dim)?;
         encode_prefill_dense_layer(
-            &encoder,
+            &mut encoder,
+            &mut spans,
+            &cmd_buf,
             &mut mrs,
             device,
             layer,
@@ -4772,6 +4757,7 @@ pub fn launch_prefill_dense_stack(
     encoder.endEncoding();
     let gpu_us =
         crate::timing::commit_wait_note(&cmd_buf, "prefill-dense-stack", 1, clock).as_micros();
+    spans.finish(&cmd_buf, "prefill-dense-stack", 1);
 
     for kv in kvs.iter_mut() {
         kv.seq_len += batch;

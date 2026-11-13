@@ -14,14 +14,18 @@ const VEC_ADD_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
+// `a[i] += b[i % period]`: a plain add when `period == n`, and a bias
+// broadcast over `n / period` rows otherwise (one dispatch for a whole
+// prefill batch instead of one per token).
 kernel void vec_add_f32(
     device float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
     constant uint& n [[buffer(2)]],
+    constant uint& period [[buffer(3)]],
     uint i [[thread_position_in_grid]]
 ) {
     if (i < n) {
-        a[i] += b[i];
+        a[i] += b[i % period];
     }
 }
 
@@ -292,17 +296,43 @@ pub(crate) fn encode_vec_add_at(
     b: &ProtocolObject<dyn MTLBuffer>,
     n: u32,
 ) -> Result<(), MetalError> {
+    encode_vec_add_period(encoder, device, a, a_offset_bytes, b, n, n)
+}
+
+/// `a[r][i] += b[i]` for every one of `rows` contiguous rows of `n_row`
+/// floats: a bias added to a whole batch in one dispatch.
+pub(crate) fn encode_vec_add_rows(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    a: &ProtocolObject<dyn MTLBuffer>,
+    b: &ProtocolObject<dyn MTLBuffer>,
+    n_row: u32,
+    rows: u32,
+) -> Result<(), MetalError> {
+    encode_vec_add_period(encoder, device, a, 0, b, n_row * rows, n_row)
+}
+
+fn encode_vec_add_period(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    a: &ProtocolObject<dyn MTLBuffer>,
+    a_offset_bytes: usize,
+    b: &ProtocolObject<dyn MTLBuffer>,
+    n: u32,
+    period: u32,
+) -> Result<(), MetalError> {
     let pipe = ensure_pipeline(device, VEC_ADD_KERNEL_SRC, "vec_add_f32")?;
     encoder.setComputePipelineState(&pipe.0);
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(a), a_offset_bytes, 0);
         encoder.setBuffer_offset_atIndex(Some(b), 0, 1);
-        let mut n_u = n;
-        encoder.setBytes_length_atIndex(
-            NonNull::new(&mut n_u as *mut u32 as *mut _).unwrap(),
-            4,
-            2,
-        );
+        for (idx, mut v) in [(2usize, n), (3, period)] {
+            encoder.setBytes_length_atIndex(
+                NonNull::new(&mut v as *mut u32 as *mut _).unwrap(),
+                4,
+                idx,
+            );
+        }
     }
     let tg = 256usize;
     let n_tg = (n as usize).div_ceil(tg);
