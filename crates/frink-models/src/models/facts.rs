@@ -139,12 +139,15 @@ pub struct FfnFacts {
 }
 
 /// Norm rows (`norm`, `sub_norms`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NormFacts {
     /// `norm::NORM_BY_RMS_EPS_KEY`: a zero RMS epsilon means "absent".
     pub norm_by_rms_eps_key: bool,
     /// `sub_norms::block_sub_norms`.
     pub block_sub_norms: bool,
+    /// `norm::post_norm_eps`: a LITERAL epsilon at the post-norm sites
+    /// (`muse-glimmer.cpp:63`), else the model's.
+    pub post_norm_eps_literal: Option<f32>,
 }
 
 /// Metadata-multiplier rows (`scalar_multipliers`, `capability`).
@@ -327,6 +330,7 @@ impl ArchFacts {
         norm: NormFacts {
             norm_by_rms_eps_key: false,
             block_sub_norms: false,
+            post_norm_eps_literal: None,
         },
         scaling: ScalingFacts {
             multipliers: MultiplierSupport::NONE,
@@ -395,7 +399,7 @@ impl ArchFacts {
                 leading_dense_key_is_inert: t::LEADING_DENSE_KEY_IS_INERT.contains(&arch),
                 // No table: `llama4` was the only row.
                 routed_weight_before_ffn: false,
-                router_input: crate::router_input::router_input(arch),
+                router_input: crate::router_input::router_input_from_table(arch),
                 selection: SelectionRule::BiasAfterGating,
                 // No table: `llama4` was the only row.
                 interleave_step_honoured: None,
@@ -425,7 +429,8 @@ impl ArchFacts {
                 geglu: crate::capability::uses_geglu_from_table(arch),
                 relu_sqr: crate::capability::uses_relu_sqr(arch),
                 gelu_ungated: crate::capability::uses_gelu_ungated_from_table(arch),
-                reglu: crate::capability::uses_reglu(arch),
+                // No table: `smallthinker` was the only row.
+                reglu: false,
                 xielu: crate::act_layers::uses_xielu(arch),
                 reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps_from_table(arch),
                 clamp_before_silu: crate::act_layers::clamp_before_silu_from_table(arch),
@@ -434,10 +439,13 @@ impl ArchFacts {
                 // No table: `cohere2moe` was the only row.
                 norm_by_rms_eps_key: false,
                 block_sub_norms: crate::sub_norms::block_sub_norms(arch),
+                // No table: `muse-glimmer` was the only row.
+                post_norm_eps_literal: None,
             },
             scaling: ScalingFacts {
                 multipliers: crate::scalar_multipliers::multiplier_support_from_table(arch),
-                logit_softcap: crate::capability::LOGIT_SOFTCAP_ARCHITECTURES.contains(&arch),
+                // No table: `grok` and `muse-glimmer` are in `crate::models`.
+                logit_softcap: false,
                 // Only read once the profile resolved; an unknown name
                 // has no family and is refused before this is read.
                 embeddings_scaled_by_sqrt_n_embd: profile.is_some_and(|p| {
@@ -479,7 +487,8 @@ impl ArchFacts {
                 post_norms_both_or_neither: crate::norm_sites::post_norms_both_or_neither(arch),
                 // No table: `cohere2moe` was the only row.
                 shared_expert_sum_scale: None,
-                weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(arch),
+                // No table: `muse-glimmer` was the only row.
+                weightless_embedding_norm: false,
                 qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),

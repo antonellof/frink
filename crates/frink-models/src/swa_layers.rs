@@ -186,15 +186,10 @@ pub const LLAMA_MAX_LAYERS: usize = 512;
 /// each passes is `capability::default_swa_layout`'s row (or the
 /// registry's `SwaFacts::default_layout`).
 pub const LOAD_SWA_PATTERN_CALLERS: &[(&str, &str)] = &[
-    ("afmoe", "src/models/afmoe.cpp:17"),
-    ("exaone-moe", "src/models/exaone-moe.cpp:6"),
     ("gemma-embedding", "src/models/gemma-embedding.cpp:5"),
     ("gemma-embedding2", "src/models/gemma-embedding2.cpp:5"),
     ("gemma3n", "src/models/gemma3n.cpp:5"),
-    ("laguna", "src/models/laguna.cpp:42"),
     ("modern-bert", "src/models/modern-bert.cpp:11"),
-    ("muse-glimmer", "src/models/muse-glimmer.cpp:13"),
-    ("smallthinker", "src/models/smallthinker.cpp:9"),
 ];
 
 /// THE table, derived from the two censuses above.

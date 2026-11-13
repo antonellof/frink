@@ -131,11 +131,8 @@ impl RouterInput {
 /// other engines are documented there and not here, because nothing
 /// on those engines asks this question.
 pub const ROUTER_INPUT_TABLE: &[(&str, RouterInput, &str)] = &[
-    (
-        "smallthinker",
-        RouterInput::RawLayerInput,
-        "src/models/smallthinker.cpp:111,151-161",
-    ),
+    // `smallthinker` (`smallthinker.cpp:111,151-161`, the raw layer
+    // input) is in `crate::models::smallthinker`.
     (
         "arctic",
         RouterInput::NormedLayerInput,
@@ -146,6 +143,12 @@ pub const ROUTER_INPUT_TABLE: &[(&str, RouterInput, &str)] = &[
 /// The router operand for an architecture: the table's entry, or the
 /// default for every architecture the table does not name.
 pub fn router_input(arch: &str) -> RouterInput {
+    crate::models::ArchFacts::of(arch).moe.router_input
+}
+
+/// [`router_input`] from [`ROUTER_INPUT_TABLE`] alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn router_input_from_table(arch: &str) -> RouterInput {
     ROUTER_INPUT_TABLE
         .iter()
         .find(|(name, _, _)| *name == arch)

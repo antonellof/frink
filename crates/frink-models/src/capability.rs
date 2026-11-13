@@ -3471,7 +3471,6 @@ pub fn swa_window_override_from_table(arch: &str, _n_layers: usize) -> SwaWindow
     match arch {
         "phi3" => SwaWindowOverride::Drop,
         // smallthinker.cpp:8.
-        "smallthinker" => SwaWindowOverride::Pin(SMALLTHINKER_PINNED_WINDOW),
         _ => SwaWindowOverride::Honour,
     }
 }
@@ -3593,7 +3592,7 @@ mod relu_sqr_tests {
 /// a loader that aliased this one would compute `relu(up) * up` on a
 /// file whose gate tensor it had silently dropped.
 pub fn uses_reglu(arch: &str) -> bool {
-    matches!(arch, "smallthinker")
+    crate::models::ArchFacts::of(arch).ffn.reglu
 }
 
 pub fn default_swa_layout(arch: &str) -> Option<SwaPattern> {
@@ -3626,7 +3625,6 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // src/models/gemma-embedding2.cpp:5 and muse-glimmer.cpp:13,
         // the two `load_swa_pattern` callers this table missed (#420).
         "gemma-embedding2" => last_dense(6),
-        "muse-glimmer" => last_dense(4),
         // Added after an audit found this table covered 6 architectures
         // where llama.cpp hardcodes a period for 17. A MISSING entry is
         // not neutral: with no period, every layer gets windowed, so a
@@ -3637,11 +3635,9 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // src/models/exaone-moe.cpp:6. SWA is unconditional there
         // with n_swa = 128, so without this every layer ran with a
         // 128-token history.
-        "exaone-moe" => last_dense(4),
         // src/models/afmoe.cpp:17. LIVE: `afmoe` is audited, and its
         // fixture's window is narrower than the prompt
         // (`tests/gated_attention_graphs.rs`).
-        "afmoe" => last_dense(4),
         // --- dense_first = true -----------------------------------
         //
         // These four put the full-attention layer at `il % p == 0`, not
@@ -3654,10 +3650,8 @@ pub(crate) fn default_swa_layout_from_table(arch: &str) -> Option<SwaPattern> {
         // triaged NEW CODE on its raw-input router and ReLU experts, so
         // it refuses before this row is consulted. This used to say
         // LIVE, and was wrong: the triage row predates the comment.
-        "smallthinker" => dense_first(4),
         // src/models/laguna.cpp:39-41 (its own comment: "XS.2: FULL at
         // il%4==0"). LIVE: `laguna` is on the generic GQA path.
-        "laguna" => dense_first(4),
         // src/models/modern-bert.cpp:8-10. Deferred (encoder scope), so
         // latent.
         "modern-bert" => dense_first(3),
@@ -3685,10 +3679,7 @@ pub fn swa_rope_base_follows_model(arch: &str) -> bool {
 /// [`swa_rope_base_follows_model`] from this list alone (`exaone4` and
 /// `olmo2` are in `crate::models`).
 pub(crate) fn swa_rope_base_follows_model_from_table(arch: &str) -> bool {
-    matches!(
-        arch,
-        "afmoe" | "dflash" | "exaone-moe" | "laguna" | "smallthinker"
-    )
+    matches!(arch, "dflash")
 }
 
 /// True when this architecture's SWA layers inherit the model's TRAINED
@@ -3728,10 +3719,7 @@ pub fn swa_rope_scale_follows_model(arch: &str) -> bool {
 pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
     matches!(
         arch,
-        "afmoe"          // afmoe.cpp:22
-            | "dflash"      // dflash.cpp:59, :71
-            | "exaone-moe"  // exaone-moe.cpp:10
-            | "smallthinker" // smallthinker.cpp:14
+        "dflash" // dflash.cpp:59, :71
     )
 }
 
@@ -3752,7 +3740,10 @@ pub(crate) fn swa_rope_scale_follows_model_from_table(arch: &str) -> bool {
 /// does not do, and `scalar_multipliers::multiplier_support` --
 /// which lists none of them -- refuses the key before this is asked.
 pub fn embeddings_scaled_by_sqrt_n_embd(arch: &str, family: DecoderFamily) -> bool {
-    matches!(family, DecoderFamily::GemmaFamily) || arch == "afmoe"
+    // `afmoe` (`afmoe.cpp:120`, "MuP scaling") states it in
+    // `crate::models::afmoe`; this is the family's half.
+    let _ = arch;
+    matches!(family, DecoderFamily::GemmaFamily)
 }
 
 /// llama.cpp's `hparams.f_attention_scale`, but only when it DIFFERS
@@ -3838,16 +3829,6 @@ pub fn gemma_27b_attention_scale(
     let kernel_scale = 1.0 / (head_dim as f32).sqrt();
     (scale != kernel_scale).then_some(scale)
 }
-
-/// Architectures outside the Gemma family whose graph applies the two
-/// logit softcaps frink implements -- `attn_logit_softcapping` on the
-/// attention scores and `final_logit_softcapping` after the lm_head.
-///
-/// `grok` states its row in `crate::models::grok` (#403 step 6).
-///
-/// The Gemma family is not here because it is exempted as a family
-/// below; a name here is one whose graph was read for both softcaps.
-pub const LOGIT_SOFTCAP_ARCHITECTURES: &[&str] = &["muse-glimmer"];
 
 /// Metadata keys that, when present with a nonzero value, require math
 /// frink's generic decoder does not implement *unless* the architecture
@@ -4536,12 +4517,17 @@ mod tests {
             .map(|(k, _)| k)
             .collect();
         assert!(llama.iter().any(|k| k == "llama.attn_logit_softcapping"));
-        for arch in LOGIT_SOFTCAP_ARCHITECTURES {
-            assert!(
-                is_audited_generic(arch),
-                "`{arch}` is on LOGIT_SOFTCAP_ARCHITECTURES without a fixture proving both \
-                 softcaps"
-            );
+        // Every graph outside the Gemma family that applies both
+        // softcaps is in `crate::models`, and each must be audited.
+        for def in crate::models::REGISTRY {
+            if def.facts.scaling.logit_softcap {
+                for arch in def.names {
+                    assert!(
+                        is_audited_generic(arch),
+                        "`{arch}` applies the softcaps without a fixture proving both"
+                    );
+                }
+            }
         }
     }
 

@@ -74,18 +74,6 @@ use frink_gguf::{GgufError, TensorSource};
 pub const PRE_FFN_NORM_IS_POST_ATTENTION_NORM: &[&str] =
     &["seed_oss", "glm4moe", "qwen35", "qwen35moe", "qwen3next"];
 
-/// Architectures that norm the token embeddings with a WEIGHTLESS RMS:
-/// `build_norm(inpL, nullptr, nullptr, LLM_NORM_RMS, -1)` before layer
-/// 0, with no `token_embd_norm` tensor to load.
-///
-/// `muse-glimmer.cpp:69` is the one (measured over the 155 graphs on
-/// 2026-09-19, the same scan that found the weightless RMS in
-/// `hrm-text.cpp`, which norms INSIDE its layers and not here). It is
-/// a separate fact from `bloom`'s stored embedding norm because the
-/// two answer different questions -- "is there a tensor" and "is there
-/// a norm" -- and `bloom`'s site has a weight where this one has none.
-pub const WEIGHTLESS_EMBEDDING_NORM: &[&str] = &["muse-glimmer"];
-
 /// Architectures with NO final norm tensor at all.
 ///
 /// `hrm-text.cpp:37-45` creates `token_embd`, `output` and
@@ -98,8 +86,13 @@ pub const NO_OUTPUT_NORM: &[&str] = &["hrm_text"];
 
 /// Does this architecture norm its embeddings without a weight? See
 /// [`WEIGHTLESS_EMBEDDING_NORM`].
+///
+/// A row of the architecture's `crate::models` definition:
+/// `muse-glimmer` (`muse-glimmer.cpp:69`) is the one graph with it.
 pub fn weightless_embedding_norm(arch: &str) -> bool {
-    WEIGHTLESS_EMBEDDING_NORM.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .weightless_embedding_norm
 }
 
 /// Architectures whose OUTPUT norm is stored under the embedding-norm

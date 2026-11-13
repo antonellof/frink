@@ -1295,7 +1295,10 @@ impl ModelConfig {
             rms_norm_eps,
             // `crate::norm::POST_NORM_EPS_LITERAL`: the architecture's, which
             // is the model's for all but one graph of 155.
-            post_norm_eps: crate::norm::post_norm_eps(&arch, rms_norm_eps),
+            post_norm_eps: crate::norm::post_norm_eps_for(
+                facts.norm.post_norm_eps_literal,
+                rms_norm_eps,
+            ),
             // No GGUF file encodes a hybrid KDA/Gated-MLA attention
             // topology today; every real checkpoint loaded this way
             // runs the standard Gqa path.
