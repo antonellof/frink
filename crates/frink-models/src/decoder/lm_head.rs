@@ -136,12 +136,13 @@ impl Logits {
 #[cfg(any(feature = "metal", test))]
 pub(crate) struct FoldedLmHead<L> {
     launch: L,
+    argmax_only: bool,
 }
 
 #[cfg(any(feature = "metal", test))]
 impl<L> FoldedLmHead<L> {
     /// `Some` only when the stack is allowed to run lm_head on device:
-    /// greedy argmax is active for this thread, the model's FINAL NORM
+    /// the model's FINAL NORM
     /// is an RMSNorm the stack can bake in, the head has NO bias (no
     /// stack adds `output.bias`, and unlike the cap and the multiplier
     /// a bias is not monotone across the vocabulary, so it moves the
@@ -163,23 +164,28 @@ impl<L> FoldedLmHead<L> {
         output_bias: Option<&[f32]>,
         launch: Option<L>,
     ) -> Option<Self> {
-        if !greedy_argmax || final_norm.rms_weights().is_none() || output_bias.is_some() {
+        if final_norm.rms_weights().is_none() || output_bias.is_some() {
             return None;
         }
-        launch.map(|launch| FoldedLmHead { launch })
+        launch.map(|launch| FoldedLmHead {
+            launch,
+            argmax_only: greedy_argmax,
+        })
     }
 
     pub(crate) fn launch(&self) -> &L {
         &self.launch
     }
 
-    /// Always `true`, and that is the point: the stack's `argmax_only`
-    /// argument is now read off the same value that decided lm_head may
-    /// fold at all, so the two cannot disagree. Folding with
-    /// `argmax_only = false` returns a full uncapped vocabulary and is
-    /// exactly the state this type exists to make unrepresentable.
+    /// Whether the stack returns an argmax id (greedy argmax active)
+    /// or the whole vocabulary. Read off the same value that decided
+    /// lm_head may fold, so the two cannot disagree. A vocabulary
+    /// comes back raw from the device and is capped by
+    /// [`Self::interpret`], the only way out of a fold; folding it
+    /// saves the second command buffer (and its commit-wait) that a
+    /// host-dispatched lm_head costs every sampled token.
     pub(crate) fn argmax_only(&self) -> bool {
-        true
+        self.argmax_only
     }
 
     /// Turn a fused stack's on-device lm_head result into what
@@ -316,15 +322,14 @@ mod tests {
         crate::norm::NormOp::Rms(vec![1.0; 4])
     }
 
-    /// Invariant 2's constructor. Folding lm_head into the stack when
-    /// greedy argmax is NOT active would return a full vocabulary that
-    /// bypasses `logits_from_normed` and therefore the cap.
+    /// The fold carries the decision about what comes back: an argmax
+    /// id under greedy argmax, the whole vocabulary otherwise (capped by
+    /// `interpret`, pinned by the next two tests).
     #[test]
-    fn lm_head_folds_into_the_stack_only_under_greedy_argmax() {
-        assert!(
-            FoldedLmHead::permit(false, &rms(), None, Some(())).is_none(),
-            "without greedy argmax the stack would return uncapped logits"
-        );
+    fn a_fold_returns_an_id_only_under_greedy_argmax() {
+        let sampled = FoldedLmHead::permit(false, &rms(), None, Some(()))
+            .expect("a sampled token folds lm_head too, returning the vocabulary");
+        assert!(!sampled.argmax_only(), "sampling needs the whole vocabulary");
         assert!(FoldedLmHead::permit(true, &rms(), None, None::<u32>).is_none());
         let folded = FoldedLmHead::permit(true, &rms(), None, Some(7u32))
             .expect("greedy + launch permits folding");
@@ -333,10 +338,7 @@ mod tests {
             7,
             "the permission must carry the launch it was granted for"
         );
-        assert!(
-            folded.argmax_only(),
-            "a permitted fold is an argmax fold; anything else returns raw logits"
-        );
+        assert!(folded.argmax_only(), "a greedy fold returns the argmax id");
     }
 
     /// The hazard itself: if that path ever hands back a vocabulary
