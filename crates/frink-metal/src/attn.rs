@@ -1067,6 +1067,16 @@ pub struct MetalKvBuffers {
     pub n_kv_heads: usize,
     pub head_dim: usize,
     pub seq_len: usize,
+    /// How many leading rows of the host `KvCache` paired with this
+    /// buffer hold the values this buffer holds.
+    ///
+    /// Host bookkeeping that no kernel reads. A Metal prefill that keeps
+    /// the device authoritative advances the host cache with
+    /// placeholder rows, so the host's row count alone cannot tell a
+    /// reader whether its rows are real; this can (#630). Zero at
+    /// construction, set by [`Self::upload_from_host`], and advanced by
+    /// whoever downloads rows to the host.
+    pub host_rows_real: usize,
     pub(crate) capacity: usize,
 }
 
@@ -1142,6 +1152,7 @@ impl MetalKvBuffers {
             n_kv_heads,
             head_dim,
             seq_len: 0,
+            host_rows_real: 0,
             capacity,
         })
     }
@@ -1246,6 +1257,7 @@ impl MetalKvBuffers {
             }
         }
         self.seq_len = seq_len;
+        self.host_rows_real = seq_len;
         Ok(())
     }
 
@@ -2716,7 +2728,15 @@ pub fn launch_decode_attn_block(
     assert_eq!(q_launch.rows, n_heads * head_dim);
     assert_eq!(k_launch.rows, n_kv_heads * head_dim);
     assert_eq!(v_launch.rows, n_kv_heads * head_dim);
-    assert_eq!(o_launch.rows, n_heads * head_dim);
+    // `wo` READS the attention width and WRITES the residual's; it
+    // used to assert its output was the attention width, which holds
+    // only where the two coincide, and panicked on every model whose
+    // `n_heads * head_dim` is not `n_embd` (GLM-4.5, ERNIE-4.5-MoE,
+    // Bailing, MiniMax-M2; #630).
+    assert_eq!(
+        o_launch.row_bytes / o_launch.block_bytes * o_launch.block_elems,
+        n_heads * head_dim
+    );
     assert_eq!(
         pos, kv.seq_len,
         "decode pos must equal current Metal KV length"
@@ -7114,5 +7134,67 @@ mod tests {
             "rotating the no-rope layer answered the same as leaving it: \
              this test proves nothing (max drift {drift})"
         );
+    }
+
+    /// `wo` reads the attention width and writes the residual's, and
+    /// the per-layer decode attention block must take a layer where the
+    /// two differ, as GLM-4.5, ERNIE-4.5-MoE, Bailing and MiniMax-M2
+    /// all have. It asserted `wo`'s OUTPUT was the attention width and
+    /// panicked on every one of them (#630).
+    ///
+    /// The oracle is the host, at position 0: attention over one key is
+    /// that key's V, so every query head of a group reads its KV head's
+    /// V and the block's output is `wo` over those V rows. The only
+    /// rounding is the f16 KV store.
+    #[test]
+    #[ignore = "needs a real Metal GPU"]
+    fn the_decode_attn_block_takes_an_attention_width_unlike_the_hidden() {
+        let (hidden, n_heads, n_kv_heads, head_dim) = (48usize, 2usize, 1usize, 16usize);
+        let (n_q, n_kv) = (n_heads * head_dim, n_kv_heads * head_dim);
+        assert_ne!(n_q, hidden, "the shape under test");
+        let w = DenseLayerBytes::new(hidden, n_q, n_kv, 8, 3.0);
+        let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.21).cos()).collect();
+        let mut kv = MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 8).expect("kv");
+        let rope = LayerRope {
+            theta: 10_000.0,
+            freq_factors: None,
+        };
+        let got = launch_decode_attn_block(
+            &x,
+            &f32_matvec(&w.q, n_q, hidden),
+            &f32_matvec(&w.k, n_kv, hidden),
+            &f32_matvec(&w.v, n_kv, hidden),
+            &f32_matvec(&w.o, hidden, n_q),
+            &mut kv,
+            n_heads,
+            MetalRope::new(MetalRopeLayout::Norm),
+            rope,
+            0,
+            &AttnExtras::default(),
+            1e-5,
+        )
+        .expect("decode attn block");
+
+        let f = |b: &[u8]| -> Vec<f32> {
+            b.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
+                .collect()
+        };
+        let (wv, wo) = (f(&w.v), f(&w.o));
+        let v: Vec<f32> = (0..n_kv)
+            .map(|r| (0..hidden).map(|c| wv[r * hidden + c] * x[c]).sum())
+            .collect();
+        // Both query heads share the one KV head.
+        let attn: Vec<f32> = (0..n_q).map(|i| v[i % head_dim]).collect();
+        let want: Vec<f32> = (0..hidden)
+            .map(|r| (0..n_q).map(|c| wo[r * n_q + c] * attn[c]).sum())
+            .collect();
+        assert_eq!(got.len(), hidden, "`wo` writes the residual's width");
+        for (i, (g, h)) in got.iter().zip(&want).enumerate() {
+            let tol = 2e-3 * h.abs().max(1.0);
+            assert!((g - h).abs() <= tol, "out[{i}]: metal={g} host={h}");
+        }
     }
 }

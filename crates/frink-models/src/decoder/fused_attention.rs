@@ -48,6 +48,12 @@ impl Decoder {
             || self.config.residual_scale.is_some()
             || self.config.normed_residual_scale.is_some()
             || self.config.skip_stream
+            // Everything the host body does AFTER the FFN, which a
+            // fused tail's `continue` skips: the loop norm at a pass
+            // boundary and HRM's stream store (`crate::layer_loops`).
+            // Nanbeige decoded through the tail with no loop norm from
+            // the first token (#630).
+            || self.config.layer_loops.is_some()
             || self.gpt_oss.is_some()
             || !self.config.layer_ffn_acts(l).all_swiglu()
             // Everything the host tail does AFTER `wo`, which this

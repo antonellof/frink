@@ -172,13 +172,25 @@ impl Decoder {
     }
 
     /// The facts this path needs of a layer beyond the tail's: one
-    /// window, no sinks, no ALiBi, one head width.
+    /// window, no sinks, no ALiBi, one head width, and nothing between
+    /// the attention and `wo` but the interleaved Q gate.
+    ///
+    /// The last is because the launch starts from Q/K/V and the
+    /// interleaved gate, so it skips everything else
+    /// [`Self::attn_branch_rows`] applies on the host: the head-wise
+    /// output gate (`crate::attn_gate`, Laguna and Step-3.5) and the
+    /// sub-norm (`crate::sub_norms`). The deferred TAIL has no such
+    /// limit, since it starts from that function's output. Without this
+    /// a gated layer answered ungated on the device from the first
+    /// decoded token (#630).
     #[cfg(feature = "metal")]
     pub(crate) fn device_attention_shape_ok(&self, l: usize, layer: &LayerWeights) -> bool {
         self.config.layer_sliding_window(l).is_none()
             && layer.attn.sinks.is_none()
             && self.alibi_slopes.is_none()
             && self.config.v_head_dim() == self.config.head_dim
+            && layer.attn.output_gate.is_none()
+            && layer.attn.attn_sub_norm.is_none()
     }
 
     /// The cache's device mirror, made on first use at the capacity the
