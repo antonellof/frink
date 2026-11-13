@@ -47,8 +47,8 @@ Limits that affect model choice:
   command buffer per decode token and per prefill chunk, with its sinks,
   biases, sliding window and clamped SwiGLU on the device. CUDA's
   resident stack runs it too.
-- Gemma-4 on Metal runs the fused dense stacks and its prefill is
-  still behind llama.cpp's (#626).
+- Gemma-4 on Metal runs the fused dense stacks, level with llama.cpp
+  on prefill and decode.
 - The Metal decode agrees with the CPU within rounding on every graph
   fixture (`tests/decode_step_graphs.rs`, run by CI). `hrm_text` is
   listed in `KNOWN_METAL_DIVERGENCES`: it amplifies the half-staged
