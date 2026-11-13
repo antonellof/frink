@@ -3,7 +3,7 @@
 //!
 //! # Why this is opt-in
 //!
-//! `docs/plans/frink-ui.md` asks for SSE replay *and* records why it
+//! `bc5074aa:docs/plans/on-hold/frink-ui.md` asks for SSE replay *and* records why it
 //! could not simply be added: two-tier cancellation made a dropped
 //! socket **stop** the generation, so by the time a client reconnected
 //! there was nothing left running to resume into. Emitting an `id:`

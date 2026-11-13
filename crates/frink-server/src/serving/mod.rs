@@ -7,7 +7,7 @@
 /// Wired: nothing yet -- `PrefillPass`, `SlotTable`, `Capacity`,
 /// `Geometry`, `PromptAdmission`, `NotAdmitted` and `FinishReason` are
 /// the largest unwired block left in this crate, and they are one
-/// roadmap item: `sched-time-debt` (roadmap `c3-serving-and-kv`), whose
+/// roadmap item: chunk-duration scheduling (#632), whose
 /// quantum is chunk DURATION because a GPU cannot preempt a running
 /// kernel.
 #[allow(dead_code)]

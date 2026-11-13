@@ -3,7 +3,7 @@
 //! server as a child process, `frink chat`, and any third-party client.
 //!
 //! Why a crate instead of literals at both ends: the UI is deliberately
-//! "just another API client" (see `docs/plans/frink-ui.md`) -- it calls
+//! "just another API client" (see `bc5074aa:docs/plans/on-hold/frink-ui.md`) -- it calls
 //! the same public endpoints an IDE would, so the public contract cannot
 //! rot without the UI breaking first. That only holds if there is
 //! exactly one definition of each path and each payload shape. A

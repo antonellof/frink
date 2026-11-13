@@ -8,7 +8,7 @@
 //!
 //! On Bonsai that is sixteen layers of sixty-four, and the ledger
 //! prices a wait at about 0.17 ms, so it is sixteen waits a token.
-//! `docs/plans/gdn-resident-state.md` carries the table this is a row
+//! `1ebda4fc:docs/plans/gdn-resident-state.md` carries the table this is a row
 //! of, and the floor it stops at.
 //!
 //! What it refuses is everything the host tail applies that no kernel

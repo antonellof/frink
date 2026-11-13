@@ -167,7 +167,7 @@ mod speculate;
 /// Unwired: `PrefillSnapshot::from_chunks` and
 /// `StatusReporter::decode_log_interval`, which report on
 /// [`super::admission`]'s chunks rather than this batcher's. Closes
-/// with `sched-time-debt` (roadmap `c3-serving-and-kv`).
+/// with chunk-duration scheduling, #632.
 #[allow(dead_code)]
 mod status;
 pub(super) mod step_budget;

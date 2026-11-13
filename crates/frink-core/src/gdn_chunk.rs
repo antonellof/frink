@@ -377,7 +377,7 @@ mod tests {
     ///
     /// This is the number that decides whether the kernel gets a
     /// caller. The three earlier device attempts lost because the
-    /// state moved once per ROW (`docs/plans/gdn-resident-state.md`);
+    /// state moved once per ROW (`1ebda4fc:docs/plans/gdn-resident-state.md`);
     /// chunking cuts that traffic by the chunk width, which is the
     /// only thing that changed.
     #[cfg(feature = "metal")]

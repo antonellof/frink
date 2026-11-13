@@ -7,7 +7,7 @@
 //! (`cargo test -p frink-cuda --features cuda -- --ignored`) passed on an
 //! RTX 3090 on 2026-09-15, covering every kind [`KINDS`] held that day, and the
 //! tensor-core body has served batched prefill since 0.22.0 (see
-//! `CHANGELOG.md` and `docs/plans/cpu-cuda-parity.md`). The standing rule
+//! `CHANGELOG.md` and `1ebda4fc:docs/plans/cpu-cuda-parity.md`). The standing rule
 //! still applies to any new kind or body added here: a CUDA claim is
 //! worth nothing until that command has run on a real device and the
 //! result is written down.
@@ -85,7 +85,7 @@
 //! prefill decomposed into one matvec per position
 //! (`crates/frink-core/src/weight_matrix.rs`, the CUDA batch arm). This
 //! is the naive tiled `mul_mm` half of
-//! `docs/plans/llama-cpp-gap-inventory.md` §2.7; the `dp4a` integer path
+//! `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` §2.7; the `dp4a` integer path
 //! (llama's `mmq.cu`) is explicitly *not* attempted here.
 //!
 //! Unlike Metal's version this uses no matrix-fragment intrinsics

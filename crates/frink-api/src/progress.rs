@@ -2,7 +2,7 @@
 //! (downloads, conversions, model loads).
 //!
 //! Written from a behavioural description, not from any reference
-//! implementation -- see `docs/plans/frink-ui.md`.
+//! implementation -- see `bc5074aa:docs/plans/on-hold/frink-ui.md`.
 //!
 //! The whole point is what it *refuses* to say. Rate is
 //! `bytes_delta / time_delta`, and on the very first tick `time_delta`

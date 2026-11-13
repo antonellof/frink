@@ -329,7 +329,7 @@ pub fn launch_q8_0_matvec(
 /// router meant the entire GEMM ran as a *single* 64-thread threadgroup
 /// on one GPU core with each lane striding its own 8 KB row: ~1.1-1.8
 /// ms/tok on OLMoE (see the MoE decode diagnosis in
-/// `docs/plans/llama-cpp-parity-push.md`).
+/// `4dc195e5:docs/plans/llama-cpp-parity-push.md`).
 ///
 /// Host dispatches `ceil(rows/2)` threadgroups of `32 * nsg` threads.
 pub const F32_MATVEC_KERNEL_SRC: &str = r#"
@@ -9190,7 +9190,7 @@ mod tests {
     /// the ONLY sound use of these numbers is comparing one variant of
     /// the kernel against another in the same run. Three kernel
     /// hypotheses were aimed at the raw figure before that was
-    /// understood (`docs/plans/gdn-resident-state.md`), which is the
+    /// understood (`1ebda4fc:docs/plans/gdn-resident-state.md`), which is the
     /// reason for this comment.
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]

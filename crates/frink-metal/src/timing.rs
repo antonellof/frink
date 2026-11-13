@@ -46,7 +46,7 @@ pub(crate) fn mm_timing_add(setup: u128, gpu: u128, read: u128) {
 /// which on a loaded host is mostly scheduler noise. `MTLCommandBuffer`'s
 /// `GPUStartTime`/`GPUEndTime` measure the command buffer's own occupancy
 /// and stay usable while the machine is busy, so A/B evidence in
-/// `docs/plans/llama-cpp-parity-push.md` is taken from these.
+/// `4dc195e5:docs/plans/llama-cpp-parity-push.md` is taken from these.
 ///
 /// GPU time alone was how GitHub issue #149 mis-read its own numbers:
 /// "host = wall minus GPU" charged to the host everything that was not

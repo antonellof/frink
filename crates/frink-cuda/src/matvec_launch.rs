@@ -31,7 +31,7 @@ use crate::matvec_kinds::coalesced::{coalesced_kind, CoalescedKind, MatvecWidth}
 /// (PR #136) and measured 22% SLOWER on a GTX 1080, because norms,
 /// RoPE and attention sat on the host between them; a dense decode
 /// layer now runs whole on the device instead (`crate::prefill`, at one
-/// row). See `docs/plans/cpu-cuda-parity.md` step 2.
+/// row). See `1ebda4fc:docs/plans/cpu-cuda-parity.md` step 2.
 #[allow(clippy::too_many_arguments)] // shared internal launch plumbing; each parameter is a distinct, clearly-named buffer/shape value, not something worth bundling into a struct for one private callee.
 pub(crate) fn launch_matvec(
     kernel_src: &'static str,

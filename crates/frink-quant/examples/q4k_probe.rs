@@ -2,7 +2,7 @@
 //! against llama.cpp's `make_qkx2_quants` on the same 32 floats.
 //!
 //! Reads 32 lines of 8 hex digits (f32 bit patterns) from the path in
-//! `argv[1]`, or `/tmp/blk.in`. See `docs/plans/llama-cpp-gap-inventory.md`
+//! `argv[1]`, or `/tmp/blk.in`. See `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md`
 //! on why frink's Q4_K matches a reference built with
 //! `-ffp-contract=off` exactly and an optimised one only approximately.
 fn main() {

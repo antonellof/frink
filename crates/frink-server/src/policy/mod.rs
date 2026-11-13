@@ -55,7 +55,7 @@
 /// Wired: `decode_slide`, `AnchorState`, `SlidingRequest`,
 /// `WindowPolicy`, `resolve_anchor_token`.
 /// Unwired: `prefill_slide`, the prefill half of the same rule.
-/// Closes with `window-slide-during-decode` (roadmap `c3-serving-and-kv`).
+/// Closes with sliding-window eviction, #61.
 #[allow(dead_code)]
 pub(crate) mod anchor;
 
@@ -64,7 +64,7 @@ pub(crate) mod detokenize;
 /// Wired: effort probing and the thinking-mode resolution behind
 /// `chat_template`. Unwired: `Effort::as_str` / `kwargs_for`, the
 /// name round-trip a user-supplied effort override would parse
-/// through. Closes with `t2-same-commands` (north star).
+/// through. Closes with the flag tail, #404.
 #[allow(dead_code)]
 pub(crate) mod effort;
 
@@ -80,7 +80,7 @@ pub(crate) mod footprint;
 /// Wired: the `MaintenanceGate` behind `/admin` admission and sealing.
 /// Unwired: `finish_loading`, `rebuild_never_dispatched`,
 /// `rebuild_timed_out`, the transitions a live pool rebuild drives.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
+/// Closes with the live pool rebuild, #632.
 #[allow(dead_code)]
 pub(crate) mod maintenance;
 
@@ -89,7 +89,7 @@ pub(crate) mod outbox;
 /// Wired: both parsers, their formats and `infer`.
 /// Unwired: `ReasoningFormat`/`ToolCallFormat` `as_str` + `parse` (the
 /// name round-trip an explicit `--reasoning-format`-style override
-/// needs) and the `format()` accessors. Closes with `t2-same-commands`.
+/// needs) and the `format()` accessors. Closes with the flag tail, #404.
 #[allow(dead_code)]
 pub(crate) mod parser;
 
@@ -97,24 +97,23 @@ pub(crate) mod parser;
 /// Unwired: `validate_rebuild`, `PoolFloors`, `RebuildRejected` -- the
 /// arithmetic that must refuse a re-split BEFORE the old pool is freed.
 /// `/admin/cache/rebuild` exists and does not yet consult it.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
+/// Closes with the live pool rebuild, #632.
 #[allow(dead_code)]
 pub(crate) mod pool_budget;
 
 /// Wired: `RadixCache::insert_prefix` / `match_prefix` / `lock` /
 /// `unlock`, from `generate::publish_to_radix`.
-/// Unwired, and this one is a live defect rather than spare capacity:
-/// `RadixCache::evict` HAS NO CALLER, so nothing ever releases the
-/// reference `generate.rs` takes when it publishes. The page pool
-/// shrinks monotonically until admission starts refusing.
-/// Closes with `wire-radix-prefix-cache` (roadmap `c3-serving-and-kv`).
+/// `RadixCache::evict` is wired too: admission reclaims pages from the
+/// tree (`generate.rs`) before it refuses.
+/// Unwired: the introspection accessors (`page_size`, `protected_size`,
+/// `total_size`, `check_integrity`). Closes with #632.
 #[allow(dead_code)]
 pub(crate) mod radix;
 
 /// Wired: `RebuildTxn::open` and the outcome match in `cache_admin`.
 /// Unwired: the activity predicates and rollback accessors the
 /// transaction exposes for a caller that drives it to completion.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
+/// Closes with the live pool rebuild, #632.
 #[allow(dead_code)]
 pub(crate) mod rebuild;
 

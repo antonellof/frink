@@ -495,9 +495,9 @@ pub(crate) struct AppState {
     /// `kv_pool` because they are two answers to the same question.
     /// Against `prefix_cache` because `PrefixCache` stores
     /// `Vec<KvCache>` snapshots, which a paged request has none of, so
-    /// enabling both would give a cache that can never hit -- see
-    /// `wire-radix-prefix-cache` in the plan, which is what removes
-    /// that restriction.
+    /// enabling both would give a cache that can never hit. Paged KV
+    /// shares prefixes through its own radix tree
+    /// (`generate::publish_to_radix`) instead.
     pub(crate) paged_kv: Option<generate::PagedKvConfig>,
     /// `Some` when `FRINK_PREFIX_CACHE_ENTRIES` is set: a shared,
     /// LRU-bounded store of previously processed prompt+KV-state
@@ -536,7 +536,7 @@ pub(crate) struct AppState {
     pub(crate) draft: Option<server_draft::ServerDraft>,
     /// Serializes private-loop Metal decodes when continuous batching is
     /// off. Shared `metal_attn_kv` is not safe across concurrent
-    /// `forward_token` calls yet; see `docs/plans/archive/metal-parallel-concurrency.md`.
+    /// `forward_token` calls yet; see `bc5074aa:docs/plans/archive/metal-parallel-concurrency.md`.
     pub(crate) metal_private_decode_gate: Option<Arc<std::sync::Mutex<()>>>,
     /// The model id a load task is currently working on, so
     /// `/admin/models` can report `loading` for it. Separate from
@@ -2971,7 +2971,7 @@ async fn chat_completions_stream(
     // choice 1 is not what a client reading `choices[].index` expects,
     // and interleaving them round-robin needs a sampler that can be
     // stepped one token at a time per choice
-    // (`docs/plans/done/several-completions-per-request.md`). Refused by
+    // (`bc5074aa:docs/plans/done/several-completions-per-request.md`). Refused by
     // name rather than silently collapsed to one, which is the whole
     // argument of `crate::unimplemented_fields`.
     let tools_active = req.tools_active();

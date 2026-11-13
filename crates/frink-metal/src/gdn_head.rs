@@ -4,7 +4,7 @@
 //!
 //! # Why
 //!
-//! `docs/plans/gdn-resident-state.md` prices a Bonsai decode token at
+//! `1ebda4fc:docs/plans/gdn-resident-state.md` prices a Bonsai decode token at
 //! 192 command buffers, 71.6 ms of GPU and 29.9 ms of latency BEYOND
 //! it, with the GPU work already faster than the reference's whole
 //! token. The 0.15 ms a submission costs is the OS wake-up and every

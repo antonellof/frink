@@ -4,11 +4,11 @@
 //! `FRINK_CPU_POOL=spin` is **+123% at 3B and +87% at 8B** on aarch64
 //! and takes decode past llama.cpp; it is **-37% at 135M** on the same
 //! host (#27, and the aarch64 table in
-//! `docs/plans/cpu-cuda-parity.md`). A default that is right at 3B is
+//! `1ebda4fc:docs/plans/cpu-cuda-parity.md`). A default that is right at 3B is
 //! wrong at 135M and vice versa, so the switch cannot flip and cannot
 //! stay: it needs a rule, and the rule has to be about the operation
 //! rather than the process. That is step 3 of
-//! `docs/plans/cpu-cuda-parity.md`.
+//! `1ebda4fc:docs/plans/cpu-cuda-parity.md`.
 //!
 //! [`backend`] is that rule, and it is the ONLY place a region's
 //! scheduler is read; [`decode_backend`] is the same constant applied
@@ -83,7 +83,7 @@ use super::Backend;
 /// every operation in the models where it WON is over 3.1M. `1 << 21`
 /// (2.1M) is the middle of that bracket in log space. The true crossover
 /// is somewhere in `0.9M ..= 3.1M` and this constant is a guess inside
-/// it; the exit criterion in `docs/plans/cpu-cuda-parity.md` asks for a
+/// it; the exit criterion in `1ebda4fc:docs/plans/cpu-cuda-parity.md` asks for a
 /// sweep on aarch64 AND x86, and that sweep is still owed.
 ///
 /// One constant, both architectures. Above it the pool won on both;

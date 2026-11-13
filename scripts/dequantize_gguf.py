@@ -6,7 +6,7 @@ measures the distance between two points and cannot say which moved:
 llama.cpp quantizes ACTIVATIONS to 8 bits for its quantized matmuls and
 frink keeps them in f32, so on a graph that amplifies that loss the
 two disagree while frink is the closer of the two to the f32 answer
-(`docs/plans/llama-cpp-gap-inventory.md` section 10). Running both
+(`1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` section 10). Running both
 engines on the dequantized file removes the quantized matmuls from both
 sides; then
 

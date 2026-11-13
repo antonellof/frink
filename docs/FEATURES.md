@@ -44,7 +44,13 @@ Limits that affect model choice:
 
 - On Metal, gpt-oss and Llama 4 run on the host path (no Metal kernel
   for attention sinks; Llama 4's chunked window does not fit the fused
-  launches). CUDA's resident stack runs gpt-oss.
+  launches), one command buffer per projection and per token, which is
+  two orders of magnitude behind llama.cpp (#627). CUDA's resident
+  stack runs gpt-oss.
+- Gemma-4's dedicated engine has no batched prefill and no resident
+  Metal stack; on Metal it is likewise per projection (#626).
+- Some architectures decode differently on Metal than on the CPU
+  (`KNOWN_METAL_DIVERGENCES` in `tests/decode_step_graphs.rs`, #630).
 - A recurrent model gets no prefix-cache reuse, since its state cannot
   be truncated mid-sequence. It can be a speculation target (state
   checkpointed before each verify, replayed after a rejection) on the
@@ -56,7 +62,7 @@ Limits that affect model choice:
 | Backend | Capabilities |
 |---|---|
 | **CPU** | Dense and MoE. An integer dot against quantized activations for every weight kind (ggml's `vec_dot_type`, ADR 0009), with AVX2 and NEON bodies; on by default where it measured faster (aarch64), `FRINK_CPU_INT_DOT` overrides. Interleaved Q4_Kx8 / Q8_0x4 GEMV, a Q8_0x4 batch GEMM for prefill, and a thread pool sized to the performance cores |
-| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
+| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill. On an M5 the prefill GEMMs (dense and MoE) and prefill flash attention run on the GPU's matrix units through the Metal 4 tensor API, as llama.cpp's tensor kernels do (`FRINK_METAL_TENSOR`); quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
 | **CUDA** | Resident weights and a resident stack for prefill and decode (`--features cuda`): norms, QKV bias, QK norm, RoPE, attention, SwiGLU or GeGLU and residuals on the device, K/V rows back to the host cache through page-locked memory. Prefill multiplies `Q8_0` and `Q4_K` on the int8 tensor cores and the other kinds on the f16 ones, and a prefill batch's attention runs on the tensor cores at head widths 64, 128 and 256 (`sm_80` and up). Decode matvecs for `Q4_K`, `Q6_K`, `Q8_0` and `MXFP4` dot a q8_1 activation with `dp4a`, as llama.cpp does. Routed MoE layers route on the device for plain softmax and gpt-oss routing, and a prefill batch's experts run as one grouped GEMM per projection. gpt-oss runs with its sinks, biases and clamped SwiGLU on the device. `FRINK_CUDA_GRAPH=1` replays a decode token from a CUDA graph; it is off by default and has not run on a GPU |
 | **Vulkan** | Matvec, prefill GEMM and embedding gather for every weight kind, resident weights, and a decode and prefill stack (`--features vulkan`, opt-in with `--device vulkan` or `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
 
@@ -154,12 +160,13 @@ llama.cpp (`common/common.h:239`), so an all-defaults run is not
 token-identical. `-e`/`--escape` is on by default, and a partial
 `-ngl N` is refused rather than offloading every layer.
 
-That penalty costs Metal decode: at `--temp 0` the stack can fold
-`final_norm + lm_head + argmax` on the device and return one token id,
-but not while any of `--repeat-penalty`, `--presence-penalty` or
-`--frequency-penalty` is live. `--repeat-penalty 1.0` or
-`--repeat-last-n 0` restores the fold and token identity with
-llama.cpp's defaults.
+That penalty costs Metal decode: the decode stack always runs
+`final_norm + lm_head` on the device, but at `--temp 0` it can also
+run the argmax there and return one token id instead of the
+vocabulary, and not while any of `--repeat-penalty`,
+`--presence-penalty` or `--frequency-penalty` is live.
+`--repeat-penalty 1.0` or `--repeat-last-n 0` restores the argmax
+fold and token identity with llama.cpp's defaults.
 
 ## Server
 

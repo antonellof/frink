@@ -20,7 +20,7 @@
 // Weights are read as BYTES out of uint words, because ggml block
 // strides (18, 34, 144, 176, 210) are not word multiples and 8-bit
 // storage is an optional capability
-// (docs/plans/archive/vulkan-beachhead-verdict.md, §3).
+// (bc5074aa:docs/plans/archive/vulkan-beachhead-verdict.md, §3).
 
 #define WG 64u
 layout(local_size_x = 64) in;

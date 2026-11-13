@@ -7,7 +7,7 @@
 //!
 //! - The row-at-a-time recurrence is bandwidth-bound (36 GB/s of state),
 //!   and moving it to the GPU lost three ways
-//!   (`docs/plans/gdn-resident-state.md`).
+//!   (`1ebda4fc:docs/plans/gdn-resident-state.md`).
 //! - Chunking trades 1.5x the multiply-adds for a 32nd of that traffic,
 //!   so the CPU version is now COMPUTE-bound, measured at ~20 GFLOP/s
 //!   across six cores and 47% of a Bonsai prefill step.

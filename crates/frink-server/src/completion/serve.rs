@@ -93,11 +93,11 @@ pub(crate) async fn serve(
     let mut params = GenerationParams {
         cache_salt: None,
         prompt_logprobs: None,
-        // Wired per route once a wire renders them; see
-        // `docs/plans/per-token-logprobs.md`.
+        // Off: the native wire's `n_probs` is refused by name
+        // (`completion::mod`, API.md's list of unsupported options).
         wants_logprobs: false,
         // `n` is wired in a later step of
-        // `docs/plans/done/several-completions-per-request.md`; the field is
+        // `bc5074aa:docs/plans/done/several-completions-per-request.md`; the field is
         // still refused on the wire by `crate::unimplemented_fields`,
         // so nothing can reach this with anything but 1.
         n: 1,

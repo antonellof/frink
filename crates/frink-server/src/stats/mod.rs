@@ -31,7 +31,7 @@
 /// Unwired: `LastKnown`, the "report nothing rather than zero" rule for
 /// a pool occupancy that only some replies carry. It has no reporter
 /// yet because the pool geometry it would hold is itself groundwork.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
+/// Closes with #632.
 #[allow(dead_code)]
 pub(crate) mod rate;
 

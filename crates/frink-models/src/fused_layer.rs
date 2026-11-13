@@ -3,7 +3,7 @@
 //!
 //! # Why
 //!
-//! `docs/plans/gdn-resident-state.md` prices a Bonsai decode token: GPU
+//! `1ebda4fc:docs/plans/gdn-resident-state.md` prices a Bonsai decode token: GPU
 //! 79 ms, submission latency 35 ms, host about 20 ms. The GPU work is
 //! already faster than the reference's whole token and the 0.15 ms a
 //! submission costs is the OS wake-up, so the gap is the COUNT: 192 a

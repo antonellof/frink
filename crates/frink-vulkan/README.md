@@ -15,7 +15,7 @@ llama.cpp's `Vulkan0`: the first discrete or integrated GPU, or the
 first index in `GGML_VK_VISIBLE_DEVICES` (`src/select.rs`).
 
 The beachhead verdict is in
-[`vulkan-beachhead-verdict.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/vulkan-beachhead-verdict.md).
+[`vulkan-beachhead-verdict.md`](https://github.com/antonellof/frink/blob/75d2769d/bc5074aa:docs/plans/archive/vulkan-beachhead-verdict.md).
 
 ```bash
 cargo test -p frink-vulkan                      # SPIR-V half, no GPU needed

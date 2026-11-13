@@ -1,7 +1,7 @@
 //! One long-running-job contract, shared by every background job the
 //! server runs (today: a Hub download and a model load).
 //!
-//! The uniformity is the point. `docs/plans/frink-ui.md` observes that
+//! The uniformity is the point. `bc5074aa:docs/plans/on-hold/frink-ui.md` observes that
 //! both reference products reuse a single task shape across four job
 //! types, and that this is what makes the UI cheap: one polling loop,
 //! one progress component, one cancel button, regardless of what is

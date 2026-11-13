@@ -17,7 +17,7 @@ frink serve -m model.gguf -dev metal -cb -np 4             # explicit slot cap
 frink serve -m model.gguf -dev metal --no-cont-batching      # private path (serialized on Metal)
 ```
 
-See [`docs/plans/archive/metal-parallel-concurrency.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/metal-parallel-concurrency.md).
+See [`bc5074aa:docs/plans/archive/metal-parallel-concurrency.md`](https://github.com/antonellof/frink/blob/75d2769d/bc5074aa:docs/plans/archive/metal-parallel-concurrency.md).
 
 Serving measurements (continuous batching, paged KV, prefix cache)
 are in

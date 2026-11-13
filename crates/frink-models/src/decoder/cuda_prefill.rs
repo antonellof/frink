@@ -1,5 +1,5 @@
 //! The CUDA resident dense stack, as the two host bodies reach it: the
-//! batched prefill (#259, `docs/plans/cpu-cuda-parity.md` step 2b) and
+//! batched prefill (#259, `1ebda4fc:docs/plans/cpu-cuda-parity.md` step 2b) and
 //! the single-token decode (#133).
 //!
 //! A run of consecutive dense layers per call: the hidden rows go up

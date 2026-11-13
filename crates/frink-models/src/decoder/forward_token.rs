@@ -664,7 +664,7 @@ impl Decoder {
                 // Consecutive layers the fused launch serves whole pass
                 // their residual stream to each other on the device and
                 // wait ONCE, which is the submission count the decode
-                // gap is made of (`docs/plans/gdn-resident-state.md`).
+                // gap is made of (`1ebda4fc:docs/plans/gdn-resident-state.md`).
                 #[cfg(feature = "metal")]
                 if let Some(end) =
                     self.fused_recurrent_run(l, &mut hidden, kv_caches, &mut pending_qkv)
