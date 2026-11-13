@@ -26,11 +26,9 @@ use frink_moe::GatingFunction;
 /// today -- all three are `NewCode` for other reasons and refuse before
 /// reaching here -- but the list is what a later admission would trust.
 pub(crate) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
-    "afmoe",
     // `cohere2moe` is in `crate::models::cohere2moe` (#403 step 7b).
     "deepseek2",
     "glm4moe",
-    "laguna",
     "step35",
 ];
 
@@ -92,15 +90,12 @@ pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe"];
 /// five it gained are all NEW graphs (`beam`, `flint`, `glm5-next`,
 /// `k2-horizon`, `muse-spark`), every one refused, so no row is added.
 pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
-    "afmoe",
     "bailingmoe",
     "bailingmoe2",
     "deepseek",
     // `dots1` is in `crate::models::dots1` (#403 step 6).
-    "exaone-moe",
     // `glm4-moe.cpp:13-14` read both the scale and the norm.
     "glm4moe",
-    "laguna",
     // `nemotron-h.cpp:19` (`routed_scaling_factor`, 2.5 on Nemotron-3 Nano).
     "nemotron_h_moe",
     "step35",
@@ -124,13 +119,10 @@ pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
 /// file declaring `false` would have been renormalised here and not
 /// upstream. The other six are new graphs, all refused.
 pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
-    "afmoe",
     "bailingmoe",
     "bailingmoe2",
     // `dots1` is in `crate::models::dots1` (#403 step 6).
-    "exaone-moe",
     "glm4moe",
-    "laguna",
     // `mellum` is in `crate::models::mellum`.
     // `nemotron-h.cpp:18` (`norm_topk_prob`).
     "nemotron_h_moe",

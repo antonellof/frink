@@ -37,7 +37,7 @@ pub(super) fn linear_scaling_from_gguf(file: &impl TensorSource, arch: &str) -> 
 /// frink was already right.
 ///
 /// `grok` states its row in `crate::models::grok` (#403 step 6).
-pub(crate) const YARN_BETA_READERS: &[&str] = &["mistral3", "laguna"];
+pub(crate) const YARN_BETA_READERS: &[&str] = &["mistral3"];
 
 /// The YaRN RoPE scaling a GGUF declares, or `None` when this file
 /// declares none that changes the rotation.

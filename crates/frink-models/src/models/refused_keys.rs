@@ -13,7 +13,7 @@ impl ArchFacts {
     /// Metadata keys that, when present with a nonzero value, require math
     /// frink's generic decoder does not implement *unless* the architecture
     /// profile opts into those features (Gemma family), or the architecture
-    /// is named in [`crate::capability::LOGIT_SOFTCAP_ARCHITECTURES`] for the softcaps.
+    /// states `ScalingFacts::logit_softcap` for the softcaps.
     pub fn unsupported_feature_keys(&self, arch: &str) -> Vec<(String, &'static str)> {
         // Gemma family implements softcap + SWA pattern; others still refuse.
         if matches!(self.family(), Some(DecoderFamily::GemmaFamily)) {

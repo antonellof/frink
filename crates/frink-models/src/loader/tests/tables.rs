@@ -66,9 +66,16 @@ fn the_gating_literal_names_are_the_gating_literal_table() {
 
 #[test]
 fn the_architectures_llama_cpp_defaults_to_sigmoid_gating_are_pinned() {
-    for arch in ["afmoe", "deepseek2", "glm4moe", "laguna", "step35"] {
+    for arch in ["deepseek2", "glm4moe", "step35"] {
         assert!(
             SIGMOID_GATING_ARCHITECTURES.contains(&arch),
+            "{arch} sets SIGMOID when the gating key is absent"
+        );
+    }
+    // `afmoe` and `laguna` state it in `crate::models` (#403 step 9b).
+    for arch in ["afmoe", "deepseek2", "glm4moe", "laguna", "step35"] {
+        assert!(
+            crate::models::ArchFacts::of(arch).moe.sigmoid_by_default,
             "{arch} sets SIGMOID when the gating key is absent"
         );
     }

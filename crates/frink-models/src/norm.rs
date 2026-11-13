@@ -358,31 +358,22 @@ pub fn norm_function(arch: &str) -> NormFunction {
     norm_function_for_file(arch, None)
 }
 
-/// Architectures whose POST-attention and POST-FFN norms run at an eps
-/// the graph writes as a LITERAL, not at the model's
-/// `attention.layer_norm_rms_epsilon`.
-///
-/// `muse-glimmer.cpp:63` is `const float post_norm_eps = 1e-8f;` with
-/// the comment "Different to f_norm_rms_eps for post-attn / post-FFN
-/// norms", and `:140-141,166-167` call `ggml_rms_norm` with it while
-/// `:90,153` norm with the model's. `grep -rn 'post_norm_eps'
-/// src/models/*.cpp` over the 155 graphs is that one file (measured
-/// 2026-09-19), so for everybody else the two epsilons are the same
-/// number and [`post_norm_eps`] answers the model's.
-///
-/// A table rather than a second epsilon field on every config: the
-/// fact belongs to the architecture, and a `ModelConfig` that carried
-/// two independent epsilons would let a loader set one and forget the
-/// other.
-pub const POST_NORM_EPS_LITERAL: &[(&str, f32)] = &[("muse-glimmer", 1e-8)];
-
 /// The epsilon this architecture's post-norm sites run at, given the
-/// model's own. See [`POST_NORM_EPS_LITERAL`].
+/// model's own: a literal where the graph writes one
+/// (`muse-glimmer.cpp:63`, `1e-8`, `crate::models::muse_glimmer`), the
+/// model's everywhere else.
 pub fn post_norm_eps(arch: &str, model_eps: f32) -> f32 {
-    POST_NORM_EPS_LITERAL
-        .iter()
-        .find(|(a, _)| *a == arch)
-        .map_or(model_eps, |(_, eps)| *eps)
+    post_norm_eps_for(
+        crate::models::ArchFacts::of(arch)
+            .norm
+            .post_norm_eps_literal,
+        model_eps,
+    )
+}
+
+/// [`post_norm_eps`] given the row (`ArchFacts`).
+pub fn post_norm_eps_for(literal: Option<f32>, model_eps: f32) -> f32 {
+    literal.unwrap_or(model_eps)
 }
 
 /// [`norm_function`] with what the file declares for

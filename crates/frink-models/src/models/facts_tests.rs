@@ -52,7 +52,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
             .iter()
             .map(|r| r.0),
     );
-    names.extend(crate::capability::LOGIT_SOFTCAP_ARCHITECTURES);
     names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
     names.extend(crate::act_layers::XIELU_ARCHITECTURES);
     names.extend(t::QK_NORM_AFTER_ROPE_ARCHITECTURES);
@@ -73,7 +72,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
         names.extend(ns::POST_NORMS_BOTH_OR_NEITHER.iter().map(|r| r.0));
         for table in [
             ns::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
-            ns::WEIGHTLESS_EMBEDDING_NORM,
             ns::NO_OUTPUT_NORM,
             ns::OUTPUT_NORM_UNDER_EMBEDDING_NAME,
             ns::ONE_NORM_PER_LAYER,
@@ -282,14 +280,21 @@ fn the_facts_agree_with_every_public_lookup() {
                 // No legacy table: only a definition states it.
                 norm_by_rms_eps_key: def.is_some_and(|f| f.norm.norm_by_rms_eps_key),
                 block_sub_norms: crate::sub_norms::block_sub_norms(name),
+                // Through the public step: the literal shows as a model
+                // epsilon that is ignored.
+                post_norm_eps_literal: (crate::norm::post_norm_eps(name, 0.5) != 0.5)
+                    .then(|| crate::norm::post_norm_eps(name, 0.5)),
             },
             scaling: ScalingFacts {
                 multipliers: crate::scalar_multipliers::multiplier_support(name),
-                logit_softcap: def.map_or(cap::LOGIT_SOFTCAP_ARCHITECTURES.contains(&name), |f| {
-                    f.scaling.logit_softcap
-                }),
-                embeddings_scaled_by_sqrt_n_embd: profile
-                    .is_some_and(|p| cap::embeddings_scaled_by_sqrt_n_embd(name, p.family)),
+                // No legacy table: only a definition states it.
+                logit_softcap: def.is_some_and(|f| f.scaling.logit_softcap),
+                // The family's half from the catalog; a definition
+                // states its own (`afmoe`, the Gemma rows).
+                embeddings_scaled_by_sqrt_n_embd: def.map_or(
+                    profile.is_some_and(|p| cap::embeddings_scaled_by_sqrt_n_embd(name, p.family)),
+                    |f| f.scaling.embeddings_scaled_by_sqrt_n_embd,
+                ),
                 // Read: a declared clamp survives; required: an absent
                 // one is refused.
                 clamp_kqv: matches!(

@@ -133,28 +133,36 @@ pub const SPARK2_5: AttnGateSpec = AttnGateSpec {
     lines: "src/models/spark2-5.cpp:41,97-105",
 };
 
+/// `afmoe`'s gate, stated by its `crate::models` file (#403 step 9b).
+pub const AFMOE: AttnGateSpec = AttnGateSpec {
+    act: GateAct::Sigmoid,
+    widths: &[GateWidth::PerElement],
+    presence: GatePresence::Required,
+    lines: "src/models/afmoe.cpp:73,154,183-185",
+};
+
+/// `laguna`'s gate, stated by its `crate::models` file (#403 step 9b).
+pub const LAGUNA: AttnGateSpec = AttnGateSpec {
+    act: GateAct::Softplus,
+    widths: &[GateWidth::PerHead, GateWidth::PerElement],
+    presence: GatePresence::Required,
+    lines: "src/models/laguna.cpp:110-124,211,246-257",
+};
+
+/// `muse-glimmer`'s gate, stated by its `crate::models` file (#403 step 9b).
+pub const MUSE_GLIMMER: AttnGateSpec = AttnGateSpec {
+    act: GateAct::Sigmoid,
+    widths: &[GateWidth::PerElement],
+    presence: GatePresence::Required,
+    lines: "src/models/muse-glimmer.cpp:46,100-135",
+};
+
 /// The three architectures whose graph gates its softmax attention
 /// output through `LLM_TENSOR_ATTN_GATE`. See the module doc for the
 /// three that store a different thing under the same name.
 pub const ATTN_GATE_ARCHS: &[(&str, AttnGateSpec)] = &[
-    (
-        "afmoe",
-        AttnGateSpec {
-            act: GateAct::Sigmoid,
-            widths: &[GateWidth::PerElement],
-            presence: GatePresence::Required,
-            lines: "src/models/afmoe.cpp:73,154,183-185",
-        },
-    ),
-    (
-        "laguna",
-        AttnGateSpec {
-            act: GateAct::Softplus,
-            widths: &[GateWidth::PerHead, GateWidth::PerElement],
-            presence: GatePresence::Required,
-            lines: "src/models/laguna.cpp:110-124,211,246-257",
-        },
-    ),
+    // `afmoe` is in `crate::models` ([`AFMOE`]).
+    // `laguna` is in `crate::models` ([`LAGUNA`]).
     (
         "step35",
         AttnGateSpec {
@@ -188,15 +196,7 @@ pub const ATTN_GATE_ARCHS: &[(&str, AttnGateSpec)] = &[
     // `{n_embd, n_head * head_dim}` and `:100-135` sigmoid it and
     // multiply it into the attention output PER ELEMENT before `wo`,
     // which is `afmoe`'s corner; its own comment says "same as afmoe".
-    (
-        "muse-glimmer",
-        AttnGateSpec {
-            act: GateAct::Sigmoid,
-            widths: &[GateWidth::PerElement],
-            presence: GatePresence::Required,
-            lines: "src/models/muse-glimmer.cpp:46,100-135",
-        },
-    ),
+    // `muse-glimmer` is in `crate::models` ([`MUSE_GLIMMER`]).
     // `spark2_5` is in `crate::models::spark2_5` ([`SPARK2_5`]).
     // Landed upstream after the 2026-09-19 pin: `lfm3.cpp:77` creates
     // the tensor REQUIRED at `{n_embd, n_head}` on every attention

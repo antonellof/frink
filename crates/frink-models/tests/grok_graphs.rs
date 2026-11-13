@@ -28,7 +28,7 @@
 //!   is Grok's POST-attention norm (`:143-148`), the same tensor name
 //!   `dbrx` uses for its PRE-FFN norm, and `layer_output_norm` its
 //!   post-FFN norm (`:75-78`, `:185-190`).
-//! - **The softcap gate**: `capability::LOGIT_SOFTCAP_ARCHITECTURES`,
+//! - **The softcap gate**: `ScalingFacts::logit_softcap`,
 //!   because `conversion/grok.py:34` writes `attn_logit_softcapping` for
 //!   every export and the generic refusal would have stopped all of them.
 //!

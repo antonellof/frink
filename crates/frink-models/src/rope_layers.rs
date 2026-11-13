@@ -190,7 +190,7 @@ impl RopeLayers {
 /// Not a frink choice and not a tunable: `afmoe` and `llama4` never
 /// assign the field and their graphs still read it, so this literal is
 /// load-bearing for two of the six rows.
-const LLAMA_CPP_DEFAULT_NO_ROPE_STEP: usize = 4;
+pub const LLAMA_CPP_DEFAULT_NO_ROPE_STEP: usize = 4;
 
 const fn step(n: usize) -> NonZeroUsize {
     match NonZeroUsize::new(n) {
@@ -278,28 +278,12 @@ pub fn never(_arch: &str, _n_layers: usize, _has_window: bool, _dense: usize) ->
 /// [`rope_layers`] from this table alone, for `HparamRules::LEGACY`.
 pub fn rope_layers_from_table(
     arch: &str,
-    n_layers: usize,
-    has_sliding_window: bool,
+    _n_layers: usize,
+    _has_sliding_window: bool,
     _n_dense_lead: usize,
 ) -> RopeLayers {
     let no_rope_every = default_no_rope_every;
     match arch {
-        // `exaone4.cpp:4-9` switches the whole SWA machinery on inside
-        // `if (hparams.n_layer() == 64)` and :116 then gates RoPE on it,
-        // so EXAONE-4 32B gives its full-attention layers no rotation
-        // and EXAONE-4 1.2B rotates everything. `exaone-moe.cpp:4` turns
-        // SWA on unconditionally and :13 reads the window as a REQUIRED
-        // key, so its `has_sliding_window` is always true and the second
-        // arm here is unreachable for it -- which is the whole reason
-        // the two rows are one rule (`exaone4`'s half is
-        // `crate::models::exaone4`).
-        "exaone-moe" => sliding_layers_rotate(has_sliding_window),
-        // `muse-glimmer.cpp:88` is `const bool use_rope =
-        // hparams.is_swa(il)` with the comment "RoPE runs on the SWA
-        // layers, NoPE on full ones", and `:19` reads the window as a
-        // REQUIRED key, so the rule is unconditional here as it is for
-        // `cohere2` and `maple`.
-        "muse-glimmer" => RopeLayers::SlidingOnly,
         // `nemotron-h.cpp:181-193` builds its attention with no
         // `ggml_rope_ext` at all: the Mamba-2 layers carry position.
         "nemotron_h" | "nemotron_h_moe" => RopeLayers::Never,
@@ -311,28 +295,6 @@ pub fn rope_layers_from_table(
         // every SmolLM3 file: 9 of a 36-layer SmolLM3-3B's layers get no
         // rotation.
         "smollm3" => no_rope_every(NoRopePhase::LastOfPeriod),
-        // `smallthinker.cpp:16-18`: the step is set to `n_layer` (i.e.
-        // "always rope") ONLY on the no-window branch. With a window the
-        // field keeps the `llama-hparams.h:203` default of 4 and
-        // :108-109 skips `il % 4 == 0`. LIVE, and it was WRONG: frink
-        // has `smallthinker` on the audited generic path and rotated
-        // every layer of it.
-        "smallthinker" if has_sliding_window && n_layers != LLAMA_CPP_DEFAULT_NO_ROPE_STEP => {
-            no_rope_every(NoRopePhase::FirstOfPeriod)
-        }
-        // `afmoe.cpp:137-138` reads the step and never assigns it, so it
-        // is the default 4. LIVE since 2026-09-11: `afmoe` is audited on
-        // a four-layer fixture whose layer 3 is the unrotated one
-        // (`tests/gated_attention_graphs.rs`).
-        "afmoe" => no_rope_every(NoRopePhase::LastOfPeriod),
-        // `llama4.cpp:11` sets the step to `n_layer` ("always use rope",
-        // its own comment) only when the file declares a window of ZERO,
-        // the branch `crate::chunked_swa` refuses because libllama
-        // aborts on it; every other Llama-4 keeps the default 4 and
-        // :145-146 skips `(il + 1) % 4 == 0`, which is exactly the
-        // full-attention layer of its 3-chunked-1-full period. LIVE
-        // since 2026-09-14 (`tests/llama4_graphs.rs`). `llama4`'s rule is
-        // `crate::models::llama4`'s (#403 step 6b).
         _ => RopeLayers::All,
     }
 }

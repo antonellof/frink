@@ -755,7 +755,7 @@ impl Decoder {
         // Two answers, one field: a STORED embedding norm (`bloom`) or
         // a weightless one (`muse-glimmer.cpp:69`), and the tables that
         // decide them are disjoint by construction
-        // (`norm_sites::WEIGHTLESS_EMBEDDING_NORM`).
+        // (`TensorFacts::weightless_embedding_norm`).
         let embedding_norm = if facts.tensors.weightless_embedding_norm {
             crate::norm::NormOp::RmsNoParams
         } else {

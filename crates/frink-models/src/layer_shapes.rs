@@ -80,6 +80,12 @@ pub const MAPLE_SHAPES: &str =
          the array must LOAD even where every entry agrees. Landed upstream after the \
          2026-08-04 pin and closed on 2026-09-19 with one `crate::rope_layers` row";
 
+/// `laguna`'s reach note, stated by `crate::models::laguna` (#403 step 9b).
+pub const LAGUNA_SHAPES: &str =
+    "generic. laguna.cpp:87-88 (loader) and :176-177 (graph) read n_head(i) per layer; \
+         KV heads uniform (:86). Closed with the gated attention (`crate::attn_gate`); the \
+         second rotary width at :50 is `ModelConfig::rope_dim_swa` (`crate::swa_geometry`)";
+
 /// Architectures whose llama.cpp tensor loader AND graph both index the
 /// per-layer arrays, with the lines. Anything else gets layer 0 from
 /// `LLAMA_LOAD_LOCALS` upstream, so a file whose layers disagree cannot
@@ -101,12 +107,6 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
         "openelm",
         "generic. openelm.cpp:26-28 (loader) and :67-69 (graph): all three per layer, sizing \
          one fused wqkv per layer",
-    ),
-    (
-        "laguna",
-        "generic. laguna.cpp:87-88 (loader) and :176-177 (graph) read n_head(i) per layer; \
-         KV heads uniform (:86). Closed with the gated attention (`crate::attn_gate`); the \
-         second rotary width at :50 is `ModelConfig::rope_dim_swa` (`crate::swa_geometry`)",
     ),
     (
         "mimo2",

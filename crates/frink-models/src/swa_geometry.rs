@@ -75,15 +75,6 @@ pub fn swa_layers_unscaled_rope(arch: &str) -> Option<&'static str> {
     crate::models::ArchFacts::of(arch).swa.layers_unscaled_rope
 }
 
-/// [`swa_layers_unscaled_rope`] from this table alone (`olmo2` is in
-/// `crate::models::olmo2`).
-pub(crate) fn swa_layers_unscaled_rope_from_table(arch: &str) -> Option<&'static str> {
-    match arch {
-        "laguna" => Some("laguna.cpp:48,181-193"),
-        _ => None,
-    }
-}
-
 /// The llama.cpp line where `arch` halves the FULL-attention layers'
 /// rotary width after the sliding width was seeded from the unhalved
 /// value, or `None`. `step35.cpp:9` alone (measured: `grep -n
@@ -113,7 +104,6 @@ pub fn window_required(arch: &str) -> Option<&'static str> {
 /// `ArchFacts::from_tables`.
 pub(crate) fn window_required_from_table(arch: &str) -> Option<&'static str> {
     match arch {
-        "exaone-moe" => Some("exaone-moe.cpp:13"),
         "lfm3" => Some("lfm3.cpp:18"),
         _ => None,
     }

@@ -85,7 +85,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("deepseek32", "src/models/deepseek32.cpp:81"),
     ("deepseek4", "src/models/deepseek4.cpp:101"),
     ("dots3note", "src/models/dots3note.cpp:70"),
-    ("exaone-moe", "src/models/exaone-moe.cpp:47"),
     ("gemma4-assistant", "src/models/gemma4-assistant.cpp:47"),
     ("glm-dsa", "src/models/glm-dsa.cpp:109"),
     ("glm4moe", "src/models/glm4-moe.cpp:49"),

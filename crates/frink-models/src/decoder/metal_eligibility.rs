@@ -122,7 +122,7 @@ impl Decoder {
             // Every fused launch takes ONE epsilon for the whole layer;
             // `muse-glimmer.cpp:63` runs its post-norms at a literal
             // 1e-8 and its pre-norms at the model's
-            // (`crate::norm::POST_NORM_EPS_LITERAL`), so a model whose
+            // (`NormFacts::post_norm_eps_literal`), so a model whose
             // two epsilons differ stays on the host rather than having
             // its post-norms silently run at the wrong one.
             && config.post_norm_eps() == config.rms_norm_eps

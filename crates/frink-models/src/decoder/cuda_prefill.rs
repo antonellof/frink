@@ -111,7 +111,7 @@ impl Decoder {
         )?;
         // One `rms_eps` uniform for the whole layer, so a model whose
         // post-norms run at a different epsilon than its pre-norms
-        // (`frink_models::norm::POST_NORM_EPS_LITERAL`) stays on the
+        // (`NormFacts::post_norm_eps_literal`) stays on the
         // host.
         if self.config.post_norm_eps() != self.config.rms_norm_eps {
             return None;

@@ -539,10 +539,7 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     ("minicpm", MultiplierSupport::MINICPM),
     ("talkie", MultiplierSupport::TALKIE),
     ("minimax-01", MultiplierSupport::MINIMAX_01),
-    // `muse-glimmer.cpp:8` reads `logit_scale` REQUIRED and `:186`
-    // MULTIPLIES by it, which is `cohere2`'s shape rather than
-    // Granite's divide.
-    ("muse-glimmer", MultiplierSupport::COHERE2),
+    // `muse-glimmer` is in `crate::models::muse_glimmer`.
     // `hrm-text.cpp:8` reads `embedding_scale` OPTIONAL and
     // `build_inp_embd` applies it; the other three it never reads.
     ("hrm_text", MultiplierSupport::EMBEDDING_ONLY),
