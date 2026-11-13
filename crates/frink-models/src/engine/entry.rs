@@ -111,6 +111,21 @@ pub trait Engine: Sync {
             self.forward_token_on_worker(token_id, pos, state)
         })
     }
+
+    /// Runs a prompt: `tokens` at positions `start_pos..`, returning the
+    /// logits after the last one (empty for no tokens).
+    ///
+    /// The default is one [`Engine::forward_token`] per token, which is
+    /// what every generation loop spelled out by hand before this
+    /// existed. An engine with a batched prompt path overrides it; the
+    /// result must be what the default would have returned.
+    fn prefill(&self, tokens: &[usize], start_pos: usize, state: &mut Self::State) -> Vec<f32> {
+        let mut last = Vec::new();
+        for (i, &tok) in tokens.iter().enumerate() {
+            last = self.forward_token(tok, start_pos + i, state);
+        }
+        last
+    }
 }
 
 /// Whether [`par::on_workers`] promotes in this process at all.

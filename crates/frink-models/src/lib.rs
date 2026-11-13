@@ -47,6 +47,8 @@ pub mod ctk;
 pub mod devices;
 pub mod gemma4_engine;
 pub mod gemma4_gguf_loader;
+#[cfg(feature = "metal")]
+pub(crate) mod gemma4_metal;
 pub mod glm52_decoder;
 pub mod glm52_gguf_loader;
 pub mod glm_dsa;

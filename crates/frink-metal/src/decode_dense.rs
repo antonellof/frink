@@ -21,6 +21,7 @@ use crate::gpu::{
 use crate::kernel_timing::SpanClock;
 use crate::mem_ranges::MemRanges;
 use crate::norm::{encode_add_rms_norm, encode_rms_norm};
+use crate::ple::{PerLayerGateMetal, PleInputMetal};
 use crate::timing::{commit_wait_note, SubmitClock};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandEncoder, MTLCommandQueue};
@@ -39,6 +40,10 @@ pub struct AttnExtras<'a> {
     pub v_bias: Option<&'a [f32]>,
     pub q_norm: Option<&'a [f32]>,
     pub k_norm: Option<&'a [f32]>,
+    /// Per-head RMSNorm of V (`head_dim` weights). Gemma-4 norms V with
+    /// no weight at all (`ggml_rms_norm` on `Vcur`); its caller passes
+    /// ones, which is the same arithmetic.
+    pub v_norm: Option<&'a [f32]>,
     pub attn_logit_softcap: Option<f32>,
 }
 
@@ -65,7 +70,81 @@ impl AttnExtras<'_> {
             || self.v_bias.is_some()
             || self.q_norm.is_some()
             || self.k_norm.is_some()
+            || self.v_norm.is_some()
     }
+
+    /// True when any field touches K or V. A layer that reads another
+    /// layer's cache ([`LayerKv::Shared`]) projects neither, so it must
+    /// carry none of these.
+    pub fn touches_kv(&self) -> bool {
+        self.k_bias.is_some()
+            || self.v_bias.is_some()
+            || self.k_norm.is_some()
+            || self.v_norm.is_some()
+    }
+}
+
+/// Where one layer's attention gets its keys and values.
+///
+/// `slot` indexes the `kvs` slice the stack is handed. Every model but
+/// Gemma-4 gives each layer its own slot (`Own`, slot = its position in
+/// the stack); Gemma-4's last `shared_kv_layers` layers project no K or
+/// V at all and attend over an earlier layer's cache as that layer left
+/// it for this very token (`Shared`). One enum rather than optional K/V
+/// launches beside a separate index, so a layer cannot project a K that
+/// nothing appends, or append to a slot another layer owns.
+#[derive(Clone, Copy)]
+pub enum LayerKv<L> {
+    Own { k: L, v: L, slot: usize },
+    Shared { slot: usize },
+}
+
+impl<L> LayerKv<L> {
+    pub fn slot(&self) -> usize {
+        match self {
+            Self::Own { slot, .. } | Self::Shared { slot } => *slot,
+        }
+    }
+
+    /// The K and V projections, when this layer has its own.
+    pub fn own(&self) -> Option<(&L, &L)> {
+        match self {
+            Self::Own { k, v, .. } => Some((k, v)),
+            Self::Shared { .. } => None,
+        }
+    }
+}
+
+/// Checks a stack's KV wiring before anything is encoded: each slot is
+/// owned by exactly one layer, every shared read comes after its owner,
+/// and a sharing layer carries no K/V epilogue. Returns, per slot,
+/// whether anything owns it.
+pub(crate) fn check_layer_kv<L>(
+    kv: impl Iterator<Item = (LayerKv<L>, bool)>,
+    n_slots: usize,
+) -> Vec<bool> {
+    let mut owned = vec![false; n_slots];
+    for (i, (kv, touches_kv)) in kv.enumerate() {
+        let slot = kv.slot();
+        assert!(slot < n_slots, "layer {i}: KV slot {slot} of {n_slots}");
+        match kv {
+            LayerKv::Own { .. } => {
+                assert!(!owned[slot], "layer {i}: KV slot {slot} owned twice");
+                owned[slot] = true;
+            }
+            LayerKv::Shared { .. } => {
+                assert!(
+                    owned[slot],
+                    "layer {i}: reads KV slot {slot} before any layer writes it"
+                );
+                assert!(
+                    !touches_kv,
+                    "layer {i}: a shared-KV layer has no K/V to bias or norm"
+                );
+            }
+        }
+    }
+    owned
 }
 
 /// Which buffer [`launch_decode_dense_stack`] hands back. Named, not
@@ -85,8 +164,7 @@ pub struct DenseLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
     pub ffn_norm_w: &'a [f32],
     pub q: MatvecLaunch<'a>,
-    pub k: MatvecLaunch<'a>,
-    pub v: MatvecLaunch<'a>,
+    pub kv: LayerKv<MatvecLaunch<'a>>,
     pub o: MatvecLaunch<'a>,
     pub gate: MatvecLaunch<'a>,
     pub up: MatvecLaunch<'a>,
@@ -106,6 +184,25 @@ pub struct DenseLayerMetal<'a> {
     /// block output *before* the residual add.
     pub post_attn_norm: Option<&'a [f32]>,
     pub post_ffn_norm: Option<&'a [f32]>,
+    /// Gemma-4's per-layer embedding gate, after the FFN residual; reads
+    /// the stack's `ple` plane.
+    pub per_layer: Option<PerLayerGateMetal<'a, MatvecLaunch<'a>>>,
+    /// Gemma-4's `layer_output_scale`: the whole residual stream is
+    /// multiplied by it at the end of the layer.
+    pub out_scale: Option<f32>,
+}
+
+impl DenseLayerMetal<'_> {
+    /// Does this layer need every residual applied eagerly, so `h` holds
+    /// the full stream at the points where it is normed, gated or
+    /// scaled? A post-norm does (see the sandwich comment in the stack),
+    /// and so does anything that reads or scales `h` after the FFN.
+    fn needs_eager_residual(&self) -> bool {
+        self.post_attn_norm.is_some()
+            || self.post_ffn_norm.is_some()
+            || self.per_layer.is_some()
+            || self.out_scale.is_some()
+    }
 }
 
 /// Optional on-GPU embedding gather at the start of
@@ -143,36 +240,59 @@ pub fn launch_decode_dense_stack(
     argmax_only: bool,
     embd: Option<&EmbdGatherMetal<'_>>,
     gelu_ffn: bool,
+    ple: Option<&PleInputMetal<'_, MatvecLaunch<'_>>>,
 ) -> Result<Vec<f32>, MetalError> {
-    assert_eq!(layers.len(), kvs.len());
     assert!(!layers.is_empty());
     let hidden_dim = match embd {
         Some(e) => e.n_cols,
         None => hidden.len(),
     };
     assert!(hidden_dim > 0);
-    let head_dim = kvs[0].head_dim;
-    let n_kv_heads = kvs[0].n_kv_heads;
-    for kv in kvs.iter() {
-        assert_eq!(kv.head_dim, head_dim);
-        assert_eq!(kv.n_kv_heads, n_kv_heads);
+    // Head width and KV head count are the SLOT's, per layer: Gemma-4's
+    // sliding and full layers differ in both widths.
+    let owned = check_layer_kv(
+        layers.iter().map(|l| (l.kv, l.extras.touches_kv())),
+        kvs.len(),
+    );
+    for (kv, owned) in kvs.iter().zip(&owned) {
+        assert!(*owned, "a KV slot no layer of this stack writes");
         assert_eq!(pos, kv.seq_len);
         if kv.seq_len >= kv.capacity {
             return Err(MetalError::CommandFailed);
         }
     }
     for layer in layers.iter() {
+        let kv = &kvs[layer.kv.slot()];
+        assert_eq!(layer.q.rows, n_heads * kv.head_dim);
         assert_freq_factors_len(
             layer.rope.and_then(|r| r.freq_factors),
             rope_layout,
-            head_dim,
+            kv.head_dim,
         );
+        if layer.per_layer.is_some() {
+            assert!(ple.is_some(), "a per-layer gate with no PLE plane");
+        }
+    }
+    if let Some(p) = ple {
+        p.check(1, p.model_proj.rows);
     }
 
     let max_q = layers.iter().map(|l| l.q.rows).max().unwrap();
-    let max_kv = layers.iter().map(|l| l.k.rows).max().unwrap();
-    let max_gate = layers.iter().map(|l| l.gate.rows).max().unwrap();
-    let attn_elems = n_heads * head_dim;
+    let max_kv = layers
+        .iter()
+        .filter_map(|l| l.kv.own().map(|(k, v)| k.rows.max(v.rows)))
+        .max()
+        .unwrap_or(1);
+    let max_gate = layers
+        .iter()
+        .map(|l| {
+            l.gate
+                .rows
+                .max(l.per_layer.as_ref().map_or(0, |p| p.gate.rows))
+        })
+        .max()
+        .unwrap();
+    let attn_elems = n_heads * kvs.iter().map(|kv| kv.head_dim).max().unwrap();
     let logits_rows = output.map(|o| o.rows);
 
     let shared = shared_metal()?;
@@ -229,13 +349,22 @@ pub fn launch_decode_dense_stack(
         })
         .collect::<Result<Vec<_>, MetalError>>()?;
 
+    // Held to the end of the call: the plane is read by every layer.
+    let ple_guard = match ple {
+        Some(p) => Some(crate::ple::borrow_ple_scratch(device, p.plane_elems(1))?),
+        None => None,
+    };
+    let ple_scratch = ple_guard.as_ref().map(|g| g.as_ref().expect("ple scratch"));
+    if let (Some(p), Some(sc)) = (ple, ple_scratch) {
+        p.upload_tok(sc);
+    }
+
     let clock = SubmitClock::start();
     let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
-    // Gemma-style post-norms ("sandwich"): these layers take the EAGER
-    // residual path below, which is what makes concurrent encode safe here.
-    let sandwich = layers
-        .iter()
-        .any(|l| l.post_attn_norm.is_some() || l.post_ffn_norm.is_some());
+    // Gemma-style post-norms ("sandwich"), and Gemma-4's per-layer gate
+    // and output scale: these layers take the EAGER residual path below,
+    // which is what makes concurrent encode safe here.
+    let sandwich = layers.iter().any(DenseLayerMetal::needs_eager_residual);
     // Every model encodes concurrently: gate∥up and Q∥K∥V overlap, and the
     // hazard tracker emits a barrier only where a dispatch reads or
     // overwrites something still in flight, narrowed to those resources.
@@ -282,6 +411,11 @@ pub fn launch_decode_dense_stack(
     };
     let _embd_resident = embd_resident;
 
+    if let (Some(p), Some(sc)) = (ple, ple_scratch) {
+        spans.span(&cmd_buf, &mut encoder, "ple_inputs")?;
+        p.encode_decode(&encoder, &mut mrs, device, sc, h_buf, rms_eps)?;
+    }
+
     // Gemma sandwich (post_attn / post_ffn) must apply residuals eagerly —
     // same shape as the working prefill stack / CPU path. Deferred
     // `h += down` fused into the next layer's attn_norm matches SmolLM2
@@ -289,18 +423,26 @@ pub fn launch_decode_dense_stack(
     // `*` spam) even when GQA unit tests pass.
     // `sandwich` was computed above (also selects serial encoder).
 
-    for (layer_idx, (layer, kv)) in layers.iter().zip(kvs.iter_mut()).enumerate() {
+    for (layer_idx, layer) in layers.iter().enumerate() {
         assert_eq!(layer.attn_norm_w.len(), hidden_dim);
         assert_eq!(layer.ffn_norm_w.len(), hidden_dim);
         assert_eq!(layer.o.rows, hidden_dim);
         assert_eq!(layer.down.rows, hidden_dim);
         assert_eq!(layer.gate.rows, layer.up.rows);
+        let kv = &kvs[layer.kv.slot()];
+        let (head_dim, n_kv_heads) = (kv.head_dim, kv.n_kv_heads);
+        let own_kv = layer.kv.own();
 
         let attn_nw = resident_f32_buffer(device, layer.attn_norm_w)?;
         let ffn_nw = resident_f32_buffer(device, layer.ffn_norm_w)?;
         let q_w = resident_weight_buffer(device, layer.q.weights)?;
-        let k_w = resident_weight_buffer(device, layer.k.weights)?;
-        let v_w = resident_weight_buffer(device, layer.v.weights)?;
+        let kv_w = match own_kv {
+            Some((k, v)) => Some((
+                resident_weight_buffer(device, k.weights)?,
+                resident_weight_buffer(device, v.weights)?,
+            )),
+            None => None,
+        };
         let o_w = resident_weight_buffer(device, layer.o.weights)?;
         let gate_w = resident_weight_buffer(device, layer.gate.weights)?;
         let up_w = resident_weight_buffer(device, layer.up.weights)?;
@@ -339,13 +481,19 @@ pub fn launch_decode_dense_stack(
             )?;
             mrs.end_op(&[h_buf, down_buf], &[h_buf, x_buf]);
         }
-        // Q∥K∥V
+        // Q∥K∥V (Q alone on a layer that reads another layer's KV).
         spans.span(&cmd_buf, &mut encoder, "qkv")?;
-        mrs.begin_op(&encoder, &[x_buf], &[q_buf, k_buf, v_buf]);
-        encode_matvec(&encoder, device, &layer.q, &q_w, x_buf, q_buf)?;
-        encode_matvec(&encoder, device, &layer.k, &k_w, x_buf, k_buf)?;
-        encode_matvec(&encoder, device, &layer.v, &v_w, x_buf, v_buf)?;
-        mrs.end_op(&[x_buf], &[q_buf, k_buf, v_buf]);
+        if let (Some((k, v)), Some((k_w, v_w))) = (own_kv, kv_w.as_ref()) {
+            mrs.begin_op(&encoder, &[x_buf], &[q_buf, k_buf, v_buf]);
+            encode_matvec(&encoder, device, &layer.q, &q_w, x_buf, q_buf)?;
+            encode_matvec(&encoder, device, k, k_w, x_buf, k_buf)?;
+            encode_matvec(&encoder, device, v, v_w, x_buf, v_buf)?;
+            mrs.end_op(&[x_buf], &[q_buf, k_buf, v_buf]);
+        } else {
+            mrs.begin_op(&encoder, &[x_buf], &[q_buf]);
+            encode_matvec(&encoder, device, &layer.q, &q_w, x_buf, q_buf)?;
+            mrs.end_op(&[x_buf], &[q_buf]);
+        }
 
         // Skipped entirely when the layer has no biases and no QK-norm:
         // the hazard check around zero dispatches is still a real
@@ -361,8 +509,8 @@ pub fn launch_decode_dense_stack(
                 k_buf,
                 v_buf,
                 layer.q.rows,
-                layer.k.rows,
-                layer.v.rows,
+                own_kv.map_or(0, |(k, _)| k.rows),
+                own_kv.map_or(0, |(_, v)| v.rows),
                 n_heads,
                 n_kv_heads,
                 head_dim,
@@ -382,7 +530,14 @@ pub fn launch_decode_dense_stack(
             // Q and K in one dispatch: same theta, position and freq
             // factors, different buffers, and RoPE is per-head independent.
             spans.span(&cmd_buf, &mut encoder, "rope")?;
-            mrs.begin_op(&encoder, &[q_buf, k_buf], &[q_buf, k_buf]);
+            // A shared-KV layer rotates Q only: its K was rotated, at
+            // this position, by the layer that wrote the slot.
+            let qk: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
+                &[q_buf, k_buf]
+            } else {
+                &[q_buf]
+            };
+            mrs.begin_op(&encoder, qk, qk);
             encode_rope(
                 &encoder,
                 device,
@@ -391,7 +546,7 @@ pub fn launch_decode_dense_stack(
                     vecs: q_buf,
                     n_heads: n_heads as u32,
                 },
-                Some(RopeTarget {
+                own_kv.map(|_| RopeTarget {
                     vecs: k_buf,
                     n_heads: n_kv_heads as u32,
                 }),
@@ -400,17 +555,19 @@ pub fn launch_decode_dense_stack(
                 pos as u32,
                 ff_buf,
             )?;
-            mrs.end_op(&[q_buf, k_buf], &[q_buf, k_buf]);
+            mrs.end_op(qk, qk);
         }
 
-        let token_elems = (n_kv_heads * head_dim) as u32;
-        let offset = (pos * n_kv_heads * head_dim) as u32;
-        spans.span(&cmd_buf, &mut encoder, "kv_append")?;
-        mrs.begin_op(&encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
-        // K and V in one dispatch: same offset, same length, disjoint
-        // destinations.
-        encode_kv_store_append(&encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
-        mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+        if own_kv.is_some() {
+            let token_elems = (n_kv_heads * head_dim) as u32;
+            let offset = (pos * n_kv_heads * head_dim) as u32;
+            spans.span(&cmd_buf, &mut encoder, "kv_append")?;
+            mrs.begin_op(&encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
+            // K and V in one dispatch: same offset, same length, disjoint
+            // destinations.
+            encode_kv_store_append(&encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
+            mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+        }
 
         let new_seq = (pos + 1) as u32;
         // Sliding window: only the last `window` positions (incl. current)
@@ -540,6 +697,30 @@ pub fn launch_decode_dense_stack(
             encode_vec_add(&encoder, device, h_buf, down_buf, hidden_dim as u32)?;
             mrs.end_op(&[h_buf, down_buf], &[h_buf]);
         }
+        if let Some(gate) = layer.per_layer.as_ref() {
+            let (p, sc) = (ple.expect("checked above"), ple_scratch.expect("with ple"));
+            spans.span(&cmd_buf, &mut encoder, "per_layer_gate")?;
+            gate.encode_decode(
+                &encoder,
+                &mut mrs,
+                device,
+                sc,
+                p.n_layer,
+                &crate::ple::GateScratch {
+                    h: h_buf,
+                    gate: gate_buf,
+                    act: act_buf,
+                    out: down_buf,
+                    half: None,
+                },
+                hidden_dim,
+                rms_eps,
+            )?;
+        }
+        if let Some(scale) = layer.out_scale {
+            spans.span(&cmd_buf, &mut encoder, "out_scale")?;
+            crate::ple::encode_out_scale(&encoder, &mut mrs, device, h_buf, scale, hidden_dim)?;
+        }
         // Non-sandwich: defer `h += down` until the next layer's attn_norm
         // (or final_norm) so it fuses with that RMSNorm. `down_buf` stays in
         // the tracker's dst set, so the next layer's fused norm barriers
@@ -623,6 +804,7 @@ pub fn launch_decode_dense_stack(
     for kv in kvs.iter_mut() {
         kv.seq_len = pos + 1;
     }
+    drop(ple_guard);
 
     let norm_resident = download == Download::NormedHidden;
     let src: &ProtocolObject<dyn MTLBuffer> = match download {
@@ -661,7 +843,93 @@ pub fn launch_decode_dense_stack(
 
 #[cfg(test)]
 mod tests {
-    use super::AttnExtras;
+    use super::{check_layer_kv, AttnExtras, LayerKv};
+
+    fn own(slot: usize) -> (LayerKv<()>, bool) {
+        (LayerKv::Own { k: (), v: (), slot }, true)
+    }
+
+    fn shared(slot: usize) -> (LayerKv<()>, bool) {
+        (LayerKv::Shared { slot }, false)
+    }
+
+    /// Gemma-4 E2B's wiring in miniature: the last layers attend over
+    /// the last sliding and the last full layer's caches. Every slot is
+    /// owned exactly once, and nothing reads a slot before it is
+    /// written in the same token.
+    #[test]
+    fn layer_kv_accepts_gemma4_shared_kv_wiring() {
+        let wiring = [
+            own(0),
+            own(1),
+            own(2),
+            own(3),
+            shared(2),
+            shared(3),
+            shared(2),
+        ];
+        assert_eq!(check_layer_kv(wiring.into_iter(), 4), vec![true; 4]);
+        // A slot nobody owns is reported, not invented: the stacks refuse it.
+        assert_eq!(
+            check_layer_kv([own(0), shared(0)].into_iter(), 2),
+            vec![true, false]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "before any layer writes it")]
+    fn layer_kv_refuses_a_read_before_its_owner() {
+        check_layer_kv([shared(1), own(0), own(1)].into_iter(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "owned twice")]
+    fn layer_kv_refuses_two_owners_of_one_slot() {
+        check_layer_kv([own(0), own(0)].into_iter(), 1);
+    }
+
+    /// A sharing layer projects no K or V, so a K norm or V bias on it
+    /// would be silently dropped by the stack rather than applied.
+    #[test]
+    #[should_panic(expected = "no K/V to bias or norm")]
+    fn layer_kv_refuses_a_kv_epilogue_on_a_sharing_layer() {
+        check_layer_kv([own(0), (LayerKv::Shared { slot: 0 }, true)].into_iter(), 1);
+    }
+
+    #[test]
+    fn touches_kv_lists_every_field_on_k_or_v() {
+        let w = [1.0f32];
+        let none = AttnExtras {
+            q_bias: Some(&w),
+            q_norm: Some(&w),
+            attn_logit_softcap: Some(30.0),
+            ..AttnExtras::default()
+        };
+        assert!(
+            !none.touches_kv(),
+            "Q-side fields are a sharing layer's own"
+        );
+        for e in [
+            AttnExtras {
+                k_bias: Some(&w),
+                ..AttnExtras::default()
+            },
+            AttnExtras {
+                v_bias: Some(&w),
+                ..AttnExtras::default()
+            },
+            AttnExtras {
+                k_norm: Some(&w),
+                ..AttnExtras::default()
+            },
+            AttnExtras {
+                v_norm: Some(&w),
+                ..AttnExtras::default()
+            },
+        ] {
+            assert!(e.touches_kv());
+        }
+    }
 
     /// `encodes_anything` decides whether the decode stack pays a barrier
     /// for this layer's attention epilogue, so a field it forgets is a
@@ -681,6 +949,7 @@ mod tests {
             v_bias,
             q_norm,
             k_norm,
+            v_norm,
             attn_logit_softcap,
         } = &base;
         assert!(q_bias.is_none());
@@ -688,6 +957,7 @@ mod tests {
         assert!(v_bias.is_none());
         assert!(q_norm.is_none());
         assert!(k_norm.is_none());
+        assert!(v_norm.is_none());
         assert!(attn_logit_softcap.is_none());
         assert!(
             !base.encodes_anything(),
@@ -695,7 +965,7 @@ mod tests {
         );
 
         // Every field that DOES encode a dispatch, one at a time.
-        let encoders: [AttnExtras<'_>; 5] = [
+        let encoders: [AttnExtras<'_>; 6] = [
             AttnExtras {
                 q_bias: Some(&w),
                 ..AttnExtras::default()
@@ -714,6 +984,10 @@ mod tests {
             },
             AttnExtras {
                 k_norm: Some(&w),
+                ..AttnExtras::default()
+            },
+            AttnExtras {
+                v_norm: Some(&w),
                 ..AttnExtras::default()
             },
         ];

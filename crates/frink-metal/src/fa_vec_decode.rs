@@ -507,16 +507,21 @@ kernel void gqa_decode_fa_vec_wide(
 typedef decltype(gqa_decode_fa_vec_wide<128>) gqa_decode_fa_vec_wide_t;
 template [[host_name("gqa_decode_fa_vec_d128")]] kernel gqa_decode_fa_vec_wide_t gqa_decode_fa_vec_wide<128>;
 template [[host_name("gqa_decode_fa_vec_d256")]] kernel gqa_decode_fa_vec_wide_t gqa_decode_fa_vec_wide<256>;
+template [[host_name("gqa_decode_fa_vec_d512")]] kernel gqa_decode_fa_vec_wide_t gqa_decode_fa_vec_wide<512>;
 "#;
 
-/// TG size for FA-vec decode (d=64/96/128/256): NSG=8 × NW=32.
+/// TG size for FA-vec decode (d=64/96/128/256/512): NSG=8 × NW=32.
 pub(crate) fn gqa_fa_vec_threadgroup_size(_head_dim: u32) -> u32 {
     256
 }
 
 /// Head dims the FA-vec decode kernels cover (dedicated specializations).
+///
+/// 512 is Gemma-4's full-attention width. It is the wide kernel at
+/// `D = 512` (four float4 slices per lane), and its threadgroup memory,
+/// `(512 + 8 * (32 + 512)) * 4` = 19 KiB, is under the 32 KiB limit.
 pub(crate) fn gqa_fa_vec_supported(head_dim: u32) -> bool {
-    matches!(head_dim, 64 | 96 | 128 | 256)
+    matches!(head_dim, 64 | 96 | 128 | 256 | 512)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -535,6 +540,11 @@ pub(crate) fn encode_gqa_fa_vec(
     softcap: f32,
 ) -> Result<(), MetalError> {
     let pipe = match head_dim {
+        512 => ensure_pipeline(
+            device,
+            GQA_DECODE_FA_VEC_WIDE_KERNEL_SRC,
+            "gqa_decode_fa_vec_d512",
+        )?,
         256 => ensure_pipeline(
             device,
             GQA_DECODE_FA_VEC_WIDE_KERNEL_SRC,

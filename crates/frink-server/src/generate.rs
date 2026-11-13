@@ -2839,11 +2839,10 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
         pos += 1;
         l
     } else {
-        let mut l = Vec::new();
-        for &tok in tokens.iter() {
-            l = engine.forward_token(tok, pos, &mut state);
-            pos += 1;
-        }
+        // Batched where the engine has a batched prompt path (Gemma-4 on
+        // Metal), one token at a time otherwise; see `Engine::prefill`.
+        let l = engine.prefill(&tokens, pos, &mut state);
+        pos += tokens.len();
         l
     };
     let prefill_secs = prefill_start.elapsed().as_secs_f64();

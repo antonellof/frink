@@ -316,6 +316,8 @@ pub fn load_gemma4_engine(file: &impl TensorSource) -> Result<Gemma4Engine, Load
             rope_freqs,
         },
         hp,
+        #[cfg(feature = "metal")]
+        device_aux: Default::default(),
     };
     // Same contract as the generic loader: resolve every kernel now,
     // then seal. This engine has no batched prefill, which the probe

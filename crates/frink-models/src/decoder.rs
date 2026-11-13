@@ -37,6 +37,8 @@ mod layer_taps;
 mod lm_head;
 mod metal_eligibility;
 #[cfg(feature = "metal")]
+pub(crate) use metal_eligibility::metal_attn_switched_on;
+#[cfg(feature = "metal")]
 mod metal_kv;
 #[cfg(feature = "metal")]
 mod metal_moe;

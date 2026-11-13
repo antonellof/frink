@@ -13,8 +13,8 @@
 //! KV growth without making the number depend on a tokenizer's behavior.
 //!
 //! Engines: generic [`Decoder`] (batched `forward_batch_last` for `pp*`)
-//! and dedicated [`Gemma4Engine`] (sequential `forward_token` for both
-//! `pp*` and `tg*` until a batched Gemma-4 prefill lands).
+//! and dedicated [`Gemma4Engine`] (`Engine::prefill` for `pp*`, batched
+//! on Metal and sequential elsewhere; `forward_token` for `tg*`).
 
 use crate::bench_contract::{self, HostState};
 use crate::bench_guard::{self, WorkloadDigest};
@@ -302,10 +302,12 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             let engine = *engine;
             let load_s = load_t.elapsed().as_secs_f64();
             let params_b = estimate_gemma4_params(&engine);
-            // Gemma-4 has no batched prefill yet: pp* is sequential
-            // forward_token (same as `frink run`). llama-bench still
-            // batches, so the pp gap is partly that asymmetry.
-            eprintln!("frink bench: gemma4 uses sequential prefill (no forward_batch_last yet)");
+            // pp* runs `Engine::prefill`, as `frink run` does: batched on
+            // Metal up to the sliding window, sequential elsewhere, where
+            // llama-bench batches, so the pp gap there is that asymmetry.
+            if active_backend() != "Metal" {
+                eprintln!("frink bench: gemma4 prefill is sequential off Metal");
+            }
             (params_b, load_s, measure_gemma4(&engine, &args)?)
         }
         other => anyhow::bail!(

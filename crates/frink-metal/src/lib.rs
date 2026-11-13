@@ -108,6 +108,10 @@ mod fa_vec_decode;
 #[cfg(feature = "metal")]
 pub mod decode_dense;
 
+/// Gemma-4's per-layer embeddings, encoded into the dense stacks.
+#[cfg(feature = "metal")]
+pub mod ple;
+
 #[cfg(feature = "metal")]
 pub mod resident_act;
 
