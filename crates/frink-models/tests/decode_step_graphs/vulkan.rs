@@ -3,31 +3,40 @@
 use super::*;
 use frink_core::kv_store::KvDtype;
 
-/// The worst |Vulkan - CPU| logit delta any step may show over a
-/// 32-step greedy decode (the prefill batch and then the row body, each
-/// on the Vulkan stack where it serves a layer and on the matvec and
-/// GEMM offload elsewhere).
+/// The floor of the bound on the worst |Vulkan - CPU| logit delta over
+/// a 32-step greedy decode (the prefill batch and then the row body,
+/// each on the Vulkan stack where it serves a layer and on the matvec
+/// and GEMM offload elsewhere). Both sides keep an f16 KV: the device's
+/// is f16, the stack declines a host cache that is not, and the CPU
+/// child is given the same dtype. What is left is the order a device
+/// kernel accumulates in.
 ///
-/// Both sides keep an f16 KV: the device's is f16, the stack declines a
-/// host cache that is not, and the CPU child is given the same dtype. So
-/// what is left is the order a device kernel accumulates in.
+/// THE BOUND IS PER FIXTURE: this floor, or [`SENSITIVITY_FACTOR`] times
+/// the fixture's own SENSITIVITY, whichever is larger. The sensitivity
+/// is the distance between two CPU decodes of it that differ only in
+/// the KV's rounding (f32 against f16), a perturbation of a part in
+/// 2^11 that the product already accepts. A deep or post-normed fixture
+/// answers such a perturbation with a large change in its logits, and a
+/// constant cannot tell that from a wrong kernel, which this can: a
+/// wrong kernel is orders past it and a rounding difference is inside.
 ///
-/// Measured (2026-11-12, M2 Pro through MoltenVK, the 28 fixtures the
-/// stack serves): min 1.2e-7, p50 3.1e-6, p90 4.3e-4, then the 64-layer
-/// `exaone4_32b` pair at 9.0e-4 and `glm4` at 1.1e-3. The tail is where
-/// a norm sits on a block's output: its sum of squares is an f32 tree on
-/// the device and an f64 loop on the CPU.
+/// Measured (2026-11-12, M2 Pro through MoltenVK, 36 fixtures served).
+/// 32 are under the floor (min 1.2e-7, median 1.8e-5 over all 36). The
+/// other four, with their sensitivity:
 ///
-/// `glm4` (pre-norms and post-norms) is the fixture's own sensitivity
-/// and not the device's error: against llama.cpp's decode golden the
-/// device is at 7.3e-4 and the CPU with the same f16 KV at 1.2e-3, so
-/// the device is the closer of the two to the oracle. The bound is 2.7x
-/// that distance.
+/// | fixture | layers | Vulkan vs CPU | CPU f32 KV vs CPU f16 KV |
+/// |---|---|---|---|
+/// | `glm4` | 3 | 1.1e-3 | 1.2e-3 |
+/// | `exaone4_32b_nowindow` | 64 | 4.1e-3 | 8.8e-3 |
+/// | `exaone4_32b` (and `_mtp`) | 64 | 8.8e-3 | 1.8e-2 |
 ///
-/// With an f32 KV on the CPU side an earlier run showed 8.7e-2 on
-/// `lora_base`, which is the KV's rounding and not the stack's, and is
-/// why the comparison is f16 against f16.
-pub const VULKAN_DECODE_TOL: f32 = 3e-3;
+/// On `glm4`, which has a llama.cpp decode golden, the device is at
+/// 7.3e-4 from it and the CPU with the same f16 KV at 1.2e-3. On
+/// lavapipe `glm4` is 2.1e-5 from the CPU.
+pub const VULKAN_DECODE_TOL: f32 = 1e-3;
+
+/// How far past its own sensitivity a fixture's Vulkan decode may be.
+const SENSITIVITY_FACTOR: f32 = 2.0;
 
 /// The bound against llama.cpp's decode goldens, which keep an f32 KV:
 /// the Metal gate's, for the same f16 rounding. Measured at 1.8e-4 on
@@ -37,7 +46,7 @@ const VULKAN_GOLDEN_TOL: f32 = 0.2;
 /// Fixtures the stack served, and agreed, at the measurement above. The
 /// gate fails below it: fewer means a refusal moved and a fixture now
 /// runs on the host, which this gate would otherwise pass in silence.
-const MIN_SERVED: usize = 28;
+const MIN_SERVED: usize = 36;
 
 /// Fixtures whose Vulkan decode is not within rounding of the CPU's,
 /// each with what was measured. The gate fails if this set and the
@@ -51,6 +60,37 @@ const MAX_RUN: usize = frink_vulkan::runtime::MAX_DISPATCHES / 19;
 /// A served fixture with F32 weights, which the matvec offload does not
 /// take: with an f32 host KV the stack declines and nothing is submitted.
 const F32_KV_FIXTURE: &str = "smollm3";
+
+/// Ten greedy tokens, and the same ten with every device KV mirror
+/// dropped after the sixth: the mirrors are rebuilt from the host
+/// caches, and the logits are the same bits. On a windowed layer the
+/// host has evicted by then, so the rebuild has to place the rows it
+/// kept at their positions.
+fn a_dropped_mirror_is_rebuilt_to_the_same_logits(d: &Decoder) -> Result<(), String> {
+    let prompt = &common::GRAPH_PROMPT;
+    let run = |drop_at: Option<usize>| {
+        let mut kv = d.config.new_kv_caches();
+        let mut logits = d.forward_batch_last(prompt, 0, &mut kv);
+        for i in 0..10 {
+            if drop_at == Some(i) {
+                for c in kv.iter_mut() {
+                    c.vulkan_attn = None;
+                }
+            }
+            logits = d.forward_token(argmax(&logits), prompt.len() + i, &mut kv);
+        }
+        logits
+    };
+    let (kept, rebuilt) = (run(None), run(Some(6)));
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    if bits(&kept) != bits(&rebuilt) {
+        return Err(format!(
+            "a decode whose mirrors were dropped and rebuilt differs by {:.3e}",
+            common::worst_vs(&rebuilt, &kept)
+        ));
+    }
+    Ok(())
+}
 
 /// The prompt prefilled as two batches (two positions, then the rest
 /// over that prefix) gives the logits of one batch, bit for bit: the
@@ -152,6 +192,9 @@ pub fn run() {
         if let Err(why) = a_split_prefill_is_the_prefill(&d) {
             failures.push((name.clone(), why));
         }
+        if let Err(why) = a_dropped_mirror_is_rebuilt_to_the_same_logits(&d) {
+            failures.push((name.clone(), why));
+        }
         if name == F32_KV_FIXTURE {
             d.config.kv_dtype = KvDtype::F32;
             let before = submissions();
@@ -168,6 +211,15 @@ pub fn run() {
             checked_f32_kv = true;
         }
         let a = device_gate::agreement(&gpu, &cpu);
+        // This fixture's sensitivity, and so its bound: see
+        // `VULKAN_DECODE_TOL`.
+        let sensitivity = device_gate::cpu_rows_from_child(
+            &name,
+            "vulkan_decode_matches_cpu_and_llama_cpp",
+            "f32",
+        )
+        .map_or(0.0, |f32_kv| device_gate::agreement(&f32_kv, &cpu).worst);
+        let tol = VULKAN_DECODE_TOL.max(SENSITIVITY_FACTOR * sensitivity);
         let vs_llama = GOLDENS.iter().find(|(g, _)| *g == name).map(|_| {
             let golden = read_golden(&name);
             (
@@ -182,7 +234,7 @@ pub fn run() {
         });
         eprintln!(
             "vulkan-decode {name:>28}: {submitted:>5} submissions, worst |vulkan - cpu| = \
-             {:.3e} over {} steps{}{}",
+             {:.3e} (bound {tol:.1e}) over {} steps{}{}",
             a.worst,
             a.steps,
             a.parted
@@ -193,22 +245,22 @@ pub fn run() {
                 .map(|(w, _)| format!(", worst |vulkan - llama.cpp| = {w:.3e}"))
                 .unwrap_or_default(),
         );
-        if a.worst.is_nan() || a.worst > VULKAN_DECODE_TOL {
+        if a.worst.is_nan() || a.worst > tol {
             failures.push((
                 name.clone(),
                 format!(
-                    "worst |vulkan - cpu| {:.3e} > {VULKAN_DECODE_TOL:.0e} within {} steps",
+                    "worst |vulkan - cpu| {:.3e} > {tol:.1e} within {} steps",
                     a.worst, a.steps
                 ),
             ));
         }
         if let Some(lead) = a.parted {
-            if lead > 2.0 * VULKAN_DECODE_TOL {
+            if lead > 2.0 * tol {
                 failures.push((
                     name.clone(),
                     format!(
                         "greedy token parted from the CPU's at step {} where the CPU led \
-                         by {lead:.3e}, more than a {VULKAN_DECODE_TOL:.0e} error can flip",
+                         by {lead:.3e}, more than a {tol:.1e} error can flip",
                         a.steps - 1
                     ),
                 ));

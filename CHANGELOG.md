@@ -17,6 +17,32 @@ are the ones worth reading twice.
 
 ### Added
 
+- **The Vulkan stack serves sliding windows** (#409). Attention takes
+  a window: each query attends over its own position and the `window -
+  1` before it. The device KV is indexed by position and keeps every
+  row, so a host cache that evicts behind its window is still mirrored:
+  a rebuild places the rows the host kept at their positions. A chunked
+  window keeps the host body. 36 graph fixtures reach the stack, and a
+  model that mixes windowed and full layers is one submission per 26
+  layers again. The decode gate's bound against the CPU is now per
+  fixture: 1e-3, or twice the fixture's own sensitivity (the distance
+  between two CPU decodes that differ only in f16 against f32 KV
+  rounding). The 64-layer `exaone4_32b` is 8.8e-3 from the CPU on the
+  device and 1.8e-2 between those two CPU runs.
+
+- **The Vulkan stack serves GeGLU** (#409). The gated-combine shader
+  takes a GELU mode, the tanh approximation in the cancellation-free
+  form the CPU uses (`x / (1 + exp(-2u))`), so a Gemma-style FFN runs
+  on the device. 33 graph fixtures reach the stack.
+
+- **The Vulkan stack serves every pre-norm kind** (#409). The norm
+  shader gains a LayerNorm mode (the mean subtracted, the divisor the
+  variance, as `ggml_norm`) and a weightless mode, and a norm's bias is
+  the broadcast add after it. So LayerNorm with or without weight and
+  bias (`orion`, `stablelm`, `olmo`), the weightless RMSNorm and the
+  biased RMSNorm run on the device, where only a weighted RMSNorm did.
+  The graph fixtures the stack serves go from 28 to 32.
+
 - **The Vulkan stack serves post-norms and layers with no pre-norm**
   (#409). A norm on a block's output, before the residual add, is the
   RMSNorm op at `post_norm_eps`; a layer whose pre-norm is absent reads
@@ -24,9 +50,8 @@ are the ones worth reading twice.
   pre-norm that is not RMS still keeps the host body. A model that mixes
   windowed and plain layers now has its plain runs on the device, one
   submission a run. The graph fixtures the stack serves go from 21 to
-  28. The gate's bound against the CPU is 3e-3: on `glm4` the device is
-  at 7.3e-4 from llama.cpp's golden where the CPU with the same f16 KV
-  is at 1.2e-3.
+  28. The gate's bound against the CPU became per fixture with the sliding
+  windows, above.
 
 ## [0.62.0] - 2026-11-12
 

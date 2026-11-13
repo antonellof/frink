@@ -71,6 +71,15 @@ use ash::vk;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceBuf(usize);
 
+/// Which mean a norm divides by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormKind {
+    /// `x / sqrt(mean(x^2) + eps)`.
+    Rms,
+    /// `(x - mean) / sqrt(var + eps)`.
+    Layer,
+}
+
 /// The shape of one decode attention: `q` is `[n_heads, head_dim]`, the
 /// cache holds `seq_len` positions of `[n_kv_heads, head_dim]` K at word
 /// `k_off` and V at word `v_off`.
@@ -83,6 +92,9 @@ pub struct AttnShape {
     pub k_off: usize,
     pub v_off: usize,
     pub scale: f32,
+    /// A sliding window: each query attends over its own position and
+    /// the `window - 1` before it. `None` is everything cached.
+    pub window: Option<usize>,
 }
 
 /// What one bound op reads and writes: three `(buffer, f32 offset,
@@ -186,11 +198,31 @@ impl<'w> Batch<'w> {
         rows: usize,
         eps: f32,
     ) {
+        self.norm(NormKind::Rms, Some(w), x, out, n, rows, eps);
+    }
+
+    /// A norm over `rows` rows of `n`: RMS, or LayerNorm (the mean
+    /// subtracted, the divisor the variance), times `w` when there is
+    /// one. A bias is [`Self::add_bias`] after it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn norm(
+        &mut self,
+        kind: NormKind,
+        w: Option<DeviceBuf>,
+        x: DeviceBuf,
+        out: DeviceBuf,
+        n: usize,
+        rows: usize,
+        eps: f32,
+    ) {
         let rows = rows * self.positions;
+        let mode = (kind == NormKind::Layer) as u32 | (w.is_none() as u32) << 1;
+        // Binding 0 is not read without a weight; it must still be a
+        // buffer, and `x` holds at least `n` values.
         self.ops.push(Op::Shader {
             shader: RMS_NORM,
-            views: [(w, 0, n), (x, 0, n * rows), (out, 0, n * rows)],
-            push: words(&[n as u32, rows as u32, eps.to_bits()]),
+            views: [(w.unwrap_or(x), 0, n), (x, 0, n * rows), (out, 0, n * rows)],
+            push: words(&[n as u32, rows as u32, eps.to_bits(), mode]),
             grid: grid(rows),
             depth: 1,
         });
@@ -198,11 +230,17 @@ impl<'w> Batch<'w> {
 
     /// `h = silu(g) * u` over `n` values (the SwiGLU combine).
     pub fn swiglu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize) {
+        self.glu(g, u, out, n, false);
+    }
+
+    /// The gated combine `h = act(g) * u` over `n` values: SiLU, or the
+    /// tanh-approximation GELU of a GeGLU FFN when `gelu`.
+    pub fn glu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize, gelu: bool) {
         let n = n * self.positions;
         self.ops.push(Op::Shader {
             shader: SWIGLU,
             views: [(g, 0, n), (u, 0, n), (out, 0, n)],
-            push: words(&[n as u32]),
+            push: words(&[n as u32, gelu as u32]),
             grid: per_value(n),
             depth: 1,
         });
@@ -299,9 +337,14 @@ impl<'w> Batch<'w> {
     ) {
         let p = self.positions;
         let stride = s.seq_len + p - 1;
+        assert!(
+            s.n_heads < 1 << 16 && s.n_kv_heads < 1 << 16,
+            "head counts share a word"
+        );
+        assert!(s.window != Some(0), "a window of no positions");
         let push = words(&[
-            s.n_heads as u32,
-            s.n_kv_heads as u32,
+            s.n_heads as u32 | (s.n_kv_heads as u32) << 16,
+            s.window.unwrap_or(0) as u32,
             s.head_dim as u32,
             s.seq_len as u32,
             s.k_off as u32,

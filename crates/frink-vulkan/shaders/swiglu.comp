@@ -1,13 +1,15 @@
 #version 450
-// h[i] = silu(g[i]) * u[i], the SwiGLU combine between gate/up and
-// down (frink_core::matmul::swiglu, ggml's ggml_swiglu). silu is the
-// cancellation-free x / (1 + exp(-x)) the CPU uses.
+// h[i] = act(g[i]) * u[i], the gated combine between gate/up and down.
+// act is silu (frink_core::matmul::swiglu, ggml's ggml_swiglu) in the
+// cancellation-free form x / (1 + exp(-x)) the CPU uses, or, with
+// `gelu` set, the tanh-approximation GELU of a GeGLU FFN in the same
+// form: x / (1 + exp(-2u)), u = sqrt(2/pi) * (x + 0.044715 x^3)
+// (frink_core::matmul::geglu).
 //
 // The matvec interface's three bindings, reused so one pipeline layout
 // serves every shader: binding 0 holds the gate output (read as uint
 // words and reinterpreted, since that binding is the matvecs' weights),
-// 1 the up output, 2 the result. Push constant `rows` is the length;
-// the other two are unused.
+// 1 the up output, 2 the result. Push: n, gelu (0 or 1).
 
 layout(local_size_x = 64) in;
 
@@ -17,13 +19,15 @@ layout(std430, binding = 2) writeonly buffer Out { float h[]; };
 
 layout(push_constant) uniform Push {
     uint n;
-    uint unused0;
-    uint unused1;
+    uint gelu;
 } p;
 
 void main() {
     uint i = gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u + gl_GlobalInvocationID.x;
     if (i >= p.n) return;
     float gv = uintBitsToFloat(g[i]);
-    h[i] = gv / (1.0 + exp(-gv)) * u[i];
+    float e = p.gelu != 0u
+        ? -2.0 * 0.7978846 * (gv + 0.044715 * gv * gv * gv)
+        : -gv;
+    h[i] = gv / (1.0 + exp(e)) * u[i];
 }
