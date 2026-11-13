@@ -274,7 +274,7 @@ fn moe_digest(p: &str, m: &MoeWeights, out: &mut String) {
         // Metal's repacked copy of the experts, built only on a
         // `metal` build. Left out of the digest so the snapshot is
         // the same with and without the feature.
-        #[cfg(feature = "metal")]
+        #[cfg(any(feature = "metal", feature = "cuda"))]
             packed_q4: _,
     } = m;
     let _ = writeln!(out, "{p}.router: {}", wm(router));

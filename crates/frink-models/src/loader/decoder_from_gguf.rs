@@ -19,7 +19,7 @@ use crate::norm::NormOp;
 use super::expert_source::{stored_expert_specs, GgufExpertSource, StoredExpertLayout};
 use super::layer_parts::{load_attn_sinks, load_dense_expert, load_gpt_oss_layer};
 use super::model_config::metadata_u64_any;
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 use super::moe_planes::try_build_moe_packed_q4_planes;
 use super::tensor_audit::assert_every_tensor_consumed;
 use super::tensors::{
@@ -603,7 +603,7 @@ impl Decoder {
             } else {
                 load_f32_vec_optional(&file, &format!("blk.{l}.ffn_gate_inp_shexp.weight"))?
             };
-            #[cfg(feature = "metal")]
+            #[cfg(any(feature = "metal", feature = "cuda"))]
             let packed_q4 = match &experts {
                 ExpertBacking::Resident(v) if !v.is_empty() => try_build_moe_packed_q4_planes(v),
                 _ => None,
@@ -717,7 +717,7 @@ impl Decoder {
                 },
                 parallel,
                 activation_counts,
-                #[cfg(feature = "metal")]
+                #[cfg(any(feature = "metal", feature = "cuda"))]
                 packed_q4,
             };
 

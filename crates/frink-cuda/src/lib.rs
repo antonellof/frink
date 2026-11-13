@@ -30,6 +30,9 @@ pub mod get_rows;
 pub mod iq_grids;
 /// Host wall time of a CUDA step by phase (`FRINK_CUDA_TIME=1`).
 pub mod phases;
+/// The routed-expert kernels (`mul_mv_id`, `mul_mm_id`): text, the
+/// routing map and the twins.
+pub mod moe_id;
 
 /// The per-kind CUDA matvec (decode) kernel table. Always compiled,
 /// for the same reason [`mul_mm`] is: it is kernel text plus three
@@ -77,6 +80,8 @@ pub mod graph;
 /// The decode matvec launch path: plan, enqueue, multi and fused FFN.
 #[cfg(feature = "cuda")]
 mod matvec_launch;
+#[cfg(feature = "cuda")]
+pub mod moe_id_launch;
 #[cfg(feature = "cuda")]
 pub mod mul_mm_launch;
 /// One dense prefill layer resident on the device (#259).

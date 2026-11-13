@@ -133,7 +133,26 @@ impl Decoder {
             }
         }
 
-        let routed_outputs: Vec<(Vec<f32>, f32)> = {
+        // CUDA: every routed slot in one id-kernel step, one download
+        // (`cuda_moe`). SwiGLU only (the device combine is `silu * up`),
+        // and not for a model that weights each slot's input, which the
+        // kernels' shared activation row cannot express. `None` is the
+        // fence: the per-expert body below runs.
+        #[cfg(feature = "cuda")]
+        let cuda_routed = if act.is_swiglu() && !config.moe.routed_weight_before_ffn {
+            let top_k = decision.expert_ids.len();
+            Self::try_cuda_moe_routed(layer, routed_input, 1, &decision.expert_ids, top_k)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "cuda"))]
+        let cuda_routed: Option<Vec<f32>> = None;
+        let routed_outputs: Vec<(Vec<f32>, f32)> = if let Some(rows) = cuda_routed {
+            rows.chunks_exact(hidden_dim)
+                .zip(decision.weights.iter())
+                .map(|(r, &w)| (r.to_vec(), w))
+                .collect()
+        } else {
             // llama.cpp mul_mat_id: one shared Q8 act + flat (slot,row)
             // parallel over all top-k experts (not serial expert loops each
             // with their own rayon fork-join).
@@ -375,12 +394,61 @@ impl Decoder {
         }
 
         let mut buckets: Vec<Vec<(usize, f32)>> = vec![Vec::new(); n_experts];
+        // Each bucket entry's routed slot, `b * top_k + j`, and the flat
+        // ids in slot order, for the CUDA id step below.
+        #[cfg_attr(not(feature = "cuda"), allow(unused_variables, unused_mut))]
+        let (mut slots, mut ids_flat, mut top_k) =
+            (vec![Vec::new(); n_experts], Vec::new(), None::<usize>);
         for b in 0..batch_size {
             let logits = &router_logits_batch[b * n_experts..(b + 1) * n_experts];
             let decision = Self::route_for_layer(layer, logits, config);
             layer.moe.record_activations(&decision.expert_ids);
-            for (&eid, &w) in decision.expert_ids.iter().zip(decision.weights.iter()) {
+            let k = decision.expert_ids.len();
+            if *top_k.get_or_insert(k) != k {
+                top_k = Some(0);
+            }
+            for (j, (&eid, &w)) in decision
+                .expert_ids
+                .iter()
+                .zip(decision.weights.iter())
+                .enumerate()
+            {
                 buckets[eid].push((b, w));
+                slots[eid].push(b * k + j);
+                ids_flat.push(eid);
+            }
+        }
+
+        // CUDA: the whole batch's routed slots in one id-kernel step,
+        // combined below in this function's own bucket order so the sum
+        // is the host path's. Fenced as the per-position arm is, and on
+        // a uniform top-k (a ragged one has no flat slot layout).
+        #[cfg(feature = "cuda")]
+        if act.is_swiglu() && !config.moe.routed_weight_before_ffn {
+            if let Some(k) = top_k.filter(|&k| k > 0) {
+                if let Some(rows) =
+                    Self::try_cuda_moe_routed(layer, routed_batch, batch_size, &ids_flat, k)
+                {
+                    let mut acc = vec![0f32; batch_size * hidden_dim];
+                    for (toks, sl) in buckets.iter().zip(&slots) {
+                        for (&(tok, w), &s) in toks.iter().zip(sl) {
+                            let out = &rows[s * hidden_dim..(s + 1) * hidden_dim];
+                            let row = &mut acc[tok * hidden_dim..(tok + 1) * hidden_dim];
+                            for (a, &o) in row.iter_mut().zip(out) {
+                                *a += w * o;
+                            }
+                        }
+                    }
+                    Self::accumulate_shared_experts_batch(
+                        layer,
+                        normed2_batch,
+                        batch_size,
+                        hidden_dim,
+                        &mut acc,
+                        acts.dense,
+                    );
+                    return Some(acc);
+                }
             }
         }
 

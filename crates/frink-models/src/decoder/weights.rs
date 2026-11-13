@@ -244,12 +244,12 @@ pub struct MoeWeights {
     /// and back-to-back gate/up/down slices. Gate/up/down kinds may differ
     /// (Qwen1.5-MoE: Q4_K gate/up + Q8_0 down). `None` for store-backed,
     /// F32, or non-contiguous layouts.
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", feature = "cuda"))]
     pub packed_q4: Option<MoePackedQ4Planes>,
 }
 
 /// Load-time validated contiguous expert tensor planes (any `mul_mm_sg` quant).
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 pub struct MoePackedQ4Planes {
     pub(super) gate: frink_core::weight_matrix::WeightBytes,
     pub(super) up: frink_core::weight_matrix::WeightBytes,
@@ -267,7 +267,7 @@ pub struct MoePackedQ4Planes {
     pub(super) down_kind: &'static str,
 }
 
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 impl MoePackedQ4Planes {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -313,6 +313,7 @@ impl MoePackedQ4Planes {
         self
     }
 
+    #[cfg(feature = "metal")]
     pub fn view(&self) -> frink_metal::gpu::MoePackedQ4<'_> {
         frink_metal::gpu::MoePackedQ4 {
             gate: self.gate.as_slice(),
@@ -330,6 +331,65 @@ impl MoePackedQ4Planes {
             up_kind: self.up_kind,
             down_kind: self.down_kind,
         }
+    }
+
+    /// The planes as CUDA's routed-expert kernels take them, or `None`
+    /// when any role's kind has no id kernel (`frink_cuda::moe_id::
+    /// supported`): the fence that sends such a layer to one matvec per
+    /// expert instead (#448's rule, on CUDA).
+    #[cfg(feature = "cuda")]
+    pub fn cuda_view(&self) -> Option<frink_cuda::moe_id_launch::MoePlanesCuda<'_>> {
+        use frink_cuda::moe_id::{supported, IdPlane};
+        let n_experts = self.n_experts;
+        fn plane<'a>(
+            data: &'a frink_core::weight_matrix::WeightBytes,
+            kind: &str,
+            n_experts: usize,
+            stride: usize,
+            rows: usize,
+            cols: usize,
+        ) -> Option<IdPlane<'a>> {
+            Some(IdPlane {
+                kind: supported(kind)?,
+                data: data.as_slice(),
+                n_experts,
+                expert_stride: stride,
+                rows,
+                cols,
+            })
+        }
+        let (ffn, hidden) = (self.ffn_rows, self.hidden_rows);
+        let planes = frink_cuda::moe_id_launch::MoePlanesCuda {
+            gate: plane(
+                &self.gate,
+                self.gate_kind,
+                n_experts,
+                self.gate_stride,
+                ffn,
+                hidden,
+            )?,
+            up: plane(
+                &self.up,
+                self.up_kind,
+                n_experts,
+                self.up_stride,
+                ffn,
+                hidden,
+            )?,
+            down: plane(
+                &self.down,
+                self.down_kind,
+                n_experts,
+                self.down_stride,
+                hidden,
+                ffn,
+            )?,
+        };
+        // The row widths the loader measured must be the ones the
+        // kernels derive from each kind's block geometry.
+        (planes.gate.row_bytes() == self.gate_row_bytes
+            && planes.down.row_bytes() == self.down_row_bytes)
+            .then_some(planes)
     }
 }
 
