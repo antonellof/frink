@@ -529,19 +529,21 @@ fn an_activation_no_kernel_spells_keeps_the_model_off_every_fused_metal_path() {
     assert!(!Decoder::metal_can_serve_model(&two_widths, false));
 }
 
-/// An attention output gate or a set of attention sinks keeps THAT
-/// LAYER off every fused Metal attention launch, through the one
-/// exhaustive destructure in `metal_attn_view`.
+/// An attention output gate keeps THAT LAYER off every fused Metal
+/// attention launch, and a set of attention sinks off every per-layer
+/// one, through the one exhaustive destructure in `metal_attn_view`.
 ///
 /// Both sit between the softmax and `wo`, which the fused kernels
 /// run with no host round-trip; a launch that ignored either would
 /// answer differently from the host bodies for the same weights.
-/// The gate is `afmoe` / `laguna` (`crate::attn_gate`); the sinks
-/// used to be refused by the gpt-oss NAME, and this pins that they
-/// are refused by the TENSOR now, on a model that is not gpt-oss.
+/// The gate is `afmoe` / `laguna` (`crate::attn_gate`) and no kernel
+/// applies it. The sinks used to be refused by the gpt-oss NAME, then
+/// by the TENSOR on every Metal launch; since #627 the stacks apply
+/// them, and this pins that only the stacks are handed them, on a
+/// model that is not gpt-oss.
 /// Only reachable in a `--features metal` build.
 #[test]
-fn an_output_gate_or_attention_sinks_keep_the_layer_off_every_fused_metal_path() {
+fn an_output_gate_or_attention_sinks_keep_the_layer_off_the_launches_without_them() {
     let mut plain = phi_like_config();
     plain.rope_dim = None;
     plain.rope_attn_factor = 1.0;
@@ -566,6 +568,7 @@ fn an_output_gate_or_attention_sinks_keep_the_layer_off_every_fused_metal_path()
         !d.layer_supports_metal_attn(&d.layers[0]),
         "a gate no Metal kernel applies must refuse the fused attention"
     );
+    assert!(!d.layer_supports_metal_stack_attn(&d.layers[0]));
     assert!(d.metal_attn_view(&d.layers[0]).is_none());
     assert!(
         d.layer_supports_metal_attn(&d.layers[1]),
@@ -577,9 +580,19 @@ fn an_output_gate_or_attention_sinks_keep_the_layer_off_every_fused_metal_path()
     assert!(d.gpt_oss.is_none());
     assert!(
         !d.layer_supports_metal_attn(&d.layers[1]),
-        "sinks are refused by the tensor, not by the gpt-oss name"
+        "the per-layer launches refuse sinks by the tensor, not by the gpt-oss name"
     );
-    assert!(d.metal_attn_view(&d.layers[1]).is_none());
+    assert!(
+        d.layer_supports_metal_stack_attn(&d.layers[1]),
+        "the stacks apply them"
+    );
+    assert!(
+        d.layer_needs_metal_stack(&d.layers[1], 1),
+        "and only the stacks: the per-layer arm must not take the layer"
+    );
+    let view = d.metal_attn_view(&d.layers[1]).expect("the stacks' view");
+    assert_eq!(view.sinks, d.layers[1].attn.sinks.as_deref());
+    assert!(view.stack_only());
 }
 
 /// A LoRA adapter keeps the WHOLE model off every fused Metal

@@ -139,7 +139,7 @@ pub(crate) fn encode(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
-    window: u32,
+    mask: crate::attn::AttnMask<'_>,
 ) -> Result<(), MetalError> {
     if !crate::tensor_mm::has_tensor() || n_kv_heads == 0 || !n_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::CommandFailed);
@@ -155,7 +155,6 @@ pub(crate) fn encode(
     encoder.setComputePipelineState(&pipe.0);
     let mut args: [u32; 4] = [n_heads, n_kv_heads, n_q, kv_prefix_len];
     let mut fargs: [f32; 2] = [scale, softcap];
-    let mut win = window;
     // SAFETY: the bound buffers outlive the command buffer (the callers
     // hold them across commit/wait or in the stack scratch), and the
     // `setBytes` sources are locals copied by Metal before the call returns.
@@ -174,13 +173,9 @@ pub(crate) fn encode(
             std::mem::size_of_val(&fargs),
             5,
         );
-        encoder.setBytes_length_atIndex(
-            NonNull::new(&mut win as *mut u32 as *mut _).unwrap(),
-            4,
-            6,
-        );
         encoder.setThreadgroupMemoryLength_atIndex(smem(head_dim), 0);
     }
+    mask.bind(encoder, q);
     dispatch_counted(
         encoder,
         MTLSize {
@@ -198,7 +193,8 @@ pub(crate) fn encode(
 }
 
 /// llama `kernel_flash_attn_ext_tensor<half, half4, D, D>` with mask =
-/// causal-from-positions, no sinks, no ALiBi. The host splices the
+/// causal-from-positions (and, with `window`, llama's standard sliding
+/// window), llama's sinks epilogue, no ALiBi. The host splices the
 /// tensor define and headers in front.
 const BODY: &str = r#"
 using namespace metal;
@@ -206,7 +202,7 @@ using namespace metal;
 #define FOR_UNROLL(x) _Pragma("clang loop unroll(full)") for (x)
 
 // args: n_heads, n_kv_heads, n_q, kv_prefix_len; fargs: scale, softcap;
-// window: sliding window in keys, 0 = full causal.
+// sinks/has_sinks/window: `crate::attn::AttnMask` (window 0 = full causal).
 template<short DK, short DV, short Q, short C, short NSG>
 kernel void gqa_prefill_fa_tensor(
         device const float * q    [[buffer(0)]],
@@ -215,7 +211,9 @@ kernel void gqa_prefill_fa_tensor(
         device       float * dst  [[buffer(3)]],
         constant uint4     & args [[buffer(4)]],
         constant float2    & fargs [[buffer(5)]],
-        constant uint      & window [[buffer(6)]],
+        device const float * sinks [[buffer(10)]],
+        constant uint      & has_sinks [[buffer(11)]],
+        constant uint      & window [[buffer(12)]],
         threadgroup  char  * shmem [[threadgroup(0)]],
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]],
@@ -433,8 +431,20 @@ kernel void gqa_prefill_fa_tensor(
     FOR_UNROLL (short jj = 0; jj < NQ; ++jj) {
         const short j = jj*NSG + sgitg;
 
+        // the sink only adds to the denominator - its rescale of O is folded into the final scale
+        float ms = 1.0f;
+
+        if (has_sinks != 0) {
+            const float s = sinks[iq2];
+            const float m = max(M[jj], s);
+
+            ms = exp(M[jj] - m);
+
+            S[jj] = S[jj]*ms + exp(s - m);
+        }
+
         if (tiisg == 0) {
-            sr[j] = S[jj] == 0.0f ? 0.0f : 1.0f/S[jj];
+            sr[j] = S[jj] == 0.0f ? 0.0f : ms/S[jj];
         }
     }
 
@@ -655,7 +665,10 @@ mod tests {
             t.n_q as u32,
             t.prefix as u32,
             t.softcap.unwrap_or(0.0),
-            t.window.map_or(0, |w| w as u32),
+            crate::attn::AttnMask {
+                sinks: None,
+                window: t.window.map_or(0, |w| w as u32),
+            },
         );
         enc.endEncoding();
         res.expect("tensor prefill");

@@ -28,18 +28,20 @@ pub(crate) struct FusedAttnExtras<'a> {
     pub k_norm: Option<&'a [f32]>,
     /// Only under caps that apply them ([`FusedAttnCaps`]); `None`
     /// otherwise, because a layer carrying one was refused. Read by the
-    /// CUDA stack alone.
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    /// CUDA stack and the Metal stacks.
+    #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(dead_code))]
     pub sinks: Option<&'a [f32]>,
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(dead_code))]
     pub o_bias: Option<&'a [f32]>,
 }
 
 /// What a backend's fused attention applies beyond the extras every
 /// backend takes: gpt-oss's attention sinks (one logit per head in the
 /// softmax, with no value) and a bias on `wo`. CUDA's resident stack
-/// applies both. Metal applies neither, so a layer carrying either
-/// takes the host body there.
+/// applies both, and so do Metal's fused stacks (the dense and MoE
+/// decode stacks and the prefill stack, #627). Metal's per-layer
+/// launches apply neither, so a layer carrying either takes the host
+/// body whenever no stack serves it.
 #[derive(Clone, Copy)]
 pub(crate) struct FusedAttnCaps {
     pub sinks: bool,
@@ -47,10 +49,18 @@ pub(crate) struct FusedAttnCaps {
 }
 
 impl FusedAttnCaps {
+    /// Metal's per-layer launches (`launch_decode_attn_block` and the
+    /// other one-layer launches).
     #[cfg_attr(not(feature = "metal"), allow(dead_code))]
     pub(crate) const METAL: Self = Self {
         sinks: false,
         o_bias: false,
+    };
+    /// Metal's fused stacks.
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
+    pub(crate) const METAL_STACK: Self = Self {
+        sinks: true,
+        o_bias: true,
     };
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     pub(crate) const CUDA: Self = Self {
@@ -159,8 +169,8 @@ impl Decoder {
         }
         // gpt-oss: a backend without the sinks and `wo`'s bias would
         // compute a *different* attention than the CPU path for the same
-        // weights, so the family stays off it (Metal) rather than letting
-        // the two disagree. The tensors are refused one line down too;
+        // weights, so the family stays off it (Metal's per-layer
+        // launches) rather than letting the two disagree. The tensors are refused one line down too;
         // the name is the fence for whatever else the family carries.
         // Its FFN (the biased router, expert biases, the clamped SwiGLU)
         // is the FFN eligibility's question, not this one. See
@@ -288,19 +298,23 @@ mod tests {
     }
 
     /// gpt-oss's sinks and `wo` bias reach a backend whose caps apply
-    /// them (CUDA), and refuse the layer on one whose caps do not
-    /// (Metal), each of the two on its own.
+    /// them (CUDA, Metal's stacks), and refuse the layer on one whose
+    /// caps do not (Metal's per-layer launches), each of the two on its
+    /// own.
     #[test]
     fn sinks_and_the_o_bias_reach_only_a_backend_that_applies_them() {
         let gpt_oss = attn(true, true);
         assert!(Decoder::attn_extras(&gpt_oss, FusedAttnCaps::METAL).is_none());
-        let cuda = Decoder::attn_extras(&gpt_oss, FusedAttnCaps::CUDA).expect("CUDA applies both");
-        assert_eq!(cuda.sinks, Some(&[0.5f32; 2][..]));
-        assert_eq!(cuda.o_bias, Some(&[0.25f32; 8][..]));
+        for caps in [FusedAttnCaps::CUDA, FusedAttnCaps::METAL_STACK] {
+            let both = Decoder::attn_extras(&gpt_oss, caps).expect("these caps apply both");
+            assert_eq!(both.sinks, Some(&[0.5f32; 2][..]));
+            assert_eq!(both.o_bias, Some(&[0.25f32; 8][..]));
+        }
         for (sinks, o_bias) in [(true, false), (false, true)] {
             let one = attn(sinks, o_bias);
             assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL).is_none());
             assert!(Decoder::attn_extras(&one, FusedAttnCaps::CUDA).is_some());
+            assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL_STACK).is_some());
         }
         let plain = attn(false, false);
         let extras = Decoder::attn_extras(&plain, FusedAttnCaps::METAL).unwrap();

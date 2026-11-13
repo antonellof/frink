@@ -1343,6 +1343,7 @@ fn encode_attn_layer(
         seq_len as u32,
         0,
         softcap,
+        None,
     )?;
     if let Some(g) = gate_buf {
         crate::elem::encode_sigmoid_mul(encoder, device, attn_buf, g, q.len() as u32)?;

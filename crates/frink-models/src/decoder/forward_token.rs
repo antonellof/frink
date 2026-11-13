@@ -55,7 +55,7 @@ impl Decoder {
                 && self
                     .layers
                     .iter()
-                    .all(|l| self.layer_supports_metal_attn(l))
+                    .all(|l| self.layer_supports_metal_stack_attn(l))
                 && self.layers.iter().all(Self::layer_supports_metal_dense_ffn);
             // Gemma scales the embedding row (`embedding_scale`) — the GPU
             // gather has no scale op, so dequant + scale on the host; nor
@@ -131,7 +131,7 @@ impl Decoder {
             && self
                 .layers
                 .iter()
-                .all(|l| self.layer_supports_metal_attn(l));
+                .all(|l| self.layer_supports_metal_stack_attn(l));
 
         #[cfg(not(feature = "metal"))]
         let use_metal_attn = false;
@@ -230,24 +230,15 @@ impl Decoder {
             && self.layers.iter().enumerate().all(|(i, l)| {
                 // Both halves are required. `layer_supports_metal_moe_resident`
                 // answers "is this an MoE layer the GPU router can serve",
-                // and says nothing about the four features
-                // `MoeLayerMetal` has no fields for: a per-layer
-                // `rope_theta`, a sliding `window`, `post_attn_norm`
-                // and `post_ffn_norm`. `DenseLayerMetal` carries all
-                // four and `launch_decode_dense_stack` implements
-                // them; the MoE stack does neither, and nothing here
-                // refused, so a windowed or sandwich-normed MoE
-                // checkpoint would have answered as a different
-                // model with no error.
-                //
-                // The per-layer path already pairs these two checks
-                // (see the `metal_moe_resident` branch in the decode
-                // loop). Only the whole-stack path was missing it.
-                // Latent today because OLMoE and Qwen3-MoE ship none
-                // of the four, which is exactly how `attention_scale`
-                // stayed latent.
+                // and says nothing about what the attention half and the
+                // FFN carry. `MoeLayerMetal` has a per-layer RoPE, a
+                // sliding window, the sinks, `wo`'s bias and gpt-oss's
+                // FFN (#627), and no sandwich norms;
+                // `layer_fits_metal_moe_stack` is that list, so a
+                // sandwich-normed MoE checkpoint stays off the stack
+                // rather than answering as a different model.
                 Self::layer_supports_metal_moe_resident(l, &self.config, self.lora_attached())
-                    && !self.layer_needs_metal_stack(l, i)
+                    && self.layer_fits_metal_moe_stack(l, i)
             })
             && !self.layers.iter().all(Self::layer_supports_metal_dense_ffn)
         {
@@ -256,7 +247,7 @@ impl Decoder {
                     if metal_kvs.iter().all(|m| m.seq_len == pos) {
                         let mut moe_layers = Vec::with_capacity(self.layers.len());
                         let mut ok = true;
-                        for layer in &self.layers {
+                        for (li, layer) in self.layers.iter().enumerate() {
                             let ExpertBacking::Resident(_) = &layer.moe.experts else {
                                 ok = false;
                                 break;
@@ -289,6 +280,9 @@ impl Decoder {
                                 router: r,
                                 packed,
                                 extras: self.metal_attn_extras(layer),
+                                rope: self.metal_layer_rope(li),
+                                window: self.config.layer_sliding_window(li),
+                                oai: self.metal_moe_oai(li),
                             });
                         }
                         if ok {
@@ -350,13 +344,8 @@ impl Decoder {
                             let hidden_ref: &[f32] =
                                 if embd_gather.is_some() { &[] } else { &hidden };
                             match seed.and_then(|_| {
-                                // A stack whose layer 0 does not rotate
-                                // cannot ride this launch; refuse rather
-                                // than rotate, and the CPU body serves
-                                // the token.
-                                let stack_rope = self
-                                    .metal_layer_rope(0)
-                                    .ok_or(frink_metal::gpu::MetalError::CommandFailed)?;
+                                // Each layer carries its own rotation
+                                // and window (`MoeLayerMetal::rope`).
                                 frink_metal::attn::launch_moe_decode_stack(
                                     hidden_ref,
                                     &moe_layers,
@@ -365,16 +354,6 @@ impl Decoder {
                                     self.config.moe.norm_topk_prob,
                                     n_heads,
                                     self.metal_rope(),
-                                    // ONE `LayerRope` for the whole
-                                    // stack, sound because no layer here
-                                    // `layer_needs_metal_stack`: none
-                                    // slides, none has a base of its
-                                    // own, and none is unrotated -- that
-                                    // predicate now covers all three
-                                    // through the same accessor, so the
-                                    // stack-wide answer and the
-                                    // per-layer one cannot disagree.
-                                    stack_rope,
                                     pos,
                                     self.config.rms_norm_eps,
                                     final_norm_w,
@@ -777,8 +756,9 @@ impl Decoder {
                         if let Some(metal_kvs) = guard.as_mut() {
                             // Metal-authoritative: host may lag after dense-stack skip.
                             // Stack-only features (SWA / sandwich norms / GeGLU /
-                            // per-layer theta) are NOT encoded by the per-layer
-                            // launches — those layers must go to CPU here.
+                            // per-layer theta / sinks / `wo` bias / gpt-oss's
+                            // FFN) are NOT encoded by the per-layer launches —
+                            // those layers must go to CPU here.
                             if metal_kvs[l].seq_len == pos
                                 && !self.layer_needs_metal_stack(layer, l)
                             {

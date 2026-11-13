@@ -165,20 +165,46 @@ impl Decoder {
     /// via [`frink_metal::attn::AttnExtras`]).
     #[cfg(feature = "metal")]
     pub(super) fn layer_supports_metal_attn(&self, layer: &LayerWeights) -> bool {
-        // The backend-neutral questions are `fused_view`'s; what is
-        // left is whether Metal has a launch for every projection.
-        self.layer_supports_fused_attn(layer, fused_view::FusedAttnCaps::METAL)
+        self.layer_supports_metal_attn_under(layer, fused_view::FusedAttnCaps::METAL)
+    }
+
+    /// Both Metal attention predicates, under the caps each launch family
+    /// has. The backend-neutral questions are `fused_view`'s; what is
+    /// left is whether Metal has a launch for every projection.
+    #[cfg(feature = "metal")]
+    fn layer_supports_metal_attn_under(
+        &self,
+        layer: &LayerWeights,
+        caps: fused_view::FusedAttnCaps,
+    ) -> bool {
+        self.layer_supports_fused_attn(layer, caps)
             && Self::metal_matvec_launch(&layer.attn.q_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.k_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.v_proj).is_some()
             && Self::metal_matvec_launch(&layer.attn.o_proj).is_some()
     }
 
-    /// Layer features only the fused dense stack implements — the
-    /// per-layer Metal launches would silently skip them (wrong output).
+    /// [`Self::layer_supports_metal_attn`] for the fused stacks, which
+    /// also apply the attention sinks and `wo`'s bias (gpt-oss, #627).
+    /// It is what `use_metal_attn` asks; a per-layer launch is kept off
+    /// the layers only a stack serves by [`Self::layer_needs_metal_stack`].
+    #[cfg(feature = "metal")]
+    pub(super) fn layer_supports_metal_stack_attn(&self, layer: &LayerWeights) -> bool {
+        self.layer_supports_metal_attn_under(layer, fused_view::FusedAttnCaps::METAL_STACK)
+    }
+
+    /// Layer features only the fused stacks implement — the per-layer
+    /// Metal launches would silently skip them (wrong output).
     #[cfg(feature = "metal")]
     pub(super) fn layer_needs_metal_stack(&self, layer: &LayerWeights, layer_idx: usize) -> bool {
-        layer.attn.post_attn_norm.is_some()
+        // The sinks and `wo`'s bias (`FusedAttnCaps::METAL` refuses
+        // both), and gpt-oss's FFN: its router bias, expert biases and
+        // clamped SwiGLU have kernels on the MoE decode stack and the
+        // prefill stack only (`frink_metal::moe_oai`).
+        layer.attn.sinks.is_some()
+            || layer.attn.o_bias.is_some()
+            || self.gpt_oss.is_some()
+            || layer.attn.post_attn_norm.is_some()
             || layer.attn.post_ffn_norm.is_some()
             || self.config.layer_sliding_window(layer_idx).is_some()
             || !self.config.layer_ffn_acts(layer_idx).all_swiglu()
@@ -232,22 +258,25 @@ impl Decoder {
 
     /// [`Self::fused_attn_extras`] -- the ONE exhaustive destructure of
     /// `AttnWeights`, in `fused_view` -- in Metal's spelling.
+    ///
+    /// Under the stacks' caps, so the sinks and `wo`'s bias come through;
+    /// a per-layer launch handed them refuses
+    /// (`AttnExtras::refuse_stack_only`), and the decoder never hands
+    /// them one (`layer_needs_metal_stack`).
     #[cfg(feature = "metal")]
     pub(super) fn metal_attn_view<'a>(
         &self,
         layer: &'a LayerWeights,
     ) -> Option<frink_metal::attn::AttnExtras<'a>> {
-        // Metal's caps refuse a layer with sinks or `wo`'s bias, so both
-        // are `None` here.
         let fused_view::FusedAttnExtras {
             q_bias,
             k_bias,
             v_bias,
             q_norm,
             k_norm,
-            sinks: _,
-            o_bias: _,
-        } = Self::fused_attn_extras(layer, fused_view::FusedAttnCaps::METAL)?;
+            sinks,
+            o_bias,
+        } = Self::fused_attn_extras(layer, fused_view::FusedAttnCaps::METAL_STACK)?;
         Some(frink_metal::attn::AttnExtras {
             q_bias,
             k_bias,
@@ -256,7 +285,37 @@ impl Decoder {
             k_norm,
             v_norm: None,
             attn_logit_softcap: self.config.attn_logit_softcap,
+            sinks,
+            o_bias,
         })
+    }
+
+    /// gpt-oss's FFN additions to layer `l` for the Metal MoE stacks, or
+    /// `None` for every other model.
+    #[cfg(feature = "metal")]
+    pub(super) fn metal_moe_oai(&self, l: usize) -> Option<frink_metal::moe_oai::MoeOaiMetal<'_>> {
+        let oai = self.gpt_oss.as_ref()?.layers.get(self.physical_index(l))?;
+        let (gate_bias, up_bias, down_bias) = oai.expert_bias.planes();
+        Some(frink_metal::moe_oai::MoeOaiMetal {
+            router_bias: &oai.router_bias,
+            gate_bias,
+            up_bias,
+            down_bias,
+            alpha: frink_moe::SWIGLU_OAI_ALPHA,
+            limit: frink_moe::SWIGLU_OAI_LIMIT,
+        })
+    }
+
+    /// Whether the MoE decode stack (`MoeLayerMetal`) carries everything
+    /// layer `l` needs. It has per-layer RoPE, a window, the sinks, `wo`'s
+    /// bias and gpt-oss's FFN; it has no sandwich norms and only a SwiGLU
+    /// (plain, or gpt-oss's clamped one through `metal_moe_oai`).
+    #[cfg(feature = "metal")]
+    pub(super) fn layer_fits_metal_moe_stack(&self, layer: &LayerWeights, l: usize) -> bool {
+        layer.attn.post_attn_norm.is_none()
+            && layer.attn.post_ffn_norm.is_none()
+            && self.config.layer_ffn_acts(l).all_swiglu()
+            && (self.gpt_oss.is_none() || self.metal_moe_oai(l).is_some())
     }
 
     /// Optional QKV bias / QK-norm ops for the Metal attn paths, for a

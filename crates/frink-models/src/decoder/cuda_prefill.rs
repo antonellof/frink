@@ -205,15 +205,15 @@ impl Decoder {
                         };
                         let bias = match oai {
                             Some(oai) => {
-                                let b = oai.expert_bias.get(eid).ok_or_else(|| {
+                                let b = oai.expert_bias.expert(eid).ok_or_else(|| {
                                     frink_cuda::gpu::CudaError::Unsupported(format!(
                                         "expert {eid} has no bias row"
                                     ))
                                 })?;
                                 Some(ExpertBiasCuda {
-                                    gate: &b.gate,
-                                    up: &b.up,
-                                    down: &b.down,
+                                    gate: b.gate,
+                                    up: b.up,
+                                    down: b.down,
                                 })
                             }
                             None => None,
@@ -377,7 +377,7 @@ impl Decoder {
                     ExpertBacking::Resident(e) => e.len(),
                     _ => return None,
                 };
-                if oai.expert_bias.len() != n || oai.router_bias.is_empty() {
+                if oai.expert_bias.n_experts() != n || oai.router_bias.is_empty() {
                     return None;
                 }
                 GluCuda::SwigluOai
@@ -605,11 +605,11 @@ impl ExpertSource for Decoder {
             .map_while(|(e, ex)| {
                 let bias = match oai {
                     Some(o) => {
-                        let b = o.expert_bias.get(e)?;
+                        let b = o.expert_bias.expert(e)?;
                         Some(ExpertBiasCuda {
-                            gate: &b.gate,
-                            up: &b.up,
-                            down: &b.down,
+                            gate: b.gate,
+                            up: b.up,
+                            down: b.down,
                         })
                     }
                     None => None,

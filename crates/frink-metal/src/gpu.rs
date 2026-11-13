@@ -86,6 +86,10 @@ pub enum MetalError {
     /// before anything is encoded (#448).
     #[error("no Metal MoE id kernel (mul_mv_id) for {0} expert weights")]
     NoMoeIdKernel(&'static str),
+    /// A launch handed something it does not implement, refused before
+    /// anything is encoded.
+    #[error("unsupported on this Metal launch: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Concurrent compute encoder (llama.cpp `MTLDispatchTypeConcurrent`).
@@ -3970,6 +3974,7 @@ pub(crate) fn encode_moe_prefill_ffn(
     moe: &PrefillMoeMetal<'_>,
     bound: &MoePackedResident,
     router_w: &ResidentF32Buffer,
+    oai: Option<&crate::moe_oai::MoeOaiResident>,
     x_f32: &ProtocolObject<dyn MTLBuffer>,
     x_f16: &ProtocolObject<dyn MTLBuffer>,
     out: &ProtocolObject<dyn MTLBuffer>,
@@ -4020,6 +4025,19 @@ pub(crate) fn encode_moe_prefill_ffn(
             n_tokens as u32,
         )?;
         mrs.end_op(&[x_f32], &[logits]);
+        if let Some(oai) = oai {
+            // gpt-oss: `ffn_gate_inp.bias` on every token's logits.
+            mrs.begin_op(enc, &[logits], &[logits]);
+            crate::elem::encode_vec_add_rows(
+                enc,
+                device,
+                logits,
+                &oai.router_bias.buffer,
+                n_experts as u32,
+                n_tokens as u32,
+            )?;
+            mrs.end_op(&[logits], &[logits]);
+        }
         mrs.begin_op(enc, &[logits], &[route_ids, route_w]);
         encode_moe_topk_softmax_batch(
             enc,
@@ -4029,7 +4047,9 @@ pub(crate) fn encode_moe_prefill_ffn(
             route_w,
             n_experts as u32,
             top_k as u32,
-            moe.renormalize,
+            // gpt-oss's gating is a softmax over the winners alone
+            // (`gpt_oss_route`), whatever the file's flag says.
+            moe.renormalize || oai.is_some(),
             n_tokens as u32,
         )?;
         mrs.end_op(&[logits], &[route_ids, route_w]);
@@ -4085,17 +4105,38 @@ pub(crate) fn encode_moe_prefill_ffn(
         )?;
         mrs.end_op(&[x_f16, mm_ids, tpe], &[gate_buf, up_buf]);
         // SwiGLU straight to f16 — the staging convert is folded in.
-        mrs.begin_op(enc, &[gate_buf, up_buf], &[half_slots]);
-        crate::elem::encode_act_mul_f32_to_f16(
-            enc,
-            device,
-            gate_buf,
-            up_buf,
-            half_slots,
-            (n_slots * ffn) as u32,
-            false,
-        )?;
-        mrs.end_op(&[gate_buf, up_buf], &[half_slots]);
+        // gpt-oss's clamped form takes the expert biases with it.
+        match oai {
+            Some(oai) => {
+                mrs.begin_op(enc, &[gate_buf, up_buf, route_ids], &[half_slots]);
+                crate::moe_oai::encode_swiglu_oai_id(
+                    enc,
+                    device,
+                    oai,
+                    gate_buf,
+                    up_buf,
+                    IdsBinding::whole(route_ids),
+                    half_slots,
+                    ffn,
+                    n_slots,
+                    true,
+                )?;
+                mrs.end_op(&[gate_buf, up_buf, route_ids], &[half_slots]);
+            }
+            None => {
+                mrs.begin_op(enc, &[gate_buf, up_buf], &[half_slots]);
+                crate::elem::encode_act_mul_f32_to_f16(
+                    enc,
+                    device,
+                    gate_buf,
+                    up_buf,
+                    half_slots,
+                    (n_slots * ffn) as u32,
+                    false,
+                )?;
+                mrs.end_op(&[gate_buf, up_buf], &[half_slots]);
+            }
+        }
         mrs.begin_op(enc, &[half_slots, mm_ids, tpe], &[expert_out]);
         encode_mul_mm_id_f16(
             enc,
@@ -4116,6 +4157,20 @@ pub(crate) fn encode_moe_prefill_ffn(
             1,
         )?;
         mrs.end_op(&[half_slots, mm_ids, tpe], &[expert_out]);
+        if let Some(oai) = oai {
+            // `down`'s expert bias, before the routing weights scale it.
+            mrs.begin_op(enc, &[expert_out, route_ids], &[expert_out]);
+            crate::moe_oai::encode_add_id(
+                enc,
+                device,
+                expert_out,
+                IdsBinding::whole(route_ids),
+                &oai.down_bias.buffer,
+                hidden,
+                n_slots,
+            )?;
+            mrs.end_op(&[expert_out, route_ids], &[expert_out]);
+        }
         mrs.begin_op(enc, &[expert_out, route_w], &[out]);
         encode_moe_prefill_weighted_sum(
             enc,
@@ -5871,6 +5926,9 @@ pub struct PrefillMoeMetal<'a> {
     /// `norm_topk_prob`: renormalize the selected probabilities.
     pub renormalize: bool,
     pub packed: MoePackedQ4<'a>,
+    /// gpt-oss's router bias, expert biases and clamped SwiGLU; `None`
+    /// is the plain SwiGLU MoE.
+    pub oai: Option<crate::moe_oai::MoeOaiMetal<'a>>,
 }
 
 impl PrefillMoeMetal<'_> {
@@ -6465,6 +6523,7 @@ pub(crate) fn encode_q4_0_moe_id(
     n_tokens: u32,
     residual_into_out: bool,
     gate_up_done: bool,
+    oai: Option<&crate::moe_oai::MoeOaiResident>,
 ) -> Result<(), MetalError> {
     assert_eq!(packed.gate_stride, packed.up_stride);
     assert!(n_tokens >= 1);
@@ -6479,14 +6538,29 @@ pub(crate) fn encode_q4_0_moe_id(
         )?;
         memory_barrier_resources(encoder, &[gate_buf, up_buf]);
     }
-    crate::elem::encode_silu_mul(
-        encoder,
-        device,
-        gate_buf,
-        up_buf,
-        act_buf,
-        (n_slots * packed.ffn_rows) as u32,
-    )?;
+    match oai {
+        // gpt-oss: the expert gate/up biases and the clamped SwiGLU.
+        Some(oai) => crate::moe_oai::encode_swiglu_oai_id(
+            encoder,
+            device,
+            oai,
+            gate_buf,
+            up_buf,
+            ids,
+            act_buf,
+            packed.ffn_rows,
+            n_slots,
+            false,
+        )?,
+        None => crate::elem::encode_silu_mul(
+            encoder,
+            device,
+            gate_buf,
+            up_buf,
+            act_buf,
+            (n_slots * packed.ffn_rows) as u32,
+        )?,
+    }
     memory_barrier_resources(encoder, &[act_buf]);
 
     let weighted_sum = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, "moe_weighted_sum")?;
@@ -6510,6 +6584,19 @@ pub(crate) fn encode_q4_0_moe_id(
         n_slots,
     )?;
     memory_barrier_resources(encoder, &[expert_out_buf]);
+    if let Some(oai) = oai {
+        // `down`'s expert bias, before the routing weights scale it.
+        crate::moe_oai::encode_add_id(
+            encoder,
+            device,
+            expert_out_buf,
+            ids,
+            &oai.down_bias.buffer,
+            packed.hidden_rows,
+            n_slots,
+        )?;
+        memory_barrier_resources(encoder, &[expert_out_buf]);
+    }
 
     const SUM_TG: usize = 256;
     if residual_into_out && n_tokens == 1 {
@@ -6876,6 +6963,7 @@ pub fn launch_moe_prefill_q4_0(
                 n_tokens as u32,
                 false,
                 false,
+                None,
             );
             encoder.endEncoding();
             enc_result?;
@@ -8459,6 +8547,7 @@ mod tests {
             top_k,
             renormalize: false,
             packed,
+            oai: None,
         };
         assert!(moe.is_supported());
 
@@ -8547,6 +8636,7 @@ mod tests {
             &moe,
             &bound,
             &router,
+            None,
             &x_buf,
             &xh_buf,
             &out_buf,

@@ -9,8 +9,8 @@
 
 use crate::attn::{
     assert_freq_factors_len, borrow_decode_scratch, copy_f32_into, encode_attn_extras,
-    encode_gqa_with_kv, encode_kv_store_append, encode_rope, LayerRope, MetalKvBuffers, MetalRope,
-    RopeTarget, ScratchCaps,
+    encode_gqa_with_kv, encode_kv_store_append, encode_rope, resident_attn_extras, LayerRope,
+    MetalKvBuffers, MetalRope, RopeTarget, ScratchCaps,
 };
 use crate::elem::{encode_argmax, encode_gelu_mul, encode_silu_mul, encode_vec_add};
 use crate::embd::{encode_get_rows, EmbdKind};
@@ -45,6 +45,13 @@ pub struct AttnExtras<'a> {
     /// ones, which is the same arithmetic.
     pub v_norm: Option<&'a [f32]>,
     pub attn_logit_softcap: Option<f32>,
+    /// gpt-oss's attention sinks, one logit per Q head: a key with no
+    /// value in every head's softmax. Read inside the attention kernels
+    /// (`crate::attn::AttnMask`), so it encodes nothing here.
+    pub sinks: Option<&'a [f32]>,
+    /// The bias on `wo`, added to the projected branch before the
+    /// residual (gpt-oss). One `vec_add_rows` after the `o` projection.
+    pub o_bias: Option<&'a [f32]>,
 }
 
 impl AttnExtras<'_> {
@@ -71,6 +78,24 @@ impl AttnExtras<'_> {
             || self.q_norm.is_some()
             || self.k_norm.is_some()
             || self.v_norm.is_some()
+    }
+
+    /// The two fields only the fused stacks apply (the decode stacks and
+    /// the prefill stack). A per-layer launch refuses a layer carrying
+    /// either rather than attending without the sinks or projecting
+    /// without the bias.
+    pub fn stack_only(&self) -> bool {
+        self.sinks.is_some() || self.o_bias.is_some()
+    }
+
+    /// `Err` for a layer [`Self::stack_only`] keeps off a per-layer launch.
+    pub(crate) fn refuse_stack_only(&self) -> Result<(), MetalError> {
+        if self.stack_only() {
+            return Err(MetalError::Unsupported(
+                "attention sinks / wo bias run only on the fused stacks",
+            ));
+        }
+        Ok(())
     }
 
     /// True when any field touches K or V. A layer that reads another
@@ -449,6 +474,9 @@ pub fn launch_decode_dense_stack(
         let down_w = resident_weight_buffer(device, layer.down.weights)?;
         let kv_k = kv.k.as_ref();
         let kv_v = kv.v.as_ref();
+        // The sinks and `wo`'s bias (gpt-oss), resident; a layer with
+        // neither looks nothing up.
+        let tail = resident_attn_extras(device, &layer.extras)?;
 
         // Pre-LN: layer 0 norms raw hidden; later layers either fuse the
         // previous FFN residual into attn_norm (non-sandwich) or just
@@ -592,12 +620,14 @@ pub fn launch_decode_dense_stack(
             new_seq,
             kv_start,
             layer.extras.attn_logit_softcap,
+            tail.sinks(),
         )?;
 
         spans.span(&cmd_buf, &mut encoder, "o_proj")?;
         mrs.begin_op(&encoder, &[attn_buf], &[o_buf]);
         encode_matvec(&encoder, device, &layer.o, &o_w, attn_buf, o_buf)?;
         mrs.end_op(&[attn_buf], &[o_buf]);
+        tail.encode_o_bias(&encoder, &mut mrs, device, o_buf, hidden_dim, 1)?;
 
         // Gemma sandwich norm: normalize the attn block output *before*
         // the residual add (in-place: each thread reads x[i] only after
@@ -951,7 +981,10 @@ mod tests {
             k_norm,
             v_norm,
             attn_logit_softcap,
+            sinks,
+            o_bias,
         } = &base;
+        assert!(sinks.is_none() && o_bias.is_none());
         assert!(q_bias.is_none());
         assert!(k_bias.is_none());
         assert!(v_bias.is_none());
@@ -995,16 +1028,33 @@ mod tests {
             assert!(e.encodes_anything(), "field {i} encodes but is not listed");
         }
 
-        // And the one that does not: the softcap is read inside the GQA
-        // kernel, never encoded by `encode_attn_extras`.
-        let softcap_only = AttnExtras {
-            attn_logit_softcap: Some(30.0),
-            ..AttnExtras::default()
-        };
-        assert!(
-            !softcap_only.encodes_anything(),
-            "attn_logit_softcap encodes no dispatch of its own, so it must \
-             not force a barrier around zero work"
-        );
+        // And the ones that do not: the softcap and the sinks are read
+        // inside the GQA kernel, and `wo`'s bias is added after `wo`,
+        // never encoded by `encode_attn_extras`.
+        for e in [
+            AttnExtras {
+                attn_logit_softcap: Some(30.0),
+                ..AttnExtras::default()
+            },
+            AttnExtras {
+                sinks: Some(&w),
+                ..AttnExtras::default()
+            },
+            AttnExtras {
+                o_bias: Some(&w),
+                ..AttnExtras::default()
+            },
+        ] {
+            assert!(
+                !e.encodes_anything(),
+                "a field read by the attention kernel or after `wo` encodes \
+                 no dispatch here, so it must not force a barrier around zero work"
+            );
+            assert_eq!(
+                e.stack_only(),
+                e.attn_logit_softcap.is_none(),
+                "sinks and wo's bias are the stacks' alone"
+            );
+        }
     }
 }

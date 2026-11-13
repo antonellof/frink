@@ -185,7 +185,7 @@ fn gpt_oss_loader_wires_the_whole_graph() {
     }
     for layer in &g.layers {
         assert_eq!(layer.router_bias.len(), decoder.config.moe.n_experts);
-        assert_eq!(layer.expert_bias.len(), decoder.config.moe.n_experts);
+        assert_eq!(layer.expert_bias.n_experts(), decoder.config.moe.n_experts);
     }
 
     // llama.cpp `openai-moe.cpp`: period 2, dense_first = false, so the
@@ -268,11 +268,10 @@ fn gpt_oss_golden_is_not_vacuous() {
     {
         let mut decoder = load();
         for layer in decoder.gpt_oss.as_mut().unwrap().layers.iter_mut() {
-            for b in layer.expert_bias.iter_mut() {
-                b.gate.iter_mut().for_each(|x| *x = 0.0);
-                b.up.iter_mut().for_each(|x| *x = 0.0);
-                b.down.iter_mut().for_each(|x| *x = 0.0);
-            }
+            let (gate, up, down) = layer.expert_bias.planes_mut();
+            gate.iter_mut().for_each(|x| *x = 0.0);
+            up.iter_mut().for_each(|x| *x = 0.0);
+            down.iter_mut().for_each(|x| *x = 0.0);
         }
         let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
         let broken = decoder.forward_batch_last(&PROMPT, 0, &mut caches);

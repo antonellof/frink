@@ -124,7 +124,7 @@ impl Decoder {
             && self
                 .layers
                 .iter()
-                .all(|l| self.layer_supports_metal_attn(l));
+                .all(|l| self.layer_supports_metal_stack_attn(l));
 
         #[cfg(not(feature = "metal"))]
         let use_metal_attn = false;
@@ -529,9 +529,15 @@ impl Decoder {
                             // block always ropes, so such a layer takes the
                             // CPU body below rather than a rotation the
                             // checkpoint never trained.
+                            // A per-layer launch: it attends without
+                            // sinks and projects `wo` on the host without
+                            // its bias, so a layer carrying either (or
+                            // gpt-oss's FFN after it) is the host body's
+                            // when no stack took it.
                             if let (true, Some(window), Some(layer_rope)) = (
                                 metal_kvs[l].seq_len == cache.positions()
-                                    && start_pos == cache.positions(),
+                                    && start_pos == cache.positions()
+                                    && self.layer_supports_metal_attn(layer),
                                 window,
                                 self.metal_layer_rope(l),
                             ) {

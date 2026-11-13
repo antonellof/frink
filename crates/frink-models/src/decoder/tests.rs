@@ -84,13 +84,21 @@ fn with_gpt_oss_graph(d: &mut Decoder) {
         layers: (0..n_layers)
             .map(|_| GptOssLayer {
                 router_bias: (0..n_experts).map(|e| 0.03 * e as f32).collect(),
-                expert_bias: (0..n_experts)
-                    .map(|e| frink_moe::ExpertBias {
-                        gate: vec![0.01 * (e + 1) as f32; ffn],
-                        up: vec![-0.02 * (e + 1) as f32; ffn],
-                        down: vec![0.005 * (e + 1) as f32; hidden],
-                    })
-                    .collect(),
+                expert_bias: frink_moe::ExpertBiasPlanes::new(
+                    (0..n_experts)
+                        .flat_map(|e| vec![0.01 * (e + 1) as f32; ffn])
+                        .collect(),
+                    (0..n_experts)
+                        .flat_map(|e| vec![-0.02 * (e + 1) as f32; ffn])
+                        .collect(),
+                    (0..n_experts)
+                        .flat_map(|e| vec![0.005 * (e + 1) as f32; hidden])
+                        .collect(),
+                    n_experts,
+                    ffn,
+                    hidden,
+                )
+                .unwrap(),
             })
             .collect(),
     });

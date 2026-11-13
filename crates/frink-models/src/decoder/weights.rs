@@ -501,8 +501,10 @@ pub struct GptOssLayer {
     /// [`AttnWeights::o_bias`] now: `crate::proj_bias` fills that slot
     /// for every graph that creates the tensor, gpt-oss among them.)
     pub router_bias: Vec<f32>,
-    /// `blk.N.ffn_{gate,up,down}_exps.bias`, one entry per expert.
-    pub expert_bias: Vec<frink_moe::ExpertBias>,
+    /// `blk.N.ffn_{gate,up,down}_exps.bias`, the expert-major planes the
+    /// file stores (the host reads one expert's rows, a device stack
+    /// binds the planes whole).
+    pub expert_bias: frink_moe::ExpertBiasPlanes,
 }
 
 /// gpt-oss side table: one entry per layer, in layer order.
