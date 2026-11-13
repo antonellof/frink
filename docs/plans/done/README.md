@@ -33,4 +33,3 @@ them now.
 | archive/amd-strix-halo | 0/14 |
 | archive/roadmap-2026-09 | 0/20 |
 | on-hold/frink-ui | 15/17 |
-| on-hold/dflash-speculative-decoding | 4/13 |

@@ -250,12 +250,9 @@ fn lfm2moe_matches_llama_cpp_on_all_three_paths() {
     assert_eq!(d.config.moe.n_experts, 4);
     assert!(d.config.layer_is_dense(0) && !d.config.layer_is_dense(1));
     assert!(d.layers[0].moe.exp_probs_bias.is_none(), "blk.0 is dense");
-    for il in 1..4 {
-        assert_eq!(d.layers[il].moe.router.rows(), 4, "blk.{il} routes");
-        assert!(
-            d.layers[il].moe.exp_probs_bias.is_some(),
-            "blk.{il} exp_probs_b"
-        );
+    for (il, layer) in d.layers.iter().enumerate().take(4).skip(1) {
+        assert_eq!(layer.moe.router.rows(), 4, "blk.{il} routes");
+        assert!(layer.moe.exp_probs_bias.is_some(), "blk.{il} exp_probs_b");
     }
     assert_eq!(d.config.layer_shape(0).attention, AttnShape::ShortConv);
     assert_eq!(d.config.layer_shape(2).attention, AttnShape::ShortConv);

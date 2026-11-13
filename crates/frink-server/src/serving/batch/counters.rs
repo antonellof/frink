@@ -21,6 +21,10 @@ pub(super) struct Counters {
     pub(super) peak_blocks: AtomicUsize,
     /// Decoding rows evicted back to the queue to admit a waiting job.
     pub(super) preempted: AtomicU64,
+    /// Sequences seated right now, decoding or still prefilling. A
+    /// gauge, stored by the worker after each flush and admission pass,
+    /// so it reads as of the last tick.
+    pub(super) running: AtomicUsize,
 }
 
 /// A snapshot of the worker's counters.
@@ -71,4 +75,8 @@ pub struct BatcherStats {
     /// Prompt tokens per prefill chunk (llama.cpp `-ub`), for the same
     /// reason.
     pub prefill_chunk: usize,
+    /// Sequences seated as of the last tick, decoding or prefilling:
+    /// llama.cpp's slots that are `is_processing`, which `GET /slots`
+    /// reports against `max_seqs`.
+    pub running: usize,
 }

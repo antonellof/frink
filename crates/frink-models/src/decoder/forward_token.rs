@@ -84,14 +84,20 @@ impl Decoder {
         let cuda_gathers = cuda_embd.is_some();
         #[cfg(not(feature = "cuda"))]
         let cuda_gathers = false;
+        // The same on Vulkan: the decode stack's first op gathers the row
+        // (`vulkan_stack::StackInput::Token`).
+        #[cfg(feature = "vulkan")]
+        let vulkan_gathers = self.vulkan_embedding_gather().is_some();
+        #[cfg(not(feature = "vulkan"))]
+        let vulkan_gathers = false;
         #[cfg(feature = "metal")]
-        let mut hidden = if metal_embd_kind.is_some() || cuda_gathers {
+        let mut hidden = if metal_embd_kind.is_some() || cuda_gathers || vulkan_gathers {
             Vec::new()
         } else {
             self.embed_token(token_id, pos)
         };
         #[cfg(not(feature = "metal"))]
-        let mut hidden = if cuda_gathers {
+        let mut hidden = if cuda_gathers || vulkan_gathers {
             Vec::new()
         } else {
             self.embed_token(token_id, pos)
@@ -691,6 +697,35 @@ impl Decoder {
                     // The stack declined a token it was to gather for:
                     // the host embeds it now, as it would have up front.
                     if cuda_gathers && l == 0 && hidden.is_empty() {
+                        hidden = self.embed_token(token_id, pos);
+                    }
+                }
+                // A run of dense layers in one Vulkan submission, the
+                // residual on the device across them (#409). It declines
+                // before touching any cache, and the body below then runs
+                // the layer.
+                #[cfg(feature = "vulkan")]
+                {
+                    use super::vulkan_stack::StackInput;
+                    let gather = vulkan_gathers && l == 0 && hidden.is_empty();
+                    if !gather && hidden.is_empty() {
+                        hidden = self.embed_token(token_id, pos);
+                    }
+                    let input = if gather {
+                        StackInput::Token(token_id)
+                    } else {
+                        StackInput::Hidden(&hidden)
+                    };
+                    if let Some((h_out, run_len)) =
+                        self.try_vulkan_dense_stack(l, input, pos, 1, kv_caches)
+                    {
+                        hidden = h_out;
+                        fused_through = l + run_len;
+                        continue;
+                    }
+                    // The stack declined a token it was to gather for:
+                    // the host embeds it now, as it would have up front.
+                    if hidden.is_empty() {
                         hidden = self.embed_token(token_id, pos);
                     }
                 }

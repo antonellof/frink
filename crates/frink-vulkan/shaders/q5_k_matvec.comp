@@ -19,11 +19,17 @@ void main() {
         uint qs = blk + 48u + c * 32u;
         uint xb = b * 256u + j * 32u;
         float s = 0.0, xs = 0.0;
-        for (uint l = 0u; l < 32u; ++l) {
-            float xv = x[xb + l];
-            uint q = ((byte_at(qs + l) >> shift) & 0x0fu) | (((byte_at(qh + l) >> j) & 1u) << 4);
-            s += float(q) * xv;
-            xs += xv;
+        // 176 is a word multiple, so qs and qh are word-aligned: read a
+        // word of each and take its four bytes at constant shifts.
+        for (uint l = 0u; l < 32u; l += 4u) {
+            uint lo = w[(qs + l) >> 2] >> shift;
+            uint hi = w[(qh + l) >> 2] >> j;
+            for (uint k = 0u; k < 4u; ++k) {
+                float xv = X(xb + l + k);
+                uint q = ((lo >> (8u * k)) & 0x0fu) | (((hi >> (8u * k)) & 1u) << 4);
+                s += float(q) * xv;
+                xs += xv;
+            }
         }
         acc += f16_at(blk) * sc * s - f16_at(blk + 2u) * m * xs;
     }

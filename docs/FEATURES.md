@@ -57,7 +57,7 @@ recurrent state cannot be rolled back to a middle position.
 | **CPU** | Dense and MoE. int8×int8 matvec on by default (`FRINK_CPU_INT_DOT=0` opts out), interleaved Q4_Kx8 / Q8_0x4 GEMV, Q8_0x4 batch GEMM for prefill, Q5/Q6 int-dot, pool sized to performance cores |
 | **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, MoE Concurrent with fused groups, `MemRanges`, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K) |
 | **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15); `Q4_1`, `Q5_1`, `TQ1_0`, `PTQ1_0` and the seven IQ1/IQ2/IQ3 kinds matvec and GEMM built from one dequant per kind, the IQ grids generated from the CPU's tables (not yet run on hardware), and a resident stack for prefill and decode (norms, QKV bias, QK norm, RoPE, attention tiled over the keys, SwiGLU or GeGLU, residuals on the device; K/V rows back to the host cache through page-locked memory, and kept on the device for the decode that follows). A prefill batch's attention at head widths 64, 128 and 256 runs on the tensor cores on `sm_80` and up (not yet run on hardware). Routed MoE layers ride the stack too: the router on the device and the host's own routing on its logits, then at a decode token the chosen experts in one matvec launch per projection, and over a prefill batch every chosen expert's projection in one grouped tensor-core GEMM (`sm_80` and up). gpt-oss rides it with its attention sinks, `wo` bias, expert biases and clamped SwiGLU on the device. A decode token whose embedding row is its first hidden state is gathered on the device (`get_rows`, built from each kind's GEMM dequant; not yet run on hardware) |
-| **Vulkan** | Decode matvecs for `Q8_0`, `Q4_0`, `Q4_K`, `Q5_K` and `Q6_K` with resident weights, no GEMM (`--features vulkan`, opt-in with `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
+| **Vulkan** | Decode matvecs and an embedding gather for every weight kind, a prefill GEMM for the same kinds, and a one-submission decode stack, with resident weights (`--features vulkan`, opt-in with `--device vulkan` or `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
 
 Which quant kinds each backend runs, per op (matvec for decode, GEMM
 for prefill, `get_rows` for the embedding), and which fall back to the
@@ -66,23 +66,37 @@ tables by `frink caps --kernels` and a test fails when it drifts. A
 fallback also prints a `NO KERNEL` line at load, and `frink inspect-plan`
 lists the tensors of one GGUF that would take one.
 
-Vulkan runs decode matvecs and nothing else. `--features vulkan`
-gives `Q8_0`, `Q4_0`, `Q4_K`, `Q5_K` and `Q6_K` (GLSL in
+Vulkan runs matvecs, a prefill GEMM and a decode stack. `--features vulkan`
+gives `Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q2_K`, `Q3_K`, `Q4_K`,
+`Q5_K`, `Q6_K`, every `IQ` kind, `MXFP4`, `TQ1_0` and `PTQ1_0` (GLSL in
 `crates/frink-vulkan/shaders`, compiled SPIR-V committed beside it, one
 workgroup per row), each run against its `frink_quant` scalar twin on
-a real device (an M2 Pro through MoltenVK), through both the mapped
+a real device (an M2 Pro through MoltenVK, and Mesa's lavapipe in CI), through both the mapped
 and the staging-buffer upload. That covers a Q4_K_M or Q5_K_M model's
 matvecs: Llama-3.2-1B Q4_K_M decodes with them on Vulkan to the CPU's
 own greedy tokens. Weights are uploaded once and stay resident, and
-pipelines are built once. It reports no GEMM for any kind, so a
-prefill lands on the host. Q/K/V and gate/up each go to the device as one
-submission. It is **opt-in** (`FRINK_VULKAN=1`, unset is off) because
-the host still runs the norms, RoPE and attention between submissions,
-so a token pays about four queue round trips per layer: that decode ran
-at 30 tok/s against the CPU's 113 on the same machine (one laptop run,
-not a benchmark). Running a whole layer on the device is the next step
-(#409). It exists to give every AMD and Intel GPU a
-path, including the ones ROCm does not support. `docs/plans/vulkan-beachhead-verdict.md` has the
+pipelines are built once. A prefill batch through one of those kinds
+is one dispatch of the same shader over a grid whose depth is the
+batch, each position bit for bit its matvec; a row is decoded again
+for every position, which is left to tune on real hardware. A decode token of a plain llama-family
+dense model, and a prefill batch of one, runs every layer in ONE
+submission, or one per 26 layers on a deeper model (the stack:
+norm, Q/K/V, RoPE, an f16 KV mirror, attention, `wo`, residual, norm,
+SwiGLU FFN, residual), with each layer's K and V rows returned to the
+host cache, which stays the authority. A layer the stack does not
+serve (post-norms, a window, a softcap, RoPE
+`mscale`, routed experts, GeGLU, or any layer under `--ctk f32`,
+since the device KV is f16) runs on the host with its matvecs
+offloaded: Q/K/V as one submission and a dense SwiGLU FFN as another.
+The stack is held to the CPU and to llama.cpp's decode goldens over
+every graph fixture in CI on lavapipe
+(`decode_step_graphs::vulkan_decode_matches_cpu_and_llama_cpp`), and
+`frink parity` is MATCH with it on Llama-3.2-3B Q4_K_M at a 300-token
+prompt. It is still **opt-in** (`--device vulkan` or `FRINK_VULKAN=1`; unset is off) until
+it is measured against the CPU on rented hardware (ADR 0006); the
+last laptop run, before the stack, was 30 tok/s against the CPU's 113.
+(#409) It exists to give every AMD and Intel GPU a
+path, including the ones ROCm does not support. `docs/plans/archive/vulkan-beachhead-verdict.md` has the
 sizing: a full Vulkan backend is 15 to 25k lines.
 
 The CUDA GEMM has run on hardware and is now the limit. Its hardware test
@@ -186,6 +200,18 @@ the per-request `lora` field. Routed-expert adapters, activated LoRAs
 and the dedicated engines refuse by name; on Metal an adapted model runs
 on the per-matrix path rather than the fused stacks. See
 [`CLI.md`](CLI.md#lora-adapters) and [`API.md`](API.md#lora-adapters).
+
+Speculative decoding on the CLI takes a draft model with `-md`: an
+autoregressive GGUF of the same family, or a DFlash / DFlash2 block
+draft (llama.cpp's `dflash` architecture, picked from the file as
+`--spec-type draft-dflash`). A DFlash draft reads the target's residual
+stream at the layers it names and proposes a whole block in one pass;
+its drafted tokens and lattice scores match libllama on the fixtures
+(`tests/dflash_graphs.rs`), and the target's greedy output with it is
+token for token the output without it, on the CPU and on Metal. The
+server takes the same draft with `--model-draft` and feeds it the
+target's layer inputs from the prompt on. See [`CLI.md`](CLI.md) and
+[`CONFIG.md`](CONFIG.md).
 
 `frink perplexity` is the quality axis: corpus evaluation using
 llama.cpp's method, agreeing with `llama-perplexity` to within a fifth
@@ -354,12 +380,13 @@ OpenAI-compatible HTTP API:
   json_object` is still the best-effort character mask, and composes
 - Parallel serving (Metal). Multiple concurrent streaming clients
   share one batched decode worker (llama.cpp slots model). Continuous
-  batching is on by default when compatible, and streaming emits
-  tokens incrementally under it. The measured throughput at each
+  batching is opt-in (`-cb` or `-np N`), since its decode attends on
+  the host and one client decodes faster on the private loop; streaming
+  emits tokens incrementally under it. The measured throughput at each
   concurrency is in
   [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured).
   CLI: `-cb`, `-np` / `--parallel N`,
-  `--no-cont-batching` for the serialized private path. See
+  the serialized private path otherwise. See
   [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
 - Cache-aware admission. When a radix prefix cache is configured,
   a waiting job whose prompt is already computed may be admitted ahead
@@ -383,9 +410,15 @@ OpenAI-compatible HTTP API:
   names, and verifies them in one
   batched forward. A drafted token is kept only if it equals the
   sampler's own draw, so the output does not change. Grammar-constrained
-  requests, the continuous-batching worker (the default on Metal) and
-  the paged and recurrent stores do not speculate, and `usage` reports
-  the speculation fields only when it ran
+  requests and a paged lease under a sliding window do not speculate,
+  and `usage` reports the speculation fields only when it ran. The
+  paged store rolls a rejected block back by rewinding its tables. The
+  continuous batch (`--cont-batching`) speculates too: every row's
+  block is verified in one forward, and a row's answer is the one it
+  gets decoded alone. A target with recurrent layers (Mamba, GDN,
+  Lightning) does: its state is checkpointed before each verify batch,
+  and a rejection restores it and replays the committed tokens, as
+  llama.cpp's server does
 - Slot save/restore (llama.cpp's `POST /slots/{id}?action=save|restore`):
   a prompt prefix's KV written to `--slot-save-path` and restored into
   the prefix cache after a restart, so a long system prompt is prefilled

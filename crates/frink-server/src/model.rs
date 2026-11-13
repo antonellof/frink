@@ -292,11 +292,33 @@ fn tokenizer_from_gguf(file: &ShardedGguf) -> anyhow::Result<ServerTokenizer> {
     }
 }
 
+/// What a GGUF's header says that the decode never reads, kept from the
+/// load so the routes that report or need it do not reopen the file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GgufFacts {
+    /// The vocabulary's fill-in-the-middle tokens, for `/infill`.
+    pub fim: frink_models::tokenizer::FimTokens,
+    /// `general.file_type`, for `/props`' `model_ftype`.
+    pub file_type: Option<u64>,
+}
+
+impl GgufFacts {
+    pub fn from_gguf(file: &impl frink_gguf::TensorSource) -> Self {
+        GgufFacts {
+            fim: frink_models::tokenizer::FimTokens::from_gguf(file),
+            file_type: file.metadata_u64("general.file_type"),
+        }
+    }
+}
+
 pub struct GgufLoaded {
     pub decoder: Decoder,
     pub tokenizer: ServerTokenizer,
     pub stop_tokens: StopTokens,
     pub bos_id: Option<usize>,
+    /// See [`GgufFacts`]. Default for the synthetic fallback, which has
+    /// no file.
+    pub facts: GgufFacts,
     /// True when this is the synthetic-random-weights fallback rather
     /// than a real checkpoint -- surfaced in `/v1/models` and logged so
     /// nobody mistakes demo output for a real completion.
@@ -413,6 +435,7 @@ pub fn load() -> anyhow::Result<LoadedModel> {
                 tokenizer: ServerTokenizer::Byte,
                 stop_tokens: StopTokens::default(),
                 bos_id: None,
+                facts: GgufFacts::default(),
                 is_synthetic: true,
                 chat_template: crate::chat_template::PromptTemplate::for_synthetic_weights()?,
             }))
@@ -644,6 +667,7 @@ fn load_real_gguf_checkpoint(path: &str, file: &ShardedGguf) -> anyhow::Result<G
         tokenizer,
         stop_tokens,
         bos_id,
+        facts: GgufFacts::from_gguf(file),
         is_synthetic: false,
         chat_template,
     })

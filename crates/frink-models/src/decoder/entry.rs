@@ -53,6 +53,8 @@
 use frink_core::cache::{KvCache, PagedKvCache, PagedStoreExhausted, SharedPagedKv};
 use frink_core::par;
 
+use super::layer_taps::{LayerTapError, TappedBatch};
+use super::multi_seq::LaneRows;
 use super::{Decoder, MultiSeqKv};
 
 impl Decoder {
@@ -217,6 +219,68 @@ impl Decoder {
             let flat: Vec<f32> = hiddens.iter().flatten().copied().collect();
             (self.logits_from_flat_hidden(flat, batch_size), hiddens)
         })
+    }
+
+    /// [`Self::forward_batch_with_hidden`] that also returns the
+    /// residual stream entering each of `layers`, per position.
+    ///
+    /// The values are those of the one batch body every other batch
+    /// forward runs: a fused multi-layer device run is cut at each tap
+    /// so the stream between layers exists on the host to be read,
+    /// and nothing else about the forward changes.
+    pub fn forward_batch_with_taps(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [KvCache],
+        layers: &[usize],
+    ) -> Result<TappedBatch, LayerTapError> {
+        self.check_layer_taps(layers)?;
+        Ok(par::on_workers(move || {
+            let mut taps = super::layer_taps::LayerTaps::new(layers);
+            let hidden =
+                self.forward_hidden_batch_tapped(tokens, start_pos, kv_caches, false, &mut taps);
+            if hidden.is_empty() {
+                return TappedBatch {
+                    logits: Vec::new(),
+                    hidden,
+                    features: Vec::new(),
+                };
+            }
+            let batch_size = hidden.len();
+            let flat: Vec<f32> = hidden.iter().flatten().copied().collect();
+            TappedBatch {
+                logits: self.logits_from_flat_hidden(flat, batch_size),
+                hidden,
+                features: taps.into_rows(batch_size, self.config.hidden_dim),
+            }
+        }))
+    }
+
+    /// [`Self::forward_batch_with_taps`] for a prompt: the layer inputs
+    /// of every position, and the logits of the LAST one only, the
+    /// output head running once as [`Self::forward_batch_last`] runs
+    /// it. `host_kv` is that function's `_host_kv` choice: whether the
+    /// caller will read the caches back.
+    pub fn forward_batch_last_with_taps(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [KvCache],
+        layers: &[usize],
+        host_kv: bool,
+    ) -> Result<(Vec<f32>, Vec<Vec<f32>>), LayerTapError> {
+        self.check_layer_taps(layers)?;
+        Ok(par::on_workers(move || {
+            let mut taps = super::layer_taps::LayerTaps::new(layers);
+            let hidden =
+                self.forward_hidden_batch_tapped(tokens, start_pos, kv_caches, host_kv, &mut taps);
+            let Some(last) = hidden.last() else {
+                return (Vec::new(), Vec::new());
+            };
+            let logits = self.logits_from_normed(last);
+            (logits, taps.into_rows(hidden.len(), self.config.hidden_dim))
+        }))
     }
 
     /// [`Self::forward_batch`] for the common case where only the final
@@ -419,7 +483,42 @@ impl Decoder {
         positions: &[usize],
         kv: &mut MultiSeqKv<'_>,
     ) -> Vec<Vec<f32>> {
-        par::on_workers(move || self.forward_multi_seq_kv_on_worker(tokens, positions, kv))
+        par::on_workers(move || {
+            let lanes: Vec<usize> = (0..tokens.len()).collect();
+            let mut no_taps = super::layer_taps::LayerTaps::new(&[]);
+            self.forward_multi_seq_rows_on_worker(tokens, positions, &lanes, kv, &mut no_taps)
+        })
+    }
+
+    /// [`Self::forward_multi_seq_kv`] where a sequence may own several
+    /// rows: row `b` is `tokens[b]` at `positions[b]` of sequence
+    /// `lanes[b]`, and a sequence's rows are consecutive positions in
+    /// order. One batched forward verifies every lane's speculative
+    /// block, each row attending over its own sequence up to itself.
+    ///
+    /// Also returns, per row, the residual entering each layer `layers`
+    /// names, as [`Self::forward_batch_with_taps`] does for one
+    /// sequence; empty rows when `layers` is.
+    pub fn forward_multi_seq_lanes(
+        &self,
+        tokens: &[usize],
+        positions: &[usize],
+        lanes: &[usize],
+        kv: &mut MultiSeqKv<'_>,
+        layers: &[usize],
+    ) -> Result<LaneRows, LayerTapError> {
+        self.check_layer_taps(layers)?;
+        Ok(par::on_workers(move || {
+            let mut taps = super::layer_taps::LayerTaps::new(layers);
+            let logits =
+                self.forward_multi_seq_rows_on_worker(tokens, positions, lanes, kv, &mut taps);
+            let features = if layers.is_empty() {
+                vec![Vec::new(); tokens.len()]
+            } else {
+                taps.into_rows(tokens.len(), self.config.hidden_dim)
+            };
+            LaneRows { logits, features }
+        }))
     }
 }
 

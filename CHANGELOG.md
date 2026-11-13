@@ -37,18 +37,270 @@ are the ones worth reading twice.
   boundary; it has not run on a GPU yet, which is why the switch is off
   (#537, #133).
 
-### Fixed
+## [0.63.0] - 2026-11-13
 
-- **`frink bench` reports llama-bench's statistics.** It printed the
-  median ± the population stddev and said that is what llama-bench
-  prints. llama-bench prints the mean ± the sample stddev
-  (`llama-bench.cpp:102-118`), and frink's own `-o json` already did.
-  So the `--compare` gap divided llama.cpp's mean by frink's median.
-  The table, the gap and the receipt (schema 4, `frink_stat`) now take
-  the mean and the sample stddev, and `--render` takes the mean of every
-  receipt's samples, so the published rows moved by under 2% (#481).
+### Added
+
+- **DFlash and DFlash2 drafts for speculative decoding** (#600).
+  `frink run -m target.gguf -md draft.gguf` now takes a draft GGUF of
+  llama.cpp's `dflash` architecture: a small stack that reads the
+  target's residual stream at the layers it names, injects it into its
+  own KV, and drafts a whole block from `[anchor, mask, ...]` in one
+  non-causal pass. DFlash2's two-tap grouped convolution and candidate
+  selector are both built. The draft's tokens and the scores they were
+  chosen on match libllama's over four drafting rounds on three
+  fixtures (`tests/dflash_graphs.rs`, goldens from
+  `scripts/dflash_reference.cpp`). The DSpark, LiLiCorr and
+  reduced-vocabulary variants refuse by name. The target exposes the
+  inputs of chosen layers through `Decoder::forward_batch_with_taps`.
+- `--spec-type` (`draft-simple`, `draft-dflash`, `none`; the other
+  upstream types refuse by name), `--spec-draft-n-max` and
+  `--spec-draft-n-min`, llama.cpp's spellings at the pin.
 
 ### Changed
+
+- **`--spec-draft-n-max` defaults to 3 and `--spec-draft-p-min` to 0**,
+  llama.cpp's defaults at the pin; they were 5 and 0.75. The old
+  spellings `--draft-max` and `--draft-p-min` still work. Output does
+  not change, only how much is drafted.
+- **Continuous batching is opt-in on Metal too.** It was on by default
+  on a Metal build, and its decode attends on the host: Qwen3-8B
+  Q4_K_M with 7.4k tokens of context decoded at 2.5 tok/s on an M2 Pro,
+  where the private loop, attending on the device, does 24.6 (llama.cpp
+  does the same). `-cb`, `-np N` or `FRINK_CONTINUOUS_BATCHING=1` turn
+  it on for many clients; without them concurrent requests serialize.
+- **Host GQA decode attention reads each K/V row once per head group**,
+  not once per query head, and the contiguous kernel spreads its head
+  groups over the cores. Bit-identical; the batched decode above goes
+  from 2.52 to 3.65 tok/s.
+
+### Fixed
+
+- **The prefix cache stored nothing for a greedy request on Metal**,
+  and greedy is the server's default. The Metal decode folds the last
+  projection into an argmax and keeps one id, and the store refused any
+  request without a full logit row, so `FRINK_PREFIX_CACHE_ENTRIES`
+  never hit for a client that sends no temperature. The KV is now
+  stored without the row; an exact repeat recomputes its last position.
+  A restored prefix also rebuilds the Metal arena, which a length check
+  alone could mistake for another conversation's, and prefills its
+  suffix in one batch rather than token by token. Qwen3-8B Q4_K_M,
+  7.4k-token agent prompt on an M2 Pro: follow-up turns 38 s -> 2.3 s,
+  greedy output identical to an uncached run.
+- **The Metal private decode loop answered 500 to every request whose
+  prompt-lookup draft was rejected.** Its KV lives on the device and the
+  host caches stop at the prompt, but the speculative gate only asked
+  whether the store could roll back, so the rollback hit the `truncate`
+  assert. A store whose host rows do not reach the position now steps
+  one token at a time.
+
+- **Speculative decoding on Metal answered from zeroed keys after a
+  rejected draft.** A rollback shortened the host KV cache but not the
+  Metal arena, whose host rows Metal prefill leaves as placeholders, so
+  the next verify rebuilt the arena from those placeholders. Greedy
+  output with a draft model left the plain greedy path two tokens in.
+  `Decoder::truncate_kv` now rewinds the arena with the host rows, for
+  `frink run -md` and for the server's prompt-lookup speculation;
+  `metal_speculation_rewinds_the_device_kv` holds it on a GPU.
+- **Llama 3 tool calls written as bare JSON are tool calls.** Llama
+  3.1/3.2 answer a custom tool with `{"name": …, "parameters": {…}}`
+  and no `<|python_tag|>`. The non-streaming path only parsed text
+  holding a known marker, and the streaming parser released the JSON
+  as text before it could be read, so every such call reached the
+  client as `content` with `finish_reason: "stop"` -- on
+  `/v1/chat/completions`, streamed or not, and on `/v1/responses`. A
+  Llama 3 turn that opens with `{` is now parsed as a call (held to the
+  end of the stream when streaming); one naming no offered tool is
+  returned as the text it was.
+- **A Hermes/Qwen tool call ending a turn is a tool call.** With tools
+  active the server stops on `</tool_call>` and cuts the stop string,
+  and the parser then required that same closer, so the last call of
+  every Hermes/Qwen turn reached the client as text, streamed or not. An
+  unclosed block holding one complete call is now that call; one cut
+  mid-JSON stays text.
+
+## [0.62.0] - 2026-11-12
+
+### Added
+
+- **The Vulkan stack serves QKV bias and QK-norm** (#409). A bias is
+  one broadcast add after its projection (Qwen2 and the GLM family); a
+  QK-norm is the RMSNorm op per head or over the whole projection,
+  after the bias and before RoPE (Qwen3, OLMoE). The graph fixtures the
+  stack serves go from 12 to 21, each held to the CPU within 1e-3 (worst
+  3.2e-4, a QK-norm, whose sum of squares is an f32 tree on the device).
+  A layer with either records up to five more dispatches, so a
+  submission holds a few fewer than 26 of them.
+
+- **A Vulkan embedding gather, from the matvec shaders** (#409,
+  #405). Every matvec shader is compiled a second time with a one-hot
+  activation (`-DGATHER`): a row of the table against `e_c` is that
+  row's value at column `c`, exactly, so each kind's decode is still
+  written once and a gather cannot disagree with its matvec. The decode
+  stack's first op gathers the token's row on the device when the
+  embedding row is the first hidden state (no embedding scale, norm or
+  position table). It costs a square matvec a token, left to tune on
+  hardware. The Vulkan row of `docs/KERNELS.md` is now 0 host fallbacks
+  in all three columns.
+
+- **A Vulkan prefill stack: the layers of a prompt batch in one
+  submission** (#409, step 6). The decode stack takes a batch of
+  positions: the same ops recorded over the batch
+  (`Batch::for_positions`), each buffer holding a row per position.
+  RoPE and attention read their batch position from the dispatch grid;
+  position `b` attends over the prefix and the batch up to itself. So a
+  prefill of a plain llama-family dense model waits once per 26 layers
+  instead of running norms, RoPE and attention on the host between
+  batched matmuls. A batch of several positions is each position alone,
+  bit for bit, and a prompt prefilled in two batches is the prompt
+  prefilled in one. A batch whose score scratch would pass 256 MiB
+  stays on the host. On Llama-3.2-3B Q4_K_M, `frink parity` is MATCH at
+  a 300-token prompt (first-token KL 2.886e-5, the CPU's 2.875e-5) and
+  over 48 decode steps, and the greedy tokens are the CPU's.
+
+- **Vulkan shaders for the codebook kinds: IQ1_S, IQ1_M, IQ2_XXS,
+  IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S** (#409, #405). One unit per
+  16-value sub-block, the cut ggml's dequants use. The grids and sign
+  table are not typed again in GLSL: they are one buffer at a fourth
+  binding, filled from `frink_quant::iq_tables` when the runtime opens.
+  Each kind is held to its `frink_quant` scalar twin as a matvec and
+  as a GEMM, on MoltenVK and on lavapipe. Every weight kind now has a
+  Vulkan matvec and GEMM: those two columns of `docs/KERNELS.md` fall
+  from 7 host fallbacks to 0.
+
+- **Vulkan shaders for the trit formats, TQ1_0 and PTQ1_0** (#409,
+  #405). One GLSL body (`trit_common.glsl`) for both block geometries,
+  a unit per packed byte, held to `frink_quant::ternary::dot_trits_f32`
+  as a matvec and as a GEMM. The Vulkan matvec and GEMM columns of
+  `docs/KERNELS.md` each fall from 9 host fallbacks to 7: the codebook
+  kinds (IQ1_S to IQ3_S).
+
+- **A Vulkan GEMM: a prefill batch is one dispatch** (#409, step 6;
+  #405). The matvec shaders read a batch position from the dispatch
+  grid's depth, so one shader per kind serves decode and prefill and
+  each position of a batch is its matvec bit for bit
+  (`frink_vulkan::runtime::Runtime::gemm`). `apply_batch` reaches it
+  under `--device vulkan` for every kind with a shader, and the Vulkan
+  GEMM column of `docs/KERNELS.md` falls from 22 host fallbacks to 9.
+  Every (row, position) decodes its row again; decoding once per batch
+  is left to tune on real hardware. On Llama-3.2-3B Q4_K_M with the
+  prefill on Vulkan, `frink parity` is MATCH at a 300-token prompt
+  (first-token KL 2.892e-5, the CPU's 2.875e-5) and over 48 decode
+  steps, and the greedy tokens are the CPU's.
+
+- **A Vulkan decode stack: every layer of a token in one submission**
+  (#409, step 5). For a plain llama-family dense model the device runs
+  norm, Q/K/V, RoPE, the KV append, attention, `wo`, the residual, norm,
+  the SwiGLU FFN and the residual for every layer, and the token waits
+  once (once per 26 layers on a deeper model: a submission holds 512
+  dispatches). The host cache stays the authority. Each layer's K and V rows
+  come back after that wait and are pushed to it, and the device KV is
+  a mirror (`frink_core::vulkan_kv`) that is checked against the host
+  rows by row count and newest K row, and rebuilt when they disagree.
+  Which layers it serves is `fused_view`'s shared decision; it declines
+  QKV bias, QK-norm, post-norms, windows, softcaps, RoPE `mscale`,
+  routed experts and GeGLU, which keep the host body, and so does a
+  run with `--ctk f32`: the device KV is f16, llama.cpp's default. F32 projections
+  ride it through an F32 matvec shader the offload paths do not use.
+  `decode_step_graphs::vulkan_decode_matches_cpu_and_llama_cpp` holds
+  it to the CPU, f16 KV against f16 KV, within 1e-3 (4.2e-5 measured
+  through MoltenVK), and to llama.cpp's decode goldens, over every
+  graph fixture. It also fails on more than one submission per 26
+  layers, and it runs in CI on lavapipe. On Llama-3.2-3B Q4_K_M (28
+  layers, so two submissions a token) `frink parity` is MATCH with it
+  at a 300-token prompt over 48 decode steps (worst KL 4.938e-4
+  against the CPU's 4.941e-4), and the greedy tokens are the CPU's.
+
+- **`--device vulkan`, and Vulkan devices numbered as llama.cpp numbers
+  them.** `frink` and `frink-server` take `-dev vulkan` (a `--features
+  vulkan` build). It runs on `Vulkan0`, chosen by llama.cpp's rule:
+  every discrete and integrated GPU in loader order, or exactly the
+  indices in `GGML_VK_VISIBLE_DEVICES`. `--list-devices` prints one
+  `Vulkan<i>` row per visible device. frink used to take the first
+  device with a compute queue, which on a machine with lavapipe
+  installed could be the CPU driver (#409).
+
+- **Vulkan decode matvecs for Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, IQ4_NL,
+  IQ4_XS and MXFP4** (#409, #405). Each is a GLSL shader held to its
+  `frink_quant` scalar twin on MoltenVK and on lavapipe, at shapes
+  with unaligned row strides, idle invocations and several workgroups,
+  through both upload paths. The Vulkan matvec column of
+  `docs/KERNELS.md` falls from 17 host fallbacks to 9: the codebook
+  kinds (IQ1_S to IQ3_S), TQ1_0 and PTQ1_0.
+
+- **Vulkan layer ops, each one submission-chainable**: RMSNorm (whole
+  row or per head), the residual add, RoPE (Norm and NeoX pairing,
+  partial rotary width), an f16 KV append that rounds to nearest even
+  as llama.cpp's f16 KV does, and GQA decode attention over that cache
+  (#409, step 5a). `frink_vulkan::runtime::ops::Batch` records them,
+  and any matvec between them, as one submission. RoPE's angles come
+  from `frink_core::rope_table::rope_cos_sin`, whose table is held to
+  every CPU rotation bit for bit, because a GPU's `sin` is not the
+  CPU's. Each op is held to its CPU function in
+  `frink-core`'s `vulkan_ops_seam` tests. No model uses them yet; the
+  decoder wiring is the next step.
+
+- **llama-server's `/props`, `GET /slots` and `/infill`, and slot
+  erase.** A client written for llama-server no longer gets a 404 on
+  them (#534).
+  - `GET /props` answers in llama.cpp's shape with every field frink can
+    state: `/completion`'s defaults, the context ceiling, the `-np`
+    slots, the served name, path and file type, the template and its
+    BOS and EOS, and the endpoint switches. Asleep it answers from the
+    snapshot the sleep took. A field frink has no value for (`seed`,
+    the knobs of samplers it does not have, llama.cpp's template caps)
+    is left out, and `docs/API.md` lists each. `POST /props` is
+    llama.cpp's 501 without `--props`.
+  - `GET /slots` lists the continuous batcher's `-np` seats, the busy
+    ones first, with llama.cpp's four always-present fields, and
+    honours `?fail_on_no_slot`. `--slots` / `--no-slots` and
+    `LLAMA_ARG_ENDPOINT_SLOTS` gate it as upstream. A deployment
+    without seats says so by name.
+  - `POST /infill` reads the vocabulary's FIM tokens as llama.cpp does
+    (the GGUF keys, then the token texts), refuses a model without them
+    in llama.cpp's words, validates the body with its messages,
+    assembles the prompt as `format_prompt_infill` does (the repo-level
+    `input_extra` pattern, the `-b` budgets, `--spm-infill`) and serves
+    it through `/completion`'s path, prefilling the assembled ids as
+    they are.
+  - `POST /slots/{id}?action=erase` empties one slot and answers
+    `n_erased`, dropping the prefix cache entry the slot's save or
+    restore stored unless another slot holds the same prompt.
+
+- **`frink parity --dump-tensors DIR`.** Both engines write the
+  prompt's per-layer intermediates under llama.cpp's tensor names (the
+  dumper through llama.cpp's own eval callback,
+  `LLAMA_LOGITS_DUMP_TENSORS`), and `parity` prints each tensor's
+  relative L2 distance over all rows, for the worst row and for the
+  output row. It says at which layer and op two engines part, which a
+  first-token KL cannot.
+
+### Changed
+
+- **A dense SwiGLU FFN is one Vulkan submission** (#409). Gate and up,
+  a SwiGLU shader, and down are recorded in one command buffer with the
+  intermediate left on the device, the Vulkan twin of CUDA's and
+  Metal's `launch_dense_ffn_swiglu`, reached through
+  `WeightMatrix::apply_gpu_dense_ffn_swiglu` from every dense decode
+  layer. A layer's decode drops from four queue round trips to three.
+  On Llama-3.2-1B Q4_K_M and Q8_0, `frink parity` and the greedy tokens
+  are unchanged with `FRINK_VULKAN=1`.
+
+- **CPU activation quantization and the RMS norm are ggml's, bit for
+  bit (#476).** The `Q8_K` quantizer in front of every K-quant integer
+  dot now takes ggml's `iscale = 127/amax`, `d = 1/iscale` and rounds
+  half to even; the `Q8_0` one (Q8_0, Q4_0, IQ4_NL, MXFP4) stores its
+  scale as f16 and follows the host ISA's `quantize_row_q8_0` (NEON
+  `1/d`, AVX `127/amax`, both half to even). The RMS norm sums its
+  squares in order in f64, as `ggml_compute_forward_rms_norm_f32` does,
+  where it summed in f32 lanes. Fed llama.cpp's own dumped inputs,
+  frink's Q8_0 and MXFP4-model matmuls were up to 2e-3 and 3e-3 off
+  libllama's per op; they are now identical, and on Llama-3.2-1B Q8_0
+  and gpt-oss-20b everything before layer 0's attention is
+  bit-identical. This changes tokens on every CPU int-dot path.
+  gpt-oss-20b's first-token KL against llama.cpp on a 64-token prompt
+  goes from 3.4e-3 to 4.6e-4, below the 3.4e-3 between two llama.cpp
+  builds.
 
 - **The CUDA decode matvecs run as llama.cpp's do, by default.** The
   dp4a matvecs of 0.61.0 (the activation quantized once to q8_1, Q4_K,
@@ -65,6 +317,40 @@ are the ones worth reading twice.
   matvec reads, the activation's q8_1 rounding by default and its f32
   values under `wide` and `narrow`, by the same once-read switch
   (#133).
+
+### Fixed
+
+- **`-ngl 0` and `-dev cpu` turn Vulkan off.** Each binary set
+  `FRINK_METAL` and `FRINK_CUDA` from its own copy of the device match,
+  and none set `FRINK_VULKAN`. A run with `FRINK_VULKAN=1` and `-dev
+  cpu` did its decode matvecs on the GPU while saying `device=cpu`, and
+  a `frink bench -ngl 0` row could be labelled `cpu` for a Vulkan run.
+  The three copies are now one, `frink_models::offload` (#409).
+
+- **DRY's scan window defaults to llama.cpp's 64 tokens.** frink
+  defaulted `dry_penalty_last_n` to `-1`, the whole context, from an
+  older `common.h`. At the pin it is 64 (`common/common.h:251`), so a
+  request that set `dry_multiplier` alone scanned a different window
+  from llama-server's.
+
+- **A crafted GGUF refuses at load instead of exhausting memory or
+  panicking.** `block_count` or `nanbeige.num_loops` of 2^31 made the
+  loader allocate until the OS killed it, and 55 other hostile values
+  panicked: zero layers indexing an empty per-layer array, a one-layer
+  minimax-01, and `rope_freqs` lengths that did not match the rotary
+  width. The layer count is now capped at llama.cpp's
+  `LLAMA_MAX_LAYERS` (512), as its loader refuses, and each of the
+  others is a named refusal. `tests/hostile_metadata.rs` sets every
+  integer key of every graph fixture to a hostile value (#577).
+
+- **`frink bench` reports llama-bench's statistics.** It printed the
+  median ± the population stddev and said that is what llama-bench
+  prints. llama-bench prints the mean ± the sample stddev
+  (`llama-bench.cpp:102-118`), and frink's own `-o json` already did.
+  So the `--compare` gap divided llama.cpp's mean by frink's median.
+  The table, the gap and the receipt (schema 4, `frink_stat`) now take
+  the mean and the sample stddev, and `--render` takes the mean of every
+  receipt's samples, so the published rows moved by under 2% (#481).
 
 ## [0.61.0] - 2026-11-09
 

@@ -506,6 +506,8 @@ fn long_prefill_does_not_freeze_an_in_flight_decode() {
         identity_decode(),
         BatcherConfig {
             prefill_chunk: 1,
+            // The bound below counts one token per decode step.
+            speculate: false,
             ..BatcherConfig::default()
         },
     );

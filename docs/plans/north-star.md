@@ -59,11 +59,11 @@ rental, asked for before it is booked (#542).
    largest gap, on the hardware most people own. Next step: the batched
    rental.
 2. **Same commands, same API.** The flag and `LLAMA_ARG_*` tail (#404).
-   The `llama-server` endpoints frink does not serve: `/infill`,
-   `/props`, `GET /slots`, slot erase (#534), and
-   `stream` on `/v1/completions`, which is refused by name today.
-3. **Numerics.** The activation quantizers' last bit (#476), and the
-   statistic `frink bench` prints (#481).
+   `stream` on `/v1/completions`, which is refused by name today, and
+   the FIM pad, repo and file-separator tokens as end-of-generation
+   tokens, which `/infill` notices most (#534).
+3. **Numerics.** The deviations ADR 0009 still lists, the largest the
+   CPU attention's arithmetic under 64 query rows and in decode.
 
 ### A server that holds up under load
 
@@ -76,6 +76,9 @@ buys on one machine.
    private loop, so on Metal, where continuous batching is the default,
    it does not speculate at all. Next: speculation inside the batch,
    then multi-token-prediction heads as a second drafter (#533).
+   Trained block drafters first reach `frink run`: DFlash2 drafts on
+   every backend (#600,
+   [`dflash2-and-serving.md`](dflash2-and-serving.md)).
 5. **Scheduling.** Preemption on by default after a measurement (#408),
    and a request priority (#541). `/metrics` reports prefix reuse and the
    latency histograms a scheduler is tuned against.

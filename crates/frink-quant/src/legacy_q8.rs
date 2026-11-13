@@ -408,16 +408,17 @@ mod tests {
         out
     }
 
-    /// Activations exact in Q8 (32-blocks, `amax` 1.0, multiples of
-    /// 1/127), so the int8 path and the f32 kernel differ only by f32
-    /// summation order.
+    /// Activations exact in Q8 (32-blocks, `amax` 127/128, multiples of
+    /// 1/128), so the int8 path and the f32 kernel differ only by f32
+    /// summation order. The scale `amax / 127` is then 1/128, exact in
+    /// the f16 ggml stores it as, where 1/127 is not.
     fn exact_acts(n: usize) -> Vec<f32> {
         let x: Vec<f32> = (0..n)
             .map(|i| {
                 if i % 32 == 0 {
-                    1.0
+                    127.0 / 128.0
                 } else {
-                    ((i * 37 % 255) as f32 - 127.0) / 127.0
+                    ((i * 37 % 255) as f32 - 127.0) / 128.0
                 }
             })
             .collect();

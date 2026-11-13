@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q2_K, 84 bytes per 256 values: 16 scale bytes (low nibble scale,
+// high nibble min), 64 bytes of 2-bit codes, f16 d, f16 dmin
+// (frink_quant::dot_q2_k_f32_scalar). Sixteen units per block, one per
+// scale: unit u is half n = u/8, shift pair j = (u/2)%4 and group
+// g = u%2; its 16 codes are bits 2j..2j+1 of qs[n*32 + g*16 + l], for
+// values n*128 + j*32 + g*16 + l.
+#include "matvec_common.glsl"
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint u = gl_LocalInvocationID.x; u < p.n_blocks_per_row * 16u; u += WG) {
+        uint b = u >> 4, v = u & 15u, n = v >> 3, j = (v >> 1) & 3u, g = v & 1u;
+        uint blk = base + b * 84u;
+        uint sc = byte_at(blk + v);
+        float dl = f16_at(blk + 80u) * float(sc & 0x0fu);
+        float ml = f16_at(blk + 82u) * float(sc >> 4);
+        uint qs = blk + 16u + n * 32u + g * 16u;
+        uint xb = b * 256u + n * 128u + j * 32u + g * 16u;
+        uint shift = 2u * j;
+        for (uint l = 0u; l < 16u; ++l) {
+            float raw = float((byte_at(qs + l) >> shift) & 3u);
+            acc += (dl * raw - ml) * X(xb + l);
+        }
+    }
+    finish(row, acc);
+}

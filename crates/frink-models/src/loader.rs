@@ -60,6 +60,10 @@ pub enum LoadError {
     ExpertCountMismatch(String, usize, usize),
     #[error("GGUF file is missing required hparam metadata key '{0}'")]
     MissingHparam(String),
+    /// A count read off the wire that the file itself cannot back, refused
+    /// before it sizes anything: key, value, and the bound it broke.
+    #[error("GGUF hparam '{0}' = {1} is impossible for this file: {2}")]
+    ImplausibleHparam(String, u64, String),
     /// `general.architecture` is not in the capability registry -- refuse
     /// to guess RoPE/gating rather than emit fluent-but-wrong logits.
     #[error(

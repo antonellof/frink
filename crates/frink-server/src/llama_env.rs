@@ -64,6 +64,7 @@ pub const LLAMA_ENV_FLAGS: &[(&str, &str)] = &[
     ("LLAMA_ARG_CORS_ORIGINS", "cors-origins"),
     ("LLAMA_ARG_THREADS_HTTP", "threads-http"),
     ("LLAMA_ARG_ENDPOINT_METRICS", "metrics"),
+    ("LLAMA_ARG_ENDPOINT_SLOTS", "slots"),
 ];
 
 /// llama.cpp's `is_truthy` / `is_falsey`, through the one copy of them

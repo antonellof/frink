@@ -1,0 +1,46 @@
+#version 450
+// Append one token's K or V (n f32 values, n even) to an f16 cache at
+// word offset `dst`: two halves per word, low half first, rounded to
+// nearest even as llama.cpp's f16 KV is (ggml_fp32_to_fp16, F16C). The
+// rounding is done here by hand because packHalf2x16's is
+// implementation-defined.
+//
+// Bindings: 0 unused (bound to the source), 1 the source, 2 the cache
+// (uint words). Push: n, dst.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Unused { uint unused[]; };
+layout(std430, binding = 1) readonly buffer S { float s[]; };
+layout(std430, binding = 2) buffer C { uint cache[]; };
+layout(push_constant) uniform Push { uint n; uint dst; } p;
+
+// IEEE binary32 -> binary16, round to nearest even, with overflow to
+// inf, NaN kept quiet, and subnormals rounded.
+uint f16_rne(float f) {
+    uint x = floatBitsToUint(f);
+    uint sign = (x >> 16) & 0x8000u;
+    uint e = (x >> 23) & 0xffu;
+    uint m = x & 0x7fffffu;
+    if (e == 0xffu) return sign | 0x7c00u | (m != 0u ? 0x200u | (m >> 13) : 0u);
+    int ex = int(e) - 127 + 15;
+    if (ex >= 31) return sign | 0x7c00u;
+    if (ex <= 0) {
+        if (ex < -10) return sign;
+        m |= 0x800000u;
+        uint shift = uint(14 - ex);
+        uint half_m = m >> shift;
+        uint rem = m & ((1u << shift) - 1u);
+        uint mid = 1u << (shift - 1u);
+        if (rem > mid || (rem == mid && (half_m & 1u) != 0u)) half_m += 1u;
+        return sign | half_m;
+    }
+    uint h = sign | (uint(ex) << 10) | (m >> 13);
+    uint rem = m & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (h & 1u) != 0u)) h += 1u;
+    return h;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 64u + gl_GlobalInvocationID.x;
+    if (2u * i >= p.n) return;
+    cache[p.dst + i] = f16_rne(s[2u * i]) | (f16_rne(s[2u * i + 1u]) << 16);
+}

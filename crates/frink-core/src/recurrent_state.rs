@@ -13,13 +13,16 @@
 //! - it CLONES with the cache (a prefix-cache fork is a fork of the
 //!   state), and CLEARS with it;
 //! - it cannot be TRUNCATED to a middle position. llama.cpp's
-//!   `llama_memory_recurrent::seq_rm` refuses a `p0 > 0` for the same
-//!   reason and its server re-prefills. So [`KvCache::truncate`] on a
-//!   cache that holds one refuses anything but "to zero" or "to where
-//!   it is", and the callers that roll back -- the prefix cache,
-//!   speculative verification, the draft model, the whole-response
-//!   cache's back-off -- ask [`KvCache::can_truncate_to`] first or are
-//!   fenced off the model.
+//!   `llama_memory_recurrent::seq_rm` refuses a `p0 > 0` too, unless
+//!   per-token snapshots were kept (`n_rs_seq`). So [`KvCache::truncate`]
+//!   on a cache that holds one refuses anything but "to zero" or "to
+//!   where it is", and the callers that roll back -- the prefix cache,
+//!   the draft model, the whole-response cache's back-off -- ask
+//!   [`KvCache::can_truncate_to`] first or are fenced off the model;
+//! - it can be CHECKPOINTED and restored ([`KvCheckpoint`]), which is
+//!   how speculative verification undoes a rejected block on such a
+//!   target, as llama.cpp's server does: restore, then replay the
+//!   committed tokens.
 //!
 //! The buffers are flat and the LAYER owns their geometry (its weights
 //! say what `d_conv`, the conv width and the scan dims are), so this
@@ -28,6 +31,7 @@
 //!
 //! [`KvCache::truncate`]: crate::cache::KvCache::truncate
 //! [`KvCache::can_truncate_to`]: crate::cache::KvCache::can_truncate_to
+//! [`KvCheckpoint`]: crate::cache::KvCheckpoint
 
 /// One sequence's state for one recurrent layer.
 #[derive(Debug, Clone, PartialEq)]

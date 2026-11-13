@@ -55,7 +55,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ("crates/frink-server/src/generate.rs", 415, "fn fork"),
     (
         "crates/frink-server/src/serving/batch/prefill.rs",
-        156,
+        178,
         "fn step_chunk",
     ),
     // Per-step token budget.
@@ -100,7 +100,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
         287,
         "fn evict",
     ),
-    ("crates/frink-server/src/generate.rs", 866, "tree.evict("),
+    ("crates/frink-server/src/generate.rs", 876, "tree.evict("),
     // Preemption.
     (
         "crates/frink-server/src/serving/batch/preempt.rs",
@@ -109,12 +109,12 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/frink-server/src/serving/batch/preempt.rs",
-        111,
+        113,
         "fn make_room",
     ),
     (
         "crates/frink-server/src/serving/batch/row.rs",
-        285,
+        300,
         "fn into_parts",
     ),
 ];

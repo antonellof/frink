@@ -169,6 +169,12 @@ pub struct KvCache {
     /// newest K row, so a truncate grown back by a host path is caught).
     #[cfg(feature = "cuda")]
     pub cuda_attn: Option<frink_cuda::prefill::CudaKvMirror>,
+    /// This sequence's KV on the Vulkan device, for the decode stack
+    /// (`crate::vulkan_kv`). The same contract as `cuda_attn`: a mirror,
+    /// never the authority, reset by a clone, used only while it holds
+    /// exactly this cache's rows.
+    #[cfg(feature = "vulkan")]
+    pub vulkan_attn: Option<crate::vulkan_kv::VulkanKvMirror>,
     /// Positions this sequence has consumed.
     ///
     /// **Not the same thing as the number of rows in `k`/`v`**, and the
@@ -263,6 +269,8 @@ impl Clone for KvCache {
             metal_attn: None,
             #[cfg(feature = "cuda")]
             cuda_attn: None,
+            #[cfg(feature = "vulkan")]
+            vulkan_attn: None,
             recurrent: self.recurrent.clone(),
         }
     }
@@ -379,6 +387,8 @@ impl KvCache {
             metal_attn: None,
             #[cfg(feature = "cuda")]
             cuda_attn: None,
+            #[cfg(feature = "vulkan")]
+            vulkan_attn: None,
             recurrent: None,
         }
     }
@@ -412,6 +422,8 @@ impl KvCache {
             metal_attn: None,
             #[cfg(feature = "cuda")]
             cuda_attn: None,
+            #[cfg(feature = "vulkan")]
+            vulkan_attn: None,
             recurrent: None,
         }
     }
@@ -481,6 +493,8 @@ impl KvCache {
             metal_attn: None,
             #[cfg(feature = "cuda")]
             cuda_attn: None,
+            #[cfg(feature = "vulkan")]
+            vulkan_attn: None,
             recurrent: None,
         })
     }
@@ -831,6 +845,9 @@ impl KvCache {
         }
     }
 }
+
+mod checkpoint;
+pub use checkpoint::KvCheckpoint;
 
 mod paged;
 pub use paged::*;

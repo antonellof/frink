@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/dflash1_draft_tiny.gguf
+config: REFUSED: architecture 'dflash' requires unimplemented feature: architecture deferred from Frink text-generation scope: speculative draft head; not a standalone decoder target (pass it as -md with its target)

@@ -1,0 +1,24 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// scores[h, t] = scale * dot(q_h, k_t) for every cached position t of
+// query head h's KV head. Bindings: 0 the KV cache, 1 q
+// [n_heads, head_dim], 2 scores [n_heads, seq_len].
+#include "attn_common.glsl"
+layout(std430, binding = 1) readonly buffer Q { float q[]; };
+layout(std430, binding = 2) writeonly buffer S { float scores[]; };
+
+void main() {
+    uint h = attn_head();
+    if (h >= p.n_heads) return;
+    uint kvh = h / (p.n_heads / p.n_kv_heads);
+    float scale = uintBitsToFloat(p.scale_bits);
+    uint seq = attn_seq(), qh = attn_row(h) * p.head_dim, row = attn_row(h) * p.seq_stride;
+    for (uint t = gl_LocalInvocationID.x; t < seq; t += 64u) {
+        float s = 0.0;
+        for (uint d = 0u; d < p.head_dim; d += 2u) {
+            vec2 k2 = unpackHalf2x16(kv[kv_word(p.k_off, t, kvh, d)]);
+            s += q[qh + d] * k2.x + q[qh + d + 1u] * k2.y;
+        }
+        scores[row + t] = s * scale;
+    }
+}

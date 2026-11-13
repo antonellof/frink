@@ -325,9 +325,9 @@ impl Plamo2Ssm {
                 &mut y,
             );
             // :333-335: y + x * D (D per head), then silu(z) * y.
-            for hh in 0..h.n_heads {
+            for (hh, &d) in self.d.iter().enumerate().take(h.n_heads) {
                 for i in hh * head_dim..(hh + 1) * head_dim {
-                    y[i] = (y[i] + xc[i] * self.d[hh]) * silu(z[i]);
+                    y[i] = (y[i] + xc[i] * d) * silu(z[i]);
                 }
             }
             ys[r * d_inner..(r + 1) * d_inner].copy_from_slice(&y);

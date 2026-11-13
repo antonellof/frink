@@ -978,7 +978,7 @@ pub use glu_act::{relu_sqr, ClampForm, GluAct, Ungated, XieluParams};
 ///
 /// `act` is not optional on purpose -- see [`GluAct`].
 pub fn run_expert(hidden: &[f32], expert: &ExpertWeights, act: GluAct) -> Vec<f32> {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     if act.is_swiglu() {
         // Full SwiGLU on-device (1× upload + 1× download) when dense GPU
         // is on. SwiGLU-only kernel: a GeGLU expert must not take it.
@@ -1043,7 +1043,7 @@ fn expert_activated(hidden: &[f32], expert: &ExpertWeights, act: GluAct) -> Vec<
 /// BEFORE any activation, which is where a bias lands
 /// (`dense_bias::run_expert_biased`).
 pub(crate) fn gate_up_projections(hidden: &[f32], expert: &ExpertWeights) -> (Vec<f32>, Vec<f32>) {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         // Gate and up share `hidden` — one GPU upload / multi-matvec.
         // Activation-agnostic: the combine happens on the host below.
@@ -1993,8 +1993,7 @@ pub fn gemma4_router_logits(
     debug_assert_eq!(hidden.len(), router_scale.len());
     let n = hidden.len() as f32;
     // Weightless RMSNorm: no learned per-channel term.
-    let mean_sq = hidden.iter().map(|v| v * v).sum::<f32>() / n;
-    let inv_rms = 1.0 / (mean_sq + eps).sqrt();
+    let inv_rms = frink_core::matmul::rms_scale(hidden, eps);
     let width_scale = n.powf(-0.5);
     let scaled: Vec<f32> = hidden
         .iter()

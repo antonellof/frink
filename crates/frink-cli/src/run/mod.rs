@@ -219,6 +219,7 @@ fn banner_line(args: &InferArgs, device: OffloadDevice) -> String {
             OffloadDevice::Cpu => "cpu",
             OffloadDevice::Metal => "Metal",
             OffloadDevice::Cuda => "CUDA",
+            OffloadDevice::Vulkan => "Vulkan",
         },
         gpu_layers_note(args, device),
         effective_ctk.as_str(),
@@ -377,64 +378,9 @@ fn apply_backend_env(args: &InferArgs) -> anyhow::Result<()> {
     // cores by default, as llama.cpp does) and explicit QoS.
     frink_core::threads::init_cpu_pool();
 
-    let device = if args.n_gpu_layers.offload_enabled() {
-        args.device.unwrap_or(OffloadDevice::Auto)
-    } else {
-        OffloadDevice::None
-    };
-
-    match device {
-        OffloadDevice::None | OffloadDevice::Cpu => unsafe {
-            std::env::set_var("FRINK_METAL", "0");
-            std::env::set_var("FRINK_METAL_ATTN", "0");
-            std::env::set_var("FRINK_CUDA", "0");
-        },
-        OffloadDevice::Auto => unsafe {
-            std::env::set_var("FRINK_METAL", "auto");
-            std::env::set_var("FRINK_CUDA", "auto");
-            // Honor a pre-set FRINK_METAL_ATTN so ablations like
-            // `FRINK_METAL_ATTN=0 … --ngl 99` actually disable attn.
-            if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                std::env::set_var("FRINK_METAL_ATTN", "1");
-            }
-        },
-        OffloadDevice::Metal => {
-            #[cfg(not(feature = "metal"))]
-            {
-                anyhow::bail!("Metal requested but this binary was built without --features metal");
-            }
-            #[cfg(feature = "metal")]
-            {
-                if !frink_metal::MetalProfile::detect().available {
-                    anyhow::bail!("Metal requested but no Metal device is available");
-                }
-                unsafe {
-                    std::env::set_var("FRINK_METAL", "1");
-                    if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                        std::env::set_var("FRINK_METAL_ATTN", "1");
-                    }
-                    std::env::set_var("FRINK_CUDA", "0");
-                }
-            }
-        }
-        OffloadDevice::Cuda => {
-            #[cfg(not(feature = "cuda"))]
-            {
-                anyhow::bail!("CUDA requested but this binary was built without --features cuda");
-            }
-            #[cfg(feature = "cuda")]
-            {
-                if !frink_cuda::HardwareProfile::detect().cuda_available {
-                    anyhow::bail!("CUDA requested but no CUDA device is available");
-                }
-                unsafe {
-                    std::env::set_var("FRINK_CUDA", "1");
-                    std::env::set_var("FRINK_METAL", "0");
-                    std::env::set_var("FRINK_METAL_ATTN", "0");
-                }
-            }
-        }
-    }
+    let device = OffloadDevice::with_offload(args.device, args.n_gpu_layers.offload_enabled());
+    // SAFETY: single-threaded here; the rayon pool reads none of these.
+    unsafe { frink_models::offload::select(device)? };
 
     // SAFETY: single-threaded init before Metal/CUDA workers spawn.
     unsafe {
@@ -747,7 +693,7 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
     // Speculative decoding with a real draft model, when `-d` names
     // one. The verification rule lives in `frink_models::speculative`
     // and is lossless at every temperature; this is only the wiring.
-    if let Some(draft_path) = args.model_draft.as_deref() {
+    if let Some(draft_path) = speculation_draft(&args)? {
         return run_infer_speculative(
             &args,
             &decoder,
@@ -817,6 +763,36 @@ pub fn run_infer(args: InferArgs) -> anyhow::Result<()> {
 /// The verification rule lives in `frink_models::speculative` and is
 /// lossless at every temperature, not only at `--temp 0`. Nothing here
 /// re-implements it: this function loads the second checkpoint, refuses
+/// The draft model speculation runs with, or `None` when it is off:
+/// `--spec-type` as llama.cpp reads it, every type it names that frink
+/// does not run refused by name.
+fn speculation_draft(args: &InferArgs) -> anyhow::Result<Option<&str>> {
+    let draft = args.model_draft.as_deref();
+    match args.spec_type.as_deref() {
+        None => Ok(draft),
+        Some("none") => {
+            if draft.is_some() {
+                anyhow::bail!(
+                    "--spec-type none turns speculation off, and -md names a draft model it would                      then ignore; drop one of the two"
+                );
+            }
+            Ok(None)
+        }
+        Some("draft-simple" | "draft-dflash") => match draft {
+            Some(d) => Ok(Some(d)),
+            None => anyhow::bail!(
+                "--spec-type {} drafts with a model, and none was given: add -md FILE",
+                args.spec_type.as_deref().unwrap_or_default()
+            ),
+        },
+        Some(other) => anyhow::bail!(
+            "--spec-type {other} is not implemented: frink speculates with a draft model \
+             (draft-simple) or a DFlash draft (draft-dflash). Prompt-lookup drafting runs on \
+             frink-server"
+        ),
+    }
+}
+
 /// the combinations speculation cannot honour, and streams the tokens
 /// the shared loop commits.
 #[allow(clippy::too_many_arguments)]
@@ -852,41 +828,85 @@ fn run_infer_speculative(
     if tokens.is_empty() {
         anyhow::bail!("--model-draft needs a prompt to continue");
     }
-    let draft = frink_models::draft_model::load(draft_path, &decoder.config)?;
-    eprintln!("frink: draft model {draft_path}");
-
-    // Refused at construction when the vocabularies differ. The two
-    // models must number their tokens identically or the rejection rule
-    // is comparing probabilities of different tokens, which produces
-    // fluent text with a plausible accept rate and no error at all.
-    let mut drafter = frink_models::DraftModelSpeculator::from_weights(
-        &draft,
-        &decoder.config,
-        sampling.clone(),
-        seed,
-        args.draft_max,
-        args.draft_p_min,
-    )?;
-
-    // One warm-up proposal, to find out whether this drafter's KV
-    // actually lands in the host caches it owns. A backend that keeps
-    // KV on the device leaves them empty, and a drafter that cannot see
-    // its own rows cannot roll back the ones the target rejected. Found
-    // by running it: on Metal this panicked mid-answer, after the first
-    // block had already been printed.
-    {
-        use frink_models::speculative::Drafter;
-        let _ = drafter.propose(tokens, &[], 1);
+    use frink_models::speculative::{Drafter, MinDraft};
+    // llama.cpp infers the type from the draft file when none is given
+    // (`common_speculative_types_from_model`); a type that disagrees
+    // with the file is refused rather than overridden.
+    let is_dflash = frink_models::dflash::is_dflash_draft(&frink_gguf::GgufFile::open(draft_path)?);
+    match (args.spec_type.as_deref(), is_dflash) {
+        (Some("draft-simple"), true) => anyhow::bail!(
+            "--spec-type draft-simple names an autoregressive draft model, and {draft_path} is a \
+             DFlash draft; use --spec-type draft-dflash or leave the type to the file"
+        ),
+        (Some("draft-dflash"), false) => anyhow::bail!(
+            "--spec-type draft-dflash needs a DFlash draft (general.architecture \"dflash\"), and \
+             {draft_path} is not one"
+        ),
+        _ => {}
     }
-    if !drafter.keeps_host_kv() {
-        anyhow::bail!(
-            "--model-draft needs the draft model's KV cache in host memory, and this \
-             backend keeps it on the device, so the drafter cannot roll back the \
-             positions the target rejects. Re-run with --device cpu, or without \
-             --model-draft. Speculative decoding on a device-resident KV cache is \
-             not implemented yet"
+
+    let mut dflash_drafter;
+    let model_weights;
+    let mut model_drafter;
+    let inner: &mut dyn Drafter = if is_dflash {
+        let draft =
+            frink_models::dflash::DFlashDraft::load(&frink_gguf::GgufFile::open(draft_path)?)?;
+        // Refused at construction when the draft does not fit the
+        // target: widths, the token table, the layers it reads.
+        dflash_drafter = frink_models::dflash::DFlashDrafter::new(
+            draft,
+            decoder,
+            args.draft_max,
+            args.draft_p_min,
+        )?;
+        eprintln!(
+            "frink: DFlash draft {draft_path} (block {}, drafting up to {}, reading target layers \
+             {:?})",
+            dflash_drafter.config().block_size,
+            dflash_drafter.n_max(),
+            dflash_drafter.config().target_layers
         );
-    }
+        &mut dflash_drafter
+    } else {
+        model_weights = frink_models::draft_model::load(draft_path, &decoder.config)?;
+        eprintln!("frink: draft model {draft_path}");
+
+        // Refused at construction when the vocabularies differ. The two
+        // models must number their tokens identically or the rejection
+        // rule is comparing probabilities of different tokens, which
+        // produces fluent text with a plausible accept rate and no error
+        // at all.
+        model_drafter = frink_models::DraftModelSpeculator::from_weights(
+            &model_weights,
+            &decoder.config,
+            sampling.clone(),
+            seed,
+            args.draft_max,
+            args.draft_p_min,
+        )?;
+
+        // One warm-up proposal, to find out whether this drafter's KV
+        // actually lands in the host caches it owns. A backend that
+        // keeps KV on the device leaves them empty, and a drafter that
+        // cannot see its own rows cannot roll back the ones the target
+        // rejected. Found by running it: on Metal this panicked
+        // mid-answer, after the first block had already been printed.
+        let _ = model_drafter.propose(tokens, &[], 1);
+        if !model_drafter.keeps_host_kv() {
+            anyhow::bail!(
+                "--model-draft needs the draft model's KV cache in host memory, and this \
+                 backend keeps it on the device, so the drafter cannot roll back the \
+                 positions the target rejects. Re-run with --device cpu, or without \
+                 --model-draft. Speculative decoding on a device-resident KV cache is \
+                 not implemented yet"
+            );
+        }
+        &mut model_drafter
+    };
+    let mut drafter = MinDraft {
+        inner,
+        n_min: args.draft_min,
+    };
 
     let mut stdout = io::stdout().lock();
     let decode_t = Instant::now();

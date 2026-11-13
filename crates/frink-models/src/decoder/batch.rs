@@ -16,6 +16,7 @@ use rayon::prelude::*;
 use crate::scalar_multipliers::residual_add;
 
 use super::ffn_block;
+use super::layer_taps::LayerTaps;
 use super::{Decoder, KvStep};
 
 impl Decoder {
@@ -72,6 +73,27 @@ impl Decoder {
         start_pos: usize,
         kv_caches: &mut [KvCache],
         host_kv_authoritative: bool,
+    ) -> Vec<Vec<f32>> {
+        let mut no_taps = LayerTaps::new(&[]);
+        self.forward_hidden_batch_tapped(
+            tokens,
+            start_pos,
+            kv_caches,
+            host_kv_authoritative,
+            &mut no_taps,
+        )
+    }
+
+    /// [`Self::forward_hidden_batch_inner`] that records the residual
+    /// entering each layer `taps` names (`super::layer_taps`). The ONE
+    /// batch body: with no taps it is the forward every caller runs.
+    pub(super) fn forward_hidden_batch_tapped(
+        &self,
+        tokens: &[usize],
+        start_pos: usize,
+        kv_caches: &mut [KvCache],
+        host_kv_authoritative: bool,
+        taps: &mut LayerTaps,
     ) -> Vec<Vec<f32>> {
         // Read only by the Metal arms below; a CPU-only build fills the
         // host cache with real rows on every path and has nothing to
@@ -173,6 +195,8 @@ impl Decoder {
         }
 
         let n_layers = self.config.n_layers;
+        // `frink parity --dump-tensors`: read once, not per layer.
+        let dump = crate::tensor_dump::active();
         let mut hrm = self.hrm_streams(&hidden_batch);
         let mut l = 0usize;
         // Labelled for the Metal arm inside the `'attention` block below,
@@ -180,6 +204,11 @@ impl Decoder {
         #[allow(unused_labels)]
         'layers: while l < n_layers {
             self.hrm_stack_input(hrm.as_ref(), l, &mut hidden_batch);
+            taps.capture(l, &hidden_batch);
+            // A fused multi-layer run below may not step over the next
+            // tap: the stream entering it has to exist on the host.
+            #[cfg(any(feature = "metal", feature = "cuda"))]
+            let run_end = taps.run_end(l, n_layers);
             let layer = self.layer_for(l);
             // THIS layer's head counts. Zero for the two attention-less
             // shapes, which leave the loop below before a width is used;
@@ -198,13 +227,17 @@ impl Decoder {
             if use_metal_attn && batch_size >= 4 {
                 if let Some(guard) = metal_kv_guard.as_mut() {
                     if let Some(metal_kvs) = guard.as_mut() {
-                        if let Some(run_len) = self.metal_prefill_dense_stack_run_len(
-                            l,
-                            start_pos,
-                            batch_size,
-                            kv_caches,
-                            Some(metal_kvs.as_slice()),
-                        ) {
+                        if let Some(run_len) = self
+                            .metal_prefill_dense_stack_run_len(
+                                l,
+                                start_pos,
+                                batch_size,
+                                kv_caches,
+                                Some(metal_kvs.as_slice()),
+                            )
+                            .map(|run| run.min(run_end - l))
+                            .filter(|&run| run >= 2)
+                        {
                             if let Some(h_out) = self.try_metal_prefill_dense_stack(
                                 l,
                                 run_len,
@@ -233,6 +266,24 @@ impl Decoder {
             if let Some((h_out, run_len)) = self.try_cuda_dense_stack(
                 l,
                 frink_cuda::prefill::StackInput::Hidden(&hidden_batch),
+                start_pos,
+                batch_size,
+                // The run walks the slice it is given, so a shorter one
+                // ends it at the next tap.
+                &mut kv_caches[..run_end],
+            ) {
+                hidden_batch = h_out;
+                l += run_len;
+                continue;
+            }
+
+            // The same on Vulkan: a run of dense layers for the whole
+            // batch in one submission (#409). It declines before touching
+            // any cache.
+            #[cfg(feature = "vulkan")]
+            if let Some((h_out, run_len)) = self.try_vulkan_dense_stack(
+                l,
+                super::vulkan_stack::StackInput::Hidden(&hidden_batch),
                 start_pos,
                 batch_size,
                 kv_caches,
@@ -331,6 +382,9 @@ impl Decoder {
             let inputs = self.branch_inputs(layer, &hidden_batch, batch_size);
             let normed_batch: Vec<f32> =
                 self.pre_norm_residual(&layer.attn.norm_weight, &mut hidden_batch, batch_size);
+            if let Some(d) = dump {
+                d.write("attn_norm", Some(l), 1, hidden_dim, &normed_batch);
+            }
             let oai = self
                 .gpt_oss
                 .as_ref()
@@ -414,6 +468,11 @@ impl Decoder {
                     qkv_acts.as_ref(),
                 );
                 drop(qkv_acts);
+                if let Some(d) = dump {
+                    d.write("Qcur", Some(l), 1, q_width, &q_batch);
+                    d.write("Kcur", Some(l), 1, kv_width, &k_batch);
+                    d.write("Vcur", Some(l), 1, v_width, &v_batch);
+                }
 
                 self.apply_qkv_bias_and_clamp(
                     layer,
@@ -424,6 +483,22 @@ impl Decoder {
                     kv_width,
                     v_width,
                 );
+                // `build_qkv` names the biased projection `Qcur` again
+                // (llama-graph.cpp), so where there is a bias the roped
+                // tensor below is the third `Qcur`, not the second.
+                let (q_biased, k_biased) =
+                    (layer.attn.q_bias.is_some(), layer.attn.k_bias.is_some());
+                if let Some(d) = dump {
+                    if q_biased {
+                        d.write("Qcur", Some(l), 2, q_width, &q_batch);
+                    }
+                    if k_biased {
+                        d.write("Kcur", Some(l), 2, kv_width, &k_batch);
+                    }
+                    if layer.attn.v_bias.is_some() {
+                        d.write("Vcur", Some(l), 2, v_width, &v_batch);
+                    }
+                }
 
                 self.apply_qk_norms_pre_rope(layer, &mut q_batch, &mut k_batch, q_width, kv_width);
                 // Host-side `mscale`, applied before either backend ropes.
@@ -536,6 +611,8 @@ impl Decoder {
                             inputs,
                             ffn_block::BatchedFfnKernels::Prefill,
                             skip_rows.as_deref().map(|rows| SkipStream { rows }),
+                            // The attention half above never reached a hook.
+                            None,
                         );
                         l += 1;
                         continue 'layers;
@@ -577,6 +654,12 @@ impl Decoder {
                     q_width,
                     kv_width,
                 );
+                // llama.cpp names the roped tensors `Qcur`/`Kcur` again,
+                // per head: `[head_dim, n_heads, n_tokens]`.
+                if let Some(d) = dump {
+                    d.write("Qcur", Some(l), 2 + q_biased as usize, head_dim, &q_batch);
+                    d.write("Kcur", Some(l), 2 + k_biased as usize, head_dim, &k_batch);
+                }
                 // Elementwise, so the whole Q batch in one call. Like the
                 // multi-sequence path, this body did not apply it at all
                 // until the decoration audit. It is placed AFTER the Metal
@@ -695,6 +778,9 @@ impl Decoder {
                 // so a 32k prompt holds ONE layer's full history at a time
                 // instead of every windowed layer's at once.
                 self.evict_layer_kv(l, cache);
+                if let Some(d) = dump {
+                    d.write("kqv_out", Some(l), 1, out_width, &attn_out_batch);
+                }
 
                 let mut projected_batch = self.attn_out_to_residual_rows(
                     layer,
@@ -704,12 +790,18 @@ impl Decoder {
                     q_gate.as_deref(),
                 );
                 Self::add_parallel_ssm(&mut projected_batch, parallel_ssm);
+                if let Some(d) = dump {
+                    d.write("attn_out", Some(l), 1, hidden_dim, &projected_batch);
+                }
                 residual_add(
                     &mut hidden_batch,
                     &projected_batch,
                     self.config.residual_scale,
                 );
             } // 'attention
+            if let Some(d) = dump {
+                d.write("ffn_inp", Some(l), 1, hidden_dim, &hidden_batch);
+            }
 
             // --- FFN block ---
             self.ffn_block_batch(
@@ -724,14 +816,25 @@ impl Decoder {
                 inputs,
                 ffn_block::BatchedFfnKernels::Prefill,
                 skip_rows.as_deref().map(|rows| SkipStream { rows }),
+                dump,
             );
+            if let Some(d) = dump {
+                d.write("l_out", Some(l), 1, hidden_dim, &hidden_batch);
+            }
             self.hrm_store(hrm.as_mut(), l, &hidden_batch);
             l += 1;
         }
+        // `nemotron-h.cpp:252`: index `n_layers` is the stream after
+        // the stack, before the final norm.
+        taps.capture(n_layers, &hidden_batch);
 
-        hidden_batch
+        let normed: Vec<Vec<f32>> = hidden_batch
             .chunks(hidden_dim)
             .map(|h| self.final_norm.apply(h, self.config.rms_norm_eps))
-            .collect()
+            .collect();
+        if let Some(d) = dump {
+            d.write("result_norm", None, 1, hidden_dim, &normed.concat());
+        }
+        normed
     }
 }

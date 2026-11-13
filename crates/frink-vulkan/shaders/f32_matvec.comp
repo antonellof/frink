@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// F32 rows: one value per "block", 4 bytes each, so n_blocks_per_row is
+// the column count. The decode stack's operand for F32 projections (the
+// matvec offload serves quantized kinds only). The words are the
+// values, so no byte extraction: a row starts on a word because 4 is a
+// word.
+#include "matvec_common.glsl"
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes / 4u;
+    float acc = 0.0;
+    for (uint i = gl_LocalInvocationID.x; i < p.n_blocks_per_row; i += WG) {
+        acc += uintBitsToFloat(w[base + i]) * X(i);
+    }
+    finish(row, acc);
+}

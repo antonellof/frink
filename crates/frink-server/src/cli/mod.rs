@@ -17,7 +17,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser};
 use frink_models::gpu_layers::GpuLayers;
 
 // `PartialEq` so frink-cli's serve tests can assert that both front
@@ -242,6 +242,22 @@ pub struct ServerArgs {
     #[arg(long = "metrics", default_value_t = false)]
     metrics: bool,
 
+    /// Serve `GET /slots`, llama.cpp's `--slots` and its default. Sets
+    /// `FRINK_ENDPOINT_SLOTS`.
+    #[arg(long = "slots", overrides_with = "no_slots")]
+    slots: bool,
+
+    /// Refuse `GET /slots` as llama.cpp does without it. The later of the
+    /// pair wins.
+    #[arg(long = "no-slots", overrides_with = "slots")]
+    no_slots: bool,
+
+    /// Assemble `/infill` prompts Suffix/Prefix/Middle rather than
+    /// Prefix/Suffix/Middle, llama.cpp's `--spm-infill`. Sets
+    /// `FRINK_SPM_INFILL`.
+    #[arg(long = "spm-infill", default_value_t = false)]
+    spm_infill: bool,
+
     /// IP address to listen on.
     #[arg(long, value_name = "HOST")]
     host: Option<IpAddr>,
@@ -262,7 +278,11 @@ pub struct ServerArgs {
         long = "device",
         visible_alias = "dev",
         value_name = "DEVICE",
-        ignore_case = true
+        ignore_case = true,
+        value_parser = clap::builder::TypedValueParser::map(
+            clap::builder::PossibleValuesParser::new(OffloadDevice::ALL.map(|d| d.as_str())),
+            |s| s.parse::<OffloadDevice>().expect("a listed value parses"),
+        ),
     )]
     device: Option<OffloadDevice>,
 
@@ -308,8 +328,9 @@ pub struct ServerArgs {
     )]
     cont_batching: bool,
 
-    /// Disable auto continuous batching on Metal
-    /// (`FRINK_CONTINUOUS_BATCHING=0`).
+    /// Keep the private decode loop, even with `--parallel`
+    /// (`FRINK_CONTINUOUS_BATCHING=0`). Continuous batching is off
+    /// unless `--cont-batching` or `--parallel` asks for it.
     #[arg(
         long = "no-cont-batching",
         visible_alias = "nocb",
@@ -465,14 +486,7 @@ impl ServerArgs {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum OffloadDevice {
-    Auto,
-    None,
-    Cpu,
-    Metal,
-    Cuda,
-}
+use frink_models::offload::OffloadDevice;
 
 /// Whether this build of the server has the Metal kernels compiled in.
 ///
@@ -771,66 +785,9 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         // device overrides skipped
     } else {
         let layers = args.n_gpu_layers.unwrap_or(GpuLayers::Auto);
-        let device = if layers.offload_enabled() {
-            args.device.unwrap_or(OffloadDevice::Auto)
-        } else {
-            OffloadDevice::None
-        };
-
-        match device {
-            OffloadDevice::None | OffloadDevice::Cpu => unsafe {
-                std::env::set_var("FRINK_METAL", "0");
-                std::env::set_var("FRINK_METAL_ATTN", "0");
-                std::env::set_var("FRINK_CUDA", "0");
-            },
-            OffloadDevice::Auto => unsafe {
-                std::env::set_var("FRINK_METAL", "auto");
-                std::env::set_var("FRINK_CUDA", "auto");
-                if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                    std::env::set_var("FRINK_METAL_ATTN", "1");
-                }
-            },
-            OffloadDevice::Metal => {
-                #[cfg(not(feature = "metal"))]
-                {
-                    anyhow::bail!(
-                        "Metal requested but this binary was built without --features metal"
-                    );
-                }
-                #[cfg(feature = "metal")]
-                {
-                    if !frink_metal::MetalProfile::detect().available {
-                        anyhow::bail!("Metal requested but no Metal device is available");
-                    }
-                    unsafe {
-                        std::env::set_var("FRINK_METAL", "1");
-                        if std::env::var_os("FRINK_METAL_ATTN").is_none() {
-                            std::env::set_var("FRINK_METAL_ATTN", "1");
-                        }
-                        std::env::set_var("FRINK_CUDA", "0");
-                    }
-                }
-            }
-            OffloadDevice::Cuda => {
-                #[cfg(not(feature = "cuda"))]
-                {
-                    anyhow::bail!(
-                        "CUDA requested but this binary was built without --features cuda"
-                    );
-                }
-                #[cfg(feature = "cuda")]
-                {
-                    if !frink_cuda::HardwareProfile::detect().cuda_available {
-                        anyhow::bail!("CUDA requested but no CUDA device is available");
-                    }
-                    unsafe {
-                        std::env::set_var("FRINK_CUDA", "1");
-                        std::env::set_var("FRINK_METAL", "0");
-                        std::env::set_var("FRINK_METAL_ATTN", "0");
-                    }
-                }
-            }
-        }
+        let device = OffloadDevice::with_offload(args.device, layers.offload_enabled());
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { frink_models::offload::select(device)? };
     }
 
     if let Some(n) = args.parallel {
@@ -878,6 +835,15 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
         // SAFETY: called before the runtime starts worker threads.
         unsafe { std::env::set_var("FRINK_SLOT_SAVE_PATH", dir) };
     }
+    if let Some(on) = frink_core::argv::flag_pair(args.slots, args.no_slots) {
+        let value = if on { "1" } else { "0" };
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::slots::listing::ENDPOINT_SLOTS_ENV, value) };
+    }
+    if args.spm_infill {
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::completion::infill::SPM_INFILL_ENV, "1") };
+    }
 
     // Lowered to the variables `server_draft::from_env` reads, which
     // also refuses, at load, a deployment that would not draft.
@@ -921,6 +887,11 @@ pub(crate) fn apply_cli_overrides(args: &ServerArgs) -> anyhow::Result<()> {
             // SAFETY: called before the runtime starts worker threads.
             unsafe { std::env::set_var(key, chunk.to_string()) };
         }
+    }
+    if let Some(n_batch) = args.batch_size {
+        // `-b` alone, for `/infill`'s prompt budget (`prefill_batch`).
+        // SAFETY: called before the runtime starts worker threads.
+        unsafe { std::env::set_var(crate::prefill_batch::LOGICAL_BATCH_ENV, n_batch.to_string()) };
     }
 
     if let Some(budget) = args.reasoning_budget {

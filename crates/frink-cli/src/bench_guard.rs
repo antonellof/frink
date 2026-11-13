@@ -386,15 +386,14 @@ pub fn check_same_result(
     Ok(())
 }
 
-/// Environment variables that `frink bench` sets for itself as part of
-/// selecting a backend and thread count. They carry no information for
-/// an auditor beyond what the receipt already records.
-const SELF_SET_ENV: &[&str] = &[
-    "FRINK_METAL",
-    "FRINK_METAL_ATTN",
-    "FRINK_CUDA",
-    "FRINK_CPU_THREADS",
-];
+/// Whether `frink bench` set this environment variable for itself, as
+/// part of selecting a backend and thread count. Such a variable carries
+/// nothing for an auditor beyond what the receipt already records. The
+/// backend switches come from [`frink_models::offload::SWITCHES`], so a
+/// switch `-ngl` sets cannot be missing here.
+fn self_set_env(k: &str) -> bool {
+    frink_models::offload::SWITCHES.contains(&k) || k == "FRINK_CPU_THREADS"
+}
 
 /// Every `FRINK_*` variable in effect that the bench did not set
 /// itself, as `(name, value)` pairs sorted by name.
@@ -419,7 +418,7 @@ where
         .into_iter()
         .filter_map(|(k, v)| {
             let k = k.as_ref();
-            (k.starts_with("FRINK_") && !SELF_SET_ENV.contains(&k))
+            (k.starts_with("FRINK_") && !self_set_env(k))
                 .then(|| (k.to_string(), v.as_ref().to_string()))
         })
         .collect();

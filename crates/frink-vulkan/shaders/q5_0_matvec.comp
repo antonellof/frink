@@ -1,0 +1,30 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q5_0, 22 bytes per 32 values: f16 d, a 32-bit qh, 16 nibble bytes.
+// Element i takes bit i of qh as its fifth bit, element i+16 bit
+// i+16; value (q - 16) * d (frink_quant::dot_q5_0_f32_scalar). One
+// unit per block.
+#include "matvec_common.glsl"
+
+void main() {
+    uint row = matvec_row();
+    if (row >= p.rows) return;
+    uint base = row * p.row_bytes;
+    float acc = 0.0;
+    for (uint b = gl_LocalInvocationID.x; b < p.n_blocks_per_row; b += WG) {
+        uint blk = base + b * 22u;
+        uint xb = b * 32u;
+        uint qh = byte_at(blk + 2u) | (byte_at(blk + 3u) << 8) | (byte_at(blk + 4u) << 16)
+            | (byte_at(blk + 5u) << 24);
+        float d = f16_at(blk), s = 0.0;
+        for (uint i = 0u; i < 16u; ++i) {
+            uint q = byte_at(blk + 6u + i);
+            uint lo = (q & 0x0fu) | (((qh >> i) << 4) & 0x10u);
+            uint hi = (q >> 4) | ((qh >> (i + 12u)) & 0x10u);
+            s += float(int(lo) - 16) * X(xb + i);
+            s += float(int(hi) - 16) * X(xb + 16u + i);
+        }
+        acc += d * s;
+    }
+    finish(row, acc);
+}

@@ -67,6 +67,46 @@ jobs:
         env:
           LD_LIBRARY_PATH: /opt/rocm/lib
 
+  # #409: the Vulkan shaders and the frink-core seam, run on a real
+  # Vulkan driver with no GPU. Mesa's lavapipe implements Vulkan on the
+  # CPU, so every device test executes here rather than skipping;
+  # FRINK_REQUIRE_VULKAN=1 turns a missing device or spirv-val into a
+  # failure, so the job cannot go green by skipping. lavapipe proves
+  # the shaders are correct Vulkan, not that they are fast, and not
+  # that RADV agrees: that still needs a Radeon.
+  vulkan-lavapipe:
+    name: frink-vulkan on lavapipe (Vulkan on the CPU, no GPU)
+    runs-on: ubuntu-24.04
+    env:
+      FRINK_REQUIRE_VULKAN: "1"
+      # lavapipe is a CPU device, which llama.cpp's rule (and frink's)
+      # leaves out unless it is named.
+      GGML_VK_VISIBLE_DEVICES: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the Vulkan loader, lavapipe and spirv-val
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers spirv-tools
+      - run: cargo run -p frink-vulkan --features vulkan --example probe
+      - run: cargo run -p frink-cli --features vulkan -- --list-devices
+      - run: cargo clippy -p frink-vulkan -p frink-core -p frink-cli -p frink-server --features vulkan --all-targets -- -D warnings
+      - run: cargo test -p frink-vulkan --features vulkan -- --nocapture
+      # Filtered: FRINK_VULKAN=1 over the whole frink-core suite is slow.
+      - run: cargo test -p frink-core --features vulkan vulkan -- --test-threads 1 --nocapture
+        env:
+          FRINK_VULKAN: "1"
+      # The decode stack against the CPU and llama.cpp's decode goldens,
+      # every graph fixture, 32 greedy steps (decode_step_graphs). Release:
+      # the host side of 200 fixtures in debug is most of the run.
+      - run: cargo test --release -p frink-models --features vulkan --test decode_step_graphs -- --ignored --exact vulkan_decode_matches_cpu_and_llama_cpp --nocapture
+        env:
+          FRINK_VULKAN: "1"
+
   # CONTRIBUTING.md: the cuda feature must keep compiling without a GPU
   # or CUDA toolkit present through the full CLI/server dependency chain.
   cuda-feature-chain:

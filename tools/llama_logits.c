@@ -60,6 +60,10 @@
 //       alone cannot see a defect that only shows once decode starts.
 //       FRINK_CTK=f32 runs an f32 K/V cache, as frink then does too.
 //
+//       With LLAMA_LOGITS_DUMP_TENSORS=<dir> it also writes the prompt's
+//       per-layer intermediates into <dir> (see "tensor dump" below),
+//       for `frink parity --dump-tensors`.
+//
 //   llama_logits --tokenize <model.gguf> <cases.bin> <out.bin>
 //       Reads an FXTK case file, writes an FXTK result file, and prints
 //       "tokenized <N> cases".
@@ -340,6 +344,134 @@ static int cmd_tokenize(const char * model_path, const char * in_path, const cha
     return rc;
 }
 
+// ------------------------------------------------------------ tensor dump
+
+// LLAMA_LOGITS_DUMP_TENSORS=<dir>: the prompt's intermediates, through
+// llama.cpp's own eval callback (`cb_eval`), so a first-token KL that
+// moved can be traced to the layer and the op that moved it. Read by
+// `frink parity --dump-tensors`, which writes frink's side under the
+// same names.
+//
+// Every f32 node whose name is `<base>-<layer>` (or `result_norm`) with
+// <base> in DUMP_NAMES is written as raw host-order f32 to
+// <dir>/<name>.f32, and one line `<name>\t<ne0>\t<rows>` is appended to
+// <dir>/manifest.tsv. A view that keeps the name of the tensor it views
+// is skipped, since it holds the same bytes. A name the graph gives twice
+// (`Qcur` before and after RoPE, `ffn_out` before and after the
+// residual) is written `<name>#2` the second time.
+//
+// Only the prompt's `llama_decode` dumps; the decode steps do not, so a
+// file holds one forward pass. The callback splits the graph at each
+// dumped node; it does not change what any node computes, and
+// `frink parity --dump-tensors` checks that by comparing the logits
+// against a run without it.
+
+#define DUMP_MAX_SEEN 4096
+
+static const char * const DUMP_NAMES[] = {
+    "attn_norm", "Qcur", "Kcur", "Vcur", "kqv_out", "attn_out", "ffn_inp",
+    "attn_post_norm", "ffn_norm", "ffn_moe_out", "ffn_out", "l_out",
+};
+
+struct dump_ctx {
+    const char * dir;
+    int active;
+    FILE * manifest;
+    int n_seen;
+    char seen[DUMP_MAX_SEEN][GGML_MAX_NAME];
+    int count[DUMP_MAX_SEEN];
+};
+
+static bool dump_name_wanted(const char * name) {
+    if (strcmp(name, "result_norm") == 0) {
+        return true;
+    }
+    // `<base>-<digits>` exactly: ggml names a view `<name> (view)`.
+    const char * dash = strrchr(name, '-');
+    if (!dash || dash[1] == '\0') {
+        return false;
+    }
+    for (const char * c = dash + 1; *c; c++) {
+        if (*c < '0' || *c > '9') {
+            return false;
+        }
+    }
+    const size_t base = (size_t) (dash - name);
+    for (size_t i = 0; i < sizeof(DUMP_NAMES) / sizeof(DUMP_NAMES[0]); i++) {
+        if (strlen(DUMP_NAMES[i]) == base && strncmp(name, DUMP_NAMES[i], base) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Contiguous f32 in host memory: the CPU backend's only layout for the
+// nodes above, checked rather than assumed. A view counts only when it
+// RENAMES what it views: `kqv_out` is the name of a reshape of the
+// flash-attention output, while the reshape of `Qcur` repeats the name
+// of the matmul it views.
+static bool dump_tensor_plain(const struct ggml_tensor * t) {
+    if (t->type != GGML_TYPE_F32 || t->data == NULL) {
+        return false;
+    }
+    if (t->view_src != NULL && (t->view_offs != 0 || strcmp(t->view_src->name, t->name) == 0)) {
+        return false;
+    }
+    size_t stride = sizeof(float);
+    for (int d = 0; d < GGML_MAX_DIMS; d++) {
+        if (t->nb[d] != stride) {
+            return false;
+        }
+        stride *= (size_t) t->ne[d];
+    }
+    return true;
+}
+
+static bool dump_cb(struct ggml_tensor * t, bool ask, void * user_data) {
+    struct dump_ctx * d = (struct dump_ctx *) user_data;
+    if (ask) {
+        return d->active && dump_name_wanted(t->name) && dump_tensor_plain(t);
+    }
+    // Returning false here would CANCEL the graph compute, so every path
+    // below returns true; a tensor that cannot be written is reported.
+    int slot = -1;
+    for (int i = 0; i < d->n_seen; i++) {
+        if (strcmp(d->seen[i], t->name) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (d->n_seen == DUMP_MAX_SEEN) {
+            fprintf(stderr, "tensor dump: more than %d names, %s not written\n", DUMP_MAX_SEEN, t->name);
+            return true;
+        }
+        slot = d->n_seen++;
+        snprintf(d->seen[slot], GGML_MAX_NAME, "%s", t->name);
+        d->count[slot] = 0;
+    }
+    const int occurrence = ++d->count[slot];
+    char name[GGML_MAX_NAME + 8];
+    if (occurrence == 1) {
+        snprintf(name, sizeof(name), "%s", t->name);
+    } else {
+        snprintf(name, sizeof(name), "%s#%d", t->name, occurrence);
+    }
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/%s.f32", d->dir, name);
+    FILE * f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "tensor dump: cannot open %s\n", path);
+        return true;
+    }
+    const size_t n = (size_t) (t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3]);
+    fwrite(t->data, sizeof(float), n, f);
+    fclose(f);
+    fprintf(d->manifest, "%s\t%lld\t%lld\n", name, (long long) t->ne[0],
+            (long long) (n / (size_t) t->ne[0]));
+    return true;
+}
+
 // ------------------------------------------------------------------ logits
 
 static int cmd_logits(const char * model_path, const char * out_path, int n_tokens, char ** tok_argv) {
@@ -403,9 +535,33 @@ static int cmd_logits(const char * model_path, const char * out_path, int n_toke
         return 1;
     }
 
+    // Static, not stack (the seen-name table is ~0.3 MB) and not heap:
+    // the callback stays registered for the decode steps, where
+    // `active == 0` makes it ask for nothing, so it must outlive `ctx`.
+    static struct dump_ctx dump_state;
+    struct dump_ctx * dump = NULL;
+    const char * dump_dir = getenv("LLAMA_LOGITS_DUMP_TENSORS");
+    if (dump_dir && *dump_dir) {
+        dump = &dump_state;
+        char manifest[4096];
+        snprintf(manifest, sizeof(manifest), "%s/manifest.tsv", dump_dir);
+        if (!(dump->manifest = fopen(manifest, "w"))) {
+            fprintf(stderr, "LLAMA_LOGITS_DUMP_TENSORS: cannot write %s\n", manifest);
+            llama_model_free(model);
+            free(tokens);
+            return 1;
+        }
+        dump->dir = dump_dir;
+        cparams.cb_eval = dump_cb;
+        cparams.cb_eval_user_data = dump;
+    }
+
     struct llama_context * ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
         fprintf(stderr, "failed to create context\n");
+        if (dump) {
+            fclose(dump->manifest);
+        }
         llama_model_free(model);
         free(tokens);
         return 1;
@@ -423,7 +579,15 @@ static int cmd_logits(const char * model_path, const char * out_path, int n_toke
     }
     batch.n_tokens = (int32_t) n_tokens;
 
-    if (llama_decode(ctx, batch) != 0) {
+    if (dump) {
+        dump->active = 1;
+    }
+    const int prompt_rc = llama_decode(ctx, batch);
+    if (dump) {
+        dump->active = 0;
+        fclose(dump->manifest);
+    }
+    if (prompt_rc != 0) {
         fprintf(stderr, "llama_decode failed\n");
         llama_batch_free(batch);
         llama_free(ctx);

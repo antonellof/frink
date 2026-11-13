@@ -33,7 +33,10 @@ comes back the same way.
 | `GET`/`POST /v1/conversations/{conversation_id}` | Read one with its messages, or rename, retarget and append |
 | `POST /v1/conversations/{conversation_id}/delete` | Delete. Spelled as a POST suffix because the CORS allow-list is `GET, POST`, so a `DELETE` method would work from curl and fail from every cross-origin browser |
 | `POST /v1/admin/prepare-stop` | Close admission, seal the accounting, and make the receipt durable (see below) |
-| `POST /slots/{id_slot}?action=save\|restore` | llama.cpp's slot save/restore: persist a prompt prefix's KV to disk and load it back after a restart. Needs `--slot-save-path` and `FRINK_PREFIX_CACHE_ENTRIES` (see below). `action=erase` is refused by name |
+| `POST /slots/{id_slot}?action=save\|restore\|erase` | llama.cpp's slot save/restore: persist a prompt prefix's KV to disk and load it back after a restart, or empty the slot. Needs `--slot-save-path` and `FRINK_PREFIX_CACHE_ENTRIES` (see below) |
+| `GET /slots` | llama.cpp's live slot listing: one entry per seat of the continuous batcher under `-np N`. A deployment with no seats refuses by name, and so does `--no-slots` (see below) |
+| `GET /props` · `POST /props` | llama.cpp's global properties, which its web UI reads first. `POST` is llama.cpp's refusal without `--props` (see below) |
+| `POST /infill` | llama.cpp's fill-in-the-middle completion, in `/completion`'s shape and through its serving path (see below) |
 | `GET /lora-adapters` · `POST /lora-adapters` | llama.cpp's LoRA listing and scale setting; the per-request `lora` field is honoured on `/v1/chat/completions`, `/v1/completions` and `/completion` (see below) |
 | `GET /cache/stats` · `GET /metrics` | Frink extensions |
 | `GET /admin/models` | Checkpoint inventory from GGUF headers (see [Admin control surface](#admin-control-surface)) |
@@ -302,11 +305,12 @@ opposite block sizes. `/admin/stats` rows carry `acceptance_length` and
 `draft_accept_rate_per_position` for the same reason.
 
 The speculation fields are absent for a request that did not draft: a
-request the continuous-batching worker serves (the default on Metal,
-which has no speculation yet), a grammar-constrained or `json_object` request (verification draws
+recurrent target in the continuous batch (its batched state has no
+checkpoint yet), a grammar-constrained or `json_object` request (verification draws
 through the same grammar machine, and a rejected block would leave it
-advanced over tokens that were never emitted), a paged or recurrent KV
-store (a rejected draft has to be rolled back and neither can), a
+advanced over tokens that were never emitted), a paged lease under a
+sliding window (a recycled page cannot be rolled back into) or a
+recurrent target on the paged store, a
 streamed `n > 1` request (its choices are interleaved a token at a
 time), and a request with no room to draft. An absent field reads as
 "this request did not speculate"; a zero would read as "the drafter was
@@ -952,10 +956,9 @@ This is the supported multi-client path on Metal.
 
 Enable it with `FRINK_CONTINUOUS_BATCHING=1`, `--cont-batching` / `-cb`,
 or `-np N` / `--parallel N` (which also sets `FRINK_CB_MAX_SEQS`).
-Disable it with `FRINK_CONTINUOUS_BATCHING=0` or `--no-cont-batching`.
-When unset on Metal builds with fused attention, continuous batching is
-on by default unless a KV pool or prefix cache forces the private
-decode path.
+It is off by default: the private decode loop serializes requests but
+attends on the device, which one client finds faster. A KV pool or
+prefix cache forces the private loop.
 
 On the contiguous KV path it is mutually exclusive with
 `FRINK_KV_POOL_BLOCKS` and `FRINK_PREFIX_CACHE_ENTRIES`; the paged KV
@@ -1059,9 +1062,15 @@ Two things differ from llama.cpp:
   carries the prompt to prefill, tokenized with BOS as a completion
   would be.
 
-`action=erase` is `501`: the prefix cache has whole-cache clearing and
-no per-entry eviction, so erasing one slot would mean erasing all of
-them. Delete the file, or restart.
+`action=erase` empties one slot and answers llama.cpp's
+`{"id_slot": 0, "n_erased": 83}`, the tokens the slot held (`0` for a
+slot that held nothing). Every save and restore records which prompt its
+slot id holds, and an erase drops the prefix cache entry for exactly
+those tokens. Two exceptions keep it to one slot: an entry another slot
+id also holds stays, because it is that slot's state too, and a longer
+entry that only starts with the prompt is a request's continuation and
+stays. Like save and restore it needs `--slot-save-path`, as upstream's
+does, and the prefix cache.
 
 A restore is refused by name when the file is not of the model being
 served. A slot file is raw attention state, and restoring it under
@@ -1097,6 +1106,38 @@ engines refuse by name, as does a server without a checkpoint on disk.
 The slot file header holds one KV geometry, so a model whose layers
 cache different KV widths, or whose K and V heads differ in width, is
 refused with a 501 as well.
+
+### The live listing, `GET /slots`
+
+llama.cpp's listing: an array with one object per slot, and
+`?fail_on_no_slot=1` answers `503 no slot available` when every slot is
+busy. A slot here is a seat of the continuous batcher, and `-np N` gives
+it N seats, so the listing has N entries and the first ones, as many as
+there are sequences decoding or prefilling, are busy:
+
+```json
+[{"id": 0, "n_ctx": 8192, "speculative": false, "is_processing": true},
+ {"id": 1, "n_ctx": 8192, "speculative": false, "is_processing": false}]
+```
+
+Each seat carries the four fields llama.cpp always sends. `n_ctx` is
+the per-request context ceiling and is absent when the model could not
+be priced. `speculative` is `true`: a batched row drafts, by prompt
+lookup or with `--model-draft`, unless its request has a grammar or no
+room left. Left out, because a seat does not hold them: `id_task`,
+`n_prompt_tokens`, `n_prompt_tokens_processed`,
+`n_prompt_tokens_cache`, `params` and `next_token`, which llama.cpp
+keeps per slot from the task it last served, and `prompt` and
+`generated`, which it adds under `LLAMA_SERVER_SLOTS_DEBUG`. frink
+builds KV per request, so a seat keeps nothing once its request ends,
+and its `id` is a position in the listing rather than an address.
+
+A deployment without seats has no slot count, and says so with a 501
+rather than inventing one: no batcher (continuous batching off, or a KV
+pool or prefix cache keeping requests on the private loop), or a batcher
+without `-np`. `--no-slots` (`LLAMA_ARG_ENDPOINT_SLOTS=0`) turns the
+route off with llama.cpp's own 501, `This server does not support slots
+endpoint. Start it with --slots`. `--slots` is the default.
 
 ## LoRA adapters
 
@@ -1387,6 +1428,131 @@ it was, so it is reported as `"eos"` where llama.cpp would say `"word"`.
 inputs. Multi-token stop strings, which is what a `/completion` caller
 normally sets, are reported correctly.
 
+## Infill, `POST /infill`
+
+llama.cpp's fill-in-the-middle completion. The body is a `/completion`
+request with three more fields, and the answer is `/completion`'s object
+and stream:
+
+```bash
+curl -s http://127.0.0.1:8383/infill -H 'content-type: application/json' -d '{
+  "input_prefix": "def add(a, b):\n    ",
+  "input_suffix": "\n\nprint(add(1, 2))\n",
+  "input_extra": [{"filename": "util.py", "text": "def sub(a, b): return a - b\n"}],
+  "n_predict": 32
+}'
+```
+
+- `input_prefix` and `input_suffix` (required) are a string, or an array
+  of strings and token ids, each string tokenized without parsing
+  special markers. A token id must be a non-negative integer.
+- `input_extra` (optional) is an array of `{"filename", "text"}`, other
+  files the model reads first. `filename` defaults to `tmp`.
+- `prompt` (optional) is text appended to the prefix, tokenized with
+  special markers parsed.
+
+The prompt is assembled as llama.cpp's `format_prompt_infill` assembles
+it, with the repo-level pattern when the vocabulary has the tokens for
+it: `[FIM_REP]myproject\n`, each extra file as `[FIM_SEP]filename\n`
+and its text (or llama.cpp's `--- snippet ---` separator without a file
+separator), a closing `[FIM_SEP]filename\n`, then the BOS where the
+vocabulary adds one, `[FIM_PRE]` prefix and prompt, `[FIM_SUF]` suffix,
+`[FIM_MID]`. `--spm-infill` puts the suffix half first. The prefix keeps
+its last `3 * (n_batch / 4)` tokens and the suffix its first
+`n_batch / 4 - (2 + prompt)`, where `n_batch` is `-b` (default 2048),
+and the extra context keeps its last `n_ctx - n_batch + 2` tokens. The
+assembled ids are prefilled as they are, and the response's `prompt` is
+their detokenization.
+
+The FIM tokens are read from the GGUF's `tokenizer.ggml.fim_*_token_id`
+keys (and the deprecated `prefix_token_id`, `suffix_token_id` and
+`middle_token_id`), then found by their text as llama.cpp finds them
+(`<|fim_prefix|>`, `<fim_prefix>`, `▁<PRE>` and the rest of its lists).
+A vocabulary without the prefix, suffix or middle token is llama.cpp's
+501, `Infill is not supported by this model: prefix token is missing.`
+and so on for each one missing. Where llama.cpp's lists match two
+entries of one kind, the lower id is taken: upstream keeps whichever
+its hash map reaches first.
+
+The body is checked with llama.cpp's messages (`"input_prefix" is
+required`, `"input_extra" must be an array of {"filename": string,
+"text": string}`, `extra_context chunk must contain a "text" field with
+a string value`, ...), and then as a `/completion` request, so every
+refusal of that route applies here too. Where this route answers
+differently:
+
+- A `prompt` that is not a string, and a missing `input_prefix` or
+  `input_suffix`, are each the 400 their message names. llama.cpp sets
+  the error and carries on: the first is served with an empty prompt,
+  the other two end in a JSON exception.
+- The dedicated engines (Kimi, MLA, Gemma-4, GLM-5.2) are a 501: their
+  loaders do not read the FIM tokens.
+- A prompt that carries repo-level context needs the context ceiling to
+  budget it against, and is a 501 on a deployment where the model could
+  not be priced.
+- llama.cpp also makes the FIM pad, repo and file-separator tokens end
+  generation, on every route. frink's end-of-generation set does not
+  include them yet, on any route, so an answer runs on past one of them
+  until the model's end of text, a stop string or `n_predict`.
+
+## Server properties, `GET /props`
+
+llama.cpp's global properties, with its field names, nesting and types.
+Every field frink can state is there. A field that would need a value
+frink does not have is left out rather than defaulted:
+
+| Field | Value |
+|---|---|
+| `default_generation_settings.params` | What `/completion` resolves an empty request to: the samplers in their default order by llama.cpp's names, each knob at its default, and the options frink lacks (`dynatemp_range`, `mirostat`, `n_probs`, `min_keep`, `n_keep`, `timings_per_token`, `post_sampling_probs`) at the off value `/completion` serves them at. `n_predict` and `max_tokens` are `-1` |
+| `default_generation_settings.n_ctx` | The per-request context ceiling |
+| `total_slots` | The `-np` seats of the continuous batcher |
+| `model_alias` | The served name (`-a`, or the model's own) |
+| `model_ftype` | `general.file_type` in llama.cpp's words (`Q4_K - Medium`), for the generic GGUF decoder |
+| `model_path` | The checkpoint path |
+| `modalities` | `vision`, `video` and `audio` all `false` |
+| `endpoint_slots` | `false` under `--no-slots` |
+| `endpoint_props` | `false`: there is no `--props` |
+| `endpoint_metrics` | `true`: `/metrics` is always served |
+| `ui` | `false`: this server serves no web UI |
+| `chat_template` | The Jinja source the checkpoint is served with |
+| `bos_token` · `eos_token` | The vocabulary entries the GGUF names, as the template renders them |
+| `build_info` | `frink-server` and its version |
+| `is_sleeping` | `true` between `POST /sleep` and `POST /wake_up` |
+| `cors_proxy_enabled` | `false`: there is no CORS proxy |
+
+Left out, and why:
+
+- `seed` in `params`: frink draws a random seed per request when none is
+  sent. llama.cpp spells that `4294967295`, which `/completion` here
+  reads as a fixed seed, so the value would not mean what it says.
+- `dynatemp_exponent`, `mirostat_tau`, `mirostat_eta`,
+  `adaptive_target`, `adaptive_decay`, `n_discard`: knobs of samplers
+  and of a context shift frink does not have. Each would be a number
+  with nothing behind it.
+- `chat_format`, `reasoning_format`, `reasoning_in_content`,
+  `generation_prompt`, `speculative.types`, `backend_sampling`: names
+  from llama.cpp's own parser, speculation and sampling vocabularies,
+  which frink's are not.
+- `n_ctx`, `total_slots`, `model_ftype`, `model_path`, `chat_template`,
+  `bos_token`, `eos_token` when the deployment does not have them: no
+  ceiling, no `-np` seats, an unknown or absent file type or a dedicated
+  engine, no checkpoint on disk, a builtin template with no source text,
+  no named BOS or EOS.
+- `media_marker`: frink takes no media input to mark.
+- `ui_settings`, `chat_template_caps`, `chat_template_tool_use`,
+  `connect_code`: the web UI's settings, llama.cpp's template capability
+  probe, the `tokenizer.chat_template.tool_use` template frink does not
+  read, and llama.cpp's tunnel, none of which frink has.
+
+An encoder model has no sampler, template or special tokens, so its
+`/props` carries only the fields about the model and the server.
+
+Asleep, the model is gone, and `/props` answers from the snapshot taken
+when the server went to sleep, with `is_sleeping: true`, as llama.cpp
+does. `POST /props` is llama.cpp's answer without `--props`, a 501:
+llama.cpp's handler changes nothing even with the flag, and a 200 for a
+change that did not happen is not an answer this server gives.
+
 ## Tokenize / detokenize, in both dialects
 
 OpenAI has no tokenize endpoint, so `/v1/tokenize` is frink's own
@@ -1513,11 +1679,12 @@ nothing is called) · the embedding architectures listed above as
 refused by name · multi-GPU, tensor parallel, prefill/decode
 disaggregation · streamed argument deltas for the JSON-payload tool
 formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained, paged or continuously
-batched requests, so their speculation fields in `usage` are absent · llama.cpp's `/infill`,
-`/props` and `GET /slots` (the live slot listing; `POST /slots/{id}` save
-and restore is supported, see above), none of which has a frink
-counterpart yet (#534).
+speculative decoding for grammar-constrained requests, recurrent
+targets in the continuous batch, and paged ones under a sliding window,
+so their speculation fields in `usage` are absent ·
+`/infill` on the dedicated engines, and the FIM pad, repo and file
+separator as end-of-generation tokens (see [Infill](#infill-post-infill))
+· `GET /slots` per-task fields, which a batcher seat does not hold.
 
 A few request fields deserialize and then go nowhere, accepted so a
 stock client's body does not fail validation over something this server

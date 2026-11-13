@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// IQ1_S, 50 bytes per 256 values: f16 d, 32 index bytes, 8 u16 holding
+// four 3-bit index high parts, a 3-bit scale and a delta sign
+// (frink_quant::dot_iq1_s_f32_scalar).
+#define IQ_BLOCK_BYTES 50u
+#include "iq_common.glsl"
+
+float sub_dot(uint blk, uint il, uint xb) {
+    uint ib = il >> 1;
+    uint h = u16_at(blk + 34u + 2u * ib);
+    float dl = f16_at(blk) * (2.0 * float((h >> 12) & 7u) + 1.0);
+    float delta = (h & 0x8000u) != 0u ? -0.125 : 0.125;
+    float s = 0.0;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint l = 2u * (il & 1u) + k;
+        uint gi = byte_at(blk + 2u + 4u * ib + l) | (((h >> (3u * l)) & 7u) << 8);
+        s += iq1_row_dot(gi, dl, delta, xb + 8u * k);
+    }
+    return s;
+}
+#include "iq_main.glsl"

@@ -438,6 +438,8 @@ pub(super) fn refuse_what_dedicated_engines_ignore(
         lora,
         lora_scaled,
         draft_max: _,
+        draft_min: _,
+        spec_type,
         draft_p_min: _,
         system: _,
         // Settled for every path by `InferArgs::apply_llama_flags`
@@ -477,7 +479,7 @@ pub(super) fn refuse_what_dedicated_engines_ignore(
              attaches adapters); refusing rather than running the base weights"
         );
     }
-    if model_draft.is_some() {
+    if model_draft.is_some() || spec_type.as_deref().is_some_and(|t| t != "none") {
         anyhow::bail!(
             "--model-draft is not implemented for the {arch} engine (only the generic decoder \
              speculates); refusing rather than decoding without the draft"

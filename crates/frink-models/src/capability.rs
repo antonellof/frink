@@ -3235,10 +3235,13 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
                 EnumOnly,
                 "speculative draft head; not a standalone decoder target",
             ),
+            // A draft head, run by `crate::dflash` behind `-md`; on
+            // its own it has no token table to decode from.
             (
                 "dflash",
                 EnumOnly,
-                "speculative draft head; not a standalone decoder target",
+                "speculative draft head; not a standalone decoder target (pass it as -md with \
+                 its target)",
             ),
             ("clip", EnumOnly, "quantize dummy only"),
             ("gptj", EnumOnly, "enum-only in llama.cpp factory gap"),

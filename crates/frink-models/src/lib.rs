@@ -26,6 +26,7 @@ pub mod decoder;
 pub mod deepseek_v4_budget;
 pub mod deepseek_v4_decoder;
 pub mod device_budget;
+pub mod dflash;
 pub mod draft_model;
 pub mod dry;
 pub mod embedding_model;
@@ -96,6 +97,7 @@ pub mod mtp_blocks;
 pub mod norm;
 pub mod norm_sites;
 pub mod normed_residual;
+pub mod offload;
 pub mod output_projection;
 pub mod parallel_dense_ffn;
 pub mod parallel_residual;
@@ -130,6 +132,7 @@ pub mod swa_geometry;
 pub mod swa_layers;
 pub mod t5_engine;
 pub mod template_flags;
+pub mod tensor_dump;
 pub mod tensor_role;
 #[cfg(test)]
 pub(crate) mod test_source;
@@ -148,7 +151,7 @@ pub use capability::{
     ArchPath, ArchProfile, ArchScope, DecoderFamily, MemoryKind, QkNormStyle,
 };
 pub use config::{deepseek_v4_pro, glm_5_2, kimi_k3, FfnActivation, ModelConfig, RopeLayout};
-pub use decoder::{Decoder, MultiSeqKv};
+pub use decoder::{Decoder, LaneRows, MultiSeqKv};
 pub use device_budget::{BudgetBackend, DeviceBudget};
 pub use draft_model::{DraftModelSpeculator, DraftWeights, VocabMismatch};
 pub use embedding_model::{is_embedding_arch, EmbedError, EmbeddingModel};

@@ -1,5 +1,6 @@
 //! The multi-sequence decode step: one token for each of several
-//! sequences, against contiguous or paged KV.
+//! sequences, or several consecutive tokens for some of them (a
+//! speculative block to verify), against contiguous or paged KV.
 
 use crate::skip_stream::SkipStream;
 use frink_core::cache::{KvCache, PagedKvCache, SharedPagedKv};
@@ -8,7 +9,18 @@ use rayon::prelude::*;
 use crate::scalar_multipliers::residual_add;
 
 use super::ffn_block;
+use super::layer_taps::LayerTaps;
 use super::{Decoder, KvStep, LayerWeights};
+
+/// [`Decoder::forward_multi_seq_lanes`]'s answer, indexed by row.
+#[derive(Debug)]
+pub struct LaneRows {
+    /// The target's logits after each row.
+    pub logits: Vec<Vec<f32>>,
+    /// The residual entering each tapped layer, per row, concatenated
+    /// in the order the layers were asked for; empty without taps.
+    pub features: Vec<Vec<f32>>,
+}
 
 /// Where a batch of independent sequences keeps its KV.
 ///
@@ -93,21 +105,43 @@ impl Decoder {
         self.push_and_attend_row(kv.step(b, l), l, layer, k, v, q)
     }
 
-    /// The body of [`Self::forward_multi_seq_kv`], already running on a
-    /// CPU-pool worker. See `entry.rs` for why the split exists.
-    pub(super) fn forward_multi_seq_kv_on_worker(
+    /// The body of [`Self::forward_multi_seq_kv`] and
+    /// [`Self::forward_multi_seq_lanes`], already running on a CPU-pool
+    /// worker. See `entry.rs` for why the split exists.
+    ///
+    /// Row `b` is token `tokens[b]` at `positions[b]` of sequence
+    /// `lanes[b]`. A sequence may own several rows, at consecutive
+    /// positions and in order: every per-row step below (the push and
+    /// attend, the recurrent update) runs the rows in order, so a later
+    /// row of a sequence sees the earlier ones, which is the causal mask
+    /// a verify block needs, with no second attention body.
+    pub(super) fn forward_multi_seq_rows_on_worker(
         &self,
         tokens: &[usize],
         positions: &[usize],
+        lanes: &[usize],
         kv: &mut MultiSeqKv<'_>,
+        taps: &mut LayerTaps,
     ) -> Vec<Vec<f32>> {
         assert_eq!(tokens.len(), positions.len());
-        assert_eq!(tokens.len(), kv.len());
+        assert_eq!(tokens.len(), lanes.len());
         let batch_size = tokens.len();
         if batch_size == 0 {
             return Vec::new();
         }
-        for seq in 0..batch_size {
+        let mut last: Vec<Option<usize>> = vec![None; kv.len()];
+        for (&lane, &pos) in lanes.iter().zip(positions) {
+            assert!(lane < kv.len(), "row of sequence {lane}, of {}", kv.len());
+            if let Some(prev) = last[lane] {
+                assert_eq!(
+                    pos,
+                    prev + 1,
+                    "a sequence's rows must be consecutive positions, in order"
+                );
+            }
+            last[lane] = Some(pos);
+        }
+        for seq in 0..kv.len() {
             assert_eq!(kv.layers_per_seq(seq), self.config.n_layers);
         }
 
@@ -123,6 +157,7 @@ impl Decoder {
         let residency = self.gpu_vram_budget_bytes.map(|b| self.residency_plan(b));
 
         for l in 0..self.config.n_layers {
+            taps.capture(l, &hidden_batch);
             self.hrm_stack_input(hrm.as_ref(), l, &mut hidden_batch);
             let layer = self.layer_for(l);
             // THIS layer's head counts; see the prefill body.
@@ -156,7 +191,7 @@ impl Decoder {
                     | crate::layer_shapes::AttnShape::Lightning => {
                         let mut out = Vec::with_capacity(batch_size * hidden_dim);
                         for b in 0..batch_size {
-                            let step = kv.step(b, l);
+                            let step = kv.step(lanes[b], l);
                             out.extend(self.recurrent_block(
                                 l,
                                 layer,
@@ -176,7 +211,7 @@ impl Decoder {
                 let parallel_ssm = layer.attn.ssm.as_ref().map(|_| {
                     let mut out = Vec::with_capacity(batch_size * hidden_dim);
                     for b in 0..batch_size {
-                        let mut step = kv.step(b, l);
+                        let mut step = kv.step(lanes[b], l);
                         out.extend(
                             self.parallel_ssm_rows(
                                 l,
@@ -282,7 +317,7 @@ impl Decoder {
                 for b in 0..batch_size {
                     let attn_out = self.push_and_attend(
                         kv,
-                        b,
+                        lanes[b],
                         l,
                         layer,
                         &k_batch[b * kv_width..(b + 1) * kv_width],
@@ -321,9 +356,13 @@ impl Decoder {
                 inputs,
                 ffn_block::BatchedFfnKernels::PerRow,
                 skip_rows.as_deref().map(|rows| SkipStream { rows }),
+                None,
             );
             self.hrm_store(hrm.as_mut(), l, &hidden_batch);
         }
+        // As the single-sequence body: index `n_layers` is the stream
+        // after the stack, before the final norm.
+        taps.capture(self.config.n_layers, &hidden_batch);
 
         let final_normed_batch: Vec<f32> = hidden_batch
             .par_chunks(hidden_dim)

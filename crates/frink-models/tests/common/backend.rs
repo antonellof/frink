@@ -33,6 +33,9 @@ pub enum Backend {
     /// Dense Metal matvecs plus the fused attention block, as `frink
     /// run --ngl 99` serves.
     Metal,
+    /// Vulkan: the decode stack where a layer is one it serves, and the
+    /// matvec offload elsewhere, as `frink run --device vulkan` serves.
+    Vulkan,
 }
 
 /// The pinned backend, and for the CPU the Metal dispatch count at the
@@ -44,7 +47,10 @@ fn requested() -> Backend {
     match std::env::var("FRINK_GOLDEN_BACKEND").as_deref() {
         Err(_) | Ok("") | Ok("cpu") => Backend::Cpu,
         Ok("metal") => Backend::Metal,
-        Ok(other) => panic!("FRINK_GOLDEN_BACKEND={other:?}: expected `cpu` or `metal`"),
+        Ok("vulkan") => Backend::Vulkan,
+        Ok(other) => {
+            panic!("FRINK_GOLDEN_BACKEND={other:?}: expected `cpu`, `metal` or `vulkan`")
+        }
     }
 }
 
@@ -78,6 +84,20 @@ fn apply(b: Backend) -> (Backend, u64) {
                 std::env::set_var("FRINK_METAL_ATTN", "1");
             }
         }
+        Backend::Vulkan => {
+            #[cfg(not(feature = "vulkan"))]
+            panic!(
+                "the Vulkan golden mode needs `--features vulkan`; without it every \
+                 comparison would be the CPU's under the Vulkan tolerance"
+            );
+            #[cfg(feature = "vulkan")]
+            {
+                std::env::set_var("FRINK_VULKAN", "1");
+                std::env::set_var("FRINK_METAL", "0");
+                std::env::set_var("FRINK_METAL_ATTN", "0");
+                std::env::set_var("FRINK_CUDA", "0");
+            }
+        }
     }
     (b, dispatches())
 }
@@ -103,7 +123,16 @@ fn verify(b: Backend, dispatches_at_pin: u64) {
                 "pinned to Metal, but this process decided dense={dense} attn={attn} \
                  before the pin; build the decoder through tests/common"
             ),
+            Backend::Vulkan => assert!(!dense, "pinned to Vulkan, but Metal dense is on"),
         }
+    }
+    #[cfg(feature = "vulkan")]
+    if b == Backend::Vulkan {
+        assert!(
+            frink_core::weight_matrix::vulkan_dense_enabled(),
+            "pinned to Vulkan, but Vulkan is not enabled in this process (no device, or \
+             decided before the pin)"
+        );
     }
     #[cfg(not(feature = "metal"))]
     let _ = (b, dispatches_at_pin);
@@ -155,6 +184,6 @@ pub const METAL_GOLDEN_TOL: f32 = 0.1;
 pub fn tolerance(cpu_tol: f32) -> f32 {
     match backend() {
         Backend::Cpu => cpu_tol,
-        Backend::Metal => cpu_tol.max(METAL_GOLDEN_TOL),
+        Backend::Metal | Backend::Vulkan => cpu_tol.max(METAL_GOLDEN_TOL),
     }
 }

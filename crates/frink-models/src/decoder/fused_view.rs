@@ -57,6 +57,12 @@ impl FusedAttnCaps {
         sinks: true,
         o_bias: true,
     };
+    /// The Vulkan decode stack applies neither (`vulkan_stack`).
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
+    pub(crate) const VULKAN: Self = Self {
+        sinks: false,
+        o_bias: false,
+    };
 }
 
 impl Decoder {

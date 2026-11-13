@@ -319,6 +319,15 @@ enum Commands {
         /// each other answer that, with no frink in the comparison.
         #[arg(long)]
         dump_logits: Option<String>,
+        /// Dump the prompt's per-layer intermediates from both engines
+        /// under this directory (`<dir>/llama`, `<dir>/frink`), under
+        /// llama.cpp's tensor names, and print a relative L2 per tensor.
+        ///
+        /// First-token KL says THAT the engines disagree; this says at
+        /// which layer and op the difference enters. Generic decoder
+        /// only, on the CPU.
+        #[arg(long)]
+        dump_tensors: Option<String>,
         /// Token ids to compare on, comma separated, instead of
         /// tokenizing `--prompt`. Skips the tokenizer half: libllama's
         /// tokenizer cannot load a synthetic fixture's vocabulary.
@@ -901,6 +910,7 @@ fn main() -> anyhow::Result<()> {
             top_k,
             dumper,
             dump_logits,
+            dump_tensors,
             tokens,
             decode_steps,
         } => {
@@ -911,6 +921,7 @@ fn main() -> anyhow::Result<()> {
                 top_k,
                 dumper,
                 dump_logits,
+                dump_tensors,
                 tokens,
                 decode_steps,
             });

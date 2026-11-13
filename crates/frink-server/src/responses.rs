@@ -1583,7 +1583,7 @@ async fn responses_stream(
         let mut tools = (!offered.is_empty()).then(|| posture.tool_call_parser(&offered));
         let result = run_generation_emit(
             &model,
-            &prompt,
+            crate::prompt_input::Prompt::Text(&prompt),
             &params,
             kv_pool.as_ref(),
             paged_kv.as_ref(),

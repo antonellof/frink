@@ -433,10 +433,8 @@ pub(crate) fn norm_function_from_table(arch: &str) -> NormFunction {
 /// large to be right.
 /// `ggml_rms_norm` with no multiply after it: `x * rsqrt(mean(x^2) + eps)`.
 pub fn rms_norm_no_params(x: &[f32], eps: f32) -> Vec<f32> {
-    let n = x.len() as f32;
-    debug_assert!(n > 0.0, "a norm site with no elements");
-    let mean_sq = x.iter().map(|v| v * v).sum::<f32>() / n;
-    let scale = 1.0 / (mean_sq + eps).sqrt();
+    debug_assert!(!x.is_empty(), "a norm site with no elements");
+    let scale = frink_core::matmul::rms_scale(x, eps);
     x.iter().map(|v| v * scale).collect()
 }
 

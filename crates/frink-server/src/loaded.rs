@@ -73,6 +73,10 @@ pub(crate) enum Loaded {
 pub(crate) struct SleptModel {
     pub(crate) id: Option<String>,
     pub(crate) path: std::path::PathBuf,
+    /// `GET /props` while asleep: llama-server answers from a snapshot
+    /// taken as it went to sleep, because the model it describes is
+    /// gone, and so does this one (`crate::props::snapshot`).
+    pub(crate) props: serde_json::Value,
 }
 
 pub(crate) struct ActiveModel {
