@@ -24,7 +24,7 @@ CPU is behind on prefill, and CUDA is behind on both.
 |---|---|
 | Dense GQA, MoE | Llama 3.x, Qwen2.5/3, Gemma-2/3, Mistral, Phi-4-mini, SmolLM2, OLMoE, Mixtral |
 | MLA, with and without the absorption optimization | DeepSeek-V2/V3, Mistral-Large-3, PLM |
-| Dedicated engines | Gemma-4 (per-layer embeddings, shared KV) |
+| Dedicated engines | Gemma-4 (per-layer embeddings, shared KV; on Metal, the fused dense decode stack and batched prefill up to the sliding window) |
 | Speculative drafts | An autoregressive draft GGUF, prompt lookup, and DFlash / DFlash2 block drafts (llama.cpp's `dflash` architecture) |
 | Sliding-window attention: per layer, per-layer arrays, chunked | Gemma-2/3, gpt-oss, Llama 4, Mistral, Cohere2 |
 | Recurrent blocks at the attention site | Mamba-1 and Mamba-2 (Jamba, FalconMamba, Granite 4.0, Nemotron-H, Falcon-H1), short convolutions (LFM2), gated delta nets (Qwen3.5, Qwen3-Next), lightning attention (MiniMax-01), PLaMo-2 |

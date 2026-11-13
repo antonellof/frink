@@ -3599,6 +3599,7 @@ fn borrow_scratch(
 
 /// One quantized matrix bound for the simdgroup GEMM, as a descriptor
 /// so several can be encoded into a single command buffer.
+#[derive(Clone, Copy)]
 pub struct MulMmSgLaunch<'a> {
     pub weights: &'a [u8],
     pub rows: usize,

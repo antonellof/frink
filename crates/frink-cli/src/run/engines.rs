@@ -85,11 +85,10 @@ pub(super) fn run_mla_infer(
         pos = 1;
         l
     } else {
-        let mut last = Vec::new();
-        for &tok in &tokens {
-            last = engine.forward_token(tok, pos, &mut state);
-            pos += 1;
-        }
+        // `Engine::prefill`: batched where the engine has a batched
+        // prompt path (Gemma-4 on Metal), one token at a time otherwise.
+        let last = engine.prefill(&tokens, pos, &mut state);
+        pos += tokens.len();
         last
     };
     let prefill_secs = prefill_t.elapsed().as_secs_f64();
@@ -212,11 +211,10 @@ pub(super) fn run_gemma4_infer(
         pos = 1;
         l
     } else {
-        let mut last = Vec::new();
-        for &tok in &tokens {
-            last = engine.forward_token(tok, pos, &mut state);
-            pos += 1;
-        }
+        // `Engine::prefill`: batched where the engine has a batched
+        // prompt path (Gemma-4 on Metal), one token at a time otherwise.
+        let last = engine.prefill(&tokens, pos, &mut state);
+        pos += tokens.len();
         last
     };
     let prefill_secs = prefill_t.elapsed().as_secs_f64();
@@ -338,11 +336,10 @@ pub(super) fn run_glm52_infer(
         pos = 1;
         l
     } else {
-        let mut last = Vec::new();
-        for &tok in &tokens {
-            last = engine.forward_token(tok, pos, &mut state);
-            pos += 1;
-        }
+        // `Engine::prefill`: batched where the engine has a batched
+        // prompt path (Gemma-4 on Metal), one token at a time otherwise.
+        let last = engine.prefill(&tokens, pos, &mut state);
+        pos += tokens.len();
         last
     };
     let prefill_secs = prefill_t.elapsed().as_secs_f64();

@@ -340,8 +340,8 @@ impl Decoder {
                                         attn_norm_w: layer.attn.norm_weight.rms_weights()?,
                                         ffn_norm_w: layer.moe.norm_weight.rms_weights()?,
                                         q,
-                                        k,
-                                        v,
+                                        // One layer, one cache: slot 0.
+                                        kv: frink_metal::attn::LayerKv::Own { k, v, slot: 0 },
                                         o,
                                         ffn,
                                         post_attn_norm: layer.attn.post_attn_norm.as_deref(),
@@ -349,6 +349,8 @@ impl Decoder {
                                         extras: self.metal_attn_extras(layer),
                                         rope: self.metal_layer_rope(l),
                                         layer_idx: l as u32,
+                                        per_layer: None,
+                                        out_scale: None,
                                     };
                                     frink_metal::attn::launch_prefill_dense_layer(
                                         &hidden_batch,

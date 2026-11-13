@@ -482,8 +482,7 @@ impl Decoder {
                                 attn_norm_w: an,
                                 ffn_norm_w: fnw,
                                 q,
-                                k,
-                                v,
+                                kv: frink_metal::attn::LayerKv::Own { k, v, slot: li },
                                 o,
                                 gate: g,
                                 up: u,
@@ -493,6 +492,8 @@ impl Decoder {
                                 window: self.config.layer_sliding_window(li),
                                 post_attn_norm: layer.attn.post_attn_norm.as_deref(),
                                 post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
+                                per_layer: None,
+                                out_scale: None,
                             });
                         }
                         if ok {
@@ -560,6 +561,7 @@ impl Decoder {
                                 folded.as_ref().is_some_and(FoldedLmHead::argmax_only),
                                 embd_gather.as_ref(),
                                 stack_gelu.expect("`ok` is false without it"),
+                                None,
                             ) {
                                 Ok(out) => {
                                     // Metal KV advanced in-place. Skip host

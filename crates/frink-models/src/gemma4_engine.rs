@@ -124,26 +124,49 @@ pub struct Gemma4Weights {
 pub struct Gemma4Engine {
     pub weights: Gemma4Weights,
     pub hp: Gemma4Hparams,
+    /// What the Metal stacks read that the file does not hold as such:
+    /// the Q norm with the attention scale folded in, and V's weightless
+    /// norm spelled as ones. Built on first use. See `crate::gemma4_metal`.
+    #[cfg(feature = "metal")]
+    pub(crate) device_aux: std::sync::OnceLock<crate::gemma4_metal::DeviceAux>,
 }
 
 pub struct Gemma4DecodeState {
     /// One cache per layer that `has_kv`; indexed by layer id (holes for shared layers).
+    ///
+    /// While the Metal stacks serve this state the device holds the KV
+    /// and these advance by placeholder rows, so their position counts
+    /// stay true; `crate::gemma4_metal` downloads the real rows before
+    /// the host body reads them again.
     pub kv: Vec<Option<KvCache>>,
+    #[cfg(feature = "metal")]
+    pub(crate) metal: crate::gemma4_metal::Gemma4MetalState,
+}
+
+/// The three constants of the per-layer-embedding prologue, from one
+/// place for the host body and the Metal one (`gemma4.cpp`
+/// `project_per_layer_inputs`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PleScales {
+    /// On the token's `per_layer_token_embd` row: `sqrt(n_embd_per_layer)`.
+    pub(crate) tok: f32,
+    /// On `per_layer_model_proj · h`: `1 / sqrt(n_embd)`.
+    pub(crate) proj: f32,
+    /// On the sum of the two: `1 / sqrt(2)`.
+    pub(crate) input: f32,
 }
 
 impl Gemma4Engine {
     /// See [`crate::decoder::Decoder::probe_kernels`]. Called at the end
     /// of loading, before the registry is sealed.
     ///
-    /// This engine implements [`Engine::forward_token`] and nothing
-    /// else: there is no batched path, so a 512-token prefill is 512
-    /// sequential single-token passes and every projection is a
-    /// `batch = 1` matvec. On Metal that is one command buffer, one
-    /// commit and one wait per projection per token, which is why
-    /// Gemma-4-E2B measures *slower* on Metal than on CPU while
-    /// producing correct output. The registry records that as a missing
-    /// engine capability rather than leaving it to be rediscovered from
-    /// a benchmark.
+    /// On Metal the whole model runs on the fused dense stacks
+    /// (`crate::gemma4_metal`): a prompt is one command buffer per chunk
+    /// through the batched GEMMs and a token is one command buffer. On
+    /// every other backend there is no batched path, so a 512-token
+    /// prefill is 512 sequential single-token passes; the registry
+    /// records that as a missing engine capability rather than leaving
+    /// it to be rediscovered from a benchmark.
     pub fn probe_kernels(&self) {
         use frink_core::kernel_registry as reg;
 
@@ -185,8 +208,23 @@ impl Gemma4Engine {
                 None,
             )
             .with_role("gemma4_engine"),
-            reg::Outcome::slow_path("sequential forward_token (batch=1 matvec per projection)"),
+            if self.batched_prefill_here() {
+                reg::Outcome::Hit
+            } else {
+                reg::Outcome::slow_path("sequential forward_token (batch=1 matvec per projection)")
+            },
         );
+    }
+
+    /// Does [`Engine::prefill`] batch on the backend this process runs?
+    fn batched_prefill_here(&self) -> bool {
+        #[cfg(feature = "metal")]
+        if frink_core::weight_matrix::active_backend()
+            == frink_core::kernel_registry::Backend::Metal
+        {
+            return self.metal_stacks_cover();
+        }
+        false
     }
 
     pub fn new_state(&self) -> Gemma4DecodeState {
@@ -200,29 +238,60 @@ impl Gemma4Engine {
                 }
             })
             .collect();
-        Gemma4DecodeState { kv }
+        Gemma4DecodeState {
+            kv,
+            #[cfg(feature = "metal")]
+            metal: Default::default(),
+        }
     }
 
-    fn project_per_layer_inputs(&self, token_id: usize, hidden: &[f32]) -> Option<Vec<Vec<f32>>> {
+    /// The token's embedding row, scaled by `sqrt(n_embd)`
+    /// (`build_inp_embd(tok_embd, sqrtf(n_embd))`).
+    pub(crate) fn embed_scaled(&self, token_id: usize) -> Vec<f32> {
+        let mut hidden = self.weights.token_embd.dequant_row(token_id);
+        let emb_scale = (self.hp.hidden_dim as f32).sqrt();
+        for x in hidden.iter_mut() {
+            *x *= emb_scale;
+        }
+        hidden
+    }
+
+    pub(crate) fn ple_scales(&self) -> PleScales {
+        PleScales {
+            tok: (self.hp.embd_per_layer as f32).sqrt(),
+            proj: 1.0 / (self.hp.hidden_dim as f32).sqrt(),
+            input: 1.0 / 2f32.sqrt(),
+        }
+    }
+
+    /// The token's `per_layer_token_embd` row times its scale:
+    /// `[n_layer * n]`, layer-major chunks of `n`. `None` without PLE.
+    pub(crate) fn per_layer_token_row(&self, token_id: usize) -> Option<Vec<f32>> {
         let pl_embd = self.weights.per_layer_token_embd.as_ref()?;
-        let pl_proj = self.weights.per_layer_model_proj.as_ref()?;
-        let pl_norm = self.weights.per_layer_proj_norm.as_ref()?;
-        let n = self.hp.embd_per_layer;
-        let n_layer = self.hp.n_layer;
-        let scale_tok = (n as f32).sqrt();
+        let scale_tok = self.ple_scales().tok;
         let mut per_tok = pl_embd.dequant_row(token_id);
         for x in per_tok.iter_mut() {
             *x *= scale_tok;
         }
+        Some(per_tok)
+    }
+
+    fn project_per_layer_inputs(&self, token_id: usize, hidden: &[f32]) -> Option<Vec<Vec<f32>>> {
+        let pl_proj = self.weights.per_layer_model_proj.as_ref()?;
+        let pl_norm = self.weights.per_layer_proj_norm.as_ref()?;
+        let n = self.hp.embd_per_layer;
+        let n_layer = self.hp.n_layer;
+        let scales = self.ple_scales();
+        let per_tok = self.per_layer_token_row(token_id)?;
         // per_tok: [n_layer * n] contiguous as layer-major chunks of n
-        let proj_scale = 1.0 / (self.hp.hidden_dim as f32).sqrt();
+        let proj_scale = scales.proj;
         let mut from_model = pl_proj.apply(hidden);
         for x in from_model.iter_mut() {
             *x *= proj_scale;
         }
         // from_model: [n_layer * n]
         let mut out = Vec::with_capacity(n_layer);
-        let input_scale = 1.0 / 2f32.sqrt();
+        let input_scale = scales.input;
         for il in 0..n_layer {
             let start = il * n;
             let mut chunk: Vec<f32> = from_model[start..start + n].to_vec();
@@ -234,31 +303,17 @@ impl Gemma4Engine {
         }
         Some(out)
     }
-}
 
-impl Engine for Gemma4Engine {
-    type State = Gemma4DecodeState;
-
-    fn new_state(&self) -> Gemma4DecodeState {
-        Gemma4Engine::new_state(self)
-    }
-
-    fn vocab_size(&self) -> usize {
-        self.weights.output_head.rows()
-    }
-
-    fn forward_token_on_worker(
+    /// The host body: the reference every device path is checked
+    /// against, and what serves a token no device path takes.
+    pub(crate) fn forward_token_host(
         &self,
         token_id: usize,
         pos: usize,
-        state: &mut Self::State,
+        state: &mut Gemma4DecodeState,
     ) -> Vec<f32> {
         let hp = &self.hp;
-        let mut hidden = self.weights.token_embd.dequant_row(token_id);
-        let emb_scale = (hp.hidden_dim as f32).sqrt();
-        for x in hidden.iter_mut() {
-            *x *= emb_scale;
-        }
+        let mut hidden = self.embed_scaled(token_id);
 
         let per_layer_in = self.project_per_layer_inputs(token_id, &hidden);
 
@@ -437,6 +492,44 @@ impl Engine for Gemma4Engine {
             softcap_inplace(&mut logits, sc);
         }
         logits
+    }
+}
+
+impl Engine for Gemma4Engine {
+    type State = Gemma4DecodeState;
+
+    fn new_state(&self) -> Gemma4DecodeState {
+        Gemma4Engine::new_state(self)
+    }
+
+    fn vocab_size(&self) -> usize {
+        self.weights.output_head.rows()
+    }
+
+    fn forward_token_on_worker(
+        &self,
+        token_id: usize,
+        pos: usize,
+        state: &mut Self::State,
+    ) -> Vec<f32> {
+        #[cfg(feature = "metal")]
+        if let Some(logits) = self.forward_token_metal(token_id, pos, state) {
+            return logits;
+        }
+        self.forward_token_host(token_id, pos, state)
+    }
+
+    /// Batched on Metal (`crate::gemma4_metal`), one token at a time
+    /// everywhere else.
+    fn prefill(&self, tokens: &[usize], start_pos: usize, state: &mut Self::State) -> Vec<f32> {
+        #[cfg(feature = "metal")]
+        let (done, mut last) = self.prefill_metal(tokens, start_pos, state);
+        #[cfg(not(feature = "metal"))]
+        let (done, mut last) = (0usize, Vec::new());
+        for (i, &tok) in tokens.iter().enumerate().skip(done) {
+            last = self.forward_token(tok, start_pos + i, state);
+        }
+        last
     }
 }
 

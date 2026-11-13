@@ -50,7 +50,7 @@
 //!
 //! `FRINK_CTK` selects KV dtype ([`MetalKvDtype`]); see [`is_implemented`].
 pub use crate::decode_dense::{
-    launch_decode_dense_stack, AttnExtras, DenseLayerMetal, EmbdGatherMetal,
+    launch_decode_dense_stack, AttnExtras, DenseLayerMetal, EmbdGatherMetal, LayerKv,
 };
 pub(crate) use crate::dispatch::dispatch_counted;
 use crate::elem::{
@@ -73,6 +73,7 @@ use crate::norm::{
     encode_rms_norm, encode_rms_norm_batch, encode_rms_norm_f32_to_f16_batch,
     encode_rms_norm_per_head_batch,
 };
+pub use crate::ple::{PerLayerGateMetal, PleInputMetal, PrefillMatMetal};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
@@ -1647,12 +1648,10 @@ impl MetalGraph {
             "silu_mul_f32"
         });
 
-        let mut launches = vec![
-            &params.layer.q,
-            &params.layer.k,
-            &params.layer.v,
-            &params.layer.o,
-        ];
+        let mut launches = vec![&params.layer.q, &params.layer.o];
+        if let Some((k, v)) = params.layer.kv.own() {
+            launches.extend([k, v]);
+        }
         // MoE layers take `mul_mm_id`, which compiles on first encode.
         if let Some((gate, up, down)) = params.layer.ffn.dense() {
             launches.extend([gate, up, down]);
@@ -2658,6 +2657,22 @@ fn encode_attn_extras_batch(
             )?;
         }
     }
+    // V is normed per head only: the one model that norms it (Gemma-4)
+    // does so on the `[head_dim, n_kv_heads]` view.
+    if let (Some(w), Some(wb)) = (extras.v_norm, resident.v_norm.as_ref()) {
+        assert_eq!(w.len(), head_dim, "V norm weight must be head_dim");
+        debug_assert_eq!(v_rows, n_kv_heads * head_dim);
+        encode_rms_norm_per_head_batch(
+            encoder,
+            device,
+            v_buf,
+            &wb.buffer,
+            n_kv_heads as u32,
+            head_dim as u32,
+            batch as u32,
+            rms_eps,
+        )?;
+    }
     Ok(())
 }
 
@@ -2667,6 +2682,7 @@ struct AttnExtrasResident {
     v_bias: Option<std::sync::Arc<ResidentF32Buffer>>,
     q_norm: Option<std::sync::Arc<ResidentF32Buffer>>,
     k_norm: Option<std::sync::Arc<ResidentF32Buffer>>,
+    v_norm: Option<std::sync::Arc<ResidentF32Buffer>>,
 }
 
 fn resident_attn_extras(
@@ -2692,6 +2708,10 @@ fn resident_attn_extras(
             .transpose()?,
         k_norm: extras
             .k_norm
+            .map(|b| resident_f32_buffer(device, b))
+            .transpose()?,
+        v_norm: extras
+            .v_norm
             .map(|b| resident_f32_buffer(device, b))
             .transpose()?,
     })
@@ -3709,6 +3729,7 @@ pub fn launch_moe_decode_layer_fused(
             v_bias: extras.v_bias,
             q_norm: extras.q_norm,
             k_norm: extras.k_norm,
+            v_norm: extras.v_norm,
             attn_logit_softcap: extras.attn_logit_softcap,
         },
     };
@@ -4174,8 +4195,9 @@ pub struct PrefillDenseLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
     pub ffn_norm_w: &'a [f32],
     pub q: MulMmSgLaunch<'a>,
-    pub k: MulMmSgLaunch<'a>,
-    pub v: MulMmSgLaunch<'a>,
+    /// This layer's own K/V projections and cache slot, or the slot of
+    /// an earlier layer it attends over; see [`LayerKv`].
+    pub kv: LayerKv<MulMmSgLaunch<'a>>,
     pub o: MulMmSgLaunch<'a>,
     /// Dense SwiGLU/GeGLU FFN, or a routed-expert MoE FFN. The attention
     /// half of the layer is identical either way.
@@ -4190,6 +4212,11 @@ pub struct PrefillDenseLayerMetal<'a> {
     pub rope: Option<LayerRope<'a>>,
     /// Layer index for [`PrefillCbCache`] keying only.
     pub layer_idx: u32,
+    /// Gemma-4's per-layer embedding gate; see
+    /// [`DenseLayerMetal::per_layer`].
+    pub per_layer: Option<PerLayerGateMetal<'a, PrefillMatMetal<'a>>>,
+    /// Gemma-4's `layer_output_scale`.
+    pub out_scale: Option<f32>,
 }
 
 /// FFN half of a fused-prefill-stack layer.
@@ -4247,8 +4274,11 @@ struct PrefillDenseLayerResident {
     attn_nw: std::sync::Arc<ResidentF32Buffer>,
     ffn_nw: std::sync::Arc<ResidentF32Buffer>,
     q_w: std::sync::Arc<ResidentWeightBuffer>,
-    k_w: std::sync::Arc<ResidentWeightBuffer>,
-    v_w: std::sync::Arc<ResidentWeightBuffer>,
+    /// `None` on a layer that reads another layer's KV.
+    kv_w: Option<(
+        std::sync::Arc<ResidentWeightBuffer>,
+        std::sync::Arc<ResidentWeightBuffer>,
+    )>,
     o_w: std::sync::Arc<ResidentWeightBuffer>,
     ffn_w: PrefillFfnResident,
     post_attn_w: Option<std::sync::Arc<ResidentF32Buffer>>,
@@ -4300,8 +4330,13 @@ fn resident_prefill_dense_layer(
         attn_nw: resident_f32_buffer(device, layer.attn_norm_w)?,
         ffn_nw: resident_f32_buffer(device, layer.ffn_norm_w)?,
         q_w: resident_weight_buffer(device, layer.q.weights)?,
-        k_w: resident_weight_buffer(device, layer.k.weights)?,
-        v_w: resident_weight_buffer(device, layer.v.weights)?,
+        kv_w: match layer.kv.own() {
+            Some((k, v)) => Some((
+                resident_weight_buffer(device, k.weights)?,
+                resident_weight_buffer(device, v.weights)?,
+            )),
+            None => None,
+        },
         o_w: resident_weight_buffer(device, layer.o.weights)?,
         ffn_w,
         post_attn_w,
@@ -4330,9 +4365,14 @@ fn encode_prefill_dense_layer(
     rms_eps: f32,
     gelu_ffn: bool,
     attn_softcap: Option<f32>,
+    ple: Option<(
+        &PleInputMetal<'_, PrefillMatMetal<'_>>,
+        &crate::ple::PleScratch,
+    )>,
 ) -> Result<(), MetalError> {
     let n_kv_heads = kv.n_kv_heads;
     let head_dim = kv.head_dim;
+    let own_kv = layer.kv.own().zip(resident.kv_w.as_ref());
     let h_buf = scratch.h;
     let _x_buf = scratch.x;
     let x2_buf = scratch.x2;
@@ -4363,9 +4403,15 @@ fn encode_prefill_dense_layer(
     )?;
     mrs.end_op(&[h_buf], &[half_act]);
 
-    // Q ∥ K ∥ V — one Concurrent set (shared src, disjoint dsts).
+    // Q ∥ K ∥ V — one Concurrent set (shared src, disjoint dsts). Q alone
+    // on a layer that reads another layer's KV.
     spans.span(cmd_buf, encoder, "pf_qkv")?;
-    mrs.begin_op(encoder, &[half_act], &[q_buf, k_buf, v_buf]);
+    let qkv: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
+        &[q_buf, k_buf, v_buf]
+    } else {
+        &[q_buf]
+    };
+    mrs.begin_op(encoder, &[half_act], qkv);
     encode_mul_mm_sg_f16(
         encoder,
         device,
@@ -4375,29 +4421,15 @@ fn encode_prefill_dense_layer(
         q_buf,
         batch,
     )?;
-    encode_mul_mm_sg_f16(
-        encoder,
-        device,
-        &layer.k,
-        &resident.k_w,
-        half_act,
-        k_buf,
-        batch,
-    )?;
-    encode_mul_mm_sg_f16(
-        encoder,
-        device,
-        &layer.v,
-        &resident.v_w,
-        half_act,
-        v_buf,
-        batch,
-    )?;
-    mrs.end_op(&[half_act], &[q_buf, k_buf, v_buf]);
+    if let Some(((k, v), (k_w, v_w))) = own_kv {
+        encode_mul_mm_sg_f16(encoder, device, k, k_w, half_act, k_buf, batch)?;
+        encode_mul_mm_sg_f16(encoder, device, v, v_w, half_act, v_buf, batch)?;
+    }
+    mrs.end_op(&[half_act], qkv);
 
     // QKV bias / QK-norm, in place on q/k/v.
     spans.span(cmd_buf, encoder, "pf_attn_extras")?;
-    mrs.begin_op(encoder, &[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
+    mrs.begin_op(encoder, qkv, qkv);
     encode_attn_extras_batch(
         encoder,
         device,
@@ -4406,8 +4438,8 @@ fn encode_prefill_dense_layer(
         k_buf,
         v_buf,
         layer.q.rows,
-        layer.k.rows,
-        layer.v.rows,
+        own_kv.map_or(0, |((k, _), _)| k.rows),
+        own_kv.map_or(0, |((_, v), _)| v.rows),
         n_heads,
         n_kv_heads,
         head_dim,
@@ -4415,7 +4447,7 @@ fn encode_prefill_dense_layer(
         rms_eps,
         &resident.extras,
     )?;
-    mrs.end_op(&[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
+    mrs.end_op(qkv, qkv);
 
     // RoPE q ∥ RoPE k, in place (disjoint buffers, so they overlap).
     //
@@ -4426,7 +4458,12 @@ fn encode_prefill_dense_layer(
     // `ggml_rope_ext` node.
     if let Some((rope_theta, ff_buf)) = rope {
         spans.span(cmd_buf, encoder, "pf_rope")?;
-        mrs.begin_op(encoder, &[q_buf, k_buf], &[q_buf, k_buf]);
+        let qk: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
+            &[q_buf, k_buf]
+        } else {
+            &[q_buf]
+        };
+        mrs.begin_op(encoder, qk, qk);
         encode_rope_batch(
             encoder,
             device,
@@ -4439,28 +4476,36 @@ fn encode_prefill_dense_layer(
             batch as u32,
             ff_buf,
         )?;
-        encode_rope_batch(
-            encoder,
-            device,
-            rope_layout,
-            k_buf,
-            n_kv_heads as u32,
-            head_dim as u32,
-            rope_theta,
-            start_pos as u32,
-            batch as u32,
-            ff_buf,
-        )?;
-        mrs.end_op(&[q_buf, k_buf], &[q_buf, k_buf]);
+        if own_kv.is_some() {
+            encode_rope_batch(
+                encoder,
+                device,
+                rope_layout,
+                k_buf,
+                n_kv_heads as u32,
+                head_dim as u32,
+                rope_theta,
+                start_pos as u32,
+                batch as u32,
+                ff_buf,
+            )?;
+        }
+        mrs.end_op(qk, qk);
     }
 
-    let kv_width = n_kv_heads * head_dim;
-    let token_elems = (batch * kv_width) as u32;
-    let offset = (kv.seq_len * kv_width) as u32;
-    spans.span(cmd_buf, encoder, "pf_kv_append")?;
-    mrs.begin_op(encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
-    encode_kv_store_append(encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
-    mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+    // `kv.seq_len` is the slot's length BEFORE this batch for every layer
+    // of the stack: the counters advance once, after the wait. So the
+    // owner appends at `start_pos` and a layer sharing its slot attends
+    // over the same `start_pos + batch` rows the owner just wrote.
+    if own_kv.is_some() {
+        let kv_width = n_kv_heads * head_dim;
+        let token_elems = (batch * kv_width) as u32;
+        let offset = (kv.seq_len * kv_width) as u32;
+        spans.span(cmd_buf, encoder, "pf_kv_append")?;
+        mrs.begin_op(encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
+        encode_kv_store_append(encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
+        mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+    }
 
     spans.span(cmd_buf, encoder, "pf_attention")?;
     encode_gqa_prefill_with_kv(
@@ -4662,6 +4707,32 @@ fn encode_prefill_dense_layer(
         (batch * hidden_dim) as u32,
     )?;
     mrs.end_op(&[h_buf, down_buf], &[h_buf]);
+
+    if let Some(gate) = layer.per_layer.as_ref() {
+        let (p, sc) = ple.expect("a per-layer gate with no PLE plane");
+        spans.span(cmd_buf, encoder, "pf_per_layer_gate")?;
+        gate.encode_prefill(
+            encoder,
+            mrs,
+            device,
+            sc,
+            p.n_layer,
+            &crate::ple::GateScratch {
+                h: h_buf,
+                gate: gate_buf,
+                act: up_buf,
+                out: down_buf,
+                half: Some(half_act),
+            },
+            hidden_dim,
+            batch,
+            rms_eps,
+        )?;
+    }
+    if let Some(scale) = layer.out_scale {
+        spans.span(cmd_buf, encoder, "pf_out_scale")?;
+        crate::ple::encode_out_scale(encoder, mrs, device, h_buf, scale, batch * hidden_dim)?;
+    }
     Ok(())
 }
 
@@ -4686,23 +4757,39 @@ pub fn launch_prefill_dense_stack(
     rms_eps: f32,
     gelu_ffn: bool,
     attn_softcap: Option<f32>,
+    ple: Option<&PleInputMetal<'_, PrefillMatMetal<'_>>>,
 ) -> Result<Vec<f32>, MetalError> {
     if batch < 4 {
         return Err(MetalError::CommandFailed);
     }
-    assert_eq!(layers.len(), kvs.len());
     assert!(!layers.is_empty());
 
     let hidden_dim = layers[0].attn_norm_w.len();
     assert_eq!(hidden.len(), batch * hidden_dim);
-    let head_dim = kvs[0].head_dim;
-    let n_kv_heads = kvs[0].n_kv_heads;
-    for (layer, kv) in layers.iter().zip(kvs.iter()) {
+    let owned = crate::decode_dense::check_layer_kv(
+        layers.iter().map(|l| (l.kv, l.extras.touches_kv())),
+        kvs.len(),
+    );
+    assert!(
+        owned.iter().all(|o| *o),
+        "a KV slot no layer of this stack writes"
+    );
+    if let Some(p) = ple {
+        p.check(batch, p.model_proj.rows());
+    }
+    for layer in layers.iter() {
+        let kv = &kvs[layer.kv.slot()];
+        let (head_dim, n_kv_heads) = (kv.head_dim, kv.n_kv_heads);
         assert_eq!(layer.attn_norm_w.len(), hidden_dim);
         assert_eq!(layer.ffn_norm_w.len(), hidden_dim);
         assert_eq!(layer.q.rows, n_heads * head_dim);
-        assert_eq!(layer.k.rows, n_kv_heads * head_dim);
-        assert_eq!(layer.v.rows, n_kv_heads * head_dim);
+        if let Some((k, v)) = layer.kv.own() {
+            assert_eq!(k.rows, n_kv_heads * head_dim);
+            assert_eq!(v.rows, n_kv_heads * head_dim);
+        }
+        if layer.per_layer.is_some() {
+            assert!(ple.is_some(), "a per-layer gate with no PLE plane");
+        }
         assert_eq!(layer.o.rows, hidden_dim);
         assert_eq!(layer.ffn.hidden_out_rows(), hidden_dim);
         if let PrefillFfnMetal::Dense { gate, up, .. } = &layer.ffn {
@@ -4717,8 +4804,6 @@ pub fn launch_prefill_dense_stack(
         if kv.seq_len + batch > kv.capacity {
             return Err(MetalError::CommandFailed);
         }
-        assert_eq!(kv.head_dim, head_dim);
-        assert_eq!(kv.n_kv_heads, n_kv_heads);
         assert_freq_factors_len(
             layer.rope.and_then(|r| r.freq_factors),
             rope_layout,
@@ -4727,8 +4812,21 @@ pub fn launch_prefill_dense_stack(
     }
 
     let max_q = layers.iter().map(|l| l.q.rows).max().unwrap();
-    let max_kv = layers.iter().map(|l| l.k.rows.max(l.v.rows)).max().unwrap();
-    let max_gate = layers.iter().map(|l| l.ffn.ffn_rows()).max().unwrap();
+    let max_kv = layers
+        .iter()
+        .filter_map(|l| l.kv.own().map(|(k, v)| k.rows.max(v.rows)))
+        .max()
+        .unwrap_or(1);
+    let max_gate = layers
+        .iter()
+        .map(|l| {
+            l.ffn
+                .ffn_rows()
+                .max(l.per_layer.as_ref().map_or(0, |p| p.gate.rows()))
+        })
+        .max()
+        .unwrap();
+    let head_dim = kvs[layers[0].kv.slot()].head_dim;
 
     let timing = std::env::var_os("FRINK_METAL_MM_TIMING").is_some();
     let t_setup = std::time::Instant::now();
@@ -4749,6 +4847,18 @@ pub fn launch_prefill_dense_stack(
     )?;
     let scratch = scratch_guard.as_ref().expect("prefill scratch ensured");
     copy_f32_into(&scratch.h, hidden);
+    // Held to the end of the call: the plane is read by every layer.
+    let ple_guard = match ple {
+        Some(p) => Some(crate::ple::borrow_ple_scratch(
+            device,
+            p.plane_elems(batch),
+        )?),
+        None => None,
+    };
+    let ple_scratch = ple_guard.as_ref().map(|g| g.as_ref().expect("ple scratch"));
+    if let (Some(p), Some(sc)) = (ple, ple_scratch) {
+        p.upload_tok(sc);
+    }
 
     let scratch_view = PrefillScratchView {
         h: &scratch.h,
@@ -4785,7 +4895,7 @@ pub fn launch_prefill_dense_stack(
                     rope_layout,
                     head_dim: head_dim as u32,
                     gelu_ffn,
-                    kv_dtype: kvs[0].dtype,
+                    kv_dtype: kvs[layers[0].kv.slot()].dtype,
                 },
             )?;
         }
@@ -4816,7 +4926,23 @@ pub fn launch_prefill_dense_stack(
     let mut spans = crate::kernel_timing::SpanClock::begin(device, 16 * layers.len() + 2);
     spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
-    for (layer_idx, (layer, kv)) in layers.iter().zip(kvs.iter()).enumerate() {
+    if let (Some(p), Some(sc)) = (ple, ple_scratch) {
+        spans.span(&cmd_buf, &mut encoder, "pf_ple_inputs")?;
+        p.encode_prefill(
+            &encoder,
+            &mut mrs,
+            device,
+            sc,
+            &scratch.h,
+            &scratch.half_act,
+            hidden_dim,
+            batch,
+            rms_eps,
+        )?;
+    }
+
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        let kv = &kvs[layer.kv.slot()];
         let resident = resident_prefill_dense_layer(device, layer, hidden_dim)?;
         encode_prefill_dense_layer(
             &mut encoder,
@@ -4842,6 +4968,7 @@ pub fn launch_prefill_dense_stack(
             rms_eps,
             gelu_ffn,
             attn_softcap,
+            ple.zip(ple_scratch),
         )?;
     }
 
@@ -4853,6 +4980,7 @@ pub fn launch_prefill_dense_stack(
     for kv in kvs.iter_mut() {
         kv.seq_len += batch;
     }
+    drop(ple_guard);
 
     let t_read = std::time::Instant::now();
     let out_ptr = scratch.h.contents();
@@ -4902,6 +5030,7 @@ pub fn launch_prefill_dense_layer(
         rms_eps,
         gelu_ffn,
         attn_softcap,
+        None,
     )
 }
 
@@ -5423,7 +5552,8 @@ mod tests {
     #[ignore = "needs a real Metal GPU"]
     fn gqa_fa_vec_matches_cpu() {
         // FA-vec dedicated kernels: d=128 (Llama-3.x), d=64 (TinyLlama /
-        // Llama-3.2-1B), d=96 (Phi-3), d=256 (Gemma-3).
+        // Llama-3.2-1B), d=96 (Phi-3), d=256 (Gemma-3), d=512 (Gemma-4's
+        // full-attention layers).
         let test_cases = vec![
             (4, 2, 128, 17),
             (8, 2, 128, 33),
@@ -5440,6 +5570,8 @@ mod tests {
             (4, 1, 256, 17),
             (8, 4, 256, 33),
             (4, 1, 256, 65),
+            (8, 1, 512, 17),
+            (4, 2, 512, 70),
         ];
         for (n_heads, n_kv_heads, head_dim, seq_len) in test_cases {
             let q: Vec<f32> = (0..n_heads * head_dim)
@@ -5485,6 +5617,7 @@ mod tests {
             (8, 4, 64, 48, 8, Some(30.0)),
             (4, 4, 96, 40, 8, Some(50.0)),
             (4, 1, 256, 40, 12, Some(50.0)),
+            (8, 1, 512, 45, 13, None),
             (8, 4, 128, 33, 0, Some(50.0)), // softcap only
         ];
         std::env::set_var("FRINK_METAL_FA_VEC", "1");
@@ -6535,6 +6668,7 @@ mod tests {
 
     fn dense_layer_metal<'a>(
         w: &'a DenseLayerBytes,
+        slot: usize,
         rope: Option<LayerRope<'a>>,
         hidden: usize,
         n_q: usize,
@@ -6545,8 +6679,11 @@ mod tests {
             attn_norm_w: &w.attn_norm,
             ffn_norm_w: &w.ffn_norm,
             q: f32_matvec(&w.q, n_q, hidden),
-            k: f32_matvec(&w.k, n_kv, hidden),
-            v: f32_matvec(&w.v, n_kv, hidden),
+            kv: LayerKv::Own {
+                k: f32_matvec(&w.k, n_kv, hidden),
+                v: f32_matvec(&w.v, n_kv, hidden),
+                slot,
+            },
             o: f32_matvec(&w.o, hidden, n_q),
             gate: f32_matvec(&w.gate, ffn, hidden),
             up: f32_matvec(&w.up, ffn, hidden),
@@ -6556,6 +6693,8 @@ mod tests {
             window: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            per_layer: None,
+            out_scale: None,
         }
     }
 
@@ -6625,7 +6764,7 @@ mod tests {
 
         for pos in 0..steps {
             let layers: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], Some(ropes[i]), hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, Some(ropes[i]), hidden, n_q, n_kv, ffn))
                 .collect();
             h_stack = launch_decode_dense_stack(
                 &h_stack,
@@ -6640,6 +6779,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack");
 
@@ -6669,7 +6809,7 @@ mod tests {
 
             // The bug, run deliberately: layer 0's rope for both layers.
             let one_set: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], Some(ropes[0]), hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, Some(ropes[0]), hidden, n_q, n_kv, ffn))
                 .collect();
             h_one = launch_decode_dense_stack(
                 &h_one,
@@ -6684,6 +6824,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack, one set");
         }
@@ -6776,7 +6917,7 @@ mod tests {
 
         for pos in 0..steps {
             let layers: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], stack_ropes[i], hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, stack_ropes[i], hidden, n_q, n_kv, ffn))
                 .collect();
             h_stack = launch_decode_dense_stack(
                 &h_stack,
@@ -6791,6 +6932,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack");
 
@@ -6819,7 +6961,7 @@ mod tests {
 
             // The bug, run deliberately: rotate layer 1 too.
             let rotated: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], all_rotate[i], hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, all_rotate[i], hidden, n_q, n_kv, ffn))
                 .collect();
             h_all = launch_decode_dense_stack(
                 &h_all,
@@ -6834,6 +6976,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack, everything rotated");
         }
@@ -6920,8 +7063,10 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prefill_layer_metal<'a>(
         w: &'a PrefillLayerBytes,
+        slot: usize,
         rope: Option<LayerRope<'a>>,
         layer_idx: u32,
         hidden: usize,
@@ -6933,8 +7078,11 @@ mod tests {
             attn_norm_w: &w.attn_norm,
             ffn_norm_w: &w.ffn_norm,
             q: q8_0_mul_mm_sg(&w.q, n_q, hidden),
-            k: q8_0_mul_mm_sg(&w.k, n_kv, hidden),
-            v: q8_0_mul_mm_sg(&w.v, n_kv, hidden),
+            kv: LayerKv::Own {
+                k: q8_0_mul_mm_sg(&w.k, n_kv, hidden),
+                v: q8_0_mul_mm_sg(&w.v, n_kv, hidden),
+                slot,
+            },
             o: q8_0_mul_mm_sg(&w.o, hidden, n_q),
             ffn: PrefillFfnMetal::Dense {
                 gate: q8_0_mul_mm_sg(&w.gate, ffn, hidden),
@@ -6946,6 +7094,8 @@ mod tests {
             extras: AttnExtras::default(),
             rope,
             layer_idx,
+            per_layer: None,
+            out_scale: None,
         }
     }
 
@@ -6991,7 +7141,9 @@ mod tests {
             .map(|_| MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv"))
             .collect();
         let layers: Vec<PrefillDenseLayerMetal<'_>> = (0..2)
-            .map(|i| prefill_layer_metal(&w[i], Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn))
+            .map(|i| {
+                prefill_layer_metal(&w[i], i, Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn)
+            })
             .collect();
         let h_stack = launch_prefill_dense_stack(
             &hidden0,
@@ -7004,6 +7156,7 @@ mod tests {
             eps,
             false,
             None,
+            None,
         )
         .expect("prefill stack");
 
@@ -7011,7 +7164,7 @@ mod tests {
         for i in 0..2 {
             let mut kv = MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv");
             let layer =
-                prefill_layer_metal(&w[i], Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn);
+                prefill_layer_metal(&w[i], 0, Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn);
             let input = std::mem::take(&mut h_ref);
             h_ref = launch_prefill_dense_layer(
                 &input, &layer, &mut kv, n_heads, batch, rope, 0, eps, false, None,
@@ -7024,7 +7177,9 @@ mod tests {
             .map(|_| MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv"))
             .collect();
         let one_set: Vec<PrefillDenseLayerMetal<'_>> = (0..2)
-            .map(|i| prefill_layer_metal(&w[i], Some(ropes[0]), i as u32, hidden, n_q, n_kv, ffn))
+            .map(|i| {
+                prefill_layer_metal(&w[i], i, Some(ropes[0]), i as u32, hidden, n_q, n_kv, ffn)
+            })
             .collect();
         let h_one = launch_prefill_dense_stack(
             &hidden0,
@@ -7036,6 +7191,7 @@ mod tests {
             0,
             eps,
             false,
+            None,
             None,
         )
         .expect("prefill stack, one set");
@@ -7102,10 +7258,10 @@ mod tests {
                 .map(|_| MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv"))
                 .collect();
             let layers: Vec<PrefillDenseLayerMetal<'_>> = (0..2)
-                .map(|i| prefill_layer_metal(&w[i], ropes[i], i as u32, hidden, n_q, n_kv, ffn))
+                .map(|i| prefill_layer_metal(&w[i], i, ropes[i], i as u32, hidden, n_q, n_kv, ffn))
                 .collect();
             launch_prefill_dense_stack(
-                &hidden0, &layers, &mut kvs, n_heads, batch, rope, 0, eps, false, None,
+                &hidden0, &layers, &mut kvs, n_heads, batch, rope, 0, eps, false, None, None,
             )
             .expect("prefill stack")
         };

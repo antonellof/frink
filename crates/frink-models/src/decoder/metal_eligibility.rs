@@ -254,6 +254,7 @@ impl Decoder {
             v_bias,
             q_norm,
             k_norm,
+            v_norm: None,
             attn_logit_softcap: self.config.attn_logit_softcap,
         })
     }

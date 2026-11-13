@@ -59,7 +59,7 @@ flag of its tool.
 | bench | `-d` | One value per run, as `-p` | Same |
 | bench | `-b` | One value per run. Leaving both `-b` and `-ub` out means the whole prompt in one pass, not llama-bench's 2048 / 512 | Keeps the rows every published receipt measured |
 | bench | `-ub` | One value per run; see `-b` | Same |
-| bench | `-pg` | One pair per run; refused on the Gemma-4 engine, which has no batched prefill to time | Same |
+| bench | `-pg` | One pair per run; refused on the Gemma-4 engine, which has no combined row yet | Same |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
 | bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and comma-separated sweeps refused | One run measures one configuration |
 | bench | `-ctk` | `f16` (the default) or `f32` on CPU and Metal; a type the KV store would fall back from (`q8_0`, `q4_0`, ...) is refused, as is a sweep | A row labelled with a type it did not measure is not a measurement |
