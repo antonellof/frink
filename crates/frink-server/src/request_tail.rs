@@ -70,7 +70,7 @@ pub(crate) struct RequestTail<'a> {
     /// Prompt positions a contiguous prefix restore saved.
     pub(crate) cached_tokens: Option<usize>,
     /// `(forwards, accepted, drafted)` from the speculative loop.
-    pub(crate) speculation: (usize, usize, usize),
+    pub(crate) speculation: (usize, usize, usize, crate::draft_tally::PositionTally),
     pub(crate) kv_pool_configured: bool,
     pub(crate) radix_enabled: bool,
     pub(crate) prefix_cache: Option<&'a Mutex<PrefixCache>>,
@@ -103,7 +103,7 @@ impl RequestTail<'_> {
             prefill_start,
             first_token_at,
             cached_tokens,
-            speculation: (spec_forwards, spec_accepted, spec_drafted),
+            speculation: (spec_forwards, spec_accepted, spec_drafted, spec_positions),
             kv_pool_configured,
             radix_enabled,
             prefix_cache,
@@ -117,7 +117,12 @@ impl RequestTail<'_> {
         // not speculate rather than reporting a zero that reads as "the
         // drafter was useless".
         if spec_drafted > 0 {
-            usage = usage.with_speculation(spec_forwards, spec_accepted, spec_drafted, Vec::new());
+            usage = usage.with_speculation(
+                spec_forwards,
+                spec_accepted,
+                spec_drafted,
+                spec_positions.rates(),
+            );
         }
         if let Some(at) = first_token_at {
             usage = usage.with_ttft(at.duration_since(prefill_start).as_secs_f64());

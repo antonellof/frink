@@ -183,6 +183,7 @@ pub(super) fn settle(slot: &mut Slot, rows: &[Vec<f32>], draft: &[usize], decode
     slot.pos += 1;
     slot.answer.forwards += 1;
     slot.answer.drafted += draft.len();
+    let accepted_before = slot.answer.accepted;
     for (i, logits) in rows.iter().enumerate() {
         let Some(token) = draw(slot, logits, decode) else {
             break;
@@ -208,6 +209,10 @@ pub(super) fn settle(slot: &mut Slot, rows: &[Vec<f32>], draft: &[usize], decode
             break;
         }
     }
+    // Agreement accepts a prefix of the block, so the count is the rows.
+    slot.answer
+        .positions
+        .record(draft.len(), slot.answer.accepted - accepted_before);
     // Rows past the committed tokens describe drafts that never
     // happened; a published prefix must not contain them.
     truncate(&mut slot.kv, slot.pos);

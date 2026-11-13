@@ -21,15 +21,11 @@
 //! ignored: the failure mode is two callers sharing a namespace, which
 //! is the behaviour they had before the field existed.
 //!
-//! # Where it is NOT honoured
+//! # The paged store
 //!
-//! The paged store's radix tree has no per-namespace scoping: it walks
-//! one tree keyed by token ids, and its nodes hold block indices the
-//! whole deployment shares. Adding a namespace there is a change to
-//! the tree and its eviction, not a parameter, so a paged request that
-//! names a salt is REFUSED BY NAME. Serving it would be the worst of
-//! the three options: a caller who asked for isolation, told they got
-//! it, and sharing anyway.
+//! The paged store honours it too: `policy::radix::salted` keeps one
+//! radix tree per namespace over the shared page pool, so a salted
+//! request can match only its own tree.
 
 use std::hash::{Hash, Hasher};
 

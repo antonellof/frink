@@ -50,6 +50,7 @@ mod completion;
 mod continuation;
 mod conversations;
 mod decode_task;
+mod draft_tally;
 mod embeddings;
 mod generate;
 mod grammar_request;

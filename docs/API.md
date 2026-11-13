@@ -280,7 +280,7 @@ time reads a 50 tok/s model as 5 tok/s on a long prompt.
 | `acceptance_length` | completion tokens per target forward pass, speculative or not. 1.0 means speculation saved nothing, 2.0 means half the forwards. A round that drafted nothing still costs a forward and is counted |
 | `draft_tokens` | draft tokens the target evaluated |
 | `accepted_draft_tokens` | draft tokens kept |
-| `draft_accept_rate_per_position` | reserved for the accept rate at each position of the draft block. Present with the other three, and an empty array for now: no decode path records it yet |
+| `draft_accept_rate_per_position` | the accept rate at each position of the draft block, over this request's rounds: entry `i` is the share of rounds that offered position `i` and kept it. Present with the other three |
 
 Every timing is optional and omitted, rather than nulled or zeroed, when
 it was not measured (a cached response, a batched decode). For
@@ -480,7 +480,7 @@ Set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) for gated repos, and
     "cached_tokens": 0,              // absent without a prefix cache, as in usage
     "stream": false,
     "acceptance_length": 1.6,        // absent when the request did not draft
-    "draft_accept_rate_per_position": [],
+    "draft_accept_rate_per_position": [0.81, 0.62, 0.37],
     "via_api_key": "key-4f21a0c3",   // fingerprint, never the key; null if none
     "client": "frink-studio"        // self-declared (X-Frink-Client); null if absent
   }]

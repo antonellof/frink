@@ -236,6 +236,16 @@ fn a_dflash_draft_in_the_batch_answers_as_each_request_alone() {
         let drafted = usage.draft_tokens.unwrap_or(0);
         let accepted = usage.accepted_draft_tokens.unwrap_or(0);
         cut |= accepted > 0 && drafted > accepted;
+        if accepted > 0 {
+            let rates = usage
+                .draft_accept_rate_per_position
+                .clone()
+                .expect("per-position rates");
+            assert!(
+                rates[0] > 0.0 && rates.iter().all(|r| (0.0..=1.0).contains(r)),
+                "{rates:?}"
+            );
+        }
     }
     assert!(
         cut,
