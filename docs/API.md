@@ -1,10 +1,10 @@
 # API
 
-`frink-server` exposes an OpenAI-compatible HTTP API for chat serving.
+`frink-server` serves an HTTP API in three dialects: OpenAI's,
+Anthropic's Messages, and llama-server's native routes.
 
-Fields marked **Reject** return HTTP 400 or 501 with an error message
-that names the problem. Multimodal input the server does not handle
-comes back the same way.
+A refusal is a 400 (the request is wrong) or a 501 (the server does not
+implement it), with a message that names the field or the problem.
 
 ## Endpoints
 
@@ -25,7 +25,7 @@ comes back the same way.
 | `POST /v1/messages/count_tokens` | Anthropic prompt sizing, no generation |
 | `POST /v1/responses` | OpenAI Responses surface (what `codex` speaks), streaming and buffered |
 | `GET /v1/responses/{id}` · `POST /v1/responses/{id}/cancel` | Always 404. This server keeps no responses, so there is nothing to fetch or cancel by response id. Cancel a live generation with `POST /v1/cancel` |
-| `GET /v1/stats` · `GET /v1/requests` | Live serving telemetry, pool gauges, memory footprint, and the request ring |
+| `GET /v1/stats` · `GET /v1/requests` | Live serving telemetry and an incremental page of the request ring (see [Serving telemetry](#serving-telemetry)) |
 | `POST /v1/cancel` | Stop a streamed generation by `request_id` (see below) |
 | `GET /v1/stream/{request_id}` · `GET /v1/stream/{request_id}/poll` | Reconnect into a resumable stream, over SSE or plain JSON (see below) |
 | `GET /v1/cache/status` · `POST /v1/cache/rebuild` | KV pool geometry and re-split (see below) |
@@ -38,7 +38,7 @@ comes back the same way.
 | `GET /props` · `POST /props` | llama.cpp's global properties, which its web UI reads first. `POST` is llama.cpp's refusal without `--props` (see below) |
 | `POST /infill` | llama.cpp's fill-in-the-middle completion, in `/completion`'s shape and through its serving path (see below) |
 | `GET /lora-adapters` · `POST /lora-adapters` | llama.cpp's LoRA listing and scale setting; the per-request `lora` field is honoured on `/v1/chat/completions`, `/v1/completions` and `/completion` (see below) |
-| `GET /cache/stats` · `GET /metrics` | Frink extensions |
+| `GET /cache/stats` · `GET /metrics` | Response-cache and prefix-cache counters, and Prometheus metrics (see [Serving telemetry](#serving-telemetry)) |
 | `GET /admin/models` | Checkpoint inventory from GGUF headers (see [Admin control surface](#admin-control-surface)) |
 | `POST /admin/models/load` · `POST /admin/models/unload` | Swap or drop the served model. A load is a background task |
 | `POST /admin/download` | Fetch one `.gguf` from the Hugging Face Hub into the model directory, as a background task |
@@ -46,7 +46,7 @@ comes back the same way.
 | `GET /admin/stats` | Counters and the recent-request ring |
 | `POST /sleep` · `POST /wake_up` · `GET /is_sleeping` | An unload that remembers the checkpoint path, so the server can wake itself; `/admin/models/unload` cannot. Frees the KV pool, the paged store, the repack and expert caches and any device buffers. Idempotent. A model with no checkpoint path on record is a `409`. While asleep, routes needing a model answer `503 server_sleeping` rather than `model_not_loaded`. There is one sleep level, because frink mmaps its weights |
 | `GET /` | 404. The web UI in [`ui/`](../ui) is a separate app and this server does not serve it |
-| Audio / images | Not supported |
+| Audio / images | Not supported. An `image_url` content part is a 501 |
 
 That is the complete list. Every path a client of the public API uses is
 one constant in the `frink-api` crate, so the UI and the server cannot
@@ -79,10 +79,10 @@ conversation or a large `/v1/embeddings` batch past that comes back
 | `typical_p`, `top_n_sigma`, `xtc_probability`, `xtc_threshold`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_penalty_last_n`, `dry_sequence_breakers` | Supported. llama.cpp's own spellings; absent means the sampler is off |
 | `samplers` | Supported. The chain order, as a list of names or a `;`-separated string. Defaults to llama.cpp's own default chain |
 | `presence_penalty`, `frequency_penalty` | Supported |
-| `stream` | Supported (overlapped SSE when tools off and CB off) |
-| `tools` / `tool_choice: none\|auto` | Supported (prompt-engineered, parsed in eleven wire formats) |
+| `stream` | Supported (SSE). `usage` rides the final chunk, so `stream_options` needs nothing more |
+| `tools` / `tool_choice: none\|auto` | Supported. Calls are parsed in the checkpoint's own wire format (see [Tool-call formats](#tool-call-formats)) |
 | `parallel_tool_calls` | Supported. `false` returns the first call the model made and drops any after it, in the whole answer and on the stream alike. Absent or `true` returns every call. Also on `/v1/responses` |
-| `tool_choice: required` / named function | Supported on ten of the eleven wire formats, by a lazy grammar built from the same marker description the parser reads with. **501 naming the format** on the remaining one (`muse_glimmer`), for the reason the refusal states |
+| `tool_choice: required` / named function | Supported by a lazy grammar built from the offered tools; `muse_glimmer` is a 501 naming the format (see [Grammar-constrained decoding](#grammar-constrained-decoding)) |
 | `logprobs` | Served on `/v1/completions` (parallel arrays plus `text_offset`) and on `/v1/chat/completions` as `logprobs: true` + `top_logprobs` (OpenAI's `content[]` shape). Over the distribution the sampler drew from, so penalties and a grammar mask are in it; a candidate the chain removed is omitted rather than reported as `null`. Cap 5 on completions, 20 on chat, above which is a 400. Such a request always misses the response cache, which stores text and not distributions |
 | `n` (>1) | Served on `/v1/completions` and `/v1/chat/completions`: prefilled once and the KV forked per choice, so `prompt_tokens` counts the prompt once. Choice `i` samples from `seed + i`, so choice 0 is byte-identical to the `n = 1` answer. With `stream` on the chat route the choices are interleaved, and each chunk carries its own index. **501** on the native `/completion`, which returns a single `content` |
 | `best_of` (>1) | Served where `n` is: generates `best_of` from one prefill, returns the `n` best by summed log-probability, as upstream does. The sum favours short answers; a per-token mean would rank differently and is deliberately not used. `usage.completion_tokens` counts every token generated, discards included. `best_of < n` is a 400 |
@@ -92,13 +92,13 @@ conversation or a large `/v1/embeddings` batch past that comes back
 | `allowed_token_ids`, `bad_words` | Served on all three generation wires, in the same mask as the grammar. They steer the draw; `stop` ends a generation. `bad_words` works on tokens: a word's last token is forbidden only when the tokens before it are what was just generated, so it is exact only for the tokenization the model would have produced. An empty `allowed_token_ids` is a **400** |
 | `echo` | Served on `/v1/completions`, the wire that returns a continuation of the prompt; **501** on the two that return a message. Prompt and completion come back as one `text`, and with `logprobs` the arrays cover both. After a truncation it echoes the tokens that were kept |
 | `truncate_prompt_tokens` | Served on all three generation wires: keeps the prompt's last `k` tokens, applied before anything is prefilled, so the KV, `usage.prompt_tokens`, the prefix cache and `echo` all see the prompt that was answered. Below 1 is a **400** |
-| `skip_special_tokens` | Served on all three generation wires. `false` keeps the model's end-of-generation token in the text and counts it; it still ends the answer. A caller's own `stop_token_ids` entry is unaffected: stopping on a token means stopping before it |
+| `skip_special_tokens` | Served on all three generation wires. `false` keeps the model's end-of-generation token in the text and counts it; it still ends the answer. A caller's `stop` string that is a single token is unaffected: stopping on a token means stopping before it |
 | `return_tokens_as_token_ids` | Served on all three generation wires: each reported token is spelled `token_id:123` instead of its text, in the `tokens` array, the `top_logprobs` keys and chat's `content[].token`. The completion's `text` is unchanged. It exists because two ids can detokenize to one string, and a map keyed by text loses one of them |
-| `use_beam_search`, `prompt_embeds` | **Reject, 501 naming the field**, on `/v1/chat/completions`, `/v1/completions` and llama.cpp's native `/completion`. Each changes the tokens or the text returned, so ignoring one answers a question the caller did not ask. The default a caller may legitimately spell out (`n: 1`, `echo: false`, `skip_special_tokens: true`) is served. One table, flattened into all three request bodies, so a field cannot be refused on one wire and dropped on another again |
+| `use_beam_search`, `prompt_embeds` | 501 naming the field, on `/v1/chat/completions`, `/v1/completions` and `/completion`. Each changes the tokens or the text returned, so ignoring one would answer a question the caller did not ask. `use_beam_search: false` is served |
 | `response_format: json_object` | Supported (a character-class mask plus validation; see [Grammar-constrained decoding](#grammar-constrained-decoding)) |
-| `grammar` | Supported. llama.cpp's own field: a GBNF string, enforced per token by a parser |
-| `response_format: json_schema` | Supported. `json_schema.schema` is compiled to GBNF and enforced per token. `strict: false` and any unknown member of the `json_schema` object are refused by name; a schema the converter cannot compile is a 400 naming the keyword |
-| Other `response_format` types | Reject |
+| `grammar` | Supported. llama.cpp's own field: a GBNF string, enforced per token |
+| `response_format: json_schema` | Supported: the schema is compiled to GBNF and enforced per token (see [Grammar-constrained decoding](#grammar-constrained-decoding)) |
+| Other `response_format` types | 400 naming the type, `text` included on this route |
 | `session_id` | Frink extension (server-side history) |
 | `stream_resumable` | Frink extension: keep a replay buffer for this stream so a client can reconnect (see [Resumable streams](#resumable-streams)) |
 | `lora` | llama.cpp's per-request adapter scales (see [LoRA adapters](#lora-adapters)) |
@@ -130,14 +130,10 @@ a template that already emitted BOS never gets a second one.
 
 ### When a request does not fit the context
 
-There are two outcomes. A prompt at or past the deployment's
-per-request position ceiling is refused with a 400 whose message reads
-`prompt is too long: N tokens > M maximum`, the wording Claude Code and
-OpenClaw match on, because the Anthropic wire carries no error code for
-it. A prompt that fits is served, with `max_tokens` clamped down to the
-room that remains; refusing that case would turn a servable long-prompt
-request into an error over a `max_tokens` the caller most likely never
-set. The clamp is also what makes the 32768 default output budget safe.
+A prompt that fits is served with `max_tokens` clamped to the room the
+per-request ceiling leaves, which is what makes the 32768 default safe.
+A prompt that fills the ceiling by itself is refused; see
+[Errors that retrying will not fix](#errors-that-retrying-will-not-fix).
 
 ## Chat templates
 
@@ -224,7 +220,7 @@ described under [Tool-call formats](#tool-call-formats).
       "reason": "metal_not_built",       // stable code, safe to switch on
       "detail": "Apple M2 Pro is present but this binary was built without --features metal; rebuild to use it." }
   ],
-  "version": "0.57.0", "pid": 4242, "uptime_seconds": 12.5,
+  "version": "0.63.0", "pid": 4242, "uptime_seconds": 12.5,
   "server_time_unix_ms": 1786000000000,
   "last_request_age_seconds": 0.4    // absent until one is served
 }
@@ -281,42 +277,54 @@ time reads a 50 tok/s model as 5 tok/s on a long prompt.
 | `time_to_first_token_ms` | prefill start to first token produced |
 | `prompt_per_second`, `predicted_per_second` | per-phase throughput |
 | `cached_tokens` | prompt tokens reused from the KV prefix cache |
-| `acceptance_length` | completion tokens per forward pass, speculative or not. 1.0 means speculation saved nothing, 2.0 means half the forwards. A round that drafted nothing still costs a forward and is counted |
-| `draft_tokens`, `accepted_draft_tokens` | draft tokens evaluated and kept |
-| `draft_accept_rate_per_position` | accept rate at each position in the draft block |
+| `acceptance_length` | completion tokens per target forward pass, speculative or not. 1.0 means speculation saved nothing, 2.0 means half the forwards. A round that drafted nothing still costs a forward and is counted |
+| `draft_tokens` | draft tokens the target evaluated |
+| `accepted_draft_tokens` | draft tokens kept |
+| `draft_accept_rate_per_position` | reserved for the accept rate at each position of the draft block. Present with the other three, and an empty array for now: no decode path records it yet |
 
 Every timing is optional and omitted, rather than nulled or zeroed, when
 it was not measured (a cached response, a batched decode). For
 `cached_tokens`, absent means no prefix cache is configured and `0`
 means the cache was consulted and missed.
 
-The server drafts with prompt lookup: an n-gram match over the
-request's own history, with no second checkpoint, so it costs no memory
-and no load time and helps where output quotes input. A server started
-with `-md` drafts with that model instead, with KV of the request's own
-([`CLI.md`](CLI.md#server-flags) says where it is refused). Verification
-draws with the server's own sampler and keeps a drafted token only when
-it equals that draw, so speculation never changes the answer. The four
-speculation fields are present whenever a request drafted.
-`draft_accept_rate_per_position` is reported beside the mean because a
-drafter that is right at the first position and useless at the last has
-the same mean as a uniformly mediocre one, and the two call for
-opposite block sizes. `/admin/stats` rows carry `acceptance_length` and
-`draft_accept_rate_per_position` for the same reason.
-
-The speculation fields are absent for a request that did not draft: a
-recurrent target in the continuous batch (its batched state has no
-checkpoint yet), a grammar-constrained or `json_object` request (verification draws
-through the same grammar machine, and a rejected block would leave it
-advanced over tokens that were never emitted), a paged lease under a
-sliding window (a recycled page cannot be rolled back into) or a
-recurrent target on the paged store, a
-streamed `n > 1` request (its choices are interleaved a token at a
-time), and a request with no room to draft. An absent field reads as
-"this request did not speculate"; a zero would read as "the drafter was
-useless".
-
 Streamed requests get the same `usage` object on the final chunk.
+
+### Speculative decoding
+
+Every generic GGUF decode drafts, on the private loop and in the
+continuous batch alike. The drafter is prompt lookup by default: an
+n-gram match over the request's own history, with no second checkpoint,
+so it costs no memory and no load time and helps where output quotes
+input. A server started with `-md` drafts with that model instead (a
+plain draft model or a DFlash one), with KV of the request's own;
+[`CLI.md`](CLI.md#server-flags) says where that is refused.
+Verification draws with the server's own sampler and keeps a drafted
+token only when it equals that draw, so speculation never changes the
+answer.
+
+The four speculation fields are present when a request drafted at least
+one token, and absent otherwise. An absent field reads as "this request
+did not speculate"; a zero would read as "the drafter was useless". A
+request does not draft when:
+
+- it has a `grammar`, a `json_schema` or `json_object` format, or a
+  forced `tool_choice`: verification draws through the same grammar
+  machine, and a rejected block would leave it advanced over tokens that
+  were never emitted;
+- its target is recurrent and it runs in the continuous batch or on the
+  paged store, whose recurrent state has no checkpoint yet (on the
+  private loop's contiguous store a recurrent target drafts);
+- it holds a paged lease under a sliding window, where a recycled page
+  cannot be rolled back into;
+- its KV lives on the Metal device and the host rows stop at the prompt
+  (the private loop with Metal attention), so there is nothing on the
+  host to roll back;
+- it is a streamed `n > 1` request, whose choices are interleaved a
+  token at a time;
+- it has no room left to draft.
+
+`/admin/stats` and `/v1/requests` rows carry `acceptance_length` and
+`draft_accept_rate_per_position` under the same rule.
 
 ## Admin control surface
 
@@ -469,15 +477,18 @@ Set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) for gated repos, and
     "model": "Qwen3-0.6B-Q4_K_M",   // the model that served it
     "status": 200, "prompt_tokens": 17, "completion_tokens": 24,
     "ttft_ms": 6586.2, "duration_ms": 23603, "decode_ms": 17004.8,
+    "cached_tokens": 0,              // absent without a prefix cache, as in usage
     "stream": false,
+    "acceptance_length": 1.6,        // absent when the request did not draft
+    "draft_accept_rate_per_position": [],
     "via_api_key": "key-4f21a0c3",   // fingerprint, never the key; null if none
     "client": "frink-studio"        // self-declared (X-Frink-Client); null if absent
   }]
 }
 ```
 
-`recent` is a 200-entry ring keyed by the same `request_id` the response
-carried, so a log row joins its message on equality. `duration_ms` and
+`recent` is the last 200 requests, keyed by the same `request_id` the
+response carried, so a log row joins its message on equality. `duration_ms` and
 `decode_ms` are separate: the first carries queue wait plus prefill plus
 decode, so dividing completion tokens by it reads a 50 tok/s model as 5.
 `decode_ms` and `ttft_ms` are `null` when the engine did not time itself
@@ -740,8 +751,6 @@ llama.cpp loads the spliced file and runs the pooler too (its
 `build_pooling` RANK arm reads `cls`); its scores still differ from
 HuggingFace by its all-zero token types, described above.
 
-Tracked as [#82](https://github.com/antonellof/frink/issues/82).
-
 ## Errors that retrying will not fix
 
 Two ceilings do not move with load. A request that hits one gets a `400`
@@ -750,9 +759,10 @@ a `Retry-After` would only start a retry loop.
 
 ```json
 {"error": {
-  "message": "context_length_exceeded: request asks for 9000 token positions …",
+  "message": "context_length_exceeded: prompt is too long: 9000 tokens > 8000 maximum",
   "type": "invalid_request_error",
   "code": "context_length_exceeded",
+  "binding": "context_length_exceeded",
   "estimated_bytes": 4718592000,
   "limit_bytes": 4194304000,
   "positions": 9000,
@@ -760,19 +770,17 @@ a `Retry-After` would only start a retry loop.
 }}
 ```
 
-`code` names the ceiling that is binding. The two have different fixes,
-and only one of them is in the client's hands:
+`code` (and its copy `binding`) names the ceiling:
 
-| `code` | Meaning | Fix |
+| `code` | When | Fix |
 |---|---|---|
-| `context_length_exceeded` | Longer than any single request may be (`FRINK_CB_MAX_CONTEXT`) | Shorter prompt, lower `max_tokens` |
-| `device_memory_budget_exceeded` | Bigger than the server's whole KV budget (`FRINK_CB_KV_BLOCKS`) | More KV blocks, or a smaller model |
+| `context_length_exceeded` | The prompt alone reaches the per-request ceiling (`FRINK_CB_MAX_CONTEXT`, or the one derived from device memory at load). The message reads `prompt is too long: N tokens > M maximum`, the wording Claude Code and OpenClaw match on, because the Anthropic wire carries no error code for it. A `prompt + max_tokens` that overflows the position counter gets the same code | A shorter prompt. `max_tokens` is clamped to fit, so lowering it does not help |
+| `device_memory_budget_exceeded` | The prompt plus the clamped `max_tokens` needs more KV than the server's whole budget (`FRINK_CB_KV_BLOCKS` under continuous batching, `FRINK_KV_POOL_BLOCKS` on the private loop) | A lower `max_tokens` or a shorter prompt; on the server side, more KV blocks or a smaller model |
 
 `estimated_bytes` and `limit_bytes` are the KV cost of the request and
 of the ceiling, priced from the model's own layout with the same
-arithmetic `frink inspect-plan` prints. When a request exceeds both
-ceilings, the per-request one is reported, because that is the one the
-caller acts on.
+arithmetic `frink inspect-plan` prints. The per-request ceiling is
+checked first, because it is the one the caller can act on.
 
 Momentary pressure gets a different answer: `503` with `Retry-After`,
 counted separately, so an operator reading `/metrics` can tell "one
@@ -877,7 +885,7 @@ reconnected in the middle of a long prefill.
 | `/v1/stream/{id}` (replay) | an id-less chunk with `choices: []` |
 | `/v1/responses` | `response.in_progress` |
 | `/v1/messages` | `ping` |
-| `/completion` | a partial frame with empty `content` and `"stop": false` |
+| `/completion`, `/infill` | a partial frame with empty `content` and `"stop": false` |
 
 The silence before the first token counts: that window is the queue
 wait plus the prefill, and on a long prompt it is the longest quiet
@@ -952,17 +960,19 @@ reader. A `Last-Event-ID` naming a different request is
 
 Concurrent requests share one batched decode worker (llama.cpp's slot
 model): many in-flight sequences, one `forward_multi_seq` step per tick.
-This is the supported multi-client path on Metal.
 
-Enable it with `FRINK_CONTINUOUS_BATCHING=1`, `--cont-batching` / `-cb`,
-or `-np N` / `--parallel N` (which also sets `FRINK_CB_MAX_SEQS`).
-It is off by default: the private decode loop serializes requests but
-attends on the device, which one client finds faster. A KV pool or
-prefix cache forces the private loop.
+It is off by default on every backend. `--cont-batching` / `-cb`,
+`-np N` / `--parallel N` (which also caps in-flight sequences at N) or
+`FRINK_CONTINUOUS_BATCHING=1` turn it on. Without it, requests run one
+at a time on the private decode loop. That is the faster choice for one
+client on Metal: the batched decode attends on the host, and the private
+loop attends on the device.
 
-On the contiguous KV path it is mutually exclusive with
-`FRINK_KV_POOL_BLOCKS` and `FRINK_PREFIX_CACHE_ENTRIES`; the paged KV
-store lifts this (see [`CONFIG.md`](CONFIG.md)).
+It serves the generic GGUF decoder only; the dedicated engines stay on
+the private loop. On the contiguous KV path a KV pool
+(`FRINK_KV_POOL_BLOCKS`) or a prefix cache (`FRINK_PREFIX_CACHE_ENTRIES`)
+keeps requests on the private loop too; the paged KV store lifts that
+(see [`CONFIG.md`](CONFIG.md)).
 
 Streaming under continuous batching emits tokens as they are sampled,
 in the same SSE shape as the private decode path.
@@ -992,7 +1002,27 @@ here and `FRINK_CHUNKED_PREFILL` on the private loop). frink has one
 prefill stage, so the two flags resolve as llama.cpp resolves them
 (`src/llama-context.cpp:265`): the smaller of whichever was named.
 
-While a batcher is active, `GET /metrics` reports
+## Serving telemetry
+
+`GET /v1/stats` is one object for a status bar: the served `model`, the
+server `state`, `uptime_s`, recent decode and prefill throughput
+(`throughput.decode_tps`, `throughput.prefill_tps`), request counts and
+latencies (`requests.active`, `completed`, `p95_ms`, `ttft_mean_ms`,
+`prompt_tokens_total`, `completion_tokens_total`), the KV pool gauges
+(`pools`) and the live memory footprint (`memory`, `null` when no live
+figure can be read).
+
+`GET /v1/requests?since=<cursor>&limit=<n>` pages the same request ring
+`/admin/stats` shows (rows as in [Stats](#stats)). It answers
+`{"requests", "next_cursor", "missed", "total"}`. The cursor counts every
+request since start, so a poller that passes `next_cursor` back reads
+each row once; `missed` counts rows that left the ring before the
+poller read them. `limit` defaults to, and is capped at, 200.
+
+`GET /cache/stats` reports the response cache's counters and the prefix
+cache's (`null` without `FRINK_PREFIX_CACHE_ENTRIES`).
+
+`GET /metrics` is Prometheus text. While a batcher is active it reports
 `frink_prefill_chunks_total`, `frink_prefill_tokens_total`,
 `frink_decode_steps_total`, `frink_scheduler_queue_depth`,
 `frink_scheduler_queue_rejected_total`, and the configured caps
@@ -1014,7 +1044,6 @@ request adds:
 
 Each histogram counts a request only from the field that measured it,
 so one that did not time its first token adds nothing to that family.
-`/v1/requests` carries the same `cached_tokens` per request.
 
 ## Slot save and restore
 
@@ -1116,15 +1145,15 @@ it N seats, so the listing has N entries and the first ones, as many as
 there are sequences decoding or prefilling, are busy:
 
 ```json
-[{"id": 0, "n_ctx": 8192, "speculative": false, "is_processing": true},
- {"id": 1, "n_ctx": 8192, "speculative": false, "is_processing": false}]
+[{"id": 0, "n_ctx": 8192, "speculative": true, "is_processing": true},
+ {"id": 1, "n_ctx": 8192, "speculative": true, "is_processing": false}]
 ```
 
 Each seat carries the four fields llama.cpp always sends. `n_ctx` is
 the per-request context ceiling and is absent when the model could not
 be priced. `speculative` is `true`: a batched row drafts, by prompt
-lookup or with `--model-draft`, unless its request has a grammar or no
-room left. Left out, because a seat does not hold them: `id_task`,
+lookup or with `--model-draft`, except in the cases
+[Speculative decoding](#speculative-decoding) lists. Left out, because a seat does not hold them: `id_task`,
 `n_prompt_tokens`, `n_prompt_tokens_processed`,
 `n_prompt_tokens_cache`, `params` and `next_token`, which llama.cpp
 keeps per slot from the task it last served, and `prompt` and
@@ -1254,7 +1283,7 @@ so the call itself is schema-constrained (see
 | Family | Shape |
 |---|---|
 | Hermes / Qwen2.5 | `<tool_call>{"name": …, "arguments": {…}}</tool_call>` |
-| Llama 3 | `<\|python_tag\|>{"name": …, "parameters": {…}}` |
+| Llama 3 | `<\|python_tag\|>{"name": …, "parameters": {…}}`, or the same object bare. A bare turn that opens with `{` is read as a call; one naming no offered tool is returned as text |
 | Mistral | `[TOOL_CALLS] [{…}]` |
 | Qwen3-Coder | `<function=name><parameter=key>value</parameter></function>` |
 | GLM-4.7 | `<arg_key>k</arg_key><arg_value>v</arg_value>` |
@@ -1298,25 +1327,20 @@ arriving as a number.
 
 ## Legacy completions
 
-`/v1/completions` honours `prompt` (a string), `max_tokens` (default
+`/v1/completions` takes `prompt` (a string) and `max_tokens` (default
 16, because a caller completing a fragment usually wants a fragment
-back), `stop`, `temperature`, `top_p`, `min_p`, `top_k`, `typical_p`,
-`top_n_sigma`, `xtc_probability`, `xtc_threshold`, the five `dry_*`
-fields, `samplers`, `repetition_penalty`, `presence_penalty`,
-`frequency_penalty`, `seed`, `ignore_eos`, `grammar`, `lora` and
-`logit_bias`, plus the fields the table above marks as served here:
-`logprobs`, `prompt_logprobs`, `n`, `best_of`, `echo`, `cache_salt`,
-`allowed_token_ids`, `bad_words`, `truncate_prompt_tokens`,
-`skip_special_tokens` and `return_tokens_as_token_ids`.
+back). Every sampling field of the chat table is read the same way,
+through the same `SamplingKnobs::resolve`, as are `seed`, `stop`,
+`ignore_eos`, `grammar`, `lora` and `logit_bias`; so are the rows that
+table marks as served on this route (`logprobs`, `prompt_logprobs`,
+`n`, `best_of`, `echo`, `cache_salt`, `allowed_token_ids`, `bad_words`,
+`truncate_prompt_tokens`, `skip_special_tokens`,
+`return_tokens_as_token_ids`). An absent `min_p` is `0.0` (off) on both
+routes rather than llama.cpp's CLI default of `0.05`: an HTTP caller is
+not running llama.cpp's command line.
 
-The chat route and this one read the same `SamplingKnobs::resolve`, so
-which knobs exist and what an absent one means are stated once. An
-absent `min_p` resolves to `0.0` (off) rather than llama.cpp's CLI
-default of `0.05`: an HTTP caller is not running llama.cpp's command
-line.
-
-The route answers with one JSON body; it does not read `stream`. What
-it does not implement comes back as an error naming the field:
+The route answers with one JSON body. Refused by name: `stream: true`
+(use `/completion` or `/v1/chat/completions`, which both stream),
 token-id prompts (`[int]` / `[[int]]`), `suffix`, and any
 `response_format` other than `{"type": "text"}`.
 
@@ -1393,7 +1417,7 @@ a false refusal. At any other value it is a 501 naming the field:
 `min_keep` · `return_tokens` (the decode loop hands this layer text, not
 ids) · `n_indent` · `n_keep` (frink refuses an oversized request rather
 than shifting context, so there is nothing to protect) · `n_cmpl` ·
-`n_cache_reuse` · `t_max_predict_ms` · `id_slot` (no slots) ·
+`n_cache_reuse` · `t_max_predict_ms` · `id_slot` (no slot holds a request's state) ·
 `response_fields` · `return_progress` · `timings_per_token` ·
 `sse_ping_interval` (the keepalive is fixed at 15 s).
 
@@ -1641,8 +1665,8 @@ end-of-generation tokens: the prefix is free, but the turn cannot end
 until a call has begun. A model that never opens a call runs to
 `max_tokens` and finishes `"length"`.
 
-Ten of the eleven wire formats are supported, with one root rule per
-shape:
+Every wire format but `muse_glimmer` is supported, with one root rule
+per shape:
 
 | Shape | Formats | Root rule |
 |---|---|---|
@@ -1674,25 +1698,23 @@ either off.
 
 ## Not yet
 
-Image and audio input · MCP tool invocation (the config is read,
-nothing is called) · the embedding architectures listed above as
-refused by name · multi-GPU, tensor parallel, prefill/decode
-disaggregation · streamed argument deltas for the JSON-payload tool
-formats (they arrive whole) · `stream` on `/v1/completions` ·
-speculative decoding for grammar-constrained requests, recurrent
-targets in the continuous batch, and paged ones under a sliding window,
-so their speculation fields in `usage` are absent ·
-`/infill` on the dedicated engines, and the FIM pad, repo and file
-separator as end-of-generation tokens (see [Infill](#infill-post-infill))
-· `GET /slots` per-task fields, which a batcher seat does not hold.
+Image and audio input · MCP tool invocation · multi-GPU, tensor
+parallel, prefill/decode disaggregation · streamed argument deltas for
+the JSON-payload tool formats · `stream` on `/v1/completions`. The
+sections above say where each of the narrower gaps sits: the refused
+embedding architectures, the requests that do not speculate, `/infill`
+on the dedicated engines, and the per-task fields of `GET /slots`.
 
-A few request fields deserialize and then go nowhere, accepted so a
-stock client's body does not fail validation over something this server
-has no use for: `metadata` on `/v1/messages`, `store` and `metadata` on
-`/v1/responses`, and `user` on the chat route, a tracing tag that
-cannot change the answer. `stream_options` is served as far as it goes:
-`usage` always rides the final chunk of a stream. Everything else this
-server does not implement is refused by name, `stream` on
-`/v1/completions` included.
+## Fields that are read and not used
 
-See [`plans/north-star.md`](plans/north-star.md).
+A few request fields deserialize and then go nowhere, because they
+cannot change the answer: `metadata` on `/v1/messages`, `store` and
+`metadata` on `/v1/responses`, `user` on the chat route (a tracing
+tag), and `stream_options` (`usage` always rides a stream's final
+chunk). The fields known to change the tokens or the text, and not
+implemented, are refused by name: the 501 rows of the chat table and
+the lists under each route. Any field this page does not name is
+dropped by the JSON parser without an error, so check this page before
+relying on one.
+
+See [`plans/north-star.md`](plans/north-star.md) for what comes next.
