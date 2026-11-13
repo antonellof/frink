@@ -33,7 +33,7 @@ own. It does not bind to llama.cpp or wrap ggml: the loader, the
 quantized kernels, attention and expert routing are all written here,
 in Rust.
 
-- **One binary, no Python.** On macOS arm64 it is 23 MB, with Metal and
+- **One binary, no Python.** The prebuilt for macOS arm64 has Metal and
   the server built in: completions, the API server, `download`, `bench`,
   `batched-bench`, `quantize`, `imatrix`, `gguf-split` and `verify`.
   There are no wheels to install and no CUDA userspace to match against
@@ -44,10 +44,10 @@ in Rust.
 - **A drop-in for llama.cpp.** The flags, the sampler order and the
   tools are the same. `quantize` writes Q8_0 and the K-quants
   byte-identically to `llama-quantize`, with or without an importance
-  matrix. Tokenization is checked against libllama on twenty
-  checkpoints, and 101 architectures run with a logit comparison
-  behind them. Any other architecture stops with an error that says
-  what is missing.
+  matrix. `frink parity` checks the tokenizer, the logits and a greedy
+  decode against libllama, and CI runs it on every fixture. 101
+  architectures run with a logit comparison behind them. Any other
+  architecture stops with an error that says what is missing.
 - **llama-server's chat prompts.** The GGUF's own Jinja chat template
   renders with the variables llama-server passes (`enable_thinking`,
   today's date, `preserve_reasoning`), so a thinking model thinks by
@@ -58,10 +58,14 @@ in Rust.
 - **An OpenAI-compatible server.** Point your existing client at it.
   It also serves the Anthropic and Responses APIs, with paged KV shared
   across conversations, model swap, sleep and wake, slot save and
-  restore, and resumable streams. On Metal, concurrent clients share
-  one batched decode worker. [Measured](benchmarks/RESULTS.md#serving-features-measured),
-  that is 1.28x aggregate throughput at eight concurrent requests, and
-  736 of 757 prompt tokens reused on a shared system prompt.
+  restore, and resumable streams. One client is served on a private
+  decode loop, and with `FRINK_PREFIX_CACHE_ENTRIES` set a follow-up
+  turn prefills only its new message. With
+  `--cont-batching` or `--parallel N`, concurrent clients share one
+  batched decode worker instead.
+  [Measured](benchmarks/RESULTS.md#serving-features-measured), batching
+  gives 1.28x aggregate throughput at eight concurrent requests, and
+  paged KV reused 736 of 757 prompt tokens on a shared system prompt.
 - **The full sampling API.** `n` and `best_of` from one prefill,
   `logprobs` and `prompt_logprobs`, `logit_bias`, `allowed_token_ids`,
   `bad_words`, `echo`, `truncate_prompt_tokens` and `cache_salt`. A
@@ -76,10 +80,11 @@ in Rust.
 - **Lossless speculative decoding.** A draft model (`-md`, as in
   llama.cpp) proposes tokens and the target checks them with the
   speculative-sampling rejection rule, so the text is exactly the
-  target's at any temperature. The server takes `-md` too, or
-  speculates on its own with prompt lookup, and reports what that saved
-  in `usage`, on its private decode loop. Inside the continuous batch it
-  does not yet.
+  target's at any temperature. The draft can be a small model of the
+  same family or a DFlash block draft (llama.cpp's `dflash`
+  architecture). The server takes `-md` too, or speculates on its own
+  with prompt lookup, on the private loop and inside the continuous
+  batch, and reports what that saved in `usage`.
 - **Mixture of experts.** GPU routing, indexed expert GEMMs and
   residency planning. Experts stream from the checkpoint only when they
   do not fit in memory.
@@ -95,20 +100,19 @@ decode) on the same GGUF and machine as `llama-bench`, and every
 published number has a receipt. The full table is
 [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 
-- **Metal (Apple M2 Pro).** Level with llama.cpp on prefill and ahead
-  of it on decode across most of the suite.
-- **CUDA (NVIDIA L40S, 0.59.0, 2026-11-09).** Greedy tokens identical
-  to frink's CPU path on all ten models measured, and the first-token
-  distribution matching llama.cpp's on nine of them (gpt-oss drifts on
-  frink's CPU path as well). Not yet as fast. On the dense 3B to 12B
-  models decode is 1.2x to 1.4x slower and prefill 3x to 4x. Qwen3-30B-A3B,
-  whose expert layers now run on the GPU, is 2x behind on decode and
-  5.5x on prefill, and gpt-oss still runs on the host path
+- **Metal (Apple M2 Pro, 0.20.0).** Prefill within 11% of llama.cpp,
+  and decode level with it or ahead on every model in the suite.
+- **CUDA (NVIDIA L40S, 0.59.0).** Not yet as fast. On the dense 3B to
+  12B models decode is 1.2x to 1.4x slower and prefill 3x to 4x.
+  Qwen3-30B-A3B is 2x behind on decode and 5.5x on prefill, and gpt-oss
+  still runs on the host path
   ([the L40S rows](benchmarks/RESULTS.md#amd-epyc-7r13-processor-4c-linux-612113-138209amzn2023x86_64--nvidia-l40s)).
   Closing that is the top of the [roadmap](docs/plans/north-star.md)
   (#133, #259).
-- **CPU.** Close to llama.cpp on decode and behind on some prefill. The
-  CPU rows predate the current code and are marked stale in the table.
+- **CPU.** Behind llama.cpp, by less on decode than on prefill.
+
+Every row was measured on a build older than the current one, and the
+table marks each one so.
 
 ## Install
 
@@ -139,8 +143,10 @@ cargo build --release -p frink-cli --features metal
 
 The only feature flag to choose is the GPU backend: `--features metal`
 on Apple silicon, `--features cuda` on Linux with an NVIDIA card, and
-none on a CPU-only machine. `frink serve`, `frink download`,
-`frink bench`, `frink verify` and completions are included by default.
+none on a CPU-only machine. `--features vulkan` is early: it runs some
+decode work on a Vulkan device when `FRINK_VULKAN=1` is set.
+`frink serve`, `frink download`, `frink bench`, `frink verify` and
+completions are included by default.
 
 Using frink as a Rust library rather than a command? Depend on
 [`frink-inference`](https://crates.io/crates/frink-inference), or on
@@ -196,12 +202,12 @@ gap:
 frink bench -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 512 -n 128 -r 3 --compare
 ```
 
-On `Q8_0` and `IQ4_NL` frink's logits match llama.cpp's. On the
-K-quants and `IQ4_XS` they drift, for a
-[known reason](docs/plans/archive/llama-cpp-gap-inventory.md) that is not a
-frink bug: llama.cpp quantizes the activations to `Q8_K` before those
-dot products, and frink keeps them in f32. `frink parity` says so when
-it reports `DRIFT`. To compare the two engines, use `Q8_0`.
+On the CPU, frink quantizes activations the way ggml does, so a
+`Q8_0` matmul is bit-identical to llama.cpp's and a K-quant one differs
+only in reduction order. The deviations that remain are listed, with
+their measured size, in
+[ADR 0009](docs/adr/0009-numerics-follow-ggml.md#known-deviations).
+`frink parity` compares the two engines on your file.
 [docs/MODELS.md](docs/MODELS.md) lists what runs today, and which
 checkpoints stop with an error instead.
 
@@ -215,7 +221,7 @@ whole run does (`-dev cpu`).
 frink download bartowski/Llama-3.2-1B-Instruct-GGUF \
   Llama-3.2-1B-Instruct-Q4_K_M.gguf --local-dir models
 frink -m models/Llama-3.2-3B-Instruct-Q4_K_M.gguf \
-  -md models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --draft-max 5 \
+  -md models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --spec-draft-n-max 5 \
   -p "Write the numbers from 1 to 30 separated by commas:" \
   -n 96 --temp 0 --no-cnv -dev cpu
 ```
@@ -230,9 +236,9 @@ frink: accept rate per position [0.89, 1.00, 1.00, 0.94, 0.93]
 ```
 
 Run the same command without `-md` to see whether the drafter helps on
-your text. [docs/CLI.md](docs/CLI.md) covers `--draft-p-min` and the
-cases it refuses: grammar-constrained runs, recurrent models, and a
-drafter placed on the GPU.
+your text. [docs/CLI.md](docs/CLI.md) covers `--spec-draft-p-min`,
+DFlash drafts, and the cases it refuses: grammar-constrained runs,
+recurrent models, and a drafter placed on the GPU.
 
 ## Frink Studio
 

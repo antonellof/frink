@@ -28,5 +28,8 @@ changed under us.
 
 ## Consequences
 
-CI gets slower by one cached C++ build. In exchange, done-means point 2
-is enforced on every PR rather than on each audit. Tracked in #402.
+CI gets slower by one cached C++ build. In exchange, point 2 of
+[the north star's "done means"](../plans/north-star.md#done-means) is
+enforced on every PR rather than on each audit (`scripts/oracle.sh`,
+the `oracle` job in `ci.yml`; `oracle-master.yml` is the scheduled run
+against `master`). Tracked in #402.

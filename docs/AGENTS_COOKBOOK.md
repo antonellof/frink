@@ -5,7 +5,7 @@ Point coding agents at a running Frink server. Start it either way:
 Both take the same flags.
 
 ```bash
-cargo build -p frink-cli --release --features "serve metal"
+cargo build -p frink-cli --release --features metal   # serve is a default feature
 ./target/release/frink serve -m /path/to/model.gguf \
   --host 127.0.0.1 --port 8383
 ```
@@ -41,7 +41,24 @@ For a browser client, Frink Studio lives in [`ui/`](../ui) as a
 separate app. This server does not serve it, and `GET /` here is a 404.
 Run `npm run dev` from that directory.
 
-## Continuous batching
+## One agent: the prefix cache
+
+By default each request runs on the server's private decode loop, one
+at a time. That is the fast path for a single agent: on Metal it
+attends on the device, where the batched decode attends on the host.
+
+An agent resends the whole conversation every turn. Keep its KV between
+turns so a follow-up prefills only the new message:
+
+```bash
+FRINK_PREFIX_CACHE_ENTRIES=2 ./target/release/frink-server -m model.gguf
+```
+
+Each entry is a full copy of one conversation's KV, so one or two is
+enough for one client. `GET /cache/stats` reports hits. See
+[CONFIG.md](CONFIG.md).
+
+## Several clients: continuous batching
 
 Off by default. Turn it on for several concurrent clients with the
 flag, `-np N`, or the variable:
@@ -52,11 +69,14 @@ flag, `-np N`, or the variable:
 ```
 
 - Not with `FRINK_KV_POOL_BLOCKS` or `FRINK_PREFIX_CACHE_ENTRIES`, unless
-  paged KV is on
+  paged KV is on. With either set, the server keeps the private loop
+  and logs a warning
 - The generic GGUF decoder only. The dedicated engines (MLA, Gemma 4,
   GLM-5.2, Kimi) serve on the private loop
+- A draft model (`-md`) and prompt-lookup speculation work inside the
+  batch as on the private loop
 
-## Sharing a system prompt between conversations
+## Several clients: sharing a system prompt
 
 Agents send the same long preamble on every turn. Paged KV stores it
 once and lets each conversation point at those pages, instead of every
@@ -68,11 +88,10 @@ FRINK_PAGED_KV_BLOCKS=4096 FRINK_PAGED_KV_BLOCK_SIZE=16 \
 ```
 
 `usage.cached_tokens` on each response says how much of that prompt was
-already computed. Paged KV used to be refused on a GPU backend,
-because a Metal prefill left K/V on the device and the paged prefill
-copied host placeholders into the page store. That is fixed and pinned
-on hardware by `paged_metal_parity`, so Metal is supported. CUDA has no
-equivalent hardware run behind it. See [CONFIG.md](CONFIG.md).
+already computed. Paged KV composes with continuous batching, and
+excludes `FRINK_PREFIX_CACHE_ENTRIES`. It runs on Metal, pinned on
+hardware by `paged_metal_parity`; CUDA has no equivalent hardware run
+behind it. See [CONFIG.md](CONFIG.md).
 
 Two callers sending the same preamble get the same pages. That saves
 memory, but if the callers are different tenants it is also a

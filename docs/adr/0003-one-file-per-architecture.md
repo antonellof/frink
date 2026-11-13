@@ -46,6 +46,7 @@ Adding an architecture becomes: one file, one registry line, one
 fixture, one golden. Reviewers compare `models/<arch>.rs` against
 `src/models/<arch>.cpp` side by side. The triage prose in
 `capability.rs` moves to the triage test and shrinks to one line per
-row. This supersedes the open half of
-`docs/plans/archive/model-layer-reorg.md`; the steps are in
-`docs/plans/arch-registry-migration.md`.
+row. This supersedes the open half of the earlier
+[model-layer reorganisation plan](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/model-layer-reorg.md);
+the steps are in
+[`docs/plans/arch-registry-migration.md`](../plans/arch-registry-migration.md).

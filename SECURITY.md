@@ -20,9 +20,9 @@ workspace share one version.
 
 ## Scope
 
-- `frink-server` authentication: `FRINK_API_KEY` is the bearer token
-  required by every route except `/health`, including the `/admin`
-  routes. A way to reach a protected route without it is in scope.
+- `frink-server` authentication: `FRINK_API_KEY` (or `--api-key`) is
+  the key every route except `/health` requires, including the `/admin`
+  routes, sent as `Authorization: Bearer` or `x-api-key`. A way to reach a protected route without it is in scope.
 - TLS: `FRINK_TLS_CERT` / `FRINK_TLS_KEY`. Without them the server
   speaks plain HTTP.
 - The bind check: the server refuses to start on a non-loopback address
