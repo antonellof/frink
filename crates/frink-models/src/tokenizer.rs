@@ -33,6 +33,7 @@
 mod fim;
 mod plamo2;
 mod pretokenize;
+mod regex_split;
 mod scored_vocab;
 mod special;
 mod unicode;
@@ -388,9 +389,9 @@ pub struct GgufBpeTokenizer {
     /// The vocabulary's special entries, carved out of the input before
     /// BPE runs on what is left -- see [`special::SpecialTokenTable`].
     special_tokens: SpecialTokenTable,
-    /// Compiled pre-tokenization pattern (GPT-2 word regex, or
-    /// newline-only for Gemma-4 SPM-BPE).
-    pretokenize_pattern: fancy_regex::Regex,
+    /// Compiled pre-tokenizer: the checkpoint's `tokenizer.ggml.pre`
+    /// regex or regex sequence, or newline-only for Gemma-4 SPM-BPE.
+    pretokenize_pattern: regex_split::PreTokenizer,
     style: BpeEncodingStyle,
 }
 
@@ -584,13 +585,15 @@ impl GgufBpeTokenizer {
             .collect()
     }
 
-    /// `pretokenize::split_with_gaps` rather than a bare `find_iter`
+    /// `PreTokenizer::split` rather than a bare `find_iter`
     /// loop: the text BETWEEN matches is input too, and llama.cpp emits
     /// it as its own chunk. Dropping it lost tabs, NBSPs, form feeds and
     /// interior newlines out of the middle of every OLMo prompt.
     fn encode_text_run(&self, text: &str) -> Vec<u32> {
         match self.style {
-            BpeEncodingStyle::Gpt2 => pretokenize::split_with_gaps(&self.pretokenize_pattern, text)
+            BpeEncodingStyle::Gpt2 => self
+                .pretokenize_pattern
+                .split(text)
                 .into_iter()
                 .flat_map(|chunk| self.encode_word(chunk))
                 .collect(),
@@ -1381,11 +1384,7 @@ mod gguf_vocab_tests {
         // "'t" pieces before BPE, not "do" + "n't" or a single
         // 6-character chunk. Confirm the pre-tokenizer actually
         // produces that split.
-        let pieces: Vec<&str> = tok
-            .pretokenize_pattern
-            .find_iter("don't")
-            .map(|m| m.expect("a fixed pattern cannot fail").as_str())
-            .collect();
+        let pieces: Vec<&str> = tok.pretokenize_pattern.split("don't");
         assert_eq!(pieces, vec!["don", "'t"]);
     }
 

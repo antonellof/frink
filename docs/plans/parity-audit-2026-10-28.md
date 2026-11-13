@@ -285,7 +285,9 @@ graphs only, except for the rows in section 2.
    `deepseek-*`, `superbpe`, `minerva` / `mellum2`, `tiny_aya`, `poro`,
    `viking` arms all need `regex_for` to return a SEQUENCE of patterns.
    One change closes the `flint` row and corrects three DeepSeek arms
-   that `pretokenize.rs` already says are wrong.
+   that `pretokenize.rs` already says are wrong. (#624 landed the
+   sequence and the eight older arms; `flint` and `soprano` are still
+   refused.)
 4. **The latent MoE**, now three graphs (`nemotron-h` Super,
    `maion-coder`, `muse-spark`): one seam with three callers, measured
    before it is built.

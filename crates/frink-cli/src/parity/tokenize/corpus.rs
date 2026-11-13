@@ -1,7 +1,7 @@
 //! The corpus `frink parity` tokenizes on both engines.
 //!
 //! Its own module because the corpus IS the coverage claim: what these
-//! twenty-one strings contain decides which tokenizer bugs the oracle
+//! twenty-two strings contain decides which tokenizer bugs the oracle
 //! next door can see, and that is a separate thing to review from the
 //! comparison machinery. The test at the bottom asserts the claim, so
 //! trimming the corpus to "the cases that pass" goes red instead of
@@ -133,6 +133,17 @@ pub(super) const CORPUS: &[Case] = &[
         why: "a whole input that is one whitespace character: the degenerate case of every \
               whitespace clause.",
         text: " ",
+    },
+    Case {
+        name: "sequence-scripts",
+        why: "the regex-SEQUENCE arms (deepseek-*, starcoder, poro, viking, tiny_aya, superbpe) \
+              cut by script and category one pass at a time: non-Latin letters, non-ASCII \
+              digits, fullwidth and CJK punctuation, digits glued to letters, combining marks.",
+        text: "\u{395}\u{3bb}\u{3bb}\u{3b7}\u{3bd}\u{3b9}\u{3ba}\u{3ac} \
+               \u{41a}\u{438}\u{440}\u{438}\u{43b}\u{43b}\u{438}\u{446}\u{430} ab1234cd \
+               \u{661}\u{662}\u{663}\u{664}\u{665} x\u{b2}\u{b3} \u{ff21}\u{ff22}\u{ff01}\u{ff1f} \
+               \u{4e2d}\u{6587}123\u{4e2d}\u{6587} \u{936}\u{92c}\u{94d}\u{926}\u{964} \
+               e\u{301}t\u{e9} (x) [y] \"z\" a.b,c\u{2026}d\u{3002}e\u{3001}f",
     },
     Case {
         name: "special-markers-as-prose",
@@ -279,6 +290,14 @@ mod tests {
                 "the prose case must mention {marker}"
             );
         }
+        // The sequence arms cut by category, so the case needs a
+        // non-ASCII letter, a non-ASCII digit and a non-ASCII
+        // punctuation mark, and a digit glued to a letter.
+        let seq = case("sequence-scripts");
+        assert!(seq.contains('\u{3bb}'), "a Greek letter");
+        assert!(seq.contains('\u{661}'), "an Arabic-Indic digit");
+        assert!(seq.contains('\u{ff01}'), "fullwidth punctuation");
+        assert!(seq.contains("ab1234cd"), "digits glued to letters");
         assert!(
             case("special-markers-glued").starts_with("<s>"),
             "a marker at the very start of the input"
