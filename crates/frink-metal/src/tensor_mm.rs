@@ -93,7 +93,7 @@ pub(crate) fn gemm_prelude() -> String {
     }
 }
 
-const HEADERS: &str = "#include <metal_tensor>\n\
+pub(crate) const HEADERS: &str = "#include <metal_tensor>\n\
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\n";
 
 /// llama's probe (`ggml-metal-device.m`), so a toolchain without the
@@ -103,7 +103,8 @@ fn probe_compiles(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> bool {
     let Some(options) = compile_options(&src) else {
         return false;
     };
-    let Ok(lib) = device.newLibraryWithSource_options_error(&NSString::from_str(&src), Some(&options))
+    let Ok(lib) =
+        device.newLibraryWithSource_options_error(&NSString::from_str(&src), Some(&options))
     else {
         return false;
     };
@@ -429,7 +430,10 @@ mod tests {
         let name = d.name().to_string();
         let new_chip = ["M5", "M6", "A19", "A20"].iter().any(|c| name.contains(c));
         if new_chip && std::env::var_os("FRINK_METAL_TENSOR").is_none() {
-            assert!(super::has_tensor(), "{name}: the tensor probe did not compile");
+            assert!(
+                super::has_tensor(),
+                "{name}: the tensor probe did not compile"
+            );
             assert_eq!(super::mm_tile(), (super::NRB, super::NRA));
         }
     }

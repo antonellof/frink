@@ -43,7 +43,8 @@
 //! `FRINK_METAL_FA_VEC=0` disables llama-style FA-vec decode **and** prefill
 //! (default **on** for `head_dim` in {64,96,128,256}). Other head dims keep
 //! legacy online-softmax GQA. Prefill at `head_dim` 64/128/256 with `n_q >= 8`
-//! goes further and takes the simdgroup-MMA `flash_attn_ext` kernel; the
+//! goes further and takes the simdgroup-MMA `flash_attn_ext` kernel, or on
+//! an M5 the tensor-API one (`crate::fa_tensor`) where llama picks it; the
 //! parity tests reach a specific one through [`PrefillAttnKernel`], not an
 //! environment variable.
 //!
@@ -1377,7 +1378,7 @@ fn borrow_q8_attn_scratch(
     Ok(guard)
 }
 
-fn alloc_f32_buffer(
+pub(crate) fn alloc_f32_buffer(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     n: usize,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
@@ -1420,7 +1421,7 @@ pub(crate) fn upload_f32(
 }
 
 /// Upload host f32 as packed f16 (Metal KV / host-probe GQA).
-fn upload_f16_from_f32(
+pub(crate) fn upload_f16_from_f32(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     data: &[f32],
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
@@ -1697,6 +1698,9 @@ fn warm_gqa_prefill_pipeline(
         };
         ensure_pipeline(device, src, name)?;
         mark(name);
+        if crate::tensor_mm::has_tensor() && crate::fa_tensor::supported(head_dim) {
+            mark(crate::fa_tensor::warm(device, head_dim)?);
+        }
     } else {
         ensure_pipeline(device, GQA_PREFILL_KERNEL_SRC, "gqa_prefill")?;
         mark("gqa_prefill");
@@ -1969,6 +1973,7 @@ fn encode_gqa_prefill_with_kv(
             kv_prefix_len,
             attn_softcap,
             PrefillAttnKernel::Auto,
+            true,
         );
         mrs.end_op(&[q, sk, sv], &[out]);
         res
@@ -1989,6 +1994,7 @@ fn encode_gqa_prefill_with_kv(
             kv_prefix_len,
             attn_softcap,
             PrefillAttnKernel::Auto,
+            false,
         );
         mrs.end_op(&[q, kk, vv], &[out]);
         res
@@ -2154,8 +2160,13 @@ fn encode_gqa_prefill_fa_ext(
 pub enum PrefillAttnKernel {
     /// Best kernel for the shape. The only thing production asks for.
     Auto,
+    /// llama `flash_attn_ext_tensor`, the Metal 4 tensor-API kernel
+    /// (`crate::fa_tensor`). `head_dim` 64, 128 or 256 on a device that
+    /// runs the tensor API; anything else is an error, not a fallback.
+    Tensor,
     /// llama `flash_attn_ext`, simdgroup-MMA score + P·V. `head_dim` 64,
     /// 128 or 256 with `n_q >= 8`; other shapes fall through to FA-vec.
+    /// Never the tensor kernel, so tests can pin the half8x8 port on M5.
     FaExt,
     /// llama-style FA-vec, every `head_dim` with a specialized kernel.
     FaVec,
@@ -2176,7 +2187,28 @@ fn encode_gqa_prefill_fa_vec(
     kv_prefix_len: u32,
     softcap: f32,
     kernel: PrefillAttnKernel,
+    kv_dequantized: bool,
 ) -> Result<(), MetalError> {
+    // llama flash_attn_ext_tensor where llama picks it (M5, a non-vec
+    // batch, enough work; `fa_tensor::selected`).
+    if kernel == PrefillAttnKernel::Auto
+        && crate::fa_tensor::selected(head_dim, n_heads, n_q, kv_dequantized)
+    {
+        return crate::fa_tensor::encode(
+            encoder,
+            device,
+            q,
+            k,
+            v,
+            out,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_q,
+            kv_prefix_len,
+            softcap,
+        );
+    }
     // llama flash_attn_ext (MMA Q·Kᵀ + P·V, QN=8/C=64) for d=64, d=128 and
     // d=256 prefill; every other width, and every batch under QN=8, stays on
     // FA-vec.
@@ -2384,8 +2416,25 @@ fn encode_gqa_prefill(
     kv_prefix_len: u32,
     attn_softcap: Option<f32>,
     kernel: PrefillAttnKernel,
+    kv_dequantized: bool,
 ) -> Result<(), MetalError> {
     let softcap = attn_softcap.filter(|&c| c > 0.0).unwrap_or(0.0);
+    if kernel == PrefillAttnKernel::Tensor {
+        return crate::fa_tensor::encode(
+            encoder,
+            device,
+            q,
+            k,
+            v,
+            out,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_q,
+            kv_prefix_len,
+            softcap,
+        );
+    }
     if metal_fa_vec_enabled() && gqa_prefill_fa_vec_supported(head_dim) {
         return encode_gqa_prefill_fa_vec(
             encoder,
@@ -2401,6 +2450,7 @@ fn encode_gqa_prefill(
             kv_prefix_len,
             softcap,
             kernel,
+            kv_dequantized,
         );
     }
     let pipe = ensure_pipeline(device, GQA_PREFILL_KERNEL_SRC, "gqa_prefill")?;
@@ -2503,15 +2553,36 @@ fn encode_attn_extras_batch(
     }
     if let Some(bb) = resident.q_bias.as_ref() {
         debug_assert_eq!(extras.q_bias.map(|b| b.len()), Some(q_rows));
-        encode_vec_add_rows(encoder, device, q_buf, &bb.buffer, q_rows as u32, batch as u32)?;
+        encode_vec_add_rows(
+            encoder,
+            device,
+            q_buf,
+            &bb.buffer,
+            q_rows as u32,
+            batch as u32,
+        )?;
     }
     if let Some(bb) = resident.k_bias.as_ref() {
         debug_assert_eq!(extras.k_bias.map(|b| b.len()), Some(k_rows));
-        encode_vec_add_rows(encoder, device, k_buf, &bb.buffer, k_rows as u32, batch as u32)?;
+        encode_vec_add_rows(
+            encoder,
+            device,
+            k_buf,
+            &bb.buffer,
+            k_rows as u32,
+            batch as u32,
+        )?;
     }
     if let Some(bb) = resident.v_bias.as_ref() {
         debug_assert_eq!(extras.v_bias.map(|b| b.len()), Some(v_rows));
-        encode_vec_add_rows(encoder, device, v_buf, &bb.buffer, v_rows as u32, batch as u32)?;
+        encode_vec_add_rows(
+            encoder,
+            device,
+            v_buf,
+            &bb.buffer,
+            v_rows as u32,
+            batch as u32,
+        )?;
     }
     // Q/K norm style is inferred from the weight LENGTH, and that is
     // sound rather than a guess: `loader.rs`'s `refined_qk_norm` derives
@@ -4431,7 +4502,7 @@ fn encode_prefill_dense_layer(
     // also routes on the f32 activations, so it keeps the f32 `x2` write and
     // converts separately.
     let ffn_is_moe = matches!(layer.ffn, PrefillFfnMetal::Moe(_));
-spans.span(cmd_buf, encoder, "pf_ffn_norm")?;
+    spans.span(cmd_buf, encoder, "pf_ffn_norm")?;
     if resident.post_attn_w.is_none() && !ffn_is_moe {
         mrs.begin_op(encoder, &[h_buf, o_buf], &[h_buf, half_act]);
         encode_add_rms_norm_f32_to_f16_batch(
@@ -5132,6 +5203,7 @@ pub fn launch_gqa_prefill_host_kernel(
         kv_prefix_len as u32,
         attn_softcap,
         kernel,
+        false,
     );
     encoder.endEncoding();
     enc_result?;

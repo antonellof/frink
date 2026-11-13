@@ -2322,7 +2322,11 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 1,
             )
             .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1)
-            .replacen("// @FRINK_TENSOR_IMPL@", crate::tensor_mm::TENSOR_IMPL_MSL, 1);
+            .replacen(
+                "// @FRINK_TENSOR_IMPL@",
+                crate::tensor_mm::TENSOR_IMPL_MSL,
+                1,
+            );
         let src = crate::tensor_mm::gemm_prelude() + &src;
         Box::leak(src.into_boxed_str())
     });

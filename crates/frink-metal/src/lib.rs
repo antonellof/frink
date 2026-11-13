@@ -128,6 +128,10 @@ mod dispatch;
 #[cfg(feature = "metal")]
 mod tensor_mm;
 
+/// Prefill flash attention through the Metal 4 tensor API (M5).
+#[cfg(feature = "metal")]
+mod fa_tensor;
+
 #[cfg(feature = "metal")]
 mod mem_ranges;
 

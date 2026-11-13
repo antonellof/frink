@@ -329,7 +329,10 @@ mod tests {
     fn a_fold_returns_an_id_only_under_greedy_argmax() {
         let sampled = FoldedLmHead::permit(false, &rms(), None, Some(()))
             .expect("a sampled token folds lm_head too, returning the vocabulary");
-        assert!(!sampled.argmax_only(), "sampling needs the whole vocabulary");
+        assert!(
+            !sampled.argmax_only(),
+            "sampling needs the whole vocabulary"
+        );
         assert!(FoldedLmHead::permit(true, &rms(), None, None::<u32>).is_none());
         let folded = FoldedLmHead::permit(true, &rms(), None, Some(7u32))
             .expect("greedy + launch permits folding");

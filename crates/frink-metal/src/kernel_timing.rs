@@ -266,8 +266,9 @@ impl SpanLedger {
         // (and `MTLCounterErrorValue` where sampling failed). Such a span
         // took no time, and must not stretch the extent back to tick 0,
         // which scaled every row to zero.
-        let sampled =
-            |s: &&(&'static str, u64, u64)| !(s.1 == 0 && s.2 == 0) && s.2 != u64::MAX && s.2 >= s.1;
+        let sampled = |s: &&(&'static str, u64, u64)| {
+            !(s.1 == 0 && s.2 == 0) && s.2 != u64::MAX && s.2 >= s.1
+        };
         let first = spans.iter().filter(sampled).map(|s| s.1).min().unwrap_or(0);
         let last = spans.iter().filter(sampled).map(|s| s.2).max().unwrap_or(0);
         slot.extent_ticks += last.saturating_sub(first);
@@ -369,7 +370,11 @@ mod tests {
     #[test]
     fn an_unsampled_empty_encoder_does_not_stretch_the_extent() {
         let mut l = SpanLedger::new();
-        let spans = [("(empty encoder)", 0, 0), ("matvec", 1000, 1300), ("norm", 1400, 1500)];
+        let spans = [
+            ("(empty encoder)", 0, 0),
+            ("matvec", 1000, 1300),
+            ("norm", 1400, 1500),
+        ];
         let r = l.note("t", &spans, 5_000_000, 1).unwrap();
         assert!((r.ns_per_tick - 10_000.0).abs() < 1e-6, "{}", r.ns_per_tick);
         assert_eq!(r.rows.iter().find(|r| r.0 == "matvec").unwrap().1, 3.0);
