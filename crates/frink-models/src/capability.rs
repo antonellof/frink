@@ -249,8 +249,8 @@ pub fn unaudited_refusal_detail(arch: &str) -> String {
         None => format!(
             "TRIAGE: not done for `{arch}` yet -- nobody has read llama.cpp's \
              src/models/*.cpp for it against the generic decoder, so this refusal names \
-             no blocker and you should not read it as one. Triaging the remaining \
-             architectures is docs/plans/llama-cpp-gap-inventory.md section 8, item 6."
+             no blocker and you should not read it as one. The unaudited architectures \
+             are tracked in issue #538."
         ),
     }
 }

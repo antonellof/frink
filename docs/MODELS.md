@@ -15,19 +15,19 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Llama 3.x, TinyLlama, Mistral, Mixtral, Yi, SmolLM2, MiroThinker (`llama`); Ministral 3 (`mistral3`) | |
 | Llama 4 Scout, Llama 4 Maverick (`llama4`) | CPU only: its window is chunked, and the fused Metal launches take one window per layer |
 | Qwen-1 (`qwen`), Qwen2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen1.5-MoE / Qwen2-MoE (`qwen2moe`), Qwen3-MoE (`qwen3moe`) | |
-| Qwen3.5 dense and MoE (`qwen35`, `qwen35moe`), Qwen3-Next (`qwen3next`) | Recurrent: no prefix-cache reuse, no `--model-draft` |
+| Qwen3.5 dense and MoE (`qwen35`, `qwen35moe`), Qwen3-Next (`qwen3next`) | Recurrent: no prefix-cache reuse; speculates on the private loop only |
 | Gemma-1, Gemma-2, Gemma-3 (`gemma`, `gemma2`, `gemma3`) | |
 | Gemma-4-E2B | Dedicated engine, `gemma4` BPE tokenizer |
 | Phi-2 / Phi-1.5 (`phi2`), Phi-3 / Phi-4-mini (`phi3`), Phi-3.5-MoE (`phimoe`) | |
 | OLMo (`olmo`), OLMo-2 / Olmo-3 (`olmo2`), OLMoE (`olmoe`), SmolLM3 (`smollm3`) | |
 | ChatGLM (`chatglm`), GLM-4-0414 / Z1 / OCR (`glm4`), GLM-4.5 / 4.5-Air / 4.6 (`glm4moe`) | A vision tower's `rope.dimension_sections` is refused by name on `glm4`, served on `glm4moe` |
-| DeepSeek-V2 / V3, Mistral-Large-3, PLM | MLA engine, both tensor forms, YaRN as real exports declare it. Any other scaling type is refused by name |
+| DeepSeek-V2 / V3, Mistral-Large-3, PLM (`deepseek2`, `mistral4`, `plm`) | MLA engine, both tensor forms, YaRN as real exports declare it. Any other scaling type is refused by name |
 | Baichuan 7B and 13B (`baichuan`), InternLM2 (`internlm2`), XVERSE (`xverse`), Orion-14B (`orion`), MiniCPM (`minicpm`), Hunyuan dense (`hunyuan-dense`), ERNIE-4.5 (`ernie4_5`), Seed-OSS (`seed_oss`), EXAONE-3 (`exaone`), openPangu-Embedded (`pangu-embedded`) | openPangu-Embedded is a decoder, not an embedding model. Baichuan-13B runs on ALiBi, picked by its 40-layer depth |
 | DeepSeek-V1 (`deepseek`), dots.llm1 (`dots1`), Ling (`bailingmoe`, `bailingmoe2`), Hunyuan-MoE (`hunyuan-moe`), ERNIE-4.5-MoE (`ernie4_5-moe`), DBRX (`dbrx`), Arctic (`arctic`), Grok-1 / Grok-2 (`grok`) | An ERNIE-4.5-MoE file whose experts interleave with dense layers is refused by name, as llama.cpp's own loader cannot load one |
 | AFMoE (`afmoe`), Laguna (`laguna`), SmallThinker (`smallthinker`), MiMo-V2 (`mimo2`), Step-3.5 (`step35`), MiniMax-M2 (`minimax-m2`), MiniMax-Text-01 (`minimax-01`) | |
 | Command-R, Aya-23 (`command-r`), Command-R7B / Command-A (`cohere2`), Cohere2 MoE (`cohere2moe`) | Command-R+ (64 layers) is refused: it needs a per-head QK LayerNorm |
 | EXAONE-4 (`exaone4`), EXAONE-MoE (`exaone-moe`) | |
-| Granite 3 (`granite`, `granitemoe`, `granite-moe`), Granite 4.1 (`granite_swa`), Granite 4.0 hybrid (`granitehybrid`, `granite-hybrid`) | Granite 4.0 hybrid is recurrent: no prefix-cache reuse, no `--model-draft` |
+| Granite 3 (`granite`, `granitemoe`, `granite-moe`), Granite 4.1 (`granite_swa`), Granite 4.0 hybrid (`granitehybrid`, `granite-hybrid`) | Granite 4.0 hybrid is recurrent: no prefix-cache reuse; speculates on the private loop only |
 | Nemotron-4 (`nemotron`), Nemotron-H and Nemotron-3 Nano dense (`nemotron_h`), Nemotron-3 Nano 30B-A3B (`nemotron_h_moe`) | The hybrids are recurrent. Nemotron-3 Super's `moe_latent_size` is refused by name, and so is the `domyn-small` pre-tokenizer |
 | Jamba (`jamba`), Mamba and FalconMamba (`mamba`), Mamba-2 (`mamba2`), Falcon-H1 (`falcon-h1`), PLaMo-2 (`plamo2`) | Recurrent |
 | PLaMo (`plamo`), PLaMo-3 (`plamo3`) | |
@@ -36,9 +36,9 @@ can do is [`FEATURES.md`](FEATURES.md).
 | GPT-2 (`gpt2`), GPT-NeoX / Pythia (`gptneox`), StarCoder (`starcoder`), StarCoder2 (`starcoder2`), CodeShell (`codeshell`), Jais-2 (`jais2`), Falcon (`falcon`), StableLM (`stablelm`) | StableLM-2-12B is refused: it needs a per-head QK LayerNorm |
 | BLOOM (`bloom`), MPT (`mpt`), Refact (`refact`), Jais (`jais`) | ALiBi in place of RoPE |
 | BitNet (`bitnet`), Apertus (`apertus`), Mellum (`mellum`), Nanbeige (`nanbeige`), Talkie (`talkie`), Arcee (`arcee`), Deci (`deci`), OpenELM (`openelm`), Maincoder (`maincoder`) | |
-| Spark-2.5 (`spark2_5`), Maple-20B (`maple`), `muse-glimmer`, DFM Mimir (`hrm_text`) | Added after the llama.cpp reference moved to `5b59b83` on 2026-09-19 |
-| LFM3 (`lfm3`), Kolibri-1 (`kolibri1`) | Added after the reference moved to `604cc430` on 2026-10-28. Kolibri-1's router ranks `logits + exp_probs_b` before the sigmoid (`kolibri1.cpp:138`); under Metal its biased routing runs on the host |
-| Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint. `PTQ1_0` runs on CPU and Metal; `PQ2_0` is recognised, not executed |
+| Spark-2.5 (`spark2_5`), Maple-20B (`maple`), `muse-glimmer`, DFM Mimir (`hrm_text`) | |
+| LFM3 (`lfm3`), Kolibri-1 (`kolibri1`) | Kolibri-1's router ranks `logits + exp_probs_b` before the sigmoid (`kolibri1.cpp:138`); under Metal its biased routing runs on the host |
+| Ternary-Bonsai-2-27B (PrismML) | Verified on the real checkpoint on CPU and Metal. `PTQ1_0` has kernels on every backend ([`KERNELS.md`](KERNELS.md)); `PQ2_0` is recognised, not executed |
 | BERT (`bert`), nomic-bert (`nomic-bert`), jina-bert-v2 (`jina-bert-v2`), jina-bert-v3 (`jina-bert-v3`), NeoBERT (`neo-bert`), EuroBERT (`eurobert`) | Encoders, for `/v1/embeddings`. A cross-encoder with a rank head answers `/v1/rerank`; `/v1/score` takes either |
 
 Every architecture in `capability::AUDITED_GENERIC_GQA` runs on the
@@ -57,8 +57,10 @@ counted separately. `frink archs` is the authoritative list.
 | Kimi K3, GLM-5.2, DeepSeek V4 | Loaders and primitives only; nothing has run end to end on a real checkpoint |
 | `bailingmoe3`, `dots3note`, `hy_v4`, `deepseek41` (DeepSeek-V4.1-Flash), `glm5-next` (GLM-5.3-Flash) | Each needs an attention or residual layout this engine does not have, and is refused by name |
 | `flint`, `beam`, `maion-coder`, `k2-horizon`, `muse-spark`, `graniteswitch`, `qwen4exp`, `grovemoe`, `phi4` | Unaudited; see below |
+| MiniCPM3, DeepSeek-3.2, Gemma-3n, RWKV-6/7, T5 | Each needs its own engine and is refused by name |
+| `dflash` | A speculative draft, not a model: load it with `-md` beside its target |
 | Vision | Frink finds an mmproj file and warns. An `image_url` in a request is an error |
-| MTP draft heads | `--mtp` errors until a multi-token-prediction drafter exists. Speculation uses prompt lookup, or a second GGUF on the CLI (`--model-draft`) |
+| MTP draft heads | `--mtp` errors until a multi-token-prediction drafter exists. Speculation uses prompt lookup or a draft GGUF (`-md`: an autoregressive model or a DFlash draft) |
 
 ## Why a model stops
 
@@ -111,18 +113,10 @@ line that decides it, so trust `frink -m <file>` over this table.
 | new code | 8 |
 | unknown | 1 |
 
-The count was 4 until 2026-10-28, when the llama.cpp pin moved from
-`5b59b83` to `604cc430` and seven of its thirteen new architecture names
-turned out to be generic-path candidates
-([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md)).
-Because upstream keeps adding architectures, this count rises whenever
-the pin moves. Of the two that read as a single match arm, `lfm3` closed
-the same day on a libllama golden and a 32-step greedy decode, and
-`kolibri1` moved to new code: its router adds the selection bias to the
-raw logits (`kolibri1.cpp:138`), before the sigmoid, where every router
-frink had adds it after. It closed on 2026-10-29, when that became a
-second selection rule in `frink_moe` (`SelectionRule::BiasBeforeGating`)
-and the architecture the first new file in `crate::models`.
+Upstream keeps adding architectures, so this count rises whenever the
+llama.cpp pin moves
+([`plans/parity-audit-2026-10-28.md`](plans/parity-audit-2026-10-28.md)
+is the last move's audit).
 
 | Architecture | What is missing |
 |---|---|
@@ -137,9 +131,7 @@ and the architecture the first new file in `crate::models`.
 | `phi4` | Not in llama.cpp's `LLM_ARCH_NAMES`, so there is no reference graph to diff against. Frink would admit it as `phi3`'s graph on the assumption that a file spelling it means the same thing, and refuses until a real file settles that |
 
 The counts here are pinned against the catalog by
-`crates/frink-models/tests/documented_counts.rs`. They once went
-stale in the direction that matters, reading `new code 1` while the
-catalog held three.
+`crates/frink-models/tests/documented_counts.rs`.
 
 ## `mistral`, `mixtral` and `yi` are not architectures
 
@@ -149,8 +141,3 @@ real checkpoint of all three declares `general.architecture = llama`,
 which is audited and runs. Frink refuses the three strings by name and
 tells you to re-convert with `convert_hf_to_gguf.py`, after which the
 file loads as `llama`.
-
-This also fixed a real defect. The three sat on the generic path with
-NEOX RoPE while `llama` is in llama.cpp's NORM group, so a file
-spelling `mistral` would have been rotated on the wrong pairs of every
-Q/K head.

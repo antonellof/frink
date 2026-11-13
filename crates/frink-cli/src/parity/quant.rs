@@ -15,14 +15,13 @@
 /// ggml declares a `vec_dot_type` per quantization
 /// (`ggml/src/ggml-cpu/ggml-cpu.c`). For the K-quants it is
 /// `GGML_TYPE_Q8_K`: llama.cpp quantizes the activation to 8 bits and
-/// accumulates in integers. frink keeps activations in f32. Both are
-/// defensible and frink is the more precise of the two, but they are
-/// not the same arithmetic, so the distributions differ by more than
-/// summation order.
+/// accumulates in integers. Since #476 frink quantizes the activation
+/// the same way, bit for bit; the reduction order of the integer dots
+/// and the repack GEMMs still differs (ADR 0009's known deviations), so
+/// these kinds can DRIFT by more than f32 summation order.
 ///
-/// Measured on five quantizations of one checkpoint: the verdict tracks
-/// this predicate on the 96 per-layer tensors exactly. See
-/// `docs/plans/llama-cpp-gap-inventory.md` §10.
+/// Measured on five quantizations of one checkpoint: the verdict tracked
+/// this predicate on the 96 per-layer tensors exactly (before #476).
 pub(super) fn llama_dots_this_against_q8k(kind: &str) -> bool {
     // Spelled as `GgmlType`'s own variant names (`Q4K`, not `Q4_K`) --
     // these come from `format!("{:?}", dtype)`, and writing the ggml

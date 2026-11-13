@@ -73,6 +73,7 @@ pub(super) struct Answer {
     pub(super) forwards: usize,
     pub(super) drafted: usize,
     pub(super) accepted: usize,
+    pub(super) positions: crate::draft_tally::PositionTally,
 }
 
 impl Answer {
@@ -96,6 +97,7 @@ impl Answer {
             forwards: 0,
             drafted: 0,
             accepted: 0,
+            positions: crate::draft_tally::PositionTally::default(),
         }
     }
 
@@ -140,7 +142,12 @@ impl Answer {
         // Absent for a row that never drafted, as on the private loop: a
         // zero would read as "the drafter was useless".
         if self.drafted > 0 {
-            usage = usage.with_speculation(self.forwards, self.accepted, self.drafted, Vec::new());
+            usage = usage.with_speculation(
+                self.forwards,
+                self.accepted,
+                self.drafted,
+                self.positions.rates(),
+            );
         }
         send_finished(reply, Ok((finish, self.generated_ids, self.visible, usage)));
     }

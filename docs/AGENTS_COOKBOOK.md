@@ -1,11 +1,10 @@
 # Agents & IDEs
 
-Point coding agents at a running Frink server. Start it either way:
-`frink serve` from the main binary or the standalone `frink-server`.
-Both take the same flags.
+Point coding agents at a running Frink server (`frink serve` or the
+standalone `frink-server`; both take the same flags).
 
 ```bash
-cargo build -p frink-cli --release --features "serve metal"
+cargo build -p frink-cli --release --features metal   # serve is a default feature
 ./target/release/frink serve -m /path/to/model.gguf \
   --host 127.0.0.1 --port 8383
 ```
@@ -20,31 +19,35 @@ The OpenAI-compatible base URL is `http://127.0.0.1:8383/v1`.
 | codex | Responses provider → `POST /v1/responses` |
 | curl | `POST /v1/chat/completions` (see [CLI.md](CLI.md)) |
 
-If `FRINK_API_KEY` is set, send `Authorization: Bearer …` or
-`x-api-key: …`. Both are accepted, so an Anthropic SDK works unchanged
-against a keyed server. Leave the key unset on a loopback bind if you
-would rather not send one at all.
+With `FRINK_API_KEY` set, send `Authorization: Bearer …` or
+`x-api-key: …`; both work, so an Anthropic SDK needs no change.
 
-Tool calls come back parsed in eleven wire formats rather than only the
-one the prompt asks for, and five of those stream their arguments as
-deltas, so an agent watching a file path arrive does not wait for the
-whole call. A reasoning model's chain of thought arrives separately as
+Tool calls parse in eleven wire formats, five of which stream their
+arguments as deltas. Reasoning arrives separately as
 `reasoning_content` (`thinking` blocks on `/v1/messages`).
+`POST /v1/cancel` stops a generation by the `request_id` its first
+streamed chunk carries. Every route is in [API.md](API.md).
 
-Also available: `POST /v1/tokenize`, `/v1/detokenize`, `/v1/embeddings`
-(an encoder checkpoint, or a decoder's pooled hidden states),
-`POST /v1/messages/count_tokens`, and `POST /v1/cancel`
-to stop a generation by the `request_id` its first streamed chunk
-carries. Full list: [API.md](API.md).
+Frink Studio, a browser client, is a separate app in [`ui/`](../ui)
+(`npm run dev` there); `GET /` on the server is a 404.
 
-For a browser client, Frink Studio lives in [`ui/`](../ui) as a
-separate app. This server does not serve it, and `GET /` here is a 404.
-Run `npm run dev` from that directory.
+## One agent: the prefix cache
 
-## Continuous batching
+By default requests run one at a time on the private decode loop, the
+fast path for a single agent (on Metal it attends on the device). An
+agent resends the whole conversation every turn; keep its KV so a
+follow-up prefills only the new message:
 
-Off by default. Turn it on for several concurrent clients with the
-flag, `-np N`, or the variable:
+```bash
+FRINK_PREFIX_CACHE_ENTRIES=2 ./target/release/frink-server -m model.gguf
+```
+
+Each entry is a full copy of one conversation's KV; one or two is
+enough for one client. `GET /cache/stats` reports hits.
+
+## Several clients: continuous batching
+
+Off by default; turn it on for concurrent clients:
 
 ```bash
 ./target/release/frink-server -m model.gguf -cb      # or FRINK_CONTINUOUS_BATCHING=1
@@ -52,40 +55,38 @@ flag, `-np N`, or the variable:
 ```
 
 - Not with `FRINK_KV_POOL_BLOCKS` or `FRINK_PREFIX_CACHE_ENTRIES`, unless
-  paged KV is on
+  paged KV is on. With either set, the server keeps the private loop
+  and logs a warning
 - The generic GGUF decoder only. The dedicated engines (MLA, Gemma 4,
   GLM-5.2, Kimi) serve on the private loop
+- A draft model (`-md`) and prompt-lookup speculation work inside the
+  batch as on the private loop
 
-## Sharing a system prompt between conversations
+## Several clients: sharing a system prompt
 
-Agents send the same long preamble on every turn. Paged KV stores it
-once and lets each conversation point at those pages, instead of every
-request holding a copy:
+Paged KV stores a shared preamble once and lets each conversation
+point at its pages:
 
 ```bash
 FRINK_PAGED_KV_BLOCKS=4096 FRINK_PAGED_KV_BLOCK_SIZE=16 \
   ./target/release/frink-server -m model.gguf -dev metal -ngl all
 ```
 
-`usage.cached_tokens` on each response says how much of that prompt was
-already computed. Paged KV used to be refused on a GPU backend,
-because a Metal prefill left K/V on the device and the paged prefill
-copied host placeholders into the page store. That is fixed and pinned
-on hardware by `paged_metal_parity`, so Metal is supported. CUDA has no
-equivalent hardware run behind it. See [CONFIG.md](CONFIG.md).
+`usage.cached_tokens` says how much of the prompt was already
+computed. Paged KV composes with continuous batching and excludes
+`FRINK_PREFIX_CACHE_ENTRIES`. Metal is pinned on hardware by
+`paged_metal_parity`; CUDA has no hardware run behind it.
 
-Two callers sending the same preamble get the same pages. That saves
-memory, but if the callers are different tenants it is also a
-disclosure. `cache_salt` on the request names a namespace: the
-contiguous prefix cache, the response
-cache and the paged radix tree all key on it, so a salted caller can
-match only its own prefixes. Absent means the shared namespace, which
-is what every request got before the field existed.
+Shared pages across tenants are a disclosure. `cache_salt` on the
+request names a namespace that the prefix cache, the response cache and
+the radix tree all key on, so a salted caller matches only its own
+prefixes; absent means the shared namespace. Switches are in
+[CONFIG.md](CONFIG.md).
 
 ## Putting a model away without losing it
 
-A scheduler that runs several models on one box can free a model's
-memory and bring it back without knowing the deployment:
+Free a model's memory and bring it back without knowing the
+deployment:
 
 ```bash
 curl -X POST http://127.0.0.1:8383/sleep
@@ -93,12 +94,7 @@ curl     http://127.0.0.1:8383/is_sleeping     # {"is_sleeping": true}
 curl -X POST http://127.0.0.1:8383/wake_up
 ```
 
-`/sleep` is an unload that remembers: it frees the KV pool, the paged
-store, the repack and expert caches and any device buffers, and keeps
-the checkpoint path, so the server can reload itself.
-`/admin/models/unload` leaves nothing behind. While asleep, routes that
-need a model answer `503 server_sleeping` rather than
-`model_not_loaded`, so a caller can tell "put away, ask again" from
-"nothing here".
-
-Full API matrix: [API.md](API.md).
+`/sleep` frees the KV pool, paged store, repack and expert caches and
+device buffers but keeps the checkpoint path, so the server can reload
+itself; `/admin/models/unload` keeps nothing. While asleep, model routes
+answer `503 server_sleeping` rather than `model_not_loaded`.

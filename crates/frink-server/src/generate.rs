@@ -1906,6 +1906,7 @@ struct ServerEngine<'a> {
     checkpoint: Option<BlockCheckpoint>,
     accepted: usize,
     drafted: usize,
+    positions: crate::draft_tally::PositionTally,
     /// FORWARD PASSES, not speculative rounds.
     ///
     /// `acceptance_length` divides the answer by this, and a round
@@ -2058,6 +2059,7 @@ impl crate::sampling_loop::DecodeEngine for ServerEngine<'_> {
     fn observe(&mut self, accepted: usize, drafted: usize) {
         self.accepted += accepted;
         self.drafted += drafted;
+        self.positions.record(drafted, accepted);
     }
 }
 
@@ -2562,7 +2564,12 @@ pub fn generate<'p>(
     // `wants_logprobs`.
     let mut choice_logprobs: Vec<crate::sampling_loop::PerTokenProbs> = Vec::with_capacity(n);
     let mut completion_tokens = 0usize;
-    let mut speculation = (0usize, 0usize, 0usize);
+    let mut speculation = (
+        0usize,
+        0usize,
+        0usize,
+        crate::draft_tally::PositionTally::default(),
+    );
     // Choice 0's ids and final logits are what the request tail
     // publishes: the prefix cache stores ONE continuation, and choice 0
     // is the one a later `n = 1` with the same seed reproduces.
@@ -2601,6 +2608,7 @@ pub fn generate<'p>(
                 checkpoint: None,
                 accepted: 0,
                 drafted: 0,
+                positions: Default::default(),
                 forwards: 0,
             })
             .collect();
@@ -2634,6 +2642,7 @@ pub fn generate<'p>(
             speculation.0 += engine.forwards;
             speculation.1 += engine.accepted;
             speculation.2 += engine.drafted;
+            speculation.3.merge(&engine.positions);
         }
         drop(engines);
         for (choice, (finish, generated_ids, final_logits, choice_probs)) in
@@ -2685,6 +2694,7 @@ pub fn generate<'p>(
                 checkpoint: None,
                 accepted: 0,
                 drafted: 0,
+                positions: Default::default(),
                 forwards: 0,
             };
             let (finish, generated_ids, final_logits, choice_probs) =
@@ -2706,6 +2716,7 @@ pub fn generate<'p>(
             speculation.0 += engine.forwards;
             speculation.1 += engine.accepted;
             speculation.2 += engine.drafted;
+            speculation.3.merge(&engine.positions);
             completion_tokens += generated_ids.len();
             finishes.push(finish);
             choice_logprobs.push(choice_probs);
@@ -3144,6 +3155,17 @@ mod tests {
         assert!(
             usage.accepted_draft_tokens.is_some_and(|a| a > 0),
             "nothing was accepted, so no forward was saved"
+        );
+        // The per-position rate is filled, a rate, and accepted somewhere.
+        let rates = usage
+            .draft_accept_rate_per_position
+            .clone()
+            .expect("per-position rates");
+        assert!(!rates.is_empty(), "drafted, yet no position reported");
+        assert!(rates.iter().all(|r| (0.0..=1.0).contains(r)), "{rates:?}");
+        assert!(
+            rates[0] > 0.0,
+            "accepted drafts, yet position 0 never was: {rates:?}"
         );
         // Tokens per forward: 1.0 is "speculation bought nothing".
         let speedup = usage.acceptance_length.expect("acceptance length");

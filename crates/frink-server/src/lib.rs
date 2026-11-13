@@ -50,6 +50,7 @@ mod completion;
 mod continuation;
 mod conversations;
 mod decode_task;
+mod draft_tally;
 mod embeddings;
 mod generate;
 mod grammar_request;
@@ -3854,6 +3855,40 @@ fn continuous_batching_compatible(
         && (paged_kv.is_some() || (kv_pool.is_none() && prefix_cache.is_none()))
 }
 
+/// Why continuous batching, asked for (`--cont-batching`, `--parallel`
+/// or `FRINK_CONTINUOUS_BATCHING=1`), cannot serve this configuration.
+/// `None` when it was not asked for or can serve it; the same rule as
+/// [`continuous_batching_compatible`], stated as the refusal text.
+fn continuous_batching_refusal(
+    asked: bool,
+    gguf_decoder: bool,
+    kv_pool: bool,
+    prefix_cache: bool,
+    paged_kv: bool,
+) -> Option<String> {
+    if !asked {
+        return None;
+    }
+    if !gguf_decoder {
+        return Some(
+            "continuous batching (--cont-batching / --parallel / FRINK_CONTINUOUS_BATCHING) \
+             serves the generic GGUF decoder only; the loaded model runs on a dedicated \
+             engine (Kimi, MLA or GLM-5.2). Drop the flag."
+                .to_string(),
+        );
+    }
+    if !paged_kv && (kv_pool || prefix_cache) {
+        return Some(
+            "continuous batching (--cont-batching / --parallel / FRINK_CONTINUOUS_BATCHING) \
+             cannot run beside FRINK_KV_POOL_BLOCKS or FRINK_PREFIX_CACHE_ENTRIES: those \
+             keep the private decode loop. Unset them, or set FRINK_PAGED_KV_BLOCKS for \
+             the batcher's own prefix reuse."
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn resolve_continuous_batching_enabled(
     loaded: &model::LoadedModel,
     kv_pool: &Option<generate::KvPoolConfig>,
@@ -4661,17 +4696,19 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
              frink_models::engine's module docs"
         );
     }
+    // Asked for and not servable is a refusal, never a warning
+    // (ADR 0005: a flag accepted but not honoured is an error).
+    if let Some(reason) = continuous_batching_refusal(
+        continuous_batching_env() == Some(true),
+        matches!(loaded, model::LoadedModel::Gguf(_)),
+        kv_pool.is_some(),
+        prefix_cache.is_some(),
+        paged_kv.is_some(),
+    ) {
+        anyhow::bail!(reason);
+    }
     let enable_cb =
         resolve_continuous_batching_enabled(&loaded, &kv_pool, &prefix_cache, &paged_kv);
-    if continuous_batching_env() == Some(true)
-        && !continuous_batching_compatible(&loaded, &kv_pool, &prefix_cache, &paged_kv)
-        && (kv_pool.is_some() || prefix_cache.is_some())
-    {
-        tracing::warn!(
-            "FRINK_CONTINUOUS_BATCHING=1 ignored while KV pool or prefix cache is configured \
-             (those modes keep the private generate path)"
-        );
-    }
     if let Ok(n) = std::env::var("FRINK_CHUNKED_PREFILL") {
         if let Ok(chunk) = n.parse::<usize>() {
             if chunk > 0 {
@@ -4878,6 +4915,30 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
 pub(crate) mod tests {
     use super::*;
     use frink_models::config::test_dense_fixture;
+
+    /// ADR 0005: `--cont-batching` beside a store that keeps the private
+    /// loop, or on a dedicated engine, used to be accepted and only
+    /// warned about. It is refused at startup, naming the conflict.
+    #[test]
+    fn continuous_batching_asked_for_and_unservable_is_refused() {
+        // (asked, gguf, kv_pool, prefix_cache, paged_kv) -> refused?
+        for (args, refused) in [
+            ((false, true, true, true, false), false),
+            ((true, true, false, false, false), false),
+            ((true, true, true, false, true), false),
+            ((true, true, false, true, true), false),
+            ((true, true, true, false, false), true),
+            ((true, true, false, true, false), true),
+            ((true, false, false, false, false), true),
+        ] {
+            let (asked, gguf, pool, prefix, paged) = args;
+            let got = continuous_batching_refusal(asked, gguf, pool, prefix, paged);
+            assert_eq!(got.is_some(), refused, "{args:?}: {got:?}");
+            if let Some(msg) = got {
+                assert!(msg.contains("--cont-batching"), "{msg}");
+            }
+        }
+    }
 
     #[test]
     fn the_ready_line_round_trips_through_a_parent_reading_stdout() {

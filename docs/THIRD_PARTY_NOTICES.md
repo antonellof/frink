@@ -399,7 +399,7 @@ A full recursive re-read of the reference in August 2026 -- six readers
 over its 435 files, checked against every frink crate rather than
 against the port's own scope -- found 34 further pieces the first pass
 had missed. They are tracked individually in
-[`docs/plans/archive/freetoken-parity.md`](https://github.com/antonellof/frink/blob/main/docs/plans/archive/freetoken-parity.md) rather
+[`docs/plans/archive/freetoken-parity.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/freetoken-parity.md) rather
 than summarised here, because each closes on its own. That review also
 found one place where the port had got a *shipped* rule wrong rather
 than merely omitted it: `route_top_k_grouped` implemented "k from every
