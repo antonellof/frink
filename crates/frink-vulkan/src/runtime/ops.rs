@@ -92,6 +92,9 @@ pub struct AttnShape {
     pub k_off: usize,
     pub v_off: usize,
     pub scale: f32,
+    /// A sliding window: each query attends over its own position and
+    /// the `window - 1` before it. `None` is everything cached.
+    pub window: Option<usize>,
 }
 
 /// What one bound op reads and writes: three `(buffer, f32 offset,
@@ -227,11 +230,17 @@ impl<'w> Batch<'w> {
 
     /// `h = silu(g) * u` over `n` values (the SwiGLU combine).
     pub fn swiglu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize) {
+        self.glu(g, u, out, n, false);
+    }
+
+    /// The gated combine `h = act(g) * u` over `n` values: SiLU, or the
+    /// tanh-approximation GELU of a GeGLU FFN when `gelu`.
+    pub fn glu(&mut self, g: DeviceBuf, u: DeviceBuf, out: DeviceBuf, n: usize, gelu: bool) {
         let n = n * self.positions;
         self.ops.push(Op::Shader {
             shader: SWIGLU,
             views: [(g, 0, n), (u, 0, n), (out, 0, n)],
-            push: words(&[n as u32]),
+            push: words(&[n as u32, gelu as u32]),
             grid: per_value(n),
             depth: 1,
         });
@@ -328,9 +337,14 @@ impl<'w> Batch<'w> {
     ) {
         let p = self.positions;
         let stride = s.seq_len + p - 1;
+        assert!(
+            s.n_heads < 1 << 16 && s.n_kv_heads < 1 << 16,
+            "head counts share a word"
+        );
+        assert!(s.window != Some(0), "a window of no positions");
         let push = words(&[
-            s.n_heads as u32,
-            s.n_kv_heads as u32,
+            s.n_heads as u32 | (s.n_kv_heads as u32) << 16,
+            s.window.unwrap_or(0) as u32,
             s.head_dim as u32,
             s.seq_len as u32,
             s.k_off as u32,

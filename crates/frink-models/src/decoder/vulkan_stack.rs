@@ -19,8 +19,8 @@
 //! Which layers it may take is `fused_view`'s decision, shared with the
 //! Metal and CUDA stacks. The stack declines what its ops do not
 //! compute, so a layer it cannot serve runs on the host body unchanged:
-//! sinks, `wo` bias, a sliding window,
-//! an attention softcap, RoPE `mscale`, routed experts, a GeGLU FFN, and
+//! sinks, `wo` bias, a chunked sliding window,
+//! an attention softcap, RoPE `mscale`, routed experts, and
 //! a host cache that is not f16 (`--ctk f32`).
 //!
 //! One submission holds 26 plain layers (`MAX_DISPATCHES`, at 19
@@ -84,6 +84,10 @@ struct StackLayer<'a> {
     /// projection (`layer_supports_fused_attn` admits only those two).
     q_norm: Option<&'a [f32]>,
     k_norm: Option<&'a [f32]>,
+    /// The FFN's gate activation: GELU (a GeGLU FFN) or SiLU.
+    gelu: bool,
+    /// The layer's sliding window, each query's own position included.
+    window: Option<usize>,
 }
 
 /// A pre-norm's kind, weight and bias once on the device.
@@ -220,29 +224,39 @@ impl Decoder {
         }
         let attn_norm = PreNorm::of(&layer.attn.norm_weight);
         let ffn_norm = PreNorm::of(&layer.moe.norm_weight);
-        // SwiGLU is the one activation the stack's FFN has.
-        if c.model_ffn_act()
-            .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)
-            != Some(false)
-        {
+        // The gated activations the combine has: SwiGLU, and GeGLU
+        // (`Some(true)`, Gemma). Every other one is the host's.
+        let gelu = c
+            .model_ffn_act()
+            .and_then(frink_moe::GluAct::fused_kernel_gelu_flag)?;
+        // A sliding window is the attention op's; a chunked one
+        // (`crate::chunked_swa`) gives each query its own width, which
+        // the op does not do.
+        let window = c.layer_sliding_window(li);
+        if window.is_some() && c.swa_chunked {
             return None;
         }
         if c.attn_logit_softcap.is_some()
-            || c.layer_sliding_window(li).is_some()
             || c.rope_attn_factor != 1.0
             || self.hrm_z_l_init.is_some()
             || !c.head_dim.is_multiple_of(2)
         {
             return None;
         }
-        // The prefix the device attends over is the cache's rows, and
-        // they are its positions only while nothing has been evicted.
+        // The device attends over positions, and the host cache holds
+        // them all unless the layer's window evicts. Then it holds the
+        // newest ones, and the rows the batch's first query needs behind
+        // it are among them (`KvWindow::rows_after`).
+        let held = match window {
+            Some(w) => cache.rows() <= pos && cache.rows() >= pos.min(w - 1),
+            None => cache.rows() == pos,
+        };
         // The device KV is f16, as llama.cpp's default is. A run that
         // asked for `--ctk f32` keeps f32 rows on the host, and attending
         // over their f16 rounding would not be what it asked for.
         if cache.dtype() != frink_core::kv_store::KvDtype::F16
             || cache.positions() != pos
-            || cache.rows() != pos
+            || !held
             || cache.n_kv_heads != c.n_kv_heads
             || cache.head_dim != c.head_dim
             || cache.v_head_dim != c.head_dim
@@ -278,6 +292,8 @@ impl Decoder {
             v_bias,
             q_norm,
             k_norm,
+            gelu,
+            window,
         })
     }
 
@@ -482,7 +498,7 @@ impl Decoder {
                 vulkan_attn,
                 ..
             } = cache;
-            let m = VulkanKvMirror::sync(vulkan_attn, rt, hk, hv, rows, kv_dim, need)?;
+            let m = VulkanKvMirror::sync(vulkan_attn, rt, hk, hv, rows, pos, kv_dim, need)?;
             bound.push(Bound {
                 pre,
                 post,
@@ -584,6 +600,7 @@ impl Decoder {
                     k_off: 0,
                     v_off: b.v_off,
                     scale: 1.0 / (hd as f32).sqrt(),
+                    window: s.window,
                 },
             );
             ops.matvec(s.o, (attn, 0), (proj, 0));
@@ -600,7 +617,7 @@ impl Decoder {
             let x_ffn = pre_norm(&mut ops, pre_ffn, h_mid);
             ops.matvec(s.gate, (x_ffn, 0), (gate, 0));
             ops.matvec(s.up, (x_ffn, 0), (up, 0));
-            ops.swiglu(gate, up, act, ffn_dim);
+            ops.glu(gate, up, act, ffn_dim, s.gelu);
             ops.matvec(s.down, (act, 0), (proj, 0));
             let ffn_out = match post_ffn {
                 Some(w) => {

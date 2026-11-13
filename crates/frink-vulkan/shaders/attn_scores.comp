@@ -9,11 +9,11 @@ layout(std430, binding = 2) writeonly buffer S { float scores[]; };
 
 void main() {
     uint h = attn_head();
-    if (h >= p.n_heads) return;
-    uint kvh = h / (p.n_heads / p.n_kv_heads);
+    if (h >= N_HEADS) return;
+    uint kvh = h / (N_HEADS / N_KV_HEADS);
     float scale = uintBitsToFloat(p.scale_bits);
     uint seq = attn_seq(), qh = attn_row(h) * p.head_dim, row = attn_row(h) * p.seq_stride;
-    for (uint t = gl_LocalInvocationID.x; t < seq; t += 64u) {
+    for (uint t = attn_start() + gl_LocalInvocationID.x; t < seq; t += 64u) {
         float s = 0.0;
         for (uint d = 0u; d < p.head_dim; d += 2u) {
             vec2 k2 = unpackHalf2x16(kv[kv_word(p.k_off, t, kvh, d)]);
