@@ -289,14 +289,13 @@ static inline void mul_mm_id_tensor_impl(
     constexpr short NL1 = NK / 8;
     constexpr short NL  = DQ::NL;
 
-    const uint im = tgpig.z;
-    const int r0 = int(tgpig.y) * NR0;
-    const int r1 = int(tgpig.x) * NR1;
-
-    const int neh1 = int(tpe[im]);
-    if (r1 >= neh1) {
+    uint im;
+    int r1;
+    int neh1;
+    if (!mm_id_tile(tpe, tgpig.x, im, r1, neh1)) {
         return;
     }
+    const int r0 = int(tgpig.y) * NR0;
 
     const short nr0 = (int(n_rows) - r0 < NR0) ? short(int(n_rows) - r0) : NR0;
     const short nr1 = (neh1 - r1 < NR1) ? short(neh1 - r1) : NR1;

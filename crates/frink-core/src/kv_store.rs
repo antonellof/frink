@@ -122,6 +122,14 @@ impl KvBuf {
         self.capacity() * self.dtype().elem_bytes()
     }
 
+    /// Appends `elems` zeros (zero is exact at either dtype).
+    pub fn extend_zeros(&mut self, elems: usize) {
+        match self {
+            KvBuf::F32(v) => v.resize(v.len() + elems, 0.0),
+            KvBuf::F16(v) => v.resize(v.len() + elems, f16::ZERO),
+        }
+    }
+
     /// Appends `src`, rounding to this buffer's dtype.
     pub fn extend_from_f32(&mut self, src: &[f32]) {
         match self {

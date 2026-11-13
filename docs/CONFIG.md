@@ -203,7 +203,7 @@ These print numbers and change nothing else.
 |---|---|
 | `FRINK_METAL_MM_TIMING` | `1`, total the host's wall-clock setup / GPU-wait / readback microseconds across the prefill GEMM paths |
 | `FRINK_METAL_GPU_TIMING` | `1`, running mean of GPU-clock milliseconds per tagged submission (`moe-decode/tok`, `dense-decode/tok`, `prefill-dense-stack`), excluding host stalls |
-| `FRINK_METAL_KERNEL_TIMING` | `1`, attribute the GPU time of the dense decode stack and the dense prefill stack to dispatch kinds (matvec or GEMM, attention, norm, RoPE, ...; prefill rows are prefixed `pf_`). Each op group gets its own sampled encoder while on, so compare ratios between runs measured the same way |
+| `FRINK_METAL_KERNEL_TIMING` | `1`, attribute the GPU time of the dense decode stack and the dense prefill stack to dispatch kinds (matvec or GEMM, attention, norm, RoPE, ...; prefill rows are prefixed `pf_`, and a MoE layer's prefill FFN is split into its parts, `moe_router` to `moe_wsum`). Each op group gets its own sampled encoder while on, so compare ratios between runs measured the same way |
 | `FRINK_METAL_BARRIER_LOG` | `1`, log the running barriers-per-op ratio from `MemRanges` (`1.00` is fully serialised) |
 
 ## Test and development fixtures

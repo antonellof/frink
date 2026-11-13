@@ -5053,9 +5053,11 @@ fn encode_prefill_dense_layer(
                 oai,
             },
         ) => {
-            spans.span(cmd_buf, encoder, "pf_moe_ffn")?;
+            // Opens its own spans, one per part (`moe_router`, ...).
             crate::gpu::encode_moe_prefill_ffn(
                 encoder,
+                spans,
+                cmd_buf,
                 mrs,
                 device,
                 moe,
@@ -5313,7 +5315,7 @@ pub fn launch_prefill_dense_stack(
     // One tracker for the whole stack: layer N+1's first dispatch only
     // barriers when it actually touches something layer N left dirty.
     let mut mrs = MemRanges::new();
-    let mut spans = crate::kernel_timing::SpanClock::begin(device, 16 * layers.len() + 2);
+    let mut spans = crate::kernel_timing::SpanClock::begin(device, 24 * layers.len() + 2);
     spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
     if let (Some(p), Some(sc)) = (ple, ple_scratch) {

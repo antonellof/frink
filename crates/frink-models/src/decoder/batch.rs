@@ -847,7 +847,7 @@ impl Decoder {
         taps.capture(n_layers, &hidden_batch);
 
         let normed: Vec<Vec<f32>> = hidden_batch
-            .chunks(hidden_dim)
+            .par_chunks(hidden_dim)
             .map(|h| self.final_norm.apply(h, self.config.rms_norm_eps))
             .collect();
         if let Some(d) = dump {
