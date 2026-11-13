@@ -1,17 +1,18 @@
 //! The load-time validation that a layer's experts sit in contiguous
-//! planes the Metal `mul_mm_sg` MoE kernels can index.
+//! planes the Metal `mul_mm_sg` MoE kernels and the CUDA id kernels
+//! (`frink_cuda::moe_id`) can index.
 
 use frink_core::weight_matrix::WeightMatrix;
 use frink_moe::ExpertWeights;
 
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 use crate::decoder::MoePackedQ4Planes;
 
 /// When every routed expert is mmap-backed with a Metal simdgroup-GEMM
 /// kind and back-to-back slices, record the combined gate/up/down planes
 /// for Metal packed MoE. Gate/up/down may differ in kind (e.g. Q4_K /
 /// Q4_K / Q8_0) but must be uniform across experts per role.
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 pub(super) fn try_build_moe_packed_q4_planes(
     experts: &[ExpertWeights],
 ) -> Option<MoePackedQ4Planes> {
@@ -54,6 +55,10 @@ pub(super) fn try_build_moe_packed_q4_planes(
                     QuantKind::Tq1_0 => "TQ1_0",
                     _ => return None,
                 };
+                // Metal packs only what its GEMM can index. CUDA packs
+                // every listed kind and fences at the launch instead
+                // (`MoePackedQ4Planes::cuda_view`).
+                #[cfg(feature = "metal")]
                 let _ = frink_metal::gpu::mul_mm_sg_meta(kind_str)?;
                 Some((
                     WeightBytes::Mapped {

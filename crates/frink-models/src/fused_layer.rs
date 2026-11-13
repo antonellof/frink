@@ -214,10 +214,10 @@ impl<'a> LayerFfnParts<'a> {
             // layer that has them is routed, which this refuses below
             // through its expert count anyway; naming it here is what
             // makes that an answer rather than an omission.
-            #[cfg(feature = "metal")]
+            #[cfg(any(feature = "metal", feature = "cuda"))]
             packed_q4,
         } = &layer.moe;
-        #[cfg(feature = "metal")]
+        #[cfg(any(feature = "metal", feature = "cuda"))]
         if packed_q4.is_some() {
             return None;
         }

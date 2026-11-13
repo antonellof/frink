@@ -16,6 +16,8 @@ mod attn_block;
 mod batch;
 mod construct;
 #[cfg(feature = "cuda")]
+mod cuda_moe;
+#[cfg(feature = "cuda")]
 mod cuda_prefill;
 #[cfg(feature = "metal")]
 mod device_attention;
@@ -64,7 +66,7 @@ pub(crate) use attn_block::KvStep;
 pub use kv_window::{KvWindowPolicy, KV_WINDOW_ENV};
 pub use layer_taps::{LayerTapError, TappedBatch};
 pub use multi_seq::{LaneRows, MultiSeqKv};
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 pub use weights::MoePackedQ4Planes;
 pub use weights::{
     AttnWeights, ExpertBacking, GptOssLayer, GptOssWeights, LayerWeights, MoeWeights,

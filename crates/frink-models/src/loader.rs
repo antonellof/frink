@@ -28,7 +28,7 @@ mod expert_source;
 mod expert_store_build;
 mod layer_parts;
 mod model_config;
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 mod moe_planes;
 pub(crate) mod rope_scaling;
 mod sampling_metadata;

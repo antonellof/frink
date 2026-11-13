@@ -203,7 +203,7 @@ impl Decoder {
                 shared_expert_gate: None,
                 norm_weight: NormOp::Rms(vec![1.0; hidden]),
                 activation_counts,
-                #[cfg(feature = "metal")]
+                #[cfg(any(feature = "metal", feature = "cuda"))]
                 packed_q4: None,
             };
 

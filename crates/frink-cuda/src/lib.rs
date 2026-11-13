@@ -28,6 +28,9 @@ pub mod dp4a_twin;
 pub mod get_rows;
 /// The IQ grid tables as CUDA C, generated from `frink_quant::iq_tables`.
 pub mod iq_grids;
+/// The routed-expert kernels (`mul_mv_id`, `mul_mm_id`): text, the
+/// routing map and the twins.
+pub mod moe_id;
 /// Host wall time of a CUDA step by phase (`FRINK_CUDA_TIME=1`).
 pub mod phases;
 
@@ -77,6 +80,8 @@ pub mod graph;
 /// The decode matvec launch path: plan, enqueue, multi and fused FFN.
 #[cfg(feature = "cuda")]
 mod matvec_launch;
+#[cfg(feature = "cuda")]
+pub mod moe_id_launch;
 #[cfg(feature = "cuda")]
 pub mod mul_mm_launch;
 /// One dense prefill layer resident on the device (#259).

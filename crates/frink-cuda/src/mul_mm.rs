@@ -345,7 +345,7 @@ extern "C" __global__ void FX_FN_NAME(
     int n_rows,
     int n_cols,
     int batch,
-    int row_bytes
+    int row_bytes/*FX_ID_PARAMS*/
 ) {
     __shared__ float sa[FX_BK][FX_BM];
     __shared__ float sb[FX_BK][FX_BN];
@@ -353,6 +353,7 @@ extern "C" __global__ void FX_FN_NAME(
     const int r0 = blockIdx.y * FX_BM;
     const int r1 = blockIdx.x * FX_BN;
     const int tid = threadIdx.x;
+/*FX_ID_PROLOGUE*/
 
     // Micro-tile owner: `tx` walks rows, `ty` walks tokens.
     const int tx = tid % (FX_BM / FX_TM);
@@ -403,7 +404,7 @@ extern "C" __global__ void FX_FN_NAME(
             const int kk = idx % FX_BK;
             const int col = r1 + j;
             sb[kk][j] = (col < batch)
-                ? src1[(size_t)col * (size_t)n_cols + (size_t)(k0 + kk)]
+                ? src1[(size_t)FX_B_ROW(col) * (size_t)n_cols + (size_t)(k0 + kk)]
                 : 0.0f;
         }
 
@@ -453,7 +454,7 @@ extern "C" __global__ void FX_FN_NAME(
         for (int m = 0; m < FX_TM; m++) {
             const int row = r0 + tx * FX_TM + m;
             if (row < n_rows) {
-                dst[(size_t)col * (size_t)n_rows + (size_t)row] = acc[n][m];
+                dst[(size_t)FX_D_ROW(col) * (size_t)n_rows + (size_t)row] = acc[n][m];
             }
         }
     }
@@ -465,7 +466,13 @@ extern "C" __global__ void FX_FN_NAME(
 /// Deterministic and side-effect free, which is what lets the tests in
 /// [`crate::mul_mm_ref`] assert against it without a device.
 pub fn kernel_src(kind: &MulMmKind) -> String {
-    let defines = format!(
+    format!("{}{}", gemm_defines(), gemm_unit(kind, kind.fn_name, None))
+}
+
+/// The tile geometry every GEMM unit (dense and `mul_mm_id`) is
+/// compiled with, `#define`d from this module's Rust constants.
+pub fn gemm_defines() -> String {
+    format!(
         "#define FX_BM {}\n\
          #define FX_BN {}\n\
          #define FX_BK {}\n\
@@ -473,9 +480,36 @@ pub fn kernel_src(kind: &MulMmKind) -> String {
          #define FX_TN {}\n\
          #define FX_THREADS {}\n",
         BM, BN, BK, TM, TN, THREADS,
+    )
+}
+
+/// The routed-expert half of the GEMM body ([`crate::moe_id`]'s
+/// `mul_mm_id`): extra parameters, the per-expert prologue, and where a
+/// tile column's activation row comes from and its output row goes.
+pub struct GemmIdParts {
+    pub params: &'static str,
+    pub prologue: &'static str,
+    pub b_row: &'static str,
+    pub d_row: &'static str,
+}
+
+/// [`BODY_SRC`] named `fn_name`, as the plain GEMM (`id = None`: column
+/// `c` reads activation row `c` and writes output row `c`) or with a
+/// routed-expert indirection. ONE body, so the expert GEMM is the dense
+/// GEMM's arithmetic by construction (ADR 0004).
+pub fn gemm_unit(kind: &MulMmKind, fn_name: &str, id: Option<&GemmIdParts>) -> String {
+    let (params, prologue, b_row, d_row) = match id {
+        None => ("", "", "(c)", "(c)"),
+        Some(p) => (p.params, p.prologue, p.b_row, p.d_row),
+    };
+    let body = format!(
+        "#define FX_B_ROW(c) {b_row}\n#define FX_D_ROW(c) {d_row}\n{}",
+        BODY_SRC
+            .replace("FX_FN_NAME", fn_name)
+            .replace("/*FX_ID_PARAMS*/", params)
+            .replace("/*FX_ID_PROLOGUE*/", prologue)
     );
-    let body = BODY_SRC.replace("FX_FN_NAME", kind.fn_name);
-    format!("{defines}{}", kernel_src_with_body(kind, &body))
+    kernel_src_with_body(kind, &body)
 }
 
 /// The kind's preamble -- the f16 decode, llama's 6-bit K-scale

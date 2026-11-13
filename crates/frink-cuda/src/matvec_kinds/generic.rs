@@ -27,23 +27,23 @@ use crate::mul_mm::{kernel_src_with_body, MulMmKind, SUB};
 /// kernel that has no coalesced replacement.
 pub const THREADS: usize = 256;
 
-/// The body. `FX_ROW_STEP` and `FX_X_STEP` are replaced by the kind's
-/// block bytes and elements as literals, the spelling
+/// The body: one row's dot as a device function, and the two entries
+/// that call it, the decode matvec and the MoE `mul_mv_id`
+/// ([`crate::moe_id`]), so the expert kernel runs the matvec's exact
+/// arithmetic. `FX_ROW_STEP` and `FX_X_STEP` are replaced by the
+/// kind's block bytes and elements as literals, the spelling
 /// `every_matvec_strides_by_the_real_block_geometry` reads back.
+///
+/// `__shared__` inside the device function is one array per block, as
+/// in the entry it was lifted from; every thread of the block calls it
+/// once, so the barriers stay uniform.
 const BODY_SRC: &str = r#"
-extern "C" __global__ void FX_FN_NAME(
-    const unsigned char* weights,
+__device__ __forceinline__ void frink_matvec_row(
+    const unsigned char* row_ptr,
     const float* x,
-    float* out,
-    int rows,
-    int row_bytes,
+    float* out_row,
     int n_blocks_per_row
 ) {
-    int row = blockIdx.x;
-    if (row >= rows) return;
-
-    const unsigned char* row_ptr = weights + (size_t)row * row_bytes;
-
     __shared__ float partial[256];
     float acc = 0.0f;
 
@@ -73,8 +73,49 @@ extern "C" __global__ void FX_FN_NAME(
     }
 
     if (threadIdx.x == 0) {
-        out[row] = partial[0];
+        *out_row = partial[0];
     }
+}
+
+extern "C" __global__ void FX_FN_NAME(
+    const unsigned char* weights,
+    const float* x,
+    float* out,
+    int rows,
+    int row_bytes,
+    int n_blocks_per_row
+) {
+    int row = blockIdx.x;
+    if (row >= rows) return;
+    frink_matvec_row(weights + (size_t)row * row_bytes, x, out + row, n_blocks_per_row);
+}
+
+// One output row of one routed slot: block (row, slot). The slot's
+// expert id offsets the weights, `slot / x_div` picks its activation
+// row (`x_div` is top_k for gate and up, 1 for down), and the output
+// is `out[slot * rows + row]`. ggml's `mul_mat_vec_q` with ids.
+extern "C" __global__ void FX_ID_NAME(
+    const unsigned char* w_all,
+    const float* x,
+    float* out,
+    const int* ids,
+    int rows,
+    int row_bytes,
+    int n_blocks_per_row,
+    int n_slots,
+    int x_div,
+    int x_stride,
+    unsigned long long expert_stride
+) {
+    const int row = blockIdx.x;
+    const int slot = blockIdx.y;
+    if (row >= rows || slot >= n_slots) return;
+    const unsigned char* w = w_all + (size_t)ids[slot] * (size_t)expert_stride;
+    frink_matvec_row(
+        w + (size_t)row * row_bytes,
+        x + (size_t)(slot / x_div) * (size_t)x_stride,
+        out + (size_t)slot * (size_t)rows + row,
+        n_blocks_per_row);
 }
 "#;
 
@@ -82,6 +123,11 @@ extern "C" __global__ void FX_FN_NAME(
 /// name its [`super::MatvecKind`] row declares.
 pub fn entry(kind: &MulMmKind) -> String {
     format!("{}_matvec", kind.name.to_ascii_lowercase())
+}
+
+/// The `mul_mv_id` entry in the same unit: `<kind>_moe_mv_id`.
+pub fn id_entry(kind: &MulMmKind) -> String {
+    format!("{}_moe_mv_id", kind.name.to_ascii_lowercase())
 }
 
 /// The complete translation unit for `kind`, built once per process
@@ -98,6 +144,7 @@ pub fn matvec_src(kind: &MulMmKind) -> &'static str {
     map.entry(kind.name).or_insert_with(|| {
         let body = BODY_SRC
             .replace("FX_FN_NAME", &entry(kind))
+            .replace("FX_ID_NAME", &id_entry(kind))
             .replace("FX_ROW_STEP;", &format!("{};", kind.block_bytes))
             .replace("FX_X_STEP;", &format!("{};", kind.block_elems));
         Box::leak(kernel_src_with_body(kind, &body).into_boxed_str())
@@ -188,6 +235,7 @@ mod tests {
             };
             let src = matvec_src(k);
             assert_eq!(src.matches(&format!("void {}(", entry(k))).count(), 1);
+            assert_eq!(src.matches(&format!("void {}(", id_entry(k))).count(), 1);
             assert!(src.contains(k.dequant_src), "{}", k.name);
             assert!(!src.contains("FX_ROW_STEP") && !src.contains("FX_X_STEP"));
             assert!(std::ptr::eq(src, matvec_src(k)), "{}: not cached", k.name);
