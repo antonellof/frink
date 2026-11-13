@@ -4,13 +4,20 @@ What this page is: the plan for running frink on AMD hardware, the
 research it rests on, and what each phase can and cannot be verified
 with. Dated 2026-11-07. Tracked as #494.
 
+**Status, 2026-11-13.** R1 landed: `frink-rocm` compiles every
+`frink-cuda` kernel for every RDNA target through `hiprtc`, held by
+CI's `rocm-hiprtc-census` job (no GPU); its launch test has not run on
+hardware. Phase V moved on under #409: Vulkan serves a decode and
+prefill stack, verified on MoltenVK and lavapipe only. R2, R3 and N
+have not started.
+
 ## Three kinds of AMD silicon, three different answers
 
 | Silicon | Examples | Path | Why |
 |---|---|---|---|
 | RDNA GPUs (wave32) | RX 6000/7000/9000, Radeon 890M, Strix Halo's 8060S (gfx1030, gfx1100-1102, gfx1150/1151, gfx1200/1201) | **HIP/ROCm**, reusing `frink-cuda`'s kernel text | llama.cpp's own answer: `ggml-hip` compiles `ggml-cuda`'s sources through a 332-line `vendors/hip.h` shim, adding no AMD kernels of its own. frink's CUDA kernels are runtime-compiled text, so `hiprtc` takes the same text behind a prelude |
 | CDNA GPUs (wave64) | MI210, MI300X, MI355X (gfx90a, gfx942, gfx950) | HIP/ROCm, **after a wave64 audit** | 37 sites in `frink-cuda` assume a 32-lane warp (`% 32`, `& 31`, `lane = tid % 32`). RDNA runs them as written; CDNA is wave64 only, so those kernels are refused there by name until each is made width-aware (llama.cpp's `WARP_SIZE` / `ggml_cuda_get_physical_warp_size`) |
-| Any AMD GPU without ROCm | APUs on Windows, older Radeons, any Linux box with RADV | **Vulkan** (#409) | ROCm's supported-GPU list is short; Vulkan reaches every Radeon. The beachhead (`frink-vulkan`) is GO and testable on any driver, including MoltenVK on this Mac |
+| Any AMD GPU without ROCm | APUs on Windows, older Radeons, any Linux box with RADV | **Vulkan** (#409) | ROCm's supported-GPU list is short; Vulkan reaches every Radeon. `frink-vulkan` runs on any driver, including MoltenVK on a Mac |
 | Ryzen AI NPU (XDNA2) | Strix, Strix Halo, Kraken, Gorgon Point | **Research spike first** (below) | No GGUF-capable NPU kernel exists in the open |
 
 ## The NPU, read against FastFlowLM

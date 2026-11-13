@@ -37,8 +37,8 @@ own. Checked 2026-11-13, at 0.63.0.
 
 | Point | Decided by | State |
 |---|---|---|
-| 1. Loads | `frink archs`, `tests/arch_coverage.rs`, the triage in [`MODELS.md`](../MODELS.md) | Every text-generation architecture llama.cpp names runs or refuses by name. A few refuse as unaudited and need new code (#538). Four loaders still default keys llama.cpp requires (#620) |
-| 2. Same tokens | `frink parity` and CI's oracle job (`scripts/oracle.sh`); the render census for prompts | Every served architecture matches on its fixtures. Pure Q2_K and Q3_K checkpoints are WRONG on the CPU (#584). The chat-prompt differences left are listed deviations |
+| 1. Loads | `frink archs`, `tests/arch_coverage.rs`, the triage in [`MODELS.md`](../MODELS.md) | Every text-generation architecture llama.cpp names runs or refuses by name. A few refuse as unaudited and need new code (#538). |
+| 2. Same tokens | `frink parity` and CI's oracle job (`scripts/oracle.sh`); the render census for prompts | Every served architecture matches on its fixtures. Pure Q2_K and Q3_K checkpoints are WRONG on the CPU (#584), and eight regex-sequence pre-tokenizers tokenize differently (#624). The chat-prompt differences left are listed deviations |
 | 3. Backend | [`KERNELS.md`](../KERNELS.md), generated and drift-tested | Every kind has a kernel on CPU, Metal and CUDA. Some CUDA kinds have never run on a GPU (#405). Vulkan serves a decode and prefill stack for its kinds, opt-in (#409) |
 | 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Many published rows predate the current code (#542) |
 | 5. Same command | `crates/frink-cli/src/llama_flags.rs`, which pins the gap | The common flags work. A tail of `llama-cli` / `llama-server` flags and `LLAMA_ARG_*` variables is still unaccepted (#404) |
@@ -62,12 +62,10 @@ oracle makes each of these cheap to verify.
    line, while Q4_1, Q5_1 and IQ4_NL match. Suspect the 2- and 3-bit
    dot paths in `frink-quant` or the Q8_K activation ggml feeds them.
    Every backend that copies the CPU's arithmetic inherits it.
-2. **Loader divergences** (#620): `afmoe`, `exaone-moe` and `laguna`
-   default a key llama.cpp reads as REQUIRED; `muse-glimmer` loads
-   without its required window and rotates its sliding layers at the
-   wrong base when the file has no `rope.freq_base_swa`. In progress on
-   `fix/620-loader-divergences` (fixtures and oracle rows done, Rust
-   tests pending).
+2. **Pre-tokenizers that are regex sequences upstream** (#624): eight
+   `tokenizer.ggml.pre` types, `deepseek-v3` among them, load and
+   tokenize differently from llama.cpp. Implement the sequence, or
+   refuse them by name until it exists.
 3. **The listed numeric deviations** ([ADR 0009](../adr/0009-numerics-follow-ggml.md)),
    largest first: CPU attention under 64 query rows and in decode.
 
@@ -111,9 +109,9 @@ without a rental.
 ### D. Architectures
 
 10. **One file per architecture** (#403,
-    [`arch-registry-migration.md`](arch-registry-migration.md)): the
-    remaining steps, SWA families after #61, then the audited list,
-    the catalog and the layer plan derived from the registry.
+   [`arch-registry-migration.md`](arch-registry-migration.md)): step
+   9c (`step35`, `mimo2`, `lfm3`), then the audited list, the catalog
+   and the layer plan derived from the registry.
 11. **The architectures that refuse as unaudited** (#538), each as one
     file with a libllama golden and a greedy decode, or a refusal with
     its reason in [`MODELS.md`](../MODELS.md).
