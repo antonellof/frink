@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.63.0] - 2026-11-13
+
 ### Added
 
 - **DFlash and DFlash2 drafts for speculative decoding** (#600).
