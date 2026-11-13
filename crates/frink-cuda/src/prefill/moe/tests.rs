@@ -749,3 +749,81 @@ fn device_routed_matches_its_host_twin(batch: usize) {
         assert_close(&out.hidden, &twin.hidden, tol, "device-routed layer hidden");
     }
 }
+
+/// Two device-routed layers, plain and gpt-oss's (attention sinks, `wo`
+/// bias, router bias, biased experts, the clamped SwiGLU), decoded over
+/// their mirrors eagerly and then replayed from a graph: every token
+/// bit for bit the eager one's, the experts it chose included, with the
+/// host routing never asked.
+#[test]
+#[ignore = "requires real CUDA hardware; not yet run"]
+fn a_device_routed_run_replayed_from_a_graph_is_the_eager_run_to_the_bit() {
+    use crate::prefill::decode_graph::tests::{replay_matches_eager, Feed, PREFIX, TOKENS};
+    for oai in [false, true] {
+        let fx: &'static RoutedFixture = Box::leak(Box::new(RoutedFixture::new(1, oai)));
+        let source: &'static FixtureExperts<'static> = Box::leak(Box::new(FixtureExperts(fx)));
+        let (hidden, ffn) = (fx.hidden, fx.ffn);
+        let q_w = fx.n_heads * fx.head_dim;
+        let kv_w = fx.n_kv_heads * fx.head_dim;
+        let [qd, kd, vd, od] = fx.attn;
+        let device = DeviceRouting {
+            // Unique to this test: the tables are cached by it.
+            key: if oai { 0xD00D_0101 } else { 0xD00D_0100 },
+            probe: [fx.experts[0].0, fx.experts[fx.experts.len() - 1].2],
+            n_experts: fx.experts.len(),
+            k: 2,
+            gating: if oai {
+                DeviceGating::SoftmaxWeight
+            } else {
+                DeviceGating::Softmax { norm: true }
+            },
+            router_bias: fx.oai.as_ref().map(|o| o.router_bias),
+            source,
+            layer: 0,
+        };
+        let layer = PrefillDenseLayerCuda {
+            attn_norm_w: &fx.attn_norm_w,
+            ffn_norm_w: &fx.ffn_norm_w,
+            q: q8_0_proj(qd, q_w, hidden),
+            k: q8_0_proj(kd, kv_w, hidden),
+            v: q8_0_proj(vd, kv_w, hidden),
+            o: q8_0_proj(od, hidden, q_w),
+            ffn: StackFfn::Moe {
+                router: RouterCuda::F32 {
+                    data: &fx.router,
+                    rows: fx.experts.len(),
+                },
+                ffn_dim: ffn,
+                device: Some(device),
+            },
+            glu: fx.glu(),
+            post_attn_norm: None,
+            post_ffn_norm: None,
+            extras: AttnExtrasCuda {
+                sinks: fx.oai.as_ref().map(|o| o.sinks),
+                o_bias: fx.oai.as_ref().map(|o| o.o_bias),
+                ..AttnExtrasCuda::default()
+            },
+            rope: None,
+        };
+        let params = || PrefillParams {
+            n_heads: fx.n_heads,
+            n_kv_heads: fx.n_kv_heads,
+            head_dim: fx.head_dim,
+            rms_eps: fx.eps,
+            attn_scale: fx.args().scale,
+            attn_softcap: None,
+            window: None,
+            prefix_k: &[],
+            prefix_v: &[],
+            start_pos: 0,
+        };
+        replay_matches_eager(
+            &[&layer, &layer],
+            &[params(), params()],
+            &Feed::Hidden(hidden),
+            PREFIX,
+            TOKENS,
+        );
+    }
+}

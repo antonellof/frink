@@ -77,6 +77,9 @@ pub mod graph;
 /// The decode matvec launch path: plan, enqueue, multi and fused FFN.
 #[cfg(feature = "cuda")]
 mod matvec_launch;
+/// The NVRTC module cache: compile once, load once per device object.
+#[cfg(feature = "cuda")]
+mod modules;
 #[cfg(feature = "cuda")]
 pub mod mul_mm_launch;
 /// One dense prefill layer resident on the device (#259).

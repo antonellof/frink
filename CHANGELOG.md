@@ -17,6 +17,26 @@ are the ones worth reading twice.
 
 ### Added
 
+- **A CUDA decode token can replay from a CUDA graph
+  (`FRINK_CUDA_GRAPH=1`, off by default).** Before, the variable was
+  read and changed nothing: nothing was ever captured, and the stream
+  every launch went to, the legacy NULL stream, cannot be captured at
+  all. Now a decode token of the resident stack is recorded once on a
+  stream of its own and replayed at every position, as llama.cpp's
+  CUDA backend replays its decode graph: the position the RoPE, KV
+  append and attention kernels read is a device word, the hidden row or
+  token id a fixed device buffer, both written before each replay, and
+  the token's scratch is the graph's own memory, at addresses fixed for
+  the graph's life. A replay is two small uploads, one graph launch and
+  the stack's one download, where an eager Qwen3-30B-A3B token is about
+  a thousand launches from the host. A run captures after one eager
+  token with every routed layer on the device and again when its KV
+  mirror grows; everything else runs eagerly, as before. A hardware test
+  holds a replayed run of 84 tokens to the eager one bit for bit, dense
+  and device-routed MoE, across a mirror growth and an attention chunk
+  boundary; it has not run on a GPU yet, which is why the switch is off
+  (#537, #133).
+
 - **The Vulkan stack serves sliding windows** (#409). Attention takes
   a window: each query attends over its own position and the `window -
   1` before it. The device KV is indexed by position and keeps every

@@ -402,7 +402,7 @@ fn rope_rows_matches_the_host_in_both_layouts_with_a_partial_width_and_divisors(
             rows,
             n_heads,
             head_dim,
-            5,
+            StepPos::Host(5),
             &RopeArgs {
                 theta: 10000.0,
                 freq_factors: d_ff.as_ref(),

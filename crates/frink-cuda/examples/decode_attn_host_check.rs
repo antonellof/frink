@@ -9,11 +9,17 @@
 //! translation unit compiles, that both kernels index the scratch and
 //! the K/V rows the way the twin does, at every chunk boundary the
 //! cases cross, and that the butterfly and the two merges are the ones
-//! the twin models.
+//! the twin models. Each case runs twice: as a token enqueued as it runs
+//! launches it (the position by value, exactly its chunks), and as a
+//! replayed CUDA graph does (the position from a device word, the grid
+//! [`replay_slots`] wide for the history's capacity), so the two forms
+//! are held to the same twin bit for bit.
 //!
 //! Run it through `tools/decode_attn_host_check/run.sh`, not directly.
 
-use frink_cuda::decode_attn::{decode_attn_twin, key_range, n_chunks, DECODE_ATTN_KERNEL_SRC};
+use frink_cuda::decode_attn::{
+    decode_attn_twin, key_range, n_chunks, replay_slots, DECODE_ATTN_KERNEL_SRC,
+};
 
 /// `(n_heads, n_kv_heads, head_dim, seq_len, window, softcap, sinks)`:
 /// one chunk, exactly one chunk, a ragged second chunk, many chunks, a
@@ -75,6 +81,14 @@ fn main() {
         );
         let (lo, hi) = key_range(seq_len, window);
         let chunks = n_chunks(hi - lo);
+        // The capacity a KV mirror holding `seq_len` rows has: a power
+        // of two from 256, as `kv_mirror::grown_capacity` grows it.
+        let cap_rows = seq_len.next_power_of_two().max(256);
+        let slots = replay_slots(cap_rows, window);
+        assert!(
+            slots >= chunks,
+            "case {i}: {slots} slots for {chunks} chunks"
+        );
         let tag = format!("case{i}");
         std::fs::write(format!("{dir}/{tag}.q"), bytes(&q)).unwrap();
         std::fs::write(format!("{dir}/{tag}.k"), bytes(&k)).unwrap();
@@ -90,7 +104,8 @@ fn main() {
         // the twin used.
         let cap = softcap.filter(|c| *c > 0.0).unwrap_or(0.0);
         manifest.push_str(&format!(
-            "{tag} {n_heads} {n_kv} {hd} {lo} {hi} {chunks} {} {}\n",
+            "{tag} {n_heads} {n_kv} {hd} {hi} {} {chunks} {slots} {} {}\n",
+            window.unwrap_or(0),
             scale.to_bits(),
             cap.to_bits()
         ));

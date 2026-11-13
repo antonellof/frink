@@ -26,9 +26,9 @@ cargo run -q --manifest-path "$root/Cargo.toml" -p frink-cuda \
     -Wno-unused-function -I"$shim" "$out/tu.cpp" -o "$out/run"
 
 status=0
-while read -r tag n_heads n_kv hd lo hi chunks scale cap; do
-    "$out/run" "$out/$tag" "$n_heads" "$n_kv" "$hd" "$lo" "$hi" "$chunks" "$scale" "$cap" \
-        || status=1
+while read -r tag n_heads n_kv hd seq window chunks slots scale cap; do
+    "$out/run" "$out/$tag" "$n_heads" "$n_kv" "$hd" "$seq" "$window" "$chunks" "$slots" \
+        "$scale" "$cap" || status=1
 done < "$out/manifest.txt"
 
 if [ "$status" -eq 0 ]; then

@@ -48,6 +48,11 @@ pub struct CudaKvMirror {
     /// The host bytes of the newest K row the mirror holds, empty when
     /// it holds none: the identity check.
     last_k: Vec<f32>,
+    /// The decode graph of the run of layers this mirror's layer starts
+    /// (`super::decode_graph`): it froze this sequence's mirror
+    /// addresses, so it lives and dies with them. A mirror rebuilt from
+    /// the host starts cold.
+    pub(crate) graph: super::decode_graph::GraphSlot,
 }
 
 impl std::fmt::Debug for CudaKvMirror {
@@ -169,6 +174,7 @@ impl CudaKvMirror {
             cap_rows,
             rows,
             last_k,
+            graph: super::decode_graph::GraphSlot::default(),
         })
     }
 

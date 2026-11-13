@@ -8,6 +8,12 @@
 //! `synchronize`) appear in this file and in tests only, and
 //! `counters::tests::no_transfer_bypasses_the_counted_door` fails if a
 //! new one appears anywhere else in the crate's non-test code.
+//!
+//! The door is also where a captured decode token is kept honest: on a
+//! thread recording a CUDA graph ([`crate::graph::capturing`]), every
+//! host copy and host wait here is refused before it reaches the
+//! driver, which would invalidate the capture. Only device-to-device
+//! copies, which a graph records, pass.
 
 use crate::counters;
 use crate::gpu::CudaError;
@@ -16,6 +22,18 @@ use std::sync::Arc;
 
 fn err(what: &str, e: impl std::fmt::Debug) -> CudaError {
     CudaError::Launch(format!("{what}: {e:?}"))
+}
+
+/// `Unsupported` on a thread recording a graph: a host copy or wait
+/// there would invalidate the capture, so the body stops and its token
+/// runs eagerly instead.
+fn host_side(what: &str) -> Result<(), CudaError> {
+    if crate::graph::capturing() {
+        return Err(CudaError::Unsupported(format!(
+            "{what}: a host copy or wait inside a captured decode token"
+        )));
+    }
+    Ok(())
 }
 
 /// Uploads `src` into a new device buffer. Enqueued on the shared
@@ -36,8 +54,33 @@ pub(crate) fn htod_owned<T: DeviceRepr + Unpin>(
     what: &str,
     src: Vec<T>,
 ) -> Result<CudaSlice<T>, CudaError> {
+    host_side(what)?;
     counters::record_h2d(std::mem::size_of_val(src.as_slice()));
     dev.htod_copy(src).map_err(|e| err(what, e))
+}
+
+/// Uploads `src` into an existing device buffer of the same length.
+/// Enqueued on the shared stream and not waited for: from pageable
+/// memory the driver stages the bytes before it returns. What a
+/// replayed decode token's per-token inputs take, into the buffers its
+/// graph reads.
+pub(crate) fn htod_into<T: DeviceRepr + Unpin + Clone>(
+    dev: &Arc<CudaDevice>,
+    what: &str,
+    src: &[T],
+    dst: &mut CudaSlice<T>,
+) -> Result<(), CudaError> {
+    host_side(what)?;
+    let len = cudarc::driver::DeviceSlice::len(dst);
+    if len != src.len() {
+        return Err(CudaError::Launch(format!(
+            "{what}: {} values into a buffer of {len}",
+            src.len()
+        )));
+    }
+    counters::record_h2d(std::mem::size_of_val(src));
+    dev.htod_copy_into(src.to_vec(), dst)
+        .map_err(|e| err(what, e))
 }
 
 /// Uploads `src` into an existing device range and WAITS for it (the
@@ -49,6 +92,7 @@ pub(crate) fn htod_into_sync<T: DeviceRepr, D: DevicePtrMut<T>>(
     src: &[T],
     dst: &mut D,
 ) -> Result<(), CudaError> {
+    host_side(what)?;
     counters::record_h2d(std::mem::size_of_val(src));
     counters::record_sync();
     dev.htod_sync_copy_into(src, dst).map_err(|e| err(what, e))
@@ -60,6 +104,7 @@ pub(crate) fn dtoh<T: DeviceRepr, S: DevicePtr<T>>(
     what: &str,
     src: &S,
 ) -> Result<Vec<T>, CudaError> {
+    host_side(what)?;
     counters::record_d2h(src.len() * std::mem::size_of::<T>());
     dev.dtoh_sync_copy(src).map_err(|e| err(what, e))
 }
@@ -131,6 +176,7 @@ pub(crate) fn dtoh_staged(
     what: &str,
     src: &CudaSlice<f32>,
 ) -> Result<Download, CudaError> {
+    host_side(what)?;
     let len = cudarc::driver::DeviceSlice::len(src);
     let bytes = std::mem::size_of::<f32>() * len;
     let guard = if bytes <= PINNED_MAX_BYTES {
@@ -193,6 +239,7 @@ pub(crate) fn dtod<T: DeviceRepr, S: DevicePtr<T>, D: DevicePtrMut<T>>(
 
 /// Waits for everything enqueued on the shared stream: one sync.
 pub(crate) fn sync(dev: &Arc<CudaDevice>, what: &str) -> Result<(), CudaError> {
+    host_side(what)?;
     counters::record_sync();
     dev.synchronize().map_err(|e| err(what, e))
 }

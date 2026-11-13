@@ -394,7 +394,10 @@ extern "C" __global__ void router_f32_matvec(
 /// * The band frequency is `1 / theta^(2i / rot_dim)` in f32, the same
 ///   expression as `frink_core::attention::rope_freqs`.
 ///
-/// Position of row `r` is `start_pos + r`.
+/// Position of row `r` is `start_pos + r`, `start_pos` read from the
+/// device word `pos` when it is not null: a decode token captured into
+/// a CUDA graph (`super::decode_graph`) is replayed at every position,
+/// and the replay writes the word.
 pub const ROPE_ROWS_KERNEL_SRC: &str = r#"
 extern "C" __global__ void rope_rows_f32(
     float* x,
@@ -406,7 +409,8 @@ extern "C" __global__ void rope_rows_f32(
     int start_pos,
     float theta,
     int neox,
-    float mscale
+    float mscale,
+    const int* pos
 ) {
     int half = rot_dim / 2;
     size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -418,7 +422,8 @@ extern "C" __global__ void rope_rows_f32(
     int i = rem % half;
     float* v = x + ((size_t)row * n_heads + h) * head_dim;
     float freq = 1.0f / powf(theta, (float)(2 * i) / (float)rot_dim);
-    float angle = (float)(start_pos + row) * freq;
+    const int p0 = pos != nullptr ? *pos : start_pos;
+    float angle = (float)(p0 + row) * freq;
     if (freq_factors != 0) {
         angle = angle / freq_factors[i];
     }
@@ -650,6 +655,30 @@ extern "C" __global__ void causal_gqa_prefill_f32(
 }
 "#;
 
+/// One decode token's K and V rows into its KV mirror at the row the
+/// device word `pos` names: the append a decode token captured into a
+/// CUDA graph replays at every position (`super::decode_graph`). A token
+/// enqueued as it runs appends with a device copy at an offset instead.
+/// A row past `cap_rows` is not written.
+pub const KV_APPEND_KERNEL_SRC: &str = r#"
+extern "C" __global__ void kv_append_f32(
+    const float* k,
+    const float* v,
+    float* k_all,
+    float* v_all,
+    int width,
+    int cap_rows,
+    const int* pos
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = *pos;
+    if (i >= width || row < 0 || row >= cap_rows) return;
+    const size_t at = (size_t)row * width + i;
+    k_all[at] = k[i];
+    v_all[at] = v[i];
+}
+"#;
+
 /// Module and function names, in one place so the enqueue helpers and
 /// the tests cannot spell them differently.
 pub const RMSNORM_ROWS: (&str, &str) = ("frink_prefill_rmsnorm_rows", "rmsnorm_rows_f32");
@@ -668,4 +697,5 @@ pub const ADD_BIAS_TAB_ROWS: (&str, &str) =
     ("frink_prefill_add_bias_tab_rows", "add_bias_tab_rows_f32");
 pub const ROUTER_F32: (&str, &str) = ("frink_prefill_router_f32", "router_f32_matvec");
 pub const ROPE_ROWS: (&str, &str) = ("frink_prefill_rope_rows", "rope_rows_f32");
+pub const KV_APPEND: (&str, &str) = ("frink_prefill_kv_append", "kv_append_f32");
 pub const CAUSAL_GQA_PREFILL: (&str, &str) = ("frink_prefill_causal_gqa", "causal_gqa_prefill_f32");

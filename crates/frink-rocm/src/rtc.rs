@@ -163,6 +163,7 @@ mod tests {
             k("prefill add_bias_rows", p::ADD_BIAS_ROWS_KERNEL_SRC),
             k("prefill add_rows", p::ADD_ROWS_KERNEL_SRC),
             k("prefill rope_rows", p::ROPE_ROWS_KERNEL_SRC),
+            k("prefill kv_append", p::KV_APPEND_KERNEL_SRC),
             k("prefill causal_gqa", p::CAUSAL_GQA_PREFILL_KERNEL_SRC),
             k("prefill add_bias_tab_rows", p::ADD_BIAS_TAB_ROWS_KERNEL_SRC),
             k("prefill moe_topk", p::MOE_TOPK_KERNEL_SRC),

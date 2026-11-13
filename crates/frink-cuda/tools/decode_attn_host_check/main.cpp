@@ -66,39 +66,31 @@ static void run_grid(unsigned grid_x, unsigned grid_y, unsigned threads, F body)
     }
 }
 
-int main(int argc, char** argv) {
-    if (argc != 10) {
-        fprintf(stderr,
-                "usage: %s <base> <n_heads> <n_kv> <head_dim> <lo> <hi> <n_chunks> "
-                "<scale_bits> <softcap_bits>\n",
-                argv[0]);
-        return 2;
-    }
-    const std::string base = argv[1];
-    const int n_heads = atoi(argv[2]), n_kv = atoi(argv[3]), hd = atoi(argv[4]);
-    const int lo = atoi(argv[5]), hi = atoi(argv[6]), n_chunks = atoi(argv[7]);
-    const float scale = from_bits(argv[8]), softcap = from_bits(argv[9]);
-
-    auto q = readf(base + ".q");
-    auto k = readf(base + ".k");
-    auto v = readf(base + ".v");
-    auto want = readf(base + ".want");
-    auto sinks = readf(base + ".sinks");
-    const float* sinks_p = sinks.empty() ? nullptr : sinks.data();
-    std::vector<float> part((size_t)n_heads * n_chunks * (hd + 2), 0.0f);
+// Runs the pair at `n_slots` chunks of grid, the position by value or,
+// when `pos` is not null, from the word it points at.
+static std::vector<float> run_pair(const std::vector<float>& q, const std::vector<float>& k,
+                                   const std::vector<float>& v, const float* sinks, int n_heads,
+                                   int n_kv, int hd, int seq_arg, int window, int n_slots,
+                                   float scale, float softcap, const int* pos) {
+    // NaN, so a slot a kernel should have written and did not shows.
+    std::vector<float> part((size_t)n_heads * n_slots * (hd + 2), NAN);
     std::vector<float> out((size_t)n_heads * hd, 0.0f);
-
-    run_grid((unsigned)n_heads, (unsigned)n_chunks, 128, [&]() {
-        decode_attn_partial_f32(q.data(), k.data(), v.data(), part.data(), n_heads, n_kv, hd, lo,
-                                hi, n_chunks, scale, softcap);
+    run_grid((unsigned)n_heads, (unsigned)n_slots, 128, [&]() {
+        decode_attn_partial_f32(q.data(), k.data(), v.data(), part.data(), n_heads | (n_kv << 16),
+                                hd, seq_arg, window, n_slots, scale, softcap, pos);
     });
     run_grid((unsigned)n_heads, 1, (unsigned)hd, [&]() {
-        decode_attn_combine_f32(part.data(), out.data(), n_heads, hd, n_chunks, sinks_p);
+        decode_attn_combine_f32(part.data(), out.data(), n_heads, hd, n_slots, sinks, seq_arg,
+                                window, pos);
     });
+    return out;
+}
 
+static size_t mismatches(const std::string& tag, const std::vector<float>& out,
+                         const std::vector<float>& want) {
     if (want.size() != out.size()) {
-        fprintf(stderr, "%s: expected-output length mismatch\n", base.c_str());
-        return 2;
+        fprintf(stderr, "%s: expected-output length mismatch\n", tag.c_str());
+        exit(2);
     }
     size_t mismatch = 0;
     for (size_t i = 0; i < out.size(); i++) {
@@ -107,11 +99,48 @@ int main(int argc, char** argv) {
         if (!same) {
             mismatch++;
             if (mismatch <= 3)
-                fprintf(stderr, "%s[%zu]: kernel=%.9g twin=%.9g\n", base.c_str(), i, out[i],
+                fprintf(stderr, "%s[%zu]: kernel=%.9g twin=%.9g\n", tag.c_str(), i, out[i],
                         want[i]);
         }
     }
-    printf("%-8s heads=%d hd=%3d keys=%d..%d chunks=%d sinks=%s mismatches=%zu\n", base.c_str(),
-           n_heads, hd, lo, hi, n_chunks, sinks_p ? "yes" : "no", mismatch);
-    return mismatch == 0 ? 0 : 1;
+    return mismatch;
+}
+
+int main(int argc, char** argv) {
+    if (argc != 11) {
+        fprintf(stderr,
+                "usage: %s <base> <n_heads> <n_kv> <head_dim> <seq_len> <window> <n_chunks> "
+                "<replay_slots> <scale_bits> <softcap_bits>\n",
+                argv[0]);
+        return 2;
+    }
+    const std::string base = argv[1];
+    const int n_heads = atoi(argv[2]), n_kv = atoi(argv[3]), hd = atoi(argv[4]);
+    const int seq_len = atoi(argv[5]), window = atoi(argv[6]);
+    const int n_chunks = atoi(argv[7]), slots = atoi(argv[8]);
+    const float scale = from_bits(argv[9]), softcap = from_bits(argv[10]);
+
+    auto q = readf(base + ".q");
+    auto k = readf(base + ".k");
+    auto v = readf(base + ".v");
+    auto want = readf(base + ".want");
+    auto sinks = readf(base + ".sinks");
+    const float* sinks_p = sinks.empty() ? nullptr : sinks.data();
+
+    // Enqueued as it runs: the position by value, exactly its chunks.
+    auto eager = run_pair(q, k, v, sinks_p, n_heads, n_kv, hd, seq_len, window, n_chunks, scale,
+                          softcap, nullptr);
+    // Replayed: the position from a device word, the grid as wide as the
+    // capacity, and a by-value position that must not be read.
+    const int pos = seq_len - 1;
+    auto replay = run_pair(q, k, v, sinks_p, n_heads, n_kv, hd, -12345, window, slots, scale,
+                           softcap, &pos);
+
+    const size_t me = mismatches(base + " eager", eager, want);
+    const size_t mr = mismatches(base + " replay", replay, want);
+    printf("%-8s heads=%d hd=%3d keys=..%d window=%d chunks=%d slots=%d sinks=%s "
+           "mismatches=%zu/%zu\n",
+           base.c_str(), n_heads, hd, seq_len, window, n_chunks, slots, sinks_p ? "yes" : "no",
+           me, mr);
+    return me == 0 && mr == 0 ? 0 : 1;
 }
