@@ -2,7 +2,8 @@
 
 Frink is a pure-Rust GGUF inference engine for dense and MoE models.
 Weights stay quantized when the file is mmapped, and dequantization
-happens inside the matvec. Backends: CPU, Apple Metal, and CUDA.
+happens inside the matvec. Backends: CPU, Apple Metal and CUDA, plus an
+opt-in Vulkan backend.
 
 ## Models
 
@@ -12,14 +13,14 @@ fixture behind it (the README states the count, which a test pins). The
 architectures on the same path that have been read but not audited stop
 with an error that names what is missing. `frink archs` prints the
 current list; [`MODELS.md`](MODELS.md) says what runs, what refuses and
-why; [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md) has the speed
-against llama.cpp on the same host and file.
+why.
 
 Speed against llama.cpp is in
 [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md), one row per host,
-backend and checkpoint, each with the build it was measured on and
-whether that build is stale. In short: Metal is level with llama.cpp or
-ahead on decode, CPU is behind on prefill, and CUDA is behind on both.
+backend and checkpoint, each with the build it was measured on. Most of
+its rows are marked stale (measured on an older build). On those rows
+Metal is level with llama.cpp on prefill and ahead on decode, CPU is
+behind on prefill, and CUDA is behind on both.
 
 The model shapes the decoder can express:
 
@@ -28,6 +29,7 @@ The model shapes the decoder can express:
 | Dense GQA, MoE | Llama 3.x, Qwen2.5/3, Gemma-2/3, Mistral, Phi-4-mini, SmolLM2, OLMoE, Mixtral |
 | MLA, with and without the absorption optimization | DeepSeek-V2/V3, Mistral-Large-3, PLM |
 | Dedicated engines | Gemma-4 (per-layer embeddings, shared KV) |
+| Speculative drafts | An autoregressive draft GGUF, prompt lookup, and DFlash / DFlash2 block drafts (llama.cpp's `dflash` architecture) |
 | Sliding-window attention: per layer, per-layer arrays, chunked | Gemma-2/3, gpt-oss, Llama 4, Mistral, Cohere2 |
 | Recurrent blocks at the attention site | Mamba-1 and Mamba-2 (Jamba, FalconMamba, Granite 4.0, Nemotron-H, Falcon-H1), short convolutions (LFM2), gated delta nets (Qwen3.5, Qwen3-Next), lightning attention (MiniMax-01), PLaMo-2 |
 | Position encodings other than NEOX RoPE | NORM RoPE, partial rotary, two rotary widths, per-layer RoPE gates, YaRN and LongRoPE, M-RoPE on text positions, learned absolute tables (GPT-2, StarCoder), ALiBi (BLOOM, MPT, Refact, Jais, Baichuan-13B), no rotation at all |
@@ -43,21 +45,25 @@ GLM-5.2, Kimi and DeepSeek-V4 have loaders and primitives in the tree,
 and nothing has run end to end on a real checkpoint of any of them, so
 they are not in the table.
 
-Two backend limits affect model choice. gpt-oss and Llama 4 are CPU
-only (no Metal kernel for attention sinks; Llama 4's window is chunked
-and the fused Metal launches take one window per layer). No recurrent
-model supports prefix-cache reuse or `--model-draft`, because a
-recurrent state cannot be rolled back to a middle position.
+Two backend limits affect model choice. On Metal, gpt-oss and Llama 4
+run on the host path (no Metal kernel for attention sinks; Llama 4's
+window is chunked and the fused Metal launches take one window per
+layer); CUDA's resident stack runs gpt-oss. A recurrent model gets no
+prefix-cache reuse, because its state cannot be truncated to a middle
+position. It can be a speculation target (its state is checkpointed
+before each verify batch and replayed after a rejection) on the CLI and
+the server's private loop, but not in the continuous batch or on the
+paged store, and it cannot be a draft.
 
 
 ## Backends
 
 | Backend | Capabilities |
 |---|---|
-| **CPU** | Dense and MoE. int8×int8 matvec on by default (`FRINK_CPU_INT_DOT=0` opts out), interleaved Q4_Kx8 / Q8_0x4 GEMV, Q8_0x4 batch GEMM for prefill, Q5/Q6 int-dot, pool sized to performance cores |
-| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, MoE Concurrent with fused groups, `MemRanges`, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K) |
-| **CUDA** | Matvec, resident weights, FFN fuse (`--features cuda`), batched GEMMs for `Q8_0`, `Q4_0`, `Q5_0`, `Q4_K`, `Q5_K`, `Q6_K`, `Q2_K`, `Q3_K`, `IQ4_NL`, `IQ4_XS` and `MXFP4` (verified on an RTX 3090, 2026-09-15); `Q4_1`, `Q5_1`, `TQ1_0`, `PTQ1_0` and the seven IQ1/IQ2/IQ3 kinds matvec and GEMM built from one dequant per kind, the IQ grids generated from the CPU's tables (not yet run on hardware), and a resident stack for prefill and decode (norms, QKV bias, QK norm, RoPE, attention tiled over the keys, SwiGLU or GeGLU, residuals on the device; K/V rows back to the host cache through page-locked memory, and kept on the device for the decode that follows). A prefill batch's attention at head widths 64, 128 and 256 runs on the tensor cores on `sm_80` and up (not yet run on hardware). Routed MoE layers ride the stack too: the router on the device and the host's own routing on its logits, then at a decode token the chosen experts in one matvec launch per projection, and over a prefill batch every chosen expert's projection in one grouped tensor-core GEMM (`sm_80` and up). gpt-oss rides it with its attention sinks, `wo` bias, expert biases and clamped SwiGLU on the device. A decode token whose embedding row is its first hidden state is gathered on the device (`get_rows`, built from each kind's GEMM dequant; not yet run on hardware) |
-| **Vulkan** | Decode matvecs and an embedding gather for every weight kind, a prefill GEMM for the same kinds, and a one-submission decode stack, with resident weights (`--features vulkan`, opt-in with `--device vulkan` or `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
+| **CPU** | Dense and MoE. An integer dot against quantized activations for every weight kind (ggml's `vec_dot_type`, ADR 0009), with AVX2 and NEON bodies; on by default where it measured faster (aarch64), `FRINK_CPU_INT_DOT` overrides. Interleaved Q4_Kx8 / Q8_0x4 GEMV, a Q8_0x4 batch GEMM for prefill, and a thread pool sized to the performance cores |
+| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
+| **CUDA** | Resident weights and a resident stack for prefill and decode (`--features cuda`): norms, QKV bias, QK norm, RoPE, attention, SwiGLU or GeGLU and residuals on the device, K/V rows back to the host cache through page-locked memory. Prefill multiplies `Q8_0` and `Q4_K` on the int8 tensor cores and the other kinds on the f16 ones, and a prefill batch's attention runs on the tensor cores at head widths 64, 128 and 256 (`sm_80` and up). Decode matvecs for `Q4_K`, `Q6_K`, `Q8_0` and `MXFP4` dot a q8_1 activation with `dp4a`, as llama.cpp does. Routed MoE layers route on the device for plain softmax and gpt-oss routing, and a prefill batch's experts run as one grouped GEMM per projection. gpt-oss runs with its sinks, biases and clamped SwiGLU on the device. `FRINK_CUDA_GRAPH=1` replays a decode token from a CUDA graph; it is off by default and has not run on a GPU |
+| **Vulkan** | Matvec, prefill GEMM and embedding gather for every weight kind, resident weights, and a decode and prefill stack (`--features vulkan`, opt-in with `--device vulkan` or `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
 
 Which quant kinds each backend runs, per op (matvec for decode, GEMM
 for prefill, `get_rows` for the embedding), and which fall back to the
@@ -66,121 +72,86 @@ tables by `frink caps --kernels` and a test fails when it drifts. A
 fallback also prints a `NO KERNEL` line at load, and `frink inspect-plan`
 lists the tensors of one GGUF that would take one.
 
-Vulkan runs matvecs, a prefill GEMM and a decode stack. `--features vulkan`
-gives `Q8_0`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q2_K`, `Q3_K`, `Q4_K`,
-`Q5_K`, `Q6_K`, every `IQ` kind, `MXFP4`, `TQ1_0` and `PTQ1_0` (GLSL in
-`crates/frink-vulkan/shaders`, compiled SPIR-V committed beside it, one
-workgroup per row), each run against its `frink_quant` scalar twin on
-a real device (an M2 Pro through MoltenVK, and Mesa's lavapipe in CI), through both the mapped
-and the staging-buffer upload. That covers a Q4_K_M or Q5_K_M model's
-matvecs: Llama-3.2-1B Q4_K_M decodes with them on Vulkan to the CPU's
-own greedy tokens. Weights are uploaded once and stay resident, and
-pipelines are built once. A prefill batch through one of those kinds
-is one dispatch of the same shader over a grid whose depth is the
-batch, each position bit for bit its matvec; a row is decoded again
-for every position, which is left to tune on real hardware. A decode token of a plain llama-family
-dense model, and a prefill batch of one, runs every layer in ONE
-submission, or one per 26 layers on a deeper model (the stack:
-norm, Q/K/V, RoPE, an f16 KV mirror, attention, `wo`, residual, norm,
-SwiGLU FFN, residual), with each layer's K and V rows returned to the
-host cache, which stays the authority. A layer the stack does not
-serve (a chunked window, a softcap, RoPE
-`mscale`, routed experts, or any layer under `--ctk f32`,
+### Vulkan
+
+The shaders are GLSL in `crates/frink-vulkan/shaders`, with the
+compiled SPIR-V committed beside them. Each kind is run against its
+`frink_quant` scalar twin on a real device (an M2 Pro through MoltenVK)
+and on Mesa's lavapipe in CI. Weights are uploaded once and stay
+resident.
+
+The stack runs a run of layers in one submission (one per 26 layers on
+a deeper model), for a decode token or a prefill batch: pre-norm
+(RMS, LayerNorm, weightless or biased), QKV bias, QK norm, RoPE, an f16
+KV mirror, attention with or without a sliding window, `wo`, post-norm,
+SwiGLU or GeGLU, and the residuals. Each layer's K and V rows go back
+to the host cache, which stays the authority. A layer the stack does
+not serve (attention sinks, a `wo` bias, a chunked window, an attention
+softcap, RoPE `mscale`, routed experts, or any layer under `--ctk f32`,
 since the device KV is f16) runs on the host with its matvecs
-offloaded: Q/K/V as one submission and a dense SwiGLU FFN as another.
-The stack is held to the CPU and to llama.cpp's decode goldens over
-every graph fixture in CI on lavapipe
+offloaded.
+
+The stack is held to the CPU and to llama.cpp's decode goldens over the
+graph fixtures in CI on lavapipe
 (`decode_step_graphs::vulkan_decode_matches_cpu_and_llama_cpp`), and
 `frink parity` is MATCH with it on Llama-3.2-3B Q4_K_M at a 300-token
-prompt. It is still **opt-in** (`--device vulkan` or `FRINK_VULKAN=1`; unset is off) until
-it is measured against the CPU on rented hardware (ADR 0006); the
-last laptop run, before the stack, was 30 tok/s against the CPU's 113.
-(#409) It exists to give every AMD and Intel GPU a
-path, including the ones ROCm does not support. `docs/plans/archive/vulkan-beachhead-verdict.md` has the
-sizing: a full Vulkan backend is 15 to 25k lines.
+prompt. It stays opt-in until it is measured against the CPU on rented
+hardware (ADR 0006). It exists to give every AMD and Intel GPU a path,
+including the ones ROCm does not support (#409).
 
-The CUDA GEMM has run on hardware and is now the limit. Its hardware test
-passes every kind and shape on an RTX 3090 and `frink verify
---backend cuda` is token-identical to the CPU on Q4_K_M, Q5_K_M, Q6_K,
-Q8_0 and IQ4_XS checkpoints (2026-09-15). It also keeps the
-thread-by-thread scalar twin held against `frink-quant`'s independent
-dequantize-then-GEMM, and the host harness that executes the emitted
-CUDA C against a barrier shim
-(`crates/frink-cuda/tools/mul_mm_host_check/run.sh`), with zero
-mismatches across 11 kinds, 33 shapes and 75,042 compared positions. Below
-the width threshold a single token stays on the matvec kernels.
+### CUDA
 
-CUDA was measured against llama.cpp for the first time on 2026-11-09,
-on rented L40S, A10G and RTX PRO 6000 cards: every dense model checked
-was token-identical to the CPU and at parity MATCH with llama.cpp, and
-behind it on speed. Since then a prefill step's K/V comes back through
-page-locked memory in parallel (208 of a Llama-3.1-8B pp512 step's 383
-ms had been host copies), the GEMM stages its weight rows before
-dequantizing (63 to 107 TFLOPS on the Q4_K gate projection), the
-attention is tiled over the keys, and the decode matvecs give a row
-several warps. At 0.59.0 on an L40S Llama-3.1-8B Q4_K_M is still 3.4x
-behind on prefill and 1.2x on decode. What is left on prefill is the GEMM's
-distance to int8 `mmq`, and on decode the matvecs' bandwidth and the
-launches a token makes (#133, #259). A Windows or
-Linux install runs and answers correctly, but is not yet the choice for
-speed. `/health` reports the same per capability, with a reason string,
-instead of greying out a control without explanation.
+The GEMM's hardware test passes every kind and shape on an RTX 3090,
+and `frink verify --backend cuda` is token-identical to the CPU on
+Q4_K_M, Q5_K_M, Q6_K, Q8_0 and IQ4_XS checkpoints. On rented L40S, A10G
+and RTX PRO 6000 cards every dense model checked was token-identical to
+the CPU and at parity MATCH with llama.cpp, and the tensor-core
+attention and `dp4a` matvecs are token-identical to the CPU on an A100. The
+`Q4_1`, `Q5_1`, `TQ1_0`, `PTQ1_0` and seven IQ1/IQ2/IQ3 kernels, the
+`get_rows` gather and the CUDA graph replay have not yet run on
+hardware (#405, #537).
+
+CUDA is behind llama.cpp on speed; the gap per card and model is in
+[`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md). A Windows or Linux
+install runs and answers correctly, but is not yet the choice for
+speed. `/health` reports each capability with a reason string.
 
 ## Quantization
 
-Parsed and executable on CPU: `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`,
-`Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`,
+Parsed and executable: `F32`, `F16`, `BF16`, `Q4_0`, `Q4_1`, `Q5_0`,
+`Q5_1`, `Q8_0`, `Q8_1`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`,
 `IQ4_NL`, `IQ4_XS`, `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`,
 `IQ3_XXS`, `IQ3_S`, `MXFP4`, `TQ1_0`, `PTQ1_0`.
 
-"Executable" covers several speeds. Every format has a matvec and a
-GEMM kernel on CPU, Metal and CUDA. [`KERNELS.md`](KERNELS.md) shows it
-per op and backend, generated from the dispatch tables and held to them
-by a drift test. Some of the CUDA kernels have not yet run on a GPU
-(#405). Vulkan covers a few formats and falls back to the host for the
-rest (#409). What differs between formats is the CPU's vector path:
+Every weight kind has a matvec and a GEMM kernel on CPU, Metal, CUDA
+and Vulkan; [`KERNELS.md`](KERNELS.md) shows it per op and backend.
+`Q8_1` is ggml's activation format, with no weight path to match, which
+`KERNELS.md` marks `n/a`. Some of the CUDA kernels have not yet run on
+a GPU (#405).
 
-| CPU path | Formats |
-|---|---|
-| AVX2 and NEON, plus the int-dot path | `Q4_0`, `Q8_0`, `Q4_K`, `Q5_K`, `Q6_K` |
-| AVX2 and NEON | `Q2_K`, `Q3_K`, `Q4_1`, `Q5_0`, `Q5_1`, `IQ4_NL`, `IQ4_XS`, safetensors two-buffer `MXFP4` |
-| AVX2, scalar on ARM | `IQ1_S`, `IQ2_XXS`, `IQ3_XXS` |
-| Scalar | `IQ2_XS`, `IQ2_S`, `IQ3_S`, `IQ1_M`, `TQ1_0`, `PTQ1_0` (PrismML ternary), GGUF-block `MXFP4` (gpt-oss's experts) |
+Metal's MoE id kernels: `mul_mv_id` (decode, and prefill below
+llama.cpp's batch threshold) covers every kind with a Metal kernel but
+`PTQ1_0`, whose experts run one matvec each. `mul_mm_id` (prefill)
+covers `Q4_0`, `Q8_0`, `Q2_K`, `Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`,
+`IQ4_NL`, `IQ4_XS` and `MXFP4`; an expert pack of any other kind
+prefills through `mul_mv_id`.
 
-`Q8_1` is ggml's activation format. It has no weight path to match,
-which `KERNELS.md` marks `n/a`.
-
-Metal's MoE id kernels (`mul_mv_id` for decode, `mul_mm_id` for
-prefill) cover every kind in the table above with a Metal kernel but
-two: `Q5_0` has `mul_mv_id` only, and `PTQ1_0` has neither, so its
-experts run one matvec each. The per-backend matrix is
-[`docs/KERNELS.md`](KERNELS.md).
-
-Before choosing a quant:
-
-- The two grid-codebook tiers are correct and deliberately slow on the
-  CPU; on Metal they have kernels in ggml's geometry (#405). The CPU
-  paths were added for coverage: before them those tags could not be
-  decoded at all, which ruled out 5 of the 16 published Unsloth `UD-*`
-  variants. A vectorized path was left out because no golden vector
-  existed that could tell it apart from the scalar one.
-- On an Apple machine's CPU the "AVX2 CPU" row is the scalar row.
-  `IQ1_S`, `IQ2_XXS` and `IQ3_XXS` have x86 kernels and no NEON ones.
-- `I32`, `TQ2_0`, `NVFP4`, `Q1_0`, `Q2_0` and `PQ2_0` are recognized
-  and sized, and nothing executes them. They parse, `frink inspect`
-  reports their real footprint, and a checkpoint needing one stops with
-  an error naming the format rather than being silently mis-measured.
+`I32`, `TQ2_0`, `NVFP4`, `Q1_0`, `Q2_0` and `PQ2_0` are recognized and
+sized, and nothing executes them. They parse, `frink inspect` reports
+their real footprint, and a checkpoint needing one stops with an error
+naming the format.
 
 `IQ2_XS`, `IQ2_S`, `IQ3_S` and `IQ1_M` were validated bit-exact against
-llama.cpp's own `dequantize_row_*` by linking `ggml-quants.c`, not by
-re-reading the spec. They have not been validated end to end on a
-published `UD-*` checkpoint.
+llama.cpp's own `dequantize_row_*` by linking `ggml-quants.c`. They
+have not been validated end to end on a published `UD-*` checkpoint.
 
 ## CLI
 
 llama.cpp-style completion flags (`-m`, `-p`, `-n`, `-ngl`, `--ctk`, …),
-plus `frink chat`, `frink pull` (Hugging Face Hub), `inspect`, `archs`,
-and `presets`. See [`CLI.md`](CLI.md).
+plus `frink chat`, `pull` (Hugging Face Hub), `inspect`, `inspect-plan`,
+`archs`, `presets`, `gguf-split`, `batched-bench`, `verify` (a GPU
+backend against the CPU), `parity` (frink against llama.cpp) and
+`layer-divergence`. See [`CLI.md`](CLI.md).
 
 Constrained decoding is on the CLI too: `--grammar`, `--grammar-file`
 and `-j` / `--json-schema`, the same spellings llama.cpp uses, reaching
@@ -209,8 +180,8 @@ stream at the layers it names and proposes a whole block in one pass;
 its drafted tokens and lattice scores match libllama on the fixtures
 (`tests/dflash_graphs.rs`), and the target's greedy output with it is
 token for token the output without it, on the CPU and on Metal. The
-server takes the same draft with `--model-draft` and feeds it the
-target's layer inputs from the prompt on. See [`CLI.md`](CLI.md) and
+server takes the same draft with `--model-draft`, on its private loop
+and in the continuous batch. See [`CLI.md`](CLI.md) and
 [`CONFIG.md`](CONFIG.md).
 
 `frink perplexity` is the quality axis: corpus evaluation using
@@ -224,14 +195,7 @@ difference predicts. `frink quantize` writes `Q8_0`, `Q4_K_S`,
 --imatrix` on a BF16 Qwen3-0.6B for all five targets tried), and
 refuses every other target by name. `frink imatrix` is
 `llama-imatrix`: same file format in both directions, so either tool's
-matrix feeds either quantizer.
-Q4_K was once thought unable to match byte for byte, and that was
-wrong. llama.cpp's `sumlx += w*x[i]*l` is contracted by its compiler
-into a single fused multiply-add, and Rust does not contract, so a
-strict transcription of the C was the defect. One unit in the last place flips a comparison and rewrites a
-whole super-block. With the fusion spelled out as `mul_add`, Q4_K went
-from 1.15% of super-blocks differing to zero, across all 147 tensors of
-a real model. See [`CLI.md`](CLI.md).
+matrix feeds either quantizer. See [`CLI.md`](CLI.md).
 
 The sampler flags carry llama.cpp's own defaults on `--temp` (0.8),
 `--top-k` (40), `--top-p` (0.95), `--min-p` (0.05) and `--repeat-last-n`
@@ -242,20 +206,17 @@ token-identical. `-e`/`--escape` is on by default as it is there, and a
 *partial* `-ngl N` is refused rather than silently offloading every
 layer.
 
-That default has a deliberate Metal decode cost. At `--temp 0` the
-Metal stack can fold
-`final_norm + lm_head + argmax` into its own command buffer and hand
-back one token id instead of `vocab_size` floats. A device argmax over
-raw logits cannot apply the penalties, so the fold is now refused
-whenever any of `--repeat-penalty`, `--presence-penalty` or
-`--frequency-penalty` is live. At `--repeat-penalty 1.1` that is every
-plain greedy run. It used to fire anyway and return a token the
-host sampler would not have chosen (GitHub issue #170).
+That default has a Metal decode cost. At `--temp 0` the Metal stack can
+fold `final_norm + lm_head + argmax` into its own command buffer and
+hand back one token id instead of `vocab_size` floats. A device argmax
+cannot apply the penalties, so the fold is refused whenever any of
+`--repeat-penalty`, `--presence-penalty` or `--frequency-penalty` is
+live, which at `--repeat-penalty 1.1` is every plain greedy run.
 `--repeat-penalty 1.0` or `--repeat-last-n 0` gets the fold back and
 is also what makes a run token-identical to llama.cpp's defaults.
 
 `frink bench -m model.gguf` works like `llama-bench`: the same `pp512`
-and `tg128` workloads, reported as a median with a population stddev.
+and `tg128` workloads, reported as llama-bench's mean and sample stddev.
 Add `--compare` to run `llama-bench` alongside it and print the gap.
 `--suite` drives every entry in
 [`benchmarks/suite.json`](../benchmarks/suite.json) and regenerates
@@ -296,10 +257,8 @@ OpenAI-compatible HTTP API:
 - Reranking. A `bert` checkpoint carrying a rank head (`cls`,
   `cls.output`, `cls.norm`, `classifier.output_labels`) is served by
   `POST /v1/rerank`, scoring `[CLS] query [SEP] document [SEP]` through
-  the head itself rather than through the cosine of two embeddings. Such
-  a checkpoint could not load at all before: `assert_every_tensor_
-  consumed` rejected the `cls.*` tensors nobody read. Verified end to
-  end against `ms-marco-MiniLM-L6-v2`: the order matches a HuggingFace
+  the head itself rather than through the cosine of two embeddings.
+  Verified end to end against `ms-marco-MiniLM-L6-v2`: the order matches a HuggingFace
   reference, which needed the document to be segment 1 rather than
   llama.cpp's all-zero token types. The scale matches too, once the
   pooler is restored: llama.cpp's converter deletes `bert.pooler.dense`
@@ -378,16 +337,20 @@ OpenAI-compatible HTTP API:
   on chat and completions and all three decode paths. Two constraints in
   one request are refused rather than ranked. `response_format:
   json_object` is still the best-effort character mask, and composes
-- Parallel serving (Metal). Multiple concurrent streaming clients
-  share one batched decode worker (llama.cpp slots model). Continuous
-  batching is opt-in (`-cb` or `-np N`), since its decode attends on
-  the host and one client decodes faster on the private loop; streaming
-  emits tokens incrementally under it. The measured throughput at each
+- Continuous batching: concurrent clients share one batched decode
+  worker (llama.cpp's slots model), streaming tokens as they come. It is
+  opt-in on every backend (`-cb`, `-np` / `--parallel N` or
+  `FRINK_CONTINUOUS_BATCHING=1`); without it concurrent requests
+  serialize on the private loop. On Metal the private loop is also the
+  faster one for a single client, since it attends on the device and the
+  batch attends on the host. The measured throughput at each
   concurrency is in
-  [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured).
-  CLI: `-cb`, `-np` / `--parallel N`,
-  the serialized private path otherwise. See
-  [`plans/archive/metal-parallel-concurrency.md`](plans/archive/metal-parallel-concurrency.md)
+  [`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured)
+- Prefix cache (`FRINK_PREFIX_CACHE_ENTRIES`, private loop): whole KV
+  snapshots in an LRU list, so a follow-up chat turn prefills only the
+  new message. It stores a greedy Metal request too, whose decode keeps
+  only the token id, and refuses a recurrent model's state. See
+  [`CONFIG.md`](CONFIG.md)
 - Cache-aware admission. When a radix prefix cache is configured,
   a waiting job whose prompt is already computed may be admitted ahead
   of one that is not. Two bounds keep it from starving any job: only
@@ -404,35 +367,33 @@ OpenAI-compatible HTTP API:
   what the decoding rows leave, with a floor of 16 prompt tokens, so a
   growing batch shortens the chunk instead of delaying every row's next
   token. The latency effect has not been measured yet
-- Speculative decoding on the server. A request whose sampling the
-  verifier can reproduce drafts tokens by prompt lookup (an n-gram match
-  over its own history, no second model), or with the draft model `-md`
-  names, and verifies them in one
-  batched forward. A drafted token is kept only if it equals the
-  sampler's own draw, so the output does not change. Grammar-constrained
+- Speculative decoding on the server. A request drafts tokens by
+  prompt lookup (an n-gram match over its own history), or with the
+  draft model `-md` names (autoregressive or DFlash), and verifies them
+  in one batched forward. A drafted token is kept only if it equals the
+  sampler's own draw, so the output does not change. It runs on the
+  private loop, on the paged store (a rejected block rewinds its
+  tables) and in the continuous batch, where every row's block is
+  verified in one multi-sequence forward. Grammar and `json_object`
   requests and a paged lease under a sliding window do not speculate,
-  and `usage` reports the speculation fields only when it ran. The
-  paged store rolls a rejected block back by rewinding its tables. The
-  continuous batch (`--cont-batching`) speculates too: every row's
-  block is verified in one forward, and a row's answer is the one it
-  gets decoded alone. A target with recurrent layers (Mamba, GDN,
-  Lightning) does: its state is checkpointed before each verify batch,
+  and `usage` reports the speculation fields only when it ran. A target
+  with recurrent layers (Mamba, GDN, Lightning) speculates on the
+  private loop only: its state is checkpointed before each verify batch,
   and a rejection restores it and replays the committed tokens, as
-  llama.cpp's server does
+  llama.cpp's server does. A DFlash draft is refused beside the prefix
+  cache and the paged store
 - Slot save/restore (llama.cpp's `POST /slots/{id}?action=save|restore`):
   a prompt prefix's KV written to `--slot-save-path` and restored into
   the prefix cache after a restart, so a long system prompt is prefilled
   once per file rather than once per process. The file carries a
   checkpoint fingerprint, and a restore under another model or another
   quantisation is refused by name. See [`API.md`](API.md#slot-save-and-restore)
+- llama-server's own routes: `/props`, `GET /slots`, slot erase,
+  `/infill`, `/apply-template` and `/metrics`. See [`API.md`](API.md)
 - Paged KV: shared page storage many requests read through a block
   table, with a radix tree over reference-counted page groups so
   conversations off one system prompt share its KV rather than each
-  holding a copy. Off unless `FRINK_PAGED_KV_BLOCKS` is set. It used to
-  be refused on a GPU backend, where it returned fluent wrong tokens; the
-  cause was a Metal prefill leaving K/V on the device and filling the
-  host cache with placeholders that the paged prefill then copied into
-  the page store, and that refusal is lifted. See
+  holding a copy. Off unless `FRINK_PAGED_KV_BLOCKS` is set. See
   [`CONFIG.md`](CONFIG.md)
 - On the paged store, a model whose layers *all* slide by the same
   window slides during decode, so a request holds its prompt and a
@@ -448,20 +409,16 @@ OpenAI-compatible HTTP API:
   carries its own window from `attention.sliding_window` and
   `attention.sliding_window_pattern` (or the file's per-layer array) and
   keeps only `window` rows plus slack, while the full-attention layers
-  keep everything. Gemma-3-4B at a 32k context holds 1.68 GiB of host
-  f32 KV instead of 9.13 GiB. Speculative decoding, the prefix cache and
+  keep everything (Gemma-3-4B at a 32k context keeps under a fifth of
+  its KV). Speculative decoding, the prefix cache and
   `n > 1` forks all work on an evicting cache: a drain keeps a rollback
   reserve and drafts are bounded by it, and a prefix-cache match deeper
   than the cache can truncate to is a miss rather than a history with a
   hole in it. `FRINK_KV_WINDOW=0` keeps every row. It turns itself off
   under `FRINK_METAL_ATTN` and on a draft model, and the paged store and
-  the KV pool do not evict. Output is token-identical with it on or off,
-  asserted on logits as well as token ids against gemma-2-2b-it-Q4_K_M
-  and through rejected drafts on a fixture decoding several windows
-  past the end. `--ctx-size auto` and the pre-load admission check are
-  priced against the same per-layer residency the stores evict with, so
-  the saving is context a user is actually offered rather than memory
-  nothing spends. See [`CONFIG.md`](CONFIG.md)
+  the KV pool do not evict. Output is token-identical with it on or off.
+  `--ctx-size auto` and the pre-load admission check are priced against
+  the same per-layer residency. See [`CONFIG.md`](CONFIG.md)
 - `frink serve-bench`: concurrency, TTFT, TPOT and queueing numbers
   for a live server, with the methodology (positional split, pooled
   nearest-rank percentiles, whole-run throughput) tested socket-free.
@@ -510,9 +467,7 @@ policy in `frink-server::policy`.
 The table compares that description with what frink does; the gaps
 are the roadmap.
 
-When the table was audited on 2026-09-23, two rows were wrong: one
-described a leak that had been fixed, and one called a named refusal
-an absence. Its structural claims are now pinned by
+Its structural claims are pinned by
 `crates/frink-server/tests/documented_capabilities.rs`, so a row that
 stops matching the code turns a test red.
 
@@ -521,7 +476,7 @@ stops matching the code turns a test red.
 | Bandwidth-adaptive CPU/GPU co-execution (`q*`) | **Partial.** `qstar::BandwidthProfile` is in `frink-core` and used by `frink bench-bw`, a measurement tool. The serving path does not consult it. |
 | Full-layer double-buffered prefill streaming | **Built, not wired.** Kept for the out-of-core work, which names it. |
 | Global LRU expert caching | **Yes, singular, and ranked by routing counts.** `expert_store` is wired into both decode paths; for a GGUF model its entries live in the slots of a `SlotDevice` (host RAM, or on Metal one Shared buffer the GPU reads in place), eviction ranks by the decoder's activation counts, and decode is proven identical to resident at half, a quarter and one slot of the expert bytes. |
-| Graph-compatible execution | **No.** Execution is eager. `ExecutionPlan` is built and read by nothing. |
+| Graph-compatible execution | **Off by default.** Execution is eager. `FRINK_CUDA_GRAPH=1` replays a CUDA decode token of the resident stack from a captured graph; it has not run on a GPU. `ExecutionPlan` is built and read by nothing. |
 | FTW fast weight format | **No.** GGUF only. |
 | Semantic anchor checkpoints for KV | **Yes.** `anchor::decode_slide` and `WindowPolicy` are wired into `generate.rs` and the batch scheduler. |
 | Agentic context edits without recompute | **Partial, and no longer leaking.** The radix prefix cache shares pages and reports `cached_tokens` on both the private and the batched path. `evict` is called from `acquire_paged_caches`, which both paths go through, when a request cannot find pages: the tree gives back what no live lease has locked, and the caller retries immediately rather than charging reclamation against its deadline. What is still partial is the edit itself: a changed middle forces a recompute from that point, because the cache is a prefix tree. |
@@ -530,13 +485,13 @@ stops matching the code turns a test red.
 | NVFP4 / FP8 | **Refused by name, not executed.** NVFP4 is recognized and sized by `frink-gguf` (tag 40) and has no execution path, so a file carrying it stops instead of computing something else. FP8 appears only as a KV cache wire (`--ctk fp8`), not as a weight format. |
 | DeepSeek-V4-Flash, GLM-5.2, Kimi K3 | **Loaders and primitives only.** Nothing has run end to end on a real checkpoint. |
 | OpenAI + Anthropic compatible APIs | **Yes**, both, plus Responses. Tool calls parsed in eleven wire formats. |
-| NVIDIA RTX 30/40/50 | **Runs, correct, behind, and the published receipts are stale.** Receipts on a GTX 1080, an RTX 3060 and an RTX 3090; correct by `frink verify`. Those receipts read 22x to 43x on prefill and were taken on 0.17.1 and 0.21.0, before the resident prefill and the tensor-core GEMM; the ledger marks them stale for that reason. The last prefill number measured after those landed is 4.2x on an RTX 3090 (1932 tok/s against ~8,200). Decode's rows are stale too, and the resident decode stack (#133) has not run on a GPU. No GPU in CI, and no receipt on this build. |
+| NVIDIA RTX 30/40/50 | **Runs, correct, behind, and the published receipts are stale.** Receipts on an RTX 3060 and an RTX 3090 (0.17.1 and 0.21.0) and an L40S (0.59.0); correct by `frink verify` and `frink parity`. The RTX receipts read 22x to 43x on prefill and predate the resident prefill and the tensor-core GEMM; the ledger marks every CUDA row stale. The last RTX 3090 prefill number measured after those landed is 4.2x (1932 tok/s against ~8,200), not a receipt. No GPU in CI, and no receipt on this build. |
 
 Two notes. Frink runs on Apple Metal, which that description does not
-cover, and Metal is where it is fastest: every `pp512` row is 0.99x to
-1.09x against llama.cpp and every one of the 16 comparable `tg128` rows
-is faster. The largest gap is missing from this table: running a model that does
-not fit in memory now executes its residency policy (set
+cover, and Metal is where it is fastest
+([`benchmarks/RESULTS.md`](../benchmarks/RESULTS.md)). The largest gap
+is missing from this table: running a model that does not fit in
+memory executes its residency policy (set
 `FRINK_EXPERT_CACHE_BYTES` below the expert bytes), and has been checked
 on models that fit, under a budget. It has not yet run a model that
 really exceeds RAM, and streamed layers decode several times slower
