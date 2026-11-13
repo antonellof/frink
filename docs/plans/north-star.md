@@ -90,8 +90,13 @@ The backend at parity. Everything here can be checked on our own Mac,
 without a rental.
 
 6. **Verify what landed untested on Metal.** `frink-metal`'s ignored
+<<<<<<< Updated upstream
    tests and `frink-models`' Metal graph suites pass on an M5 Max; CI
    does not run the latter yet. Then `frink-server` with a draft model and with a DFlash draft, once on
+=======
+   tests and `frink-models`' Metal graph suites pass on an M5 Max, and
+   CI runs both. Then `frink-server` with a draft model and with a DFlash draft, once on
+>>>>>>> Stashed changes
    the private loop and once with `--cont-batching`: several
    temperature-0 requests return the same text as without the draft,
    and `usage` reports accepted draft tokens (#600, #533).
