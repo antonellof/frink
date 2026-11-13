@@ -87,7 +87,7 @@ library or overriding the CLI.
 
 | Variable | Purpose |
 |---|---|
-| `FRINK_CONTINUOUS_BATCHING` | `1` turns on the batched decode worker, `0` keeps the private decode loop; unset is off on every backend. `--cont-batching` / `-cb` and `--parallel N` set it to `1`, `--no-cont-batching` to `0`. A KV pool or `FRINK_PREFIX_CACHE_ENTRIES` keeps the private loop, with a warning; paged KV composes with it |
+| `FRINK_CONTINUOUS_BATCHING` | `1` turns on the batched decode worker, `0` keeps the private decode loop; unset is off on every backend. `--cont-batching` / `-cb` and `--parallel N` set it to `1`, `--no-cont-batching` to `0`. Asked for beside a KV pool or `FRINK_PREFIX_CACHE_ENTRIES` (without paged KV), or on a dedicated engine (Kimi, MLA, GLM-5.2), the server refuses to start and names the conflict; paged KV composes with it |
 | `FRINK_CB_MAX_SEQS` | Continuous batching: cap on in-flight sequences (llama.cpp `-np`). CLI: `-np N` / `--parallel N`. Default: unlimited. Reported as `frink_scheduler_max_seqs` on `/metrics` |
 | `FRINK_CB_PREFILL_CHUNK`, `FRINK_CHUNKED_PREFILL` | Prompt tokens per forward pass, on the batch scheduler and the private decode loop respectively. On the scheduler the chunk is a scheduling quantum, the granularity at which a long prompt yields to in-flight decodes, since each tick runs one chunk plus one batched decode step. On the private loop it is the batch shape of each `forward_batch`. `-b` / `-ub` set both from one value (the smaller of the two flags, llama.cpp's own rule). Defaults: 128 on the scheduler, unchunked on the private loop |
 | `FRINK_CB_MAX_QUEUE` | Continuous batching: requests allowed to wait for admission (default `512`). Past it, new requests get `503` + `Retry-After` instead of queueing without bound |

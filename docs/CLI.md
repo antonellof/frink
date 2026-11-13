@@ -1436,7 +1436,8 @@ serializes concurrent requests. The batched decode attends on the host,
 which at long context is several times slower for one client (Qwen3-8B
 at 7.4k tokens on an M2 Pro: 24.6 tok/s private, 3.6 batched), and
 serves many clients at once. `FRINK_PREFIX_CACHE_ENTRIES` and the KV
-pool keep the private loop ([CONFIG.md](CONFIG.md#tuning)).
+pool keep the private loop, so `-cb` beside either (without paged KV) is
+refused at startup ([CONFIG.md](CONFIG.md#tuning)).
 
 Without the feature, `frink serve` still exists and explains itself
 rather than reporting an unknown subcommand, since a compiled-out
