@@ -92,6 +92,9 @@ pub struct AttnShape {
     pub k_off: usize,
     pub v_off: usize,
     pub scale: f32,
+    /// A sliding window: each query attends over its own position and
+    /// the `window - 1` before it. `None` is everything cached.
+    pub window: Option<usize>,
 }
 
 /// What one bound op reads and writes: three `(buffer, f32 offset,
@@ -334,9 +337,14 @@ impl<'w> Batch<'w> {
     ) {
         let p = self.positions;
         let stride = s.seq_len + p - 1;
+        assert!(
+            s.n_heads < 1 << 16 && s.n_kv_heads < 1 << 16,
+            "head counts share a word"
+        );
+        assert!(s.window != Some(0), "a window of no positions");
         let push = words(&[
-            s.n_heads as u32,
-            s.n_kv_heads as u32,
+            s.n_heads as u32 | (s.n_kv_heads as u32) << 16,
+            s.window.unwrap_or(0) as u32,
             s.head_dim as u32,
             s.seq_len as u32,
             s.k_off as u32,
