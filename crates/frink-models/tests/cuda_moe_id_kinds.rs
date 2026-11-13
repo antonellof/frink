@@ -99,7 +99,10 @@ fn every_kind_packs_for_the_cuda_id_kernels_and_q8_1_is_fenced() {
                 .cuda_view()
                 .unwrap_or_else(|| panic!("{kind}: layer {l}'s pack was fenced"));
             assert_eq!(view.gate.kind.name, kind, "layer {l}");
-            assert_eq!(view.down.rows, view.gate.cols, "layer {l}: down is hidden x ffn");
+            assert_eq!(
+                view.down.rows, view.gate.cols,
+                "layer {l}: down is hidden x ffn"
+            );
             assert!(
                 planes.relabelled("Q8_1").cuda_view().is_none(),
                 "{kind}: a Q8_1 pack was admitted"
@@ -204,7 +207,10 @@ mod device {
         let mut worst = 0f32;
         for (step, (g, c)) in gpu.iter().zip(cpu).enumerate() {
             let delta = common::worst_vs(g, c);
-            assert!(delta <= TOL, "{what} step {step}: max |cuda - cpu| = {delta} > {TOL}");
+            assert!(
+                delta <= TOL,
+                "{what} step {step}: max |cuda - cpu| = {delta} > {TOL}"
+            );
             worst = worst.max(delta);
         }
         worst
@@ -264,7 +270,8 @@ mod device {
         if !device_present() {
             return;
         }
-        let path = synthetic_llama::write_moe("cuda_moe_no_id", GgmlType::Q8_0, quant_encode::encode);
+        let path =
+            synthetic_llama::write_moe("cuda_moe_no_id", GgmlType::Q8_0, quant_encode::encode);
         let (tokens, cpu) = cpu_rows(&path);
         let mut relabelled = load(&path);
         for layer in &mut relabelled.layers {
@@ -278,7 +285,10 @@ mod device {
             "cuda-moe-no-id: {waits} waits per decode token (per-expert {loop_waits}, \
              id {id_waits}), worst |cuda - cpu| = {worst:.3e}"
         );
-        assert_eq!(waits, loop_waits, "the fenced pack did not take the per-expert path");
+        assert_eq!(
+            waits, loop_waits,
+            "the fenced pack did not take the per-expert path"
+        );
         assert!(id_waits < loop_waits);
         std::fs::remove_file(&path).ok();
     }

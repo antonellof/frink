@@ -28,11 +28,11 @@ pub mod dp4a_twin;
 pub mod get_rows;
 /// The IQ grid tables as CUDA C, generated from `frink_quant::iq_tables`.
 pub mod iq_grids;
-/// Host wall time of a CUDA step by phase (`FRINK_CUDA_TIME=1`).
-pub mod phases;
 /// The routed-expert kernels (`mul_mv_id`, `mul_mm_id`): text, the
 /// routing map and the twins.
 pub mod moe_id;
+/// Host wall time of a CUDA step by phase (`FRINK_CUDA_TIME=1`).
+pub mod phases;
 
 /// The per-kind CUDA matvec (decode) kernel table. Always compiled,
 /// for the same reason [`mul_mm`] is: it is kernel text plus three

@@ -18,8 +18,8 @@
 //! Never run on a GPU; the hardware test below is owed.
 
 use crate::gpu::{
-    ensure_module_loaded_lazy, resident_cuda_weights, shared_device, silu_mul_device, CudaError,
-    ResidentCudaWeights,
+    ensure_module_loaded_lazy, glu_mul_device, resident_cuda_weights, shared_device, CudaError,
+    GluCuda, ResidentCudaWeights,
 };
 use crate::moe_id::{
     mm_id_names, mm_id_src, mv_id_names, mv_id_src, IdMap, IdPlane, MM_ID_MIN_ROWS,
@@ -241,7 +241,7 @@ pub fn launch_moe_swiglu_id(
         let slot = DeviceMap::upload(&dev, &IdMap::build(ids, top_k, n_experts, false))?;
         let (g, wg) = enqueue_id(&dev, &planes.gate, &d_x, n_slots, Route::Mm(&tok))?;
         let (u, wu) = enqueue_id(&dev, &planes.up, &d_x, n_slots, Route::Mm(&tok))?;
-        let act = silu_mul_device(&dev, &g, &u, n_slots * ffn)?;
+        let act = glu_mul_device(&dev, GluCuda::Silu, &g, &u, n_slots * ffn)?;
         let (d, wd) = enqueue_id(&dev, &planes.down, &act, n_slots, Route::Mm(&slot))?;
         held.extend([wg, wu, wd]);
         d
@@ -258,7 +258,7 @@ pub fn launch_moe_swiglu_id(
             x_div: top_k,
         };
         let (u, wu) = enqueue_id(&dev, &planes.up, &d_x, n_slots, tok)?;
-        let act = silu_mul_device(&dev, &g, &u, n_slots * ffn)?;
+        let act = glu_mul_device(&dev, GluCuda::Silu, &g, &u, n_slots * ffn)?;
         let slot = Route::Mv {
             ids: &d_ids,
             x_div: 1,
