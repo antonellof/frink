@@ -147,16 +147,19 @@ impl Decoder {
                 .saturating_add(batch_size)
                 .saturating_add(256)
                 .max(512);
-            let reset = match guard.as_ref() {
+            let reset = match guard.as_mut() {
                 None => true,
                 Some(v) => {
                     v.len() != need
                         || v.iter().any(|m| m.capacity() < need_cap)
-                        || v.iter()
-                            .zip(kv_caches.iter())
-                            // ROWS: Metal holds rows, and this asks whether the
-                            // host buffer matches them.
-                            .any(|(m, c)| m.seq_len != c.rows())
+                        // Per layer, not all-or-nothing: see
+                        // `resync_stale_metal_layers`.
+                        || Self::resync_stale_metal_layers(v, kv_caches, |m, c| {
+                            // ROWS: Metal holds rows, and this asks
+                            // whether the host buffer matches them.
+                            m.seq_len != c.rows()
+                        })
+                        .is_err()
                 }
             };
             if reset {
@@ -363,7 +366,7 @@ impl Decoder {
                                 });
                                 if let Some(h_out) = fused {
                                     Self::advance_host_kv_after_metal_prefill(
-                                        &metal_kvs[l],
+                                        &mut metal_kvs[l],
                                         cache,
                                         batch_size,
                                         host_kv_authoritative,
@@ -550,7 +553,7 @@ impl Decoder {
                                     .map(
                                         |(attn_out_batch, _, _)| {
                                             Self::advance_host_kv_after_metal_prefill(
-                                                &metal_kvs[l],
+                                                &mut metal_kvs[l],
                                                 cache,
                                                 batch_size,
                                                 host_kv_authoritative,
@@ -674,6 +677,15 @@ impl Decoder {
                 // batch is position `start_pos + b`, which is what the
                 // RoPE loop above used for it.
                 self.apply_attn_temperature(l, &mut q_batch, q_width, |b| start_pos + b);
+
+                // The host body reads this layer's earlier rows, which an
+                // earlier Metal chunk may have left as placeholders. The
+                // device rows it pushes below are re-uploaded at the next
+                // entry (`resync_stale_metal_layers`).
+                #[cfg(feature = "metal")]
+                if let Some(Some(metal_kvs)) = metal_kv_guard.as_mut().map(|g| g.as_mut()) {
+                    Self::catch_up_host_kv_from_metal(&mut metal_kvs[l], cache);
+                }
 
                 // ROWS, not positions: it is added to `b + 1` below to give
                 // each query in the batch the length of the KV it attends

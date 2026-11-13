@@ -550,7 +550,9 @@ mod metal {
     /// reach a kernel): min 2.4e-7, p50 6.8e-4, p90 4.7e-2, then a
     /// CONTINUOUS tail to 1.33e-1 (`minimax_01_fused_qkv`), then nothing
     /// until 4.7e-1, where the fixtures in [`KNOWN_METAL_DIVERGENCES`]
-    /// start and run to 7.5.
+    /// start and run to 7.5. Re-read after #630 (2026-11-13, M5 Max,
+    /// 163 fixtures): p50 5.8e-4, p90 9.1e-3, max still 1.33e-1 on the
+    /// same fixture, with the 21 fixed rows inside it.
     ///
     /// The continuous part is explained, and by the same choices
     /// llama.cpp's own Metal backend makes: the prefill GEMM
@@ -575,48 +577,23 @@ mod metal {
     /// measured one differ in EITHER direction, so a fix has to remove
     /// its row and a new divergence cannot hide among the old ones.
     ///
-    /// Two causes were separated by re-running with `FRINK_METAL_ATTN=0`
-    /// (dense Metal matvecs and GEMMs only):
+    /// `hrm_text` is the one row, and it is not a Metal fault. Its decode
+    /// runs on the host (8 dispatches, all in the prefill GEMMs), and the
+    /// model amplifies rounding: the CPU alone, with an f16 KV cache
+    /// against its own f32 one, is 6.3e-2 apart at the prefill, past 0.2
+    /// by step 4, and parts at step 8 (measured 2026-11-13, M5 Max).
+    /// The half-staged prefill GEMM is the same size of perturbation.
     ///
-    /// - FUSED ATTENTION ONLY (clean with the attention block off):
-    ///   the first decode step after a Metal prefill parts from the CPU
-    ///   on `olmo`, `olmo2`, `orion`, `stablelm`, `exaone4`, `smollm3`,
-    ///   `mellum`, `plamo3`, while the row body from position 0 matches
-    ///   to ~1e-6 on the same fixtures, so it is the prefill-to-decode
-    ///   hand-off of the device KV. `olmo_clamped` and `step35` (clamped,
-    ///   so fenced off the fused path) are clean beside their unclamped
-    ///   twins. Six MoE rows (`bailingmoe`, `ernie4_5_moe`, `glm4moe*`,
-    ///   `minimax_m2`) PANIC in `frink_metal::attn` asserting
-    ///   `o_launch.rows == n_heads * head_dim`, which is false whenever
-    ///   the attention width differs from the hidden size: the
-    ///   eligibility check admits a layer the launch cannot take.
-    /// - DENSE METAL TOO (still wrong with the attention block off):
-    ///   `laguna*` (gated attention), `nanbeige` (layer loop),
-    ///   `hrm_text`, `step35_noclamp`, `lfm3_no_post_norm`.
-    pub const KNOWN_METAL_DIVERGENCES: &[&str] = &[
-        "bailingmoe",
-        "ernie4_5_moe",
-        "exaone4",
-        "glm4moe",
-        "glm4moe_air",
-        "glm4moe_mrope",
-        "hrm_text",
-        "laguna",
-        "laguna_swa",
-        "laguna_swa_rot",
-        "lfm3_no_post_norm",
-        "mellum",
-        "minimax_m2",
-        "nanbeige",
-        "olmo",
-        "olmo2",
-        "orion",
-        "plamo3",
-        "smollm3",
-        "stablelm",
-        "stablelm_parkey",
-        "step35_noclamp",
-    ];
+    /// The 22 rows #630 found had three causes, fixed there: a Metal
+    /// prefill left placeholder rows in the host KV that a host decode
+    /// layer then read, or that a device-KV rebuild uploaded (`olmo*`,
+    /// `orion`, `stablelm*`, `exaone4*`, `smollm3`, `mellum*`,
+    /// `plamo3`); `launch_decode_attn_block` asserted `wo`'s OUTPUT was
+    /// the attention width (`bailingmoe`, `ernie4_5_moe`, `glm4moe*`,
+    /// `minimax_m2`); and the host-attention device tail skipped the
+    /// head-wise output gate (`laguna*`, `step35_noclamp`,
+    /// `lfm3_no_post_norm`) and the loop norm (`nanbeige`).
+    pub const KNOWN_METAL_DIVERGENCES: &[&str] = &["hrm_text"];
 
     pub fn run() {
         if frink_metal::gpu::probe().is_none() {

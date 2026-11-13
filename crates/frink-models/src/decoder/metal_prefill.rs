@@ -205,7 +205,7 @@ impl Decoder {
             self.config.attn_logit_softcap,
         )
         .ok()?;
-        for (mkv, cache) in kvs.iter().zip(&mut kv_caches[start..start + run_len]) {
+        for (mkv, cache) in kvs.iter_mut().zip(&mut kv_caches[start..start + run_len]) {
             Self::advance_host_kv_after_metal_prefill(
                 mkv,
                 cache,

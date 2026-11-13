@@ -158,24 +158,27 @@ impl Decoder {
                 .unwrap_or(512)
                 .max(512)
                 .max(pos + 1);
-            let reset = match guard.as_ref() {
+            let reset = match guard.as_mut() {
                 None => true,
                 Some(v) => {
                     if v.len() != need || v.iter().any(|m| m.capacity() < pos + 1) {
                         // Growing / reshaping: preserve Metal-ahead tokens on host first.
                         if v.len() == need {
-                            for (m, c) in v.iter().zip(kv_caches.iter_mut()) {
+                            for (m, c) in v.iter_mut().zip(kv_caches.iter_mut()) {
                                 Self::catch_up_host_kv_from_metal(m, c);
                             }
                         }
                         true
-                    } else if v.iter().all(|m| m.seq_len == pos) {
-                        // Metal already holds tokens [0, pos). Host may lag
-                        // after dense-stack decode — do not re-upload from host.
-                        false
                     } else {
-                        // Stale Metal (new request / prefix restore): rebuild from host.
-                        true
+                        // A layer whose Metal KV already holds tokens
+                        // [0, pos) keeps it: the host may lag after a
+                        // dense-stack decode, or hold placeholders after
+                        // a Metal prefill. Any other layer (a new
+                        // request, a prefix restore, a layer the last
+                        // pass served on the host) is rebuilt from the
+                        // host, which is the authority for it.
+                        Self::resync_stale_metal_layers(v, kv_caches, |m, _| m.seq_len != pos)
+                            .is_err()
                     }
                 }
             };
@@ -600,7 +603,7 @@ impl Decoder {
                                     }
                                     // Preserve any prior Metal-ahead tokens on host
                                     // before dropping the device buffers.
-                                    for (m, c) in metal_kvs.iter().zip(kv_caches.iter_mut()) {
+                                    for (m, c) in metal_kvs.iter_mut().zip(kv_caches.iter_mut()) {
                                         Self::catch_up_host_kv_from_metal(m, c);
                                     }
                                     clear_metal_after_stack = true;
@@ -843,7 +846,7 @@ impl Decoder {
                                             Ok(new_h) => {
                                                 // Catch up any dense-stack lag + this token.
                                                 Self::catch_up_host_kv_from_metal(
-                                                    &metal_kvs[l],
+                                                    &mut metal_kvs[l],
                                                     cache,
                                                 );
                                                 layer.moe.record_activations(&[0]);
@@ -863,7 +866,10 @@ impl Decoder {
                                             did_metal_attn = true;
                                         } else if metal_kvs[l].seq_len != cache.rows() {
                                             // Dense path may have advanced Metal KV before failing.
-                                            Self::catch_up_host_kv_from_metal(&metal_kvs[l], cache);
+                                            Self::catch_up_host_kv_from_metal(
+                                                &mut metal_kvs[l],
+                                                cache,
+                                            );
                                             clear_metal_kv = true;
                                         }
                                     }
@@ -1030,7 +1036,7 @@ impl Decoder {
                                                             if metal_kvs[l].seq_len != cache.rows()
                                                             {
                                                                 Self::catch_up_host_kv_from_metal(
-                                                                    &metal_kvs[l],
+                                                                    &mut metal_kvs[l],
                                                                     cache,
                                                                 );
                                                                 clear_metal_kv = true;
@@ -1073,7 +1079,7 @@ impl Decoder {
                                                 "frink: Metal attn block failed, CPU fallback: {e}"
                                             );
                                                 Self::catch_up_host_kv_from_metal(
-                                                    &metal_kvs[l],
+                                                    &mut metal_kvs[l],
                                                     cache,
                                                 );
                                                 clear_metal_kv = true;
@@ -1081,9 +1087,18 @@ impl Decoder {
                                         }
                                     }
                                 }
-                            } else if metal_kvs[l].seq_len > cache.rows() {
-                                // Leaving Metal path: host must see full KV for CPU attn.
-                                Self::catch_up_host_kv_from_metal(&metal_kvs[l], cache);
+                            }
+                            // Leaving the Metal path, by ANY of the ways
+                            // above (a stack-only feature, a launch with
+                            // no weights, a failed launch): the host body
+                            // below reads this layer's rows, so they have
+                            // to be the real ones, placeholders included.
+                            // It used to catch up only behind the outer
+                            // `else`, so a layer that passed the position
+                            // check and then had no launch attended over
+                            // the placeholders a Metal prefill left (#630).
+                            if !did_metal_attn {
+                                Self::catch_up_host_kv_from_metal(&mut metal_kvs[l], cache);
                             }
                         }
                         if clear_metal_kv {
