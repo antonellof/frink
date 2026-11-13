@@ -52,6 +52,17 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **The prefix cache stored nothing for a greedy request on Metal**,
+  and greedy is the server's default. The Metal decode folds the last
+  projection into an argmax and keeps one id, and the store refused any
+  request without a full logit row, so `FRINK_PREFIX_CACHE_ENTRIES`
+  never hit for a client that sends no temperature. The KV is now
+  stored without the row; an exact repeat recomputes its last position.
+  A restored prefix also rebuilds the Metal arena, which a length check
+  alone could mistake for another conversation's, and prefills its
+  suffix in one batch rather than token by token. Qwen3-8B Q4_K_M,
+  7.4k-token agent prompt on an M2 Pro: follow-up turns 38 s -> 2.3 s,
+  greedy output identical to an uncached run.
 - **The Metal private decode loop answered 500 to every request whose
   prompt-lookup draft was rejected.** Its KV lives on the device and the
   host caches stop at the prompt, but the speculative gate only asked
