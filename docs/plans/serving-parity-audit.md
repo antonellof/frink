@@ -202,7 +202,7 @@ matched unlocked leaf and cascading into a newly childless parent.
 reused 736 of 757 tokens deep (97.2%), 938 ms cold against 410 ms
 warm. A
 different salt with identical prompt text reuses nothing. Reported
-through `usage.cached_tokens` on both paths since 0.49.0 — before
+through `usage.cached_tokens` on both paths since 0.49.0; before
 that the batched path adopted correctly and reported zero, which is
 what the measurement found.
 
@@ -257,8 +257,9 @@ the one number in this document that did not come off a socket.
 | Multi-device expert residency | Not implemented. Expert residency executes on one device, through the host and Metal expert slots (`frink-core/src/expert_slab.rs`, #406). Nothing spreads experts across devices. |
 
 Present and worth naming because they are usually listed beside the
-above: speculative decoding (a draft model on `frink run`, prompt lookup on
-the server's private loop),
+above: speculative decoding (prompt lookup, a draft model or a DFlash
+draft, on `frink run`, the server's private loop and inside the
+continuous batch, #614 and #615),
 grammar- and schema-constrained decoding, LoRA adapters
 (`frink-models/src/lora.rs`), and an OpenAI- plus Anthropic-compatible
 API surface.
@@ -268,13 +269,13 @@ API surface.
 **Not measured, deliberately.** Cross-engine numbers need a quiet box.
 The CPU and CUDA rows in `benchmarks/RESULTS.md` come from rented
 hardware and every one of them is currently marked stale against this
-build. Metal is the one backend this laptop is the sanctioned hardware
+build. Metal is the one backend a local Mac is the sanctioned hardware
 for, and at the time of this audit `suggestd` and `spotlightknowledged`
 were each holding about 90% of a core, which `CLAUDE.md` names as
 disqualifying. A number taken then would be a fact about the desktop
 session.
 
-The serving figures above are self-relative — one build against itself
-on one box, interleaved — which is exactly the kind of measurement a
+The serving figures above are self-relative: one build against itself
+on one box, interleaved, which is exactly the kind of measurement a
 loaded machine can still support, and is why they are quoted and a
 throughput comparison is not.

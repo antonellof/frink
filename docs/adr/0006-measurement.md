@@ -15,8 +15,8 @@ core.
 ## Decision
 
 - CPU and CUDA numbers come from rented vast.ai hosts with
-  `cpu_cores_effective == cpu_cores`. The M2 Pro is used for Metal
-  only. Agents never benchmark; the parent session does.
+  `cpu_cores_effective == cpu_cores`. A local Mac is used for Metal
+  only, and a Metal row names its chip. Agents never benchmark; the parent session does.
 - Before a run: `ps -eo pcpu,comm | sort -rn | head`; any process above
   ~90% disqualifies the host, whatever the load average says.
 - Trust the receipt, not the flag: `backend_active` is what ran. A
