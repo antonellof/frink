@@ -4193,7 +4193,7 @@ pub fn launch_moe_decode_stack(
         // llama.cpp / dense-stack: one Concurrent encoder for the full graph,
         // barriers only via MemRanges (ggml_mem_ranges).
         let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
-        let early = crate::timing::early_commit_layer(layers.len());
+        let early = crate::timing::early_commit_layer(crate::timing::Stack::Moe, layers.len());
         let mut mrs = MemRanges::new();
 
         let _embd_w = if let Some(e) = embd {

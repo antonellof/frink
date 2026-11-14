@@ -386,7 +386,7 @@ pub fn launch_decode_dense_stack(
 
     let clock = SubmitClock::start();
     let mut cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
-    let early = crate::timing::early_commit_layer(layers.len());
+    let early = crate::timing::early_commit_layer(crate::timing::Stack::Dense, layers.len());
     // Gemma-style post-norms ("sandwich"), and Gemma-4's per-layer gate
     // and output scale: these layers take the EAGER residual path below,
     // which is what makes concurrent encode safe here.

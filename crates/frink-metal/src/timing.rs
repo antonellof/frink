@@ -334,11 +334,14 @@ pub(crate) fn note_wait(
 /// `None` = one command buffer: under `FRINK_METAL_KERNEL_TIMING` (its
 /// spans belong to one command buffer), with `FRINK_METAL_EARLY_COMMIT=0`,
 /// or for a one-layer stack. `FRINK_METAL_EARLY_COMMIT=N` splits before
-/// layer `N`; unset is the first third of the layers, at least one.
-/// Measured on an M5 Max (tg128): gpt-oss-20b 105 tok/s unsplit, 121-129
-/// at an eighth, 146-153 at a third (llama.cpp 154), worse again past
-/// half; Llama-3.2-1B gains 4-10% anywhere from an eighth to a half.
-pub(crate) fn early_commit_layer(n_layers: usize) -> Option<usize> {
+/// layer `N` in either stack. Unset: the dense stack splits after the
+/// first third of its layers (at least one); the MoE stack does not.
+///
+/// Measured on an M5 Max (tg128, best of interleaved runs): Llama-3.2-1B
+/// gains 4-10% anywhere from an eighth to a half. gpt-oss-20b gained
+/// with a split before the MoE prefill rework (59d0586f) and loses with
+/// one after it: 124 tok/s unsplit, 116 split at a third, 82 at a sixth.
+pub(crate) fn early_commit_layer(stack: Stack, n_layers: usize) -> Option<usize> {
     if crate::kernel_timing::kernel_timing_enabled() {
         return None;
     }
@@ -349,15 +352,23 @@ pub(crate) fn early_commit_layer(n_layers: usize) -> Option<usize> {
             .filter(|v| !v.trim().is_empty())
             .map(|v| v.trim().parse::<usize>().ok().filter(|&n| n > 0))
     });
-    split_layer(set, n_layers)
+    split_layer(set, stack, n_layers)
+}
+
+/// Which decode stack asks [`early_commit_layer`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Stack {
+    Dense,
+    Moe,
 }
 
 /// [`early_commit_layer`] without the environment: `set` is `None`
 /// when the variable is unset, `Some(None)` for `0` or garbage.
-fn split_layer(set: Option<Option<usize>>, n_layers: usize) -> Option<usize> {
-    let at = match set {
-        Some(explicit) => explicit?,
-        None => n_layers.div_ceil(3).max(1),
+fn split_layer(set: Option<Option<usize>>, stack: Stack, n_layers: usize) -> Option<usize> {
+    let at = match (set, stack) {
+        (Some(explicit), _) => explicit?,
+        (None, Stack::Dense) => n_layers.div_ceil(3).max(1),
+        (None, Stack::Moe) => return None,
     };
     (at < n_layers).then_some(at)
 }
@@ -396,21 +407,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_decode_split_falls_a_third_of_the_way_in_unless_told_otherwise() {
-        assert_eq!(split_layer(None, 24), Some(8)); // gpt-oss-20b
-        assert_eq!(split_layer(None, 16), Some(6)); // Llama-3.2-1B
-        assert_eq!(split_layer(None, 2), Some(1));
+    fn the_dense_stack_splits_a_third_of_the_way_in_and_the_moe_stack_does_not() {
+        use Stack::{Dense, Moe};
+        assert_eq!(split_layer(None, Dense, 16), Some(6)); // Llama-3.2-1B
+        assert_eq!(split_layer(None, Dense, 2), Some(1));
         assert_eq!(
-            split_layer(None, 1),
+            split_layer(None, Dense, 1),
             None,
             "one layer has nothing to overlap"
         );
-        assert_eq!(split_layer(Some(None), 24), None, "0 turns it off");
-        assert_eq!(split_layer(Some(Some(4)), 24), Some(4));
         assert_eq!(
-            split_layer(Some(Some(24)), 24),
+            split_layer(None, Moe, 24),
             None,
-            "past the last layer: no split"
+            "the MoE stack measured slower split"
+        );
+        assert_eq!(split_layer(Some(None), Dense, 24), None, "0 turns it off");
+        assert_eq!(
+            split_layer(Some(Some(4)), Moe, 24),
+            Some(4),
+            "an explicit N splits either"
+        );
+        assert_eq!(
+            split_layer(Some(Some(24)), Dense, 24),
+            None,
+            "past the last layer"
         );
     }
     use crate::dispatch::EncodeStats;
