@@ -18,6 +18,26 @@ use frink_core::KvCache;
 use frink_metal::gdn_prefill::PrefillRunLayer;
 use frink_metal::gdn_prefill_attn::PrefillAttnLayer;
 
+/// An attention layer a device run serves whole, before its kernels
+/// are chosen ([`Decoder::resident_attn_parts`]).
+pub(super) struct ResidentAttnParts<'a> {
+    pub(super) n_heads: usize,
+    pub(super) n_kv_heads: usize,
+    pub(super) attn_norm: &'a [f32],
+    pub(super) eps: f32,
+    pub(super) fold_x: Option<frink_metal::hadamard::FoldPlan<'a>>,
+    pub(super) q: &'a frink_core::WeightMatrix,
+    pub(super) k: &'a frink_core::WeightMatrix,
+    pub(super) v: &'a frink_core::WeightMatrix,
+    pub(super) q_gate: bool,
+    pub(super) extras: frink_metal::attn::AttnExtras<'a>,
+    pub(super) rope: frink_metal::attn::MetalRope,
+    pub(super) layer_rope: Option<frink_metal::attn::LayerRope<'a>>,
+    pub(super) o: &'a frink_core::WeightMatrix,
+    pub(super) fold_branch: Option<frink_metal::hadamard::FoldPlan<'a>>,
+    pub(super) ffn: LayerFfnParts<'a>,
+}
+
 /// One layer of a run as planned, before any cache is touched.
 enum Planned<'a> {
     Gdn(&'a crate::gdn::Gdn, &'a [f32], LayerFfnParts<'a>),
@@ -103,6 +123,37 @@ impl Decoder {
     /// or `None` and it is the host body's. Asked BEFORE any cache is
     /// touched; the mirror's own fit is
     /// [`PrefillAttnLayer::is_supported`]'s, once it exists.
+    fn prefill_attn_layer(
+        &self,
+        l: usize,
+        start_pos: usize,
+        cache: &KvCache,
+    ) -> Option<(PrefillAttnLayer<'_>, usize)> {
+        let p = self.resident_attn_parts(l, start_pos, cache)?;
+        let attn = PrefillAttnLayer {
+            attn_norm: p.attn_norm,
+            eps: p.eps,
+            fold_x: p.fold_x,
+            q: p.q.mul_mm_sg_launch()?,
+            k: p.k.mul_mm_sg_launch()?,
+            v: p.v.mul_mm_sg_launch()?,
+            n_heads: p.n_heads,
+            q_gate: p.q_gate,
+            extras: p.extras,
+            rope: p.rope,
+            layer_rope: p.layer_rope,
+            o_proj: p.o.mul_mm_sg_launch()?,
+            fold_branch: p.fold_branch,
+            ffn: p.ffn.prefill_launches()?,
+        };
+        Some((attn, p.n_kv_heads))
+    }
+
+    /// Attention layer `l` as a device RUN takes it whole -- the prefill
+    /// run ([`Self::prefill_attn_layer`]) and the decode run
+    /// (`Decoder::decode_attn_layer`) -- before either picks its
+    /// kernels: GEMMs for a batch, matvecs for a token. ONE set of
+    /// refusals, so the two cannot disagree about which layers ride.
     ///
     /// Everything the host body applies between the pre-norm and `wo`
     /// is either here or a refusal: the attention facts every fused
@@ -112,12 +163,12 @@ impl Decoder {
     /// attention's ([`Self::device_attention_shape_ok`]). The host KV
     /// must be f16 with no row evicted, so the mirror the run appends to
     /// and the host rows written back from it are the same rows.
-    fn prefill_attn_layer(
+    pub(super) fn resident_attn_parts(
         &self,
         l: usize,
         start_pos: usize,
         cache: &KvCache,
-    ) -> Option<(PrefillAttnLayer<'_>, usize)> {
+    ) -> Option<ResidentAttnParts<'_>> {
         let layer = self.layer_for(l);
         let AttnShape::Gqa {
             n_heads,
@@ -127,7 +178,8 @@ impl Decoder {
             return None;
         };
         let caps = FusedAttnCaps::METAL_PREFILL_RUN;
-        if !Self::metal_can_serve_layers(&self.config, self.lora_attached())
+        if !self.has_gdn_layers()
+            || !Self::metal_can_serve_layers(&self.config, self.lora_attached())
             || !self.fused_attn_layer_ok(layer, caps)
             || !self.fused_attention_tail_eligible(l, layer)
             || !self.device_attention_shape_ok(l, layer)
@@ -161,24 +213,23 @@ impl Decoder {
             None => None,
             Some(f) => Some(f.metal_plan(n_heads * self.config.head_dim)?),
         };
-        let ffn = LayerFfnParts::for_layer(layer, eps, true)?;
-        let attn = PrefillAttnLayer {
+        Some(ResidentAttnParts {
+            n_heads,
+            n_kv_heads,
             attn_norm,
             eps,
             fold_x,
-            q: q.mul_mm_sg_launch()?,
-            k: k.mul_mm_sg_launch()?,
-            v: v.mul_mm_sg_launch()?,
-            n_heads,
+            q,
+            k,
+            v,
             q_gate: layer.attn.q_gate_interleaved,
             extras: self.metal_attn_view_under(layer, caps)?,
             rope: self.metal_rope(),
             layer_rope: self.metal_layer_rope(l),
-            o_proj: o.mul_mm_sg_launch()?,
+            o,
             fold_branch,
-            ffn: ffn.prefill_launches()?,
-        };
-        Some((attn, n_kv_heads))
+            ffn: LayerFfnParts::for_layer(layer, eps, true)?,
+        })
     }
 
     /// The ONE body both entries share: `head`, if any, then the
@@ -318,20 +369,48 @@ mod tests {
     use frink_metal::gdn_prefill_attn::PrefillAttnLayer;
     use std::sync::Arc;
 
-    /// A Qwen3.5 attention layer whole in the prefill run against the
-    /// host body the decoder runs otherwise: `attn_norm`, the folded
-    /// Q/K/V, the interleaved gate split, the per-head QK norms, a
-    /// PARTIAL NeoX RoPE, causal attention over earlier rows already in
-    /// the mirror and this batch, the gate, the folded `wo` and the
-    /// FFN. The batch starts at position 8, so a RoPE or a KV offset
-    /// read from zero is wrong here, and the mirror's new rows are
-    /// checked against the host's roped K and V.
-    #[test]
-    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
-    fn an_attention_layer_in_the_run_matches_the_host_body() {
+    /// One Qwen3.5 attention layer and what the host body makes of
+    /// `rows` tokens from position 8 through it: the case both device
+    /// runs are held to, so the prefill and the decode test cannot test
+    /// different layers.
+    struct Case {
+        n_embd: usize,
+        n_heads: usize,
+        n_kv: usize,
+        hd: usize,
+        rot: usize,
+        prior: usize,
+        rows: usize,
+        eps: f32,
+        theta: f32,
+        q_width: usize,
+        wq: WeightMatrix,
+        wk: WeightMatrix,
+        wv: WeightMatrix,
+        wo: WeightMatrix,
+        gate: WeightMatrix,
+        up: WeightMatrix,
+        down: WeightMatrix,
+        fold_x: Arc<HadamardFold>,
+        fold_o: Arc<HadamardFold>,
+        attn_norm: Vec<f32>,
+        ffn_norm: Vec<f32>,
+        q_norm: Vec<f32>,
+        k_norm: Vec<f32>,
+        hidden: Vec<f32>,
+        /// The mirror's earlier rows, f16 as it holds them.
+        k0: Vec<f32>,
+        v0: Vec<f32>,
+        /// The host's roped K and V for the new rows, and its output.
+        k: Vec<f32>,
+        v: Vec<f32>,
+        want: Vec<f32>,
+    }
+
+    fn case(rows: usize) -> Case {
         let (n_embd, ffn_dim) = (256usize, 384usize);
         let (n_heads, n_kv, hd, rot) = (4usize, 2usize, 128usize, 32usize);
-        let (prior, rows) = (8usize, 40usize);
+        let prior = 8usize;
         let (eps, theta) = (1e-6f32, 10_000.0f32);
         let (q_width, kv_width) = (n_heads * hd, n_kv * hd);
         let mut seed = 77_031u32;
@@ -460,6 +539,81 @@ mod tests {
             *r += d;
         }
 
+        Case {
+            n_embd,
+            n_heads,
+            n_kv,
+            hd,
+            rot,
+            prior,
+            rows,
+            eps,
+            theta,
+            q_width,
+            wq,
+            wk,
+            wv,
+            wo,
+            gate,
+            up,
+            down,
+            fold_x,
+            fold_o,
+            attn_norm,
+            ffn_norm,
+            q_norm,
+            k_norm,
+            hidden,
+            k0,
+            v0,
+            k,
+            v,
+            want,
+        }
+    }
+
+    /// A Qwen3.5 attention layer whole in the prefill run against the
+    /// host body the decoder runs otherwise: `attn_norm`, the folded
+    /// Q/K/V, the interleaved gate split, the per-head QK norms, a
+    /// PARTIAL NeoX RoPE, causal attention over earlier rows already in
+    /// the mirror and this batch, the gate, the folded `wo` and the
+    /// FFN. The batch starts at position 8, so a RoPE or a KV offset
+    /// read from zero is wrong here, and the mirror's new rows are
+    /// checked against the host's roped K and V.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn an_attention_layer_in_the_run_matches_the_host_body() {
+        let Case {
+            n_embd,
+            n_heads,
+            n_kv,
+            hd,
+            rot,
+            prior,
+            rows,
+            eps,
+            theta,
+            q_width,
+            wq,
+            wk,
+            wv,
+            wo,
+            gate,
+            up,
+            down,
+            fold_x,
+            fold_o,
+            attn_norm,
+            ffn_norm,
+            q_norm,
+            k_norm,
+            hidden,
+            k0,
+            v0,
+            k,
+            v,
+            want,
+        } = case(40);
         // The run.
         let ffn = LayerFfnParts::from_parts(&ffn_norm, eps, &gate, &up, &down);
         fn launch(m: &WeightMatrix) -> frink_metal::gpu::MulMmSgLaunch<'_> {
@@ -530,6 +684,115 @@ mod tests {
             }
         };
         let (dk, dv) = kv.tokens_host(prior, rows);
+        close("k", &dk, &k, 2e-3);
+        close("v", &dv, &v, 2e-3);
+        close("out", &got, &want, 3e-3);
+    }
+
+    /// The same layer as a DECODE run takes it (`GdnRun::attn_layer_resident`),
+    /// one token at position 8: matvecs instead of GEMMs, and nothing
+    /// returned to the host between the projections and the FFN. The
+    /// mirror's new row is checked against the host's roped K and V, so
+    /// a RoPE at position zero, a gate left unsplit or an append at the
+    /// wrong offset is red here.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn an_attention_layer_in_a_decode_run_matches_the_host_body() {
+        let Case {
+            n_embd,
+            n_heads,
+            n_kv,
+            hd,
+            rot,
+            prior,
+            eps,
+            theta,
+            q_width,
+            wq,
+            wk,
+            wv,
+            wo,
+            gate,
+            up,
+            down,
+            fold_x,
+            fold_o,
+            attn_norm,
+            ffn_norm,
+            q_norm,
+            k_norm,
+            hidden,
+            k0,
+            v0,
+            k,
+            v,
+            want,
+            ..
+        } = case(1);
+        let ffn = LayerFfnParts::from_parts(&ffn_norm, eps, &gate, &up, &down);
+        let ffn = ffn.launches().expect("Q8_0 has a matvec");
+        let ffn = ffn.as_metal();
+        fn mv(m: &WeightMatrix) -> frink_metal::gpu::MatvecLaunch<'_> {
+            crate::metal_launch::matvec(m.launch_parts().0).expect("Q8_0 has a matvec")
+        }
+        let (q, kp, vp, o) = (mv(&wq), mv(&wk), mv(&wv), mv(&wo));
+        let extras = frink_metal::attn::AttnExtras {
+            q_norm: Some(&q_norm),
+            k_norm: Some(&k_norm),
+            ..Default::default()
+        };
+        let (fx, fo) = (
+            fold_x.metal_plan(n_embd).expect("a plan"),
+            fold_o.metal_plan(q_width).expect("a plan"),
+        );
+        let layer = frink_metal::gdn_decode_attn::DecodeAttnLayer {
+            attn_norm: &attn_norm,
+            eps,
+            fold_x: Some(&fx),
+            q: &q,
+            k: &kp,
+            v: &vp,
+            n_heads,
+            q_gate: true,
+            extras: &extras,
+            rope: MetalRope {
+                layout: MetalRopeLayout::Neox,
+                rot_dim: Some(rot),
+                attn_factor: 1.0,
+            },
+            layer_rope: Some(LayerRope {
+                theta,
+                freq_factors: None,
+            }),
+            o_proj: &o,
+            fold_branch: Some(&fo),
+            ffn: &ffn,
+        };
+        let mut kv =
+            MetalKvBuffers::with_capacity_dtype(n_kv, hd, 64, MetalKvDtype::F16).expect("a mirror");
+        kv.upload_from_host(&k0, &v0, prior)
+            .expect("the prior rows");
+        assert!(layer.is_supported(&kv, prior));
+        assert!(
+            !layer.is_supported(&kv, prior + 1),
+            "a position past the mirror"
+        );
+        let mut run = frink_metal::gdn_branch::GdnRun::start(&hidden).expect("a run");
+        // SAFETY: the mirror is this test's and outlives `finish`.
+        unsafe { run.attn_layer_resident(&layer, &mut kv, prior) }.expect("the layer encodes");
+        let got = run.finish().expect("the run completes");
+        assert_eq!(kv.seq_len, prior + 1, "the run advanced the mirror");
+        let close = |what: &str, d: &[f32], w: &[f32], tol: f32| {
+            assert_eq!(d.len(), w.len(), "{what}: length");
+            let scale = w.iter().fold(0f32, |a, v| a.max(v.abs())).max(1.0);
+            for (i, (x, y)) in d.iter().zip(w).enumerate() {
+                assert!(
+                    (x - y).abs() <= tol * scale,
+                    "{what}[{i}]: device {x} host {y}"
+                );
+            }
+        };
+        let (dk, dv) = kv.tokens_host(prior, 1);
         close("k", &dk, &k, 2e-3);
         close("v", &dv, &v, 2e-3);
         close("out", &got, &want, 3e-3);

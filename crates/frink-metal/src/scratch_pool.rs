@@ -41,6 +41,23 @@ unsafe impl Send for Pooled {}
 
 static POOL: Mutex<Option<HashMap<usize, Vec<Pooled>>>> = Mutex::new(None);
 
+/// How many returned buffers of `floats` floats the pool keeps.
+///
+/// A cap, so a run that touches many distinct widths does not hold
+/// every one of them forever, and one that SCALES with the width,
+/// because a decode run holds its scratch across a whole token: a
+/// Bonsai-2-27B token is some 300 live buffers of the hidden width
+/// alone. A flat eight sent all but eight of them back to Metal at the
+/// end of every token and allocated them again during the next, which
+/// was a sixth of the token's host time (#540). Small buffers are kept
+/// up to [`KEEP_BYTES`] per width; a large one still eight deep.
+fn keep_at_most(floats: usize) -> usize {
+    (KEEP_BYTES / (floats * 4).max(1)).max(8)
+}
+
+/// What the pool may keep per width beyond the eight-deep floor.
+const KEEP_BYTES: usize = 64 << 20;
+
 /// Buffers borrowed from the pool for one launch, returned on drop.
 pub(crate) struct Scratch {
     bufs: Vec<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -107,10 +124,7 @@ impl Drop for Scratch {
         let pool = guard.get_or_insert_with(HashMap::new);
         for (buf, n) in self.bufs.drain(..).zip(self.lens.iter()) {
             let slot = pool.entry(*n).or_default();
-            // A cap, so a run that touches many distinct widths does
-            // not hold every one of them forever. Eight is more than
-            // any single launch asks for at one length.
-            if slot.len() < 8 {
+            if slot.len() < keep_at_most(*n) {
                 slot.push(Pooled(buf));
             }
         }
@@ -145,6 +159,34 @@ mod tests {
             held.buf(0) as *const _,
             other.buf(0) as *const _,
             "a buffer still held is not handed to a second caller"
+        );
+    }
+
+    /// A whole decode run's worth of one width comes back out of the
+    /// pool rather than out of Metal: 300 buffers of a hidden width,
+    /// held at once as a run holds them, then taken again.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn a_run_held_at_once_is_reused_whole() {
+        let shared = crate::gpu::shared_metal().expect("a device");
+        let device = &shared.device;
+        let take = || -> Vec<Scratch> {
+            (0..300)
+                .map(|_| Scratch::take(device, &[5_121]).expect("a buffer"))
+                .collect()
+        };
+        let ptrs = |held: &[Scratch]| -> std::collections::HashSet<usize> {
+            held.iter()
+                .map(|s| s.buf(0) as *const _ as *const u8 as usize)
+                .collect()
+        };
+        let first = ptrs(&take());
+        let second = ptrs(&take());
+        assert_eq!(first.len(), 300);
+        assert_eq!(
+            first.intersection(&second).count(),
+            300,
+            "every buffer of the run came back out"
         );
     }
 }

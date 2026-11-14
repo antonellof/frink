@@ -100,6 +100,7 @@ impl Decoder {
     pub(crate) fn device_attention_layer_then_run(
         &self,
         l: usize,
+        pos: usize,
         layer: &LayerWeights,
         q: &[f32],
         k: &[f32],
@@ -165,11 +166,7 @@ impl Decoder {
         }
         layer.moe.record_activations_dense();
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
-        let head = self.encode_next_attn_head(&mut run, end, kv_caches.len());
-        let (out, qkv) = run.finish_with_head().ok()?;
-        *hidden = out;
-        *pending = head.then_some(qkv).flatten().map(|q| (end, q));
-        Some(end)
+        self.close_run(run, end, pos, hidden, kv_caches, pending)
     }
 
     /// The facts this path needs of a layer beyond the tail's: one

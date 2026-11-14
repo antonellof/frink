@@ -603,9 +603,16 @@ impl Decoder {
             } else {
                 load_f32_vec_optional(&file, &format!("blk.{l}.ffn_gate_inp_shexp.weight"))?
             };
+            // ROUTED experts only. A dense layer's FFN is one expert,
+            // which no packed kernel reads (each refuses a dense layer),
+            // and planes on it made every fused dense FFN refuse
+            // (`LayerFfnParts::for_layer`): a Q4_K_M Qwen3.5 decoded at
+            // a third of the reference's rate, layer by layer (#540).
             #[cfg(feature = "metal")]
             let packed_q4 = match &experts {
-                ExpertBacking::Resident(v) if !v.is_empty() => try_build_moe_packed_q4_planes(v),
+                ExpertBacking::Resident(v) if !is_dense_layer && !v.is_empty() => {
+                    try_build_moe_packed_q4_planes(v)
+                }
                 _ => None,
             };
             // DeepSeek-V3's aux-loss-free selection bias. The on-disk

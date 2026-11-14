@@ -651,7 +651,7 @@ impl Decoder {
                 // gap is made of (`1ebda4fc:docs/plans/gdn-resident-state.md`).
                 #[cfg(feature = "metal")]
                 if let Some(end) =
-                    self.fused_recurrent_run(l, &mut hidden, kv_caches, &mut pending_qkv)
+                    self.fused_recurrent_run(l, pos, &mut hidden, kv_caches, &mut pending_qkv)
                 {
                     fused_through = end;
                     continue;
@@ -1183,6 +1183,7 @@ impl Decoder {
                     let gate = r.gate.as_deref();
                     if let Some(end) = self.device_attention_layer_then_run(
                         l,
+                        pos,
                         layer,
                         &r.q,
                         &r.k,
@@ -1248,6 +1249,7 @@ impl Decoder {
                     // any: one wait for the four layers instead of two.
                     if let Some(end) = self.fused_attention_tail_then_run(
                         l,
+                        pos,
                         layer,
                         &branch,
                         &mut hidden,

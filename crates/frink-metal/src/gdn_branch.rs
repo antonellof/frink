@@ -615,11 +615,11 @@ enum ResultBuf {
 /// caller until the command buffer completes, and returned to the pool
 /// when dropped -- which is what makes the pool safe with a command
 /// buffer that has not been waited for yet.
-struct ScratchSet {
-    main: crate::scratch_pool::Scratch,
+pub(crate) struct ScratchSet {
+    pub(crate) main: crate::scratch_pool::Scratch,
     #[allow(dead_code)]
-    head: Option<crate::scratch_pool::Scratch>,
-    ffn: Option<crate::scratch_pool::Scratch>,
+    pub(crate) head: Option<crate::scratch_pool::Scratch>,
+    pub(crate) ffn: Option<crate::scratch_pool::Scratch>,
 }
 
 impl ScratchSet {
@@ -713,11 +713,17 @@ pub unsafe fn launch_gdn_branch(
 /// scratch is held here until [`Self::finish`] returns. Dropping it
 /// earlier would hand a live buffer to the next layer.
 pub struct GdnRun {
-    hidden: crate::scratch_pool::Scratch,
-    keep: Vec<ScratchSet>,
-    last: Option<objc2::rc::Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
-    rows: usize,
-    submissions: usize,
+    pub(crate) hidden: crate::scratch_pool::Scratch,
+    pub(crate) keep: Vec<ScratchSet>,
+    pub(crate) last: Option<objc2::rc::Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    /// The run's first buffer, so the ledger notes the GPU time from
+    /// its start to the last one's end rather than the last alone.
+    first: Option<objc2::rc::Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    /// Started with the run, so the ledger's encode column is the host
+    /// time from `start` to the wait: every layer's encoding.
+    clock: crate::timing::SubmitClock,
+    pub(crate) rows: usize,
+    pub(crate) submissions: usize,
     /// The NEXT attention layer's projections, when they were encoded
     /// at the end of this run: the scratch holding `q`, `k` and `v`,
     /// and their lengths. `finish` reads them back with the hidden
@@ -736,10 +742,24 @@ impl GdnRun {
             hidden: scratch,
             keep: Vec::new(),
             last: None,
+            first: None,
+            clock: crate::timing::SubmitClock::start(),
             rows: hidden.len(),
             submissions: 0,
             head: None,
         })
+    }
+
+    /// Records a buffer this run has just committed.
+    pub(crate) fn committed(
+        &mut self,
+        cmd_buf: objc2::rc::Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    ) {
+        if self.first.is_none() {
+            self.first = Some(cmd_buf.clone());
+        }
+        self.last = Some(cmd_buf);
+        self.submissions += 1;
     }
 
     /// One more layer, committed but NOT waited for.
@@ -799,8 +819,7 @@ impl GdnRun {
         encoder.endEncoding();
         cmd_buf.commit();
         self.keep.push(keep);
-        self.last = Some(cmd_buf);
-        self.submissions += 1;
+        self.committed(cmd_buf);
         Ok(())
     }
 
@@ -896,8 +915,7 @@ impl GdnRun {
             head: None,
             ffn: Some(tail),
         });
-        self.last = Some(cmd_buf);
-        self.submissions += 1;
+        self.committed(cmd_buf);
         Ok(())
     }
 
@@ -931,23 +949,6 @@ impl GdnRun {
         // normed, then q, k, v.
         let sc = crate::scratch_pool::Scratch::take(device, &[hidden, q.rows, k.rows, v.rows])
             .ok_or(MetalError::BufferAllocFailed)?;
-        let normed = sc.buf(0);
-        let norm_w = crate::gpu::resident_f32_buffer(device, norm)?;
-        let (q_w, k_w, v_w) = (
-            resident_weight_buffer(device, q.weights)?,
-            resident_weight_buffer(device, k.weights)?,
-            resident_weight_buffer(device, v.weights)?,
-        );
-        let signs = match fold_x.and_then(|p| p.signs) {
-            None => None,
-            Some(sg) => {
-                // SAFETY: a `&[f32]` viewed as its own bytes, read only.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(sg.as_ptr() as *const u8, std::mem::size_of_val(sg))
-                };
-                Some(resident_weight_buffer(device, bytes)?)
-            }
-        };
         let cmd_buf = shared
             .queue
             .commandBuffer()
@@ -955,33 +956,22 @@ impl GdnRun {
         let encoder = cmd_buf
             .computeCommandEncoder()
             .ok_or(MetalError::CommandFailed)?;
-        crate::norm::encode_rms_norm(
+        crate::gdn_decode_attn::encode_attn_head(
             &encoder,
             device,
             self.hidden.buf(0),
-            &norm_w.buffer,
-            normed,
-            hidden as u32,
+            norm,
             norm_eps,
+            q,
+            k,
+            v,
+            fold_x,
+            sc.buf(0),
+            [sc.buf(1), sc.buf(2), sc.buf(3)],
         )?;
-        if let Some(plan) = fold_x {
-            plan.check(hidden)?;
-            crate::hadamard::encode_fold(
-                &encoder,
-                device,
-                normed,
-                hidden,
-                plan,
-                signs.as_ref().map(|b| &*b.buffer),
-            )?;
-        }
-        encode_matvec(&encoder, device, q, &q_w, normed, sc.buf(1))?;
-        encode_matvec(&encoder, device, k, &k_w, normed, sc.buf(2))?;
-        encode_matvec(&encoder, device, v, &v_w, normed, sc.buf(3))?;
         encoder.endEncoding();
         cmd_buf.commit();
-        self.last = Some(cmd_buf);
-        self.submissions += 1;
+        self.committed(cmd_buf);
         self.head = Some((sc, q.rows, k.rows));
         Ok(())
     }
@@ -1040,8 +1030,7 @@ impl GdnRun {
         )?;
         encoder.endEncoding();
         cmd_buf.commit();
-        self.last = Some(cmd_buf);
-        self.submissions += 1;
+        self.committed(cmd_buf);
         Ok(())
     }
 
@@ -1069,8 +1058,14 @@ impl GdnRun {
         };
         // One queue is ordered, so waiting for the LAST buffer waits
         // for every buffer before it.
-        let clock = crate::timing::SubmitClock::start();
-        crate::timing::note_wait(last, "gdn-run", self.submissions, 32, clock);
+        crate::timing::note_wait(
+            self.first.as_deref(),
+            last,
+            "gdn-run",
+            self.submissions,
+            32,
+            self.clock,
+        );
         let hidden = read(self.hidden.buf(0), self.rows);
         let head = self.head.as_ref().map(|(sc, q_rows, k_rows)| {
             (
@@ -1091,7 +1086,7 @@ impl GdnRun {
 /// the head of a RUN, where it shares the single wait with the
 /// recurrent layers that follow it.
 #[allow(clippy::too_many_arguments)]
-fn encode_attn_tail<'b>(
+pub(crate) fn encode_attn_tail<'b>(
     encoder: &ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>,
     device: &objc2::rc::Retained<ProtocolObject<dyn objc2_metal::MTLDevice>>,
     out_proj: &MatvecLaunch<'_>,
@@ -1268,113 +1263,49 @@ fn encode_attn_layer(
     h_ext: Option<&ProtocolObject<dyn MTLBuffer>>,
     keep: &mut Vec<ScratchSet>,
 ) -> Result<(), MetalError> {
-    // `wo`'s row count IS the hidden width; `residual` is empty when
-    // the run already holds the stream in `h_ext`.
-    let hidden = out_proj.rows;
     let per_token = kv.elems_per_token();
-    let branch_cols = out_proj.row_bytes / out_proj.block_bytes * out_proj.block_elems;
-    if (h_ext.is_none() && residual.len() != hidden)
-        || k.len() != per_token
+    if k.len() != per_token
         || v.len() != per_token
         || q.len() != n_heads * kv.head_dim
-        || branch_cols != n_heads * kv.head_dim
         || gate.is_some_and(|g| g.len() != q.len())
-        || kv.seq_len >= kv.capacity()
     {
         return Err(MetalError::CommandFailed);
     }
     let shared = shared_metal()?;
     let device = &shared.device;
+    // q, k, v, gate, then the attention output (`wo`'s input).
     let scratch = crate::scratch_pool::Scratch::take(
         device,
-        &[q.len(), per_token, per_token, q.len().max(1), hidden],
+        &[q.len(), per_token, per_token, q.len(), q.len()],
     )
     .ok_or(MetalError::BufferAllocFailed)?;
-    let q_buf = scratch.write(0, q).ok_or(MetalError::CommandFailed)?;
-    let k_buf = scratch.write(1, k).ok_or(MetalError::CommandFailed)?;
-    let v_buf = scratch.write(2, v).ok_or(MetalError::CommandFailed)?;
-    let gate_buf = match gate {
-        None => None,
-        Some(g) => Some(scratch.write(3, g).ok_or(MetalError::CommandFailed)?),
-    };
-    // The attention output, which is also `wo`'s input.
-    let attn_buf = scratch.buf(4);
-    let tail = crate::scratch_pool::Scratch::take(
-        device,
-        &[
-            hidden,
-            hidden,
-            ffn.gate.rows,
-            ffn.up.rows,
-            ffn.gate.rows,
-            hidden,
-        ],
-    )
-    .ok_or(MetalError::BufferAllocFailed)?;
-    let proj = crate::scratch_pool::Scratch::take(device, &[hidden])
-        .ok_or(MetalError::BufferAllocFailed)?;
-    let out_w = resident_weight_buffer(device, out_proj.weights)?;
-    let signs = match fold_branch.and_then(|p| p.signs) {
-        None => None,
-        Some(sg) => {
-            // SAFETY: a `&[f32]` viewed as its own bytes, read only.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(sg.as_ptr() as *const u8, std::mem::size_of_val(sg))
-            };
-            Some(resident_weight_buffer(device, bytes)?)
-        }
-    };
-
-    let mut mrs = crate::mem_ranges::MemRanges::new();
-    // Append this token, then attend over everything including it.
-    let at = (kv.seq_len * per_token) as u32;
-    crate::attn::encode_kv_store_append(encoder, device, k_buf, v_buf, kv, at, per_token as u32)?;
-    let seq_len = kv.seq_len + 1;
-    crate::attn::encode_gqa_with_kv(
-        encoder,
-        &mut mrs,
-        device,
-        q_buf,
-        kv,
-        attn_buf,
-        n_heads as u32,
-        kv.n_kv_heads as u32,
-        kv.head_dim as u32,
-        seq_len as u32,
-        0,
-        softcap,
-        None,
-    )?;
-    if let Some(g) = gate_buf {
-        crate::elem::encode_sigmoid_mul(encoder, device, attn_buf, g, q.len() as u32)?;
+    scratch.write(0, q).ok_or(MetalError::CommandFailed)?;
+    scratch.write(1, k).ok_or(MetalError::CommandFailed)?;
+    scratch.write(2, v).ok_or(MetalError::CommandFailed)?;
+    if let Some(g) = gate {
+        scratch.write(3, g).ok_or(MetalError::CommandFailed)?;
     }
-    // `wo` reads the gated attention output directly: the fold rewrites
-    // that buffer in place and nothing reads it afterwards, so there is
-    // nothing to copy.
-    let branch_buf = attn_buf;
-    encode_attn_tail(
+    crate::gdn_decode_attn::encode_attn_core(
         encoder,
         device,
+        kv,
+        scratch,
+        crate::gdn_decode_attn::AttnSlots {
+            q: 0,
+            k: 1,
+            v: 2,
+            gate: gate.map(|_| 3),
+            attn: 4,
+        },
+        n_heads,
+        softcap,
         out_proj,
-        &out_w,
         fold_branch,
-        signs.as_ref().map(|b| &*b.buffer),
         ffn,
-        branch_buf,
-        branch_cols,
-        proj.buf(0),
-        &tail,
         residual,
         h_ext,
-        hidden,
-    )?;
-    kv.seq_len = seq_len;
-    keep.push(ScratchSet {
-        main: scratch,
-        head: Some(proj),
-        ffn: Some(tail),
-    });
-    Ok(())
+        keep,
+    )
 }
 
 /// The whole attention layer in a command buffer of its own.

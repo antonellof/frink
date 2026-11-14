@@ -51,6 +51,11 @@ pub mod gdn_prefill;
 #[cfg(feature = "metal")]
 pub mod gdn_prefill_attn;
 
+/// An attention layer whole inside a DECODE run, so a hybrid token
+/// waits once (#540).
+#[cfg(feature = "metal")]
+pub mod gdn_decode_attn;
+
 /// Shared-storage buffers reused across launches, because allocating
 /// them per launch is host time the GPU ledger cannot see.
 #[cfg(feature = "metal")]

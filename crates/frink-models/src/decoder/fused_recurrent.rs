@@ -109,6 +109,7 @@ impl Decoder {
     pub(crate) fn fused_recurrent_run(
         &self,
         start: usize,
+        pos: usize,
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
         pending: &mut PendingQkv,
@@ -128,11 +129,7 @@ impl Decoder {
         }
         let mut run = frink_metal::gdn_branch::GdnRun::start(hidden).ok()?;
         self.run_layers(&mut run, start, end, kv_caches)?;
-        let head = self.encode_next_attn_head(&mut run, end, kv_caches.len());
-        let (out, qkv) = run.finish_with_head().ok()?;
-        *hidden = out;
-        *pending = head.then_some(qkv).flatten().map(|q| (end, q));
-        Some(end)
+        self.close_run(run, end, pos, hidden, kv_caches, pending)
     }
 
     /// The same run, begun with an ATTENTION layer's tail.
@@ -143,9 +140,11 @@ impl Decoder {
     /// looks at. So it goes in their command buffer and shares their
     /// single wait, which is sixteen fewer a token on Bonsai.
     #[cfg(feature = "metal")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn fused_attention_tail_then_run(
         &self,
         l: usize,
+        pos: usize,
         layer: &LayerWeights,
         branch: &[f32],
         hidden: &mut Vec<f32>,
@@ -173,11 +172,111 @@ impl Decoder {
         let _ = ffn;
         layer.moe.record_activations_dense();
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
-        let head = self.encode_next_attn_head(&mut run, end, kv_caches.len());
+        self.close_run(run, end, pos, hidden, kv_caches, pending)
+    }
+
+    /// Carries `run` on from layer `end` to the end of the stack where
+    /// it can, then waits for it ONCE.
+    ///
+    /// Each attention layer [`Self::resident_attn_parts`] admits joins
+    /// the run whole (`GdnRun::attn_layer_resident`), and the recurrent
+    /// layers after it follow, so a hybrid token that qualifies end to
+    /// end is one wait instead of one per attention layer (#540). Where
+    /// the run stops short of the stack, the next attention layer's
+    /// Q/K/V are encoded at its end as before and come back in
+    /// `pending`. The rows each joined attention layer appended to its
+    /// mirror are copied to the host cache after the wait, so the host
+    /// stays the authority.
+    #[cfg(feature = "metal")]
+    pub(crate) fn close_run(
+        &self,
+        mut run: frink_metal::gdn_branch::GdnRun,
+        mut end: usize,
+        pos: usize,
+        hidden: &mut Vec<f32>,
+        kv_caches: &mut [frink_core::KvCache],
+        pending: &mut PendingQkv,
+    ) -> Option<usize> {
+        let n_layers = kv_caches.len();
+        let mut joined = Vec::new();
+        while end < n_layers && self.decode_attn_layer_in_run(&mut run, end, pos, kv_caches) {
+            joined.push(end);
+            let mut next = end + 1;
+            while next < n_layers && self.fused_layer_parts(next).is_some() {
+                next += 1;
+            }
+            self.run_layers(&mut run, end + 1, next, kv_caches)?;
+            end = next;
+        }
+        let head = self.encode_next_attn_head(&mut run, end, n_layers);
         let (out, qkv) = run.finish_with_head().ok()?;
+        for l in joined {
+            let cache = &mut kv_caches[l];
+            let prior = cache.rows();
+            let (k, v) = cache.metal_attn.as_ref()?.tokens_host(prior, 1);
+            cache
+                .push(&k, &v)
+                .expect("unbounded/planned KvCache growth is infallible");
+        }
         *hidden = out;
         *pending = head.then_some(qkv).flatten().map(|q| (end, q));
         Some(end)
+    }
+
+    /// Attention layer `l` appended to `run` whole, at position `pos`,
+    /// or `false` with nothing encoded and nothing advanced.
+    #[cfg(feature = "metal")]
+    fn decode_attn_layer_in_run(
+        &self,
+        run: &mut frink_metal::gdn_branch::GdnRun,
+        l: usize,
+        pos: usize,
+        kv_caches: &mut [frink_core::KvCache],
+    ) -> bool {
+        let cache = &mut kv_caches[l];
+        let Some(p) = self.resident_attn_parts(l, pos, cache) else {
+            return false;
+        };
+        let mv = crate::metal_launch::matvec;
+        let (Some(q), Some(k), Some(v), Some(o), Some(ffn)) =
+            (mv(p.q), mv(p.k), mv(p.v), mv(p.o), p.ffn.launches())
+        else {
+            return false;
+        };
+        let head_dim = self.config.head_dim;
+        let rows = cache.rows();
+        let width = rows * p.n_kv_heads * head_dim;
+        if Self::ensure_attn_mirror(cache, p.n_kv_heads, head_dim, rows, width, 1).is_none() {
+            return false;
+        }
+        let Some(mirror) = cache.metal_attn.as_mut() else {
+            return false;
+        };
+        let ffn = ffn.as_metal();
+        let w = frink_metal::gdn_decode_attn::DecodeAttnLayer {
+            attn_norm: p.attn_norm,
+            eps: p.eps,
+            fold_x: p.fold_x.as_ref(),
+            q: &q,
+            k: &k,
+            v: &v,
+            n_heads: p.n_heads,
+            q_gate: p.q_gate,
+            extras: &p.extras,
+            rope: p.rope,
+            layer_rope: p.layer_rope,
+            o_proj: &o,
+            fold_branch: p.fold_branch.as_ref(),
+            ffn: &ffn,
+        };
+        // SAFETY: the mirror lives in this layer's cache element, which
+        // nothing else touches until the run is waited for in
+        // `close_run`.
+        if unsafe { run.attn_layer_resident(&w, mirror, pos) }.is_err() {
+            return false;
+        }
+        self.layer_for(l).moe.record_activations_dense();
+        true
     }
 
     /// The NEXT layer's Q/K/V projections at the end of `run`, when
