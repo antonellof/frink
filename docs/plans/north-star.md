@@ -97,10 +97,10 @@ without a rental.
    and `usage` reports accepted draft tokens (#600, #533).
 7. **gpt-oss decode on Metal** (#627): it runs the fused MoE stacks
    with every one of its additions on the device and its prefill is
-   ahead of llama.cpp, but a decode token spends ~6 ms on the GPU and
-   ~2 ms more waiting on the command buffer. llama.cpp keeps its
-   buffers in Metal residency sets and frink does not; that is the
-   first suspect.
+   ahead of llama.cpp, but decode is ~1.16x behind: ~6 ms of GPU per
+   token plus ~1 ms of encode for 530 dispatches. Metal residency sets
+   (llama.cpp's) measured no change, and the early-commit split now
+   slows the MoE stack, so it is off there.
 8. **Re-measure the stale Metal rows** (#542), on a quiet host, by a
    person (ADR 0006).
 9. **MoE larger than memory** (#406,
