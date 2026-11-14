@@ -1,12 +1,8 @@
 //! The plain radix prefix cache: one currency (full KV pages), LRU
 //! eviction over unlocked leaves.
 //!
-//! This is the cache a dense or ordinary MoE model uses. The two
-//! variants in the sibling modules add a *second* currency -- a sliding
-//! window ([`super::swa`]) or a recurrent-state snapshot
-//! ([`super::hybrid`]) -- and are separate types rather than a
-//! parameterization, because what may be evicted, and what an eviction
-//! frees, differs at every step.
+//! [`super::SaltedRadix`] keeps one of these per cache salt over one
+//! page pool.
 //!
 //! # The accounting rule
 //!
@@ -79,14 +75,6 @@ impl RadixCache {
             protected_size: 0,
             clock: 0,
         }
-    }
-
-    pub fn page_size(&self) -> usize {
-        self.tree.page_size()
-    }
-
-    pub fn tree(&self) -> &RadixTree {
-        &self.tree
     }
 
     /// Tokens held by nodes no request is reading.
@@ -327,6 +315,7 @@ impl RadixCache {
 
     /// The accounting invariant: the two buckets, recomputed from raw
     /// node state, must equal what the cache has been maintaining.
+    #[cfg(test)]
     pub fn check_integrity(&self) {
         self.tree.check_structure();
         let mut evictable = 0usize;
@@ -561,10 +550,10 @@ mod tests {
         }
 
         let mut live: Vec<u32> = cache
-            .tree()
+            .tree
             .walk()
             .into_iter()
-            .flat_map(|id| cache.tree().node(id).value.clone())
+            .flat_map(|id| cache.tree.node(id).value.clone())
             .collect();
         live.extend(cache.evict(cache.evictable_size()));
         live.extend(returned);

@@ -108,18 +108,6 @@ impl<T> RequestRing<T> {
     pub fn recorded_total(&self) -> u64 {
         self.next_seq
     }
-
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
 }
 
 #[cfg(test)]
@@ -132,7 +120,7 @@ mod tests {
         for i in 0..5u32 {
             assert_eq!(ring.push(i), i as u64);
         }
-        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.rows.len(), 3);
         assert_eq!(ring.rows().copied().collect::<Vec<_>>(), vec![2, 3, 4]);
         assert_eq!(ring.recorded_total(), 5);
     }

@@ -61,11 +61,6 @@ pub fn align_down(a: usize, b: usize) -> usize {
     (a / b) * b
 }
 
-/// Round `a` up to a multiple of `b`.
-pub fn align_ceil(a: usize, b: usize) -> usize {
-    a.div_ceil(b) * b
-}
-
 /// The length of the longest common prefix of `a` and `b`.
 ///
 /// Equal on the overlap means the shorter length: a query shorter than
@@ -76,11 +71,6 @@ pub fn match_len(a: &[u32], b: &[u32]) -> usize {
 }
 
 /// One node of the tree.
-///
-/// The two currencies beyond plain KV are carried here rather than in a
-/// subclass, because [`RadixTree::split_at`] has to know how each one
-/// splits and a split is a tree operation. A plain cache simply never
-/// sets them.
 #[derive(Debug, Clone)]
 pub struct Node {
     /// The token ids this edge spells. Always a whole number of pages.
@@ -94,24 +84,8 @@ pub struct Node {
     /// Full-KV lock depth. Non-zero means some live request is reading
     /// these pages, so they may not be evicted.
     pub ref_count: u32,
-    /// LRU age. Larger is newer; the evictors pop the minimum.
+    /// LRU age. Larger is newer; the evictor pops the minimum.
     pub timestamp: i64,
-
-    /// Recurrent-state (GDN) snapshot slot attached at this node's
-    /// **end** boundary, for hybrid models. A point, not a span.
-    pub mamba_value: Option<u32>,
-    pub mamba_ref_count: u32,
-
-    /// Sliding-window models: the window KV for these tokens has been
-    /// freed while the full KV survives. Such a node still serves a
-    /// full-KV match, but a window-attention layer cannot read it.
-    pub swa_tombstone: bool,
-    /// Window lock depth. Bounded by `ref_count`: the window pins a
-    /// suffix of what the full lock pins.
-    pub swa_ref_count: u32,
-    /// Handle identifying *which* reader's window ends here, so one
-    /// reader's unlock releases only its own window.
-    pub swa_uuid: Option<u64>,
 }
 
 impl Node {
@@ -123,11 +97,6 @@ impl Node {
             children: HashMap::new(),
             ref_count: 0,
             timestamp,
-            mamba_value: None,
-            mamba_ref_count: 0,
-            swa_tombstone: false,
-            swa_ref_count: 0,
-            swa_uuid: None,
         }
     }
 
@@ -144,7 +113,7 @@ impl Node {
     }
 }
 
-/// The arena the three caches share.
+/// The arena a [`crate::policy::radix::RadixCache`] is built on.
 ///
 /// Node 0 is always the root: it spells nothing, is never evicted, and
 /// is the answer to "no prefix matched".
@@ -152,8 +121,6 @@ impl Node {
 pub struct RadixTree {
     nodes: Vec<Node>,
     page_size: usize,
-    /// Monotonic source for `swa_uuid`.
-    uuid: u64,
 }
 
 pub const ROOT: NodeId = NodeId(0);
@@ -168,7 +135,6 @@ impl RadixTree {
         RadixTree {
             nodes: vec![root],
             page_size,
-            uuid: 0,
         }
     }
 
@@ -192,13 +158,6 @@ impl RadixTree {
     pub fn alloc(&mut self, timestamp: i64) -> NodeId {
         self.nodes.push(Node::new(timestamp));
         NodeId((self.nodes.len() - 1) as u32)
-    }
-
-    /// The next window-boundary handle. Handed out lazily, only to a
-    /// node that actually becomes some reader's boundary.
-    pub fn next_uuid(&mut self) -> u64 {
-        self.uuid += 1;
-        self.uuid
     }
 
     pub fn set_key_value(&mut self, id: NodeId, key: Vec<u32>, value: Vec<u32>) {
@@ -248,15 +207,8 @@ impl RadixTree {
     /// | field | prefix (new node) | suffix (original id) |
     /// |---|---|---|
     /// | `key` / `value` | `[..pos]` | `[pos..]` |
-    /// | `ref_count`, `swa_ref_count`, `swa_tombstone` | copied -- both halves are covered by the same locks and the same window state | unchanged |
-    /// | `swa_uuid` | **migrates** root-side | cleared |
-    /// | `mamba_value`, `mamba_ref_count` | none -- a recurrent snapshot is taken *at* a boundary and cannot be split | kept |
+    /// | `ref_count` | copied -- both halves are covered by the same locks | unchanged |
     /// | `timestamp` | inherited | unchanged |
-    ///
-    /// `swa_uuid` migrates because it marks where one reader's window
-    /// *starts*, which is the root-side end of the run -- leaving it on
-    /// the suffix would release a different span than the one that was
-    /// locked.
     pub fn split_at(&mut self, id: NodeId, pos: usize) -> NodeId {
         let length = self.node(id).length();
         assert!(
@@ -278,15 +230,7 @@ impl RadixTree {
 
         self.set_key_value(prefix, head_key, head_value);
         self.set_parent(prefix, parent);
-        {
-            let original = self.node(id).clone();
-            let head = self.node_mut(prefix);
-            head.ref_count = original.ref_count;
-            head.swa_ref_count = original.swa_ref_count;
-            head.swa_tombstone = original.swa_tombstone;
-            head.swa_uuid = original.swa_uuid;
-        }
-        self.node_mut(id).swa_uuid = None;
+        self.node_mut(prefix).ref_count = self.node(id).ref_count;
 
         self.set_key_value(id, tail_key, tail_value);
         self.set_parent(id, prefix);
@@ -303,17 +247,6 @@ impl RadixTree {
         }
         chunks.reverse();
         chunks.concat()
-    }
-
-    /// The number of tokens from the root down to `id`.
-    pub fn path_len(&self, id: NodeId) -> usize {
-        let mut total = 0;
-        let mut cur = id;
-        while !self.node(cur).is_root() {
-            total += self.node(cur).length();
-            cur = self.node(cur).parent.expect("non-root has a parent");
-        }
-        total
     }
 
     /// Every reachable node except the root, deepest-first order
@@ -339,6 +272,7 @@ impl RadixTree {
     }
 
     /// Structural invariants, for tests and `check_integrity`.
+    #[cfg(test)]
     pub fn check_structure(&self) {
         for id in self.walk() {
             let node = self.node(id);
@@ -419,38 +353,19 @@ mod tests {
     }
 
     #[test]
-    fn split_copies_locks_and_window_state_to_both_halves() {
+    fn split_copies_locks_and_age_to_both_halves() {
         let (mut tree, id) = tree_with_chain(1, &[1, 2, 3, 4], &[10, 11, 12, 13]);
         {
             let node = tree.node_mut(id);
             node.ref_count = 2;
-            node.swa_ref_count = 1;
-            node.swa_tombstone = true;
-            node.swa_uuid = Some(77);
-            node.mamba_value = Some(99);
-            node.mamba_ref_count = 1;
             node.timestamp = 42;
         }
         let prefix = tree.split_at(id, 2);
 
         assert_eq!(tree.node(prefix).ref_count, 2);
-        assert_eq!(tree.node(prefix).swa_ref_count, 1);
-        assert!(tree.node(prefix).swa_tombstone);
         assert_eq!(tree.node(prefix).timestamp, 42);
         assert_eq!(tree.node(id).ref_count, 2);
-
-        // The window handle marks where a reader's window starts, so it
-        // moves root-side and is cleared from the suffix.
-        assert_eq!(tree.node(prefix).swa_uuid, Some(77));
-        assert_eq!(tree.node(id).swa_uuid, None);
-
-        // A recurrent snapshot is attached at an end boundary and
-        // cannot be halved: it stays with the suffix, which is the half
-        // that still ends where it was taken.
-        assert_eq!(tree.node(prefix).mamba_value, None);
-        assert_eq!(tree.node(prefix).mamba_ref_count, 0);
-        assert_eq!(tree.node(id).mamba_value, Some(99));
-        assert_eq!(tree.node(id).mamba_ref_count, 1);
+        assert_eq!(tree.node(id).timestamp, 42);
     }
 
     #[test]

@@ -162,13 +162,6 @@ mod prefill;
 mod queue;
 mod row;
 mod speculate;
-/// Wired: `BatchStatus`, `PoolUsage`, `PrefillSnapshot`,
-/// `StatusReporter` and the decode log interval, all from [`worker`].
-/// Unwired: `PrefillSnapshot::from_chunks` and
-/// `StatusReporter::decode_log_interval`, which report on
-/// [`super::admission`]'s chunks rather than this batcher's. Closes
-/// with chunk-duration scheduling, #632.
-#[allow(dead_code)]
 mod status;
 pub(super) mod step_budget;
 mod worker;

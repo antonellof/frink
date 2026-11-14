@@ -13,8 +13,10 @@
 //!
 //! 1. A hand-written splitter, when the pattern is byte for byte one it
 //!    has one for (`unicode_regex_split_custom`). Frink stands in for
-//!    those with [`Step::Native`], the same Rust-regex transcription the
-//!    single-regex arms have always used.
+//!    the gpt2, llama3, qwen2, qwen35 and newline splitters with
+//!    [`Step::Native`], the pattern run with Rust's Unicode classes, and
+//!    ports the afmoe and kimi-k2 ones ([`Step::DigitGroups`],
+//!    [`Step::KimiK2`]).
 //! 2. `std::regex` over a COLLAPSED copy of the text, when the pattern
 //!    names a Unicode category (`\p{N}`, `\p{L}`, `\p{P}`, `\p{M}`,
 //!    `\p{S}`, `\p{Lu}`/`Ll`/`Lt`/`Lm`/`Lo`). Every non-ASCII codepoint
@@ -61,6 +63,9 @@ pub(super) enum Step {
     /// `unicode_regex_split_custom_afmoe`, which upstream also runs for
     /// tiny_aya's `\d{1,3}(?=(?:\d{3})*\b)`. See [`digit_groups`].
     DigitGroups,
+    /// `unicode_regex_split_custom_kimi_k2`, which upstream runs for the
+    /// trigger pattern `\p{Han}+`. See [`super::kimi_k2_split`].
+    KimiK2,
 }
 
 /// A compiled pre-tokenizer: one or more [`Step`]s, applied in order.
@@ -247,13 +252,6 @@ fn compile(pattern: &str) -> fancy_regex::Regex {
 }
 
 impl PreTokenizer {
-    /// One pattern, run on the text as is.
-    pub(super) fn native(pattern: &str) -> Self {
-        PreTokenizer {
-            steps: vec![Step::Native(compile(pattern))],
-        }
-    }
-
     /// Upstream's `regex_exprs`, verbatim, each dispatched the way
     /// `unicode_regex_split` dispatches it. `native` maps a pattern
     /// upstream has a hand-written splitter for onto frink's stand-in
@@ -287,6 +285,7 @@ impl PreTokenizer {
                     Step::Collapsed(re) => split_mapped(re, fragment, collapse_char, &mut next),
                     Step::Codepoints(re) => split_mapped(re, fragment, whitespace_char, &mut next),
                     Step::DigitGroups => digit_groups(fragment, &mut next),
+                    Step::KimiK2 => super::kimi_k2_split::split(fragment, &mut next),
                 }
             }
             fragments = next;
@@ -304,6 +303,11 @@ impl Step {
     /// `unicode_regex_split_custom_afmoe`.
     pub(super) fn digit_groups() -> Self {
         Step::DigitGroups
+    }
+
+    /// `unicode_regex_split_custom_kimi_k2`.
+    pub(super) fn kimi_k2() -> Self {
+        Step::KimiK2
     }
 }
 

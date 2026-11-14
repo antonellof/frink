@@ -1777,15 +1777,14 @@ const NEOX_ROPE_TRIAGED: &[(&str, TriageClass, &str)] = &[
     (
         "flint",
         TriageClass::NewCode,
-        "the graph is served seams; the TOKENIZER is not. `src/models/flint.cpp` is GQA with \
+        "the graph is served seams, wired nowhere yet. `src/models/flint.cpp` is GQA with \
          per-head QK RMS, `attention.rope_pattern` (`:14`, `RopeLayers::FileMask`, the \
          second reader of 169 after `granite_swa`), the window ARRAY (`:13`), REQUIRED \
-         sinks (`:41`), leading dense layers and a shared expert -- each one table row. \
-         Its `flint` pre-tokenizer is a SEQUENCE of two regexes (`src/llama-vocab.cpp:\
-         285-290`), which `tokenizer::pretokenize` cannot express (one `Regex` per `pre`), \
-         so a Flint file is refused at the tokenizer even before this verdict. The \
-         amax rescale `llama-graph.cpp:2532` adds for it is a power-of-two divide and \
-         multiply around `down_exps`, an identity in f32",
+         sinks (`:41`), leading dense layers and a shared expert -- each one table row, \
+         and five of them is more than one match arm. Its `flint` pre-tokenizer, a \
+         SEQUENCE of three regexes (`src/llama-vocab.cpp:285-290`), is served and splits \
+         as libllama does (#629). The amax rescale `llama-graph.cpp:2532` adds for it is \
+         a power-of-two divide and multiply around `down_exps`, an identity in f32",
     ),
     (
         "beam",

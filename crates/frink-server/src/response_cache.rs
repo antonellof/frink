@@ -241,6 +241,10 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         // happens to register a cancel token no longer decides whether
         // this cache is correct.
         cancel: _,
+        // NOT KEYED. Where the tokens are counted for `/v1/stats` is not
+        // what they are: the same request answers identically whether
+        // or not anything is counting.
+        serving: _,
         ignore_eos,
         reasoning_budget,
         lora,
@@ -636,6 +640,7 @@ mod tests {
             json_object: false,
             grammar: None,
             cancel: None,
+            serving: None,
             ignore_eos: false,
             reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
             lora: None,

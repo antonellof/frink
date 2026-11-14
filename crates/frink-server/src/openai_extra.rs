@@ -642,6 +642,7 @@ pub async fn completions(
         // nothing for a client to name in a cancel.
         stop_token_ids: Vec::new(),
         cancel: None,
+        serving: None,
         ignore_eos: req.ignore_eos.unwrap_or(false),
         // A raw completion has no reasoning format (`reasoning: None`
         // above), so there is no block for a budget to bound.

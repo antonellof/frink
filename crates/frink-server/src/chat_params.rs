@@ -123,6 +123,7 @@ impl ChatCompletionRequest {
             // Filled in by the handler that owns the request id --
             // the request body cannot name its own cancel token.
             cancel: None,
+            serving: None,
             ignore_eos: self.ignore_eos.unwrap_or(false),
             // The number only; it is tokenized against the checkpoint
             // at `run_generation_emit`, beside `stop_token_ids`.
