@@ -427,6 +427,7 @@ mod tests {
             json_object: false,
             grammar: None,
             cancel: None,
+            serving: None,
             ignore_eos: false,
             reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
             lora: None,

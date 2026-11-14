@@ -108,9 +108,8 @@ whether it should be on by default is a measurement question this
 audit does not answer. `frink_scheduler_preempted_total` on `/metrics`
 counts evictions.
 
-`serving/mod.rs:11` records why the scheduling quantum is a chunk
-duration: a GPU cannot preempt a running kernel, so preemption here
-happens between ticks, never inside one.
+Preemption happens between ticks, never inside one: a GPU cannot
+preempt a running kernel.
 
 ### The per-step token budget
 
@@ -168,7 +167,7 @@ carries.
 lease, not a contiguous buffer, so its KV is scattered and its pages
 are returned when it ends.
 
-- Copy-on-write fork: `generate.rs:415`. A fork shares whole page
+- Copy-on-write fork: `generate.rs:426`. A fork shares whole page
   groups and copies only the part-written tail. It REFUSES on a
   sliding-window model (`ForkRefused::SlidingWindow`), because two
   sequences recycling out of one page set is a use-after-free that
@@ -184,16 +183,16 @@ pool is reclaimed from the prefix tree (below) or the request waits.
 ## Prefix caching over paged KV
 
 **Implemented.** `crates/frink-server/src/policy/radix/` is a radix
-tree over page indices: `match_prefix` (`plain.rs:201`) and
-`insert_prefix` (`plain.rs:211`); `lock` (`plain.rs:245`) and `unlock`
-(`plain.rs:259`), so a prefix a live lease adopted cannot be taken
-from under it; and `evict` (`plain.rs:287`), taking the least recently
+tree over page indices: `match_prefix` (`plain.rs:189`) and
+`insert_prefix` (`plain.rs:199`); `lock` (`plain.rs:233`) and `unlock`
+(`plain.rs:247`), so a prefix a live lease adopted cannot be taken
+from under it; and `evict` (`plain.rs:275`), taking the least recently
 matched unlocked leaf and cascading into a newly childless parent.
 
 - Namespaces: `salted.rs` is one tree per caller salt over one page
   pool, with round-robin eviction across namespaces. Two callers with
   byte-identical prompts share nothing.
-- Reclamation is wired on both decode paths: `generate.rs:876` calls
+- Reclamation is wired on both decode paths: `generate.rs:887` calls
   `evict` from `acquire_paged_caches`, which the private loop and the
   batched worker both go through, and the caller retries immediately
   rather than charging reclamation against its deadline.
@@ -232,7 +231,7 @@ than `MAX_SKIPS = 4` times, after which nothing overtakes it and the
 scan stops at it. `a_job_cannot_be_passed_over_forever` drives the
 queue rather than reading the constant.
 
-The peek is read-only (`plain.rs:176`, `peek_cached_len`), so ranking
+The peek is read-only (`plain.rs:164`, `peek_cached_len`), so ranking
 a job that is not admitted neither splits a node nor stamps the LRU
 clock: asking through the ordinary lookup would make recency reflect
 what was considered rather than what was served.

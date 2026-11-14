@@ -425,14 +425,16 @@ every request allocates privately). `moe`, `mamba` and `swa` are always
 
 `POST /v1/cache/rebuild` with `{"kv": <tokens>}` re-budgets the shared
 KV pool on a live engine. Every check runs before anything is freed, so
-a refused rebuild changes nothing.
+a refused rebuild changes nothing. llama.cpp has no counterpart; its KV
+is sized once at startup.
 
 | Case | Answer |
 |---|---|
 | names `moe`, `mamba` or `swa`; missing `kv`; target below one page; no pool | 400 |
+| target costs more than `FRINK_KV_BYTE_BUDGET`, when the pool was sized from one | 400 naming both byte figures. A pool sized with `FRINK_KV_POOL_BLOCKS` has no byte ceiling |
 | target below the pages in-flight requests hold | 409 naming the floor in tokens |
-| a rebuild already running | 409 |
-| not allowed to start (engine loading, or a previous rebuild failed) | 503 |
+| a rebuild already running, or a stop | 409 |
+| a previous rebuild failed and latched the engine | 503 |
 | success | clears the prefix cache, says so in `prefix_cache_invalidated` |
 
 While a rebuild runs, generation requests answer 503 with
@@ -766,10 +768,32 @@ the two resolve as llama.cpp resolves them
 `GET /v1/stats` is one object for a status bar: `model`, `state`,
 `uptime_s`, recent throughput (`throughput.decode_tps`,
 `throughput.prefill_tps`), request counts and latencies
-(`requests.active`, `completed`, `p95_ms`, `ttft_mean_ms`,
-`prompt_tokens_total`, `completion_tokens_total`), KV pool gauges
+(`requests.active`, `completed`, `aborted`, `p95_ms`, `ttft_mean_ms`,
+`prompt_tokens_total`, `completion_tokens_total`), pool gauges
 (`pools`) and the live memory footprint (`memory`, `null` when it cannot
 be read).
+
+Both decode paths (the private loop and `FRINK_CONTINUOUS_BATCHING`)
+feed the two rates, for streamed and buffered requests alike.
+`prefill_tps` counts prompt tokens actually computed, so a prefix the
+cache served is not in it; `decode_tps` counts completion tokens as
+they are committed. Each is tokens over the span from the oldest sample
+in the last 5 seconds to now, so an idle server decays to `0.0`.
+`active` counts generations in flight on either path, queued for the
+batch worker included; `completed` counts those answered and `aborted`
+those answered after a cancel (`POST /v1/cancel` or a dropped stream).
+A generation that failed is in neither, and a reply the response cache
+served ran no generation and is in none of the three. The token totals
+are summed from each finished request's `usage`.
+
+`pools.kv_pages` is the shared KV pool (`used`, `total`, `evictable`,
+`page_size`); `pools.prefix_cache` is what paged KV's prefix tree holds,
+in tokens across every cache salt (`tokens`, `locked` by live requests,
+`evictable` back to the store when it runs short, `page_size`). Each is
+`null`, never a zero row, on a deployment without that pool:
+`kv_pages` without `FRINK_KV_POOL_BLOCKS` or `FRINK_KV_BYTE_BUDGET`,
+`prefix_cache` without `FRINK_PAGED_KV_BLOCKS`. `window_slots` and
+`state_slots` are always `null`.
 
 `GET /v1/requests?since=<cursor>&limit=<n>` pages the `/admin/stats`
 request ring (rows as in [Stats](#stats)) and answers

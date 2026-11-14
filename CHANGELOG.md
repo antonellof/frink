@@ -73,6 +73,38 @@ are the ones worth reading twice.
   28. The gate's bound against the CPU became per fixture with the sliding
   windows, above.
 
+- **`/v1/stats` reports what paged KV's prefix tree holds**
+  (`pools.prefix_cache`: tokens, locked, evictable, page size), `null`
+  without `FRINK_PAGED_KV_BLOCKS` (#632).
+
+### Fixed
+
+- **`/v1/stats` throughput and request counts are true.** Nothing fed
+  them: `throughput.decode_tps` and `prefill_tps` read `0.0` on every
+  reply, and `requests.active` counted only streamed requests. Both
+  decode paths now count prompt tokens as they are computed and
+  completion tokens as they are committed, and every generation,
+  streamed or not, is counted in flight, then `completed` or, after a
+  cancel, the new `aborted`. `completed` used to count every row the
+  request ring recorded, errors and embeddings included.
+
+- **`POST /v1/cache/rebuild` holds a re-split to `FRINK_KV_BYTE_BUDGET`**
+  (#632). A pool sized from a byte budget could be grown past it: the
+  endpoint never consulted the pre-check that exists to refuse a split
+  before the pool moves. It answers 400 with both byte figures now. The
+  price of a split saturates, so a target large enough to overflow it
+  is refused rather than wrapped into one that fits.
+
+### Removed
+
+- **Server groundwork with no caller** (#632): chunk-duration admission
+  for the window and recurrent memory models (`serving::admission`,
+  which the continuous batcher never served), the "last known value"
+  stats type, the rebuild transitions for an out-of-process scheduler
+  (timeout, never dispatched) and the gate's loading state, which the
+  server never entered, and the prefix tree's sliding-window and
+  recurrent-state fields left from caches already deleted.
+
 ## [0.63.0] - 2026-11-13
 
 ### Added

@@ -5,30 +5,29 @@
 //!
 //! # Why a gate at all
 //!
-//! Three operations mutate a serving engine out from under its
-//! requests: loading a model, re-splitting the caches, and stopping.
-//! Each one has a window in which admitting a request would be wrong,
-//! and each one can *fail in a way that leaves the engine in an unknown
-//! state*. A boolean `is_serving` handles the first half and not the
-//! second, which is how an engine ends up accepting work while a rebuild
-//! is halfway through moving its KV pool.
+//! Two operations mutate a serving engine out from under its requests:
+//! re-splitting the caches, and stopping. Each one has a window in
+//! which admitting a request would be wrong, and each one can *fail in
+//! a way that leaves the engine in an unknown state*. A boolean
+//! `is_serving` handles the first half and not the second, which is how
+//! an engine ends up accepting work while a rebuild is halfway through
+//! moving its KV pool.
 //!
-//! # The three fail-closed rules
+//! There is no loading state: the server builds this gate after the
+//! startup checkpoint is resident ([`MaintenanceGate::serving`]). And a
+//! rebuild is in-process and synchronous (`POST /v1/cache/rebuild`
+//! resizes the pool under the gate and knows the outcome before it
+//! returns), so there is no rebuild that timed out or never reached the
+//! engine for the gate to reason about. FreeToken has both, because its
+//! scheduler is another process.
 //!
-//! **A rebuild that times out does not reopen the gate.** The scheduler
-//! may still be mid-rebuild -- a slow CUDA-graph recapture, a large
-//! copy -- and nothing cancelled it. Reopening would admit requests into
-//! a cache that is being resized under them. The state stays
-//! [`Rebuilding`](MaintenanceState::Rebuilding) until a real reply
-//! arrives and says which way it went.
+//! # The fail-closed rules
 //!
-//! **A rebuild that never dispatched *does* reopen it.** This is the
-//! exception that proves the rule, and it is exact: if the request never
-//! reached the scheduler, the engine is untouched. Latching maintenance
-//! on a transient enqueue error would leave the gate closed forever with
-//! no reply ever coming to clear it.
+//! **Only a failed rollback latches.** A rebuild that was refused or
+//! rolled back reopens the gate; one whose rollback failed leaves no
+//! pools and latches [`Failed`](MaintenanceState::Failed).
 //!
-//! **A drain that times out never reopens admission either.** A server
+//! **A drain that times out never reopens admission.** A server
 //! that announced it was stopping, then accepted more work, then sealed
 //! totals that do not include it, has produced accounting that is simply
 //! false. The caller is expected to preserve the process and retry --
@@ -50,8 +49,6 @@
 /// What the engine is doing, and therefore what it will accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceState {
-    /// Weights are still being read. Nothing can be served yet.
-    Loading,
     /// The only state that admits requests.
     Serving,
     /// A cache re-split is in flight.
@@ -66,7 +63,6 @@ pub enum MaintenanceState {
 impl MaintenanceState {
     pub fn as_str(self) -> &'static str {
         match self {
-            MaintenanceState::Loading => "loading",
             MaintenanceState::Serving => "serving",
             MaintenanceState::Rebuilding => "rebuilding",
             MaintenanceState::Stopping => "stopping",
@@ -89,14 +85,11 @@ impl std::fmt::Display for AdmissionClosed {
 
 /// Why a rebuild was refused before it started.
 ///
-/// The distinction between the three is the HTTP status a caller should
-/// return, and it is not cosmetic: `Busy` is retryable in a moment,
-/// `NotReady` is retryable when loading finishes, and `Latched` is not
-/// retryable at all.
+/// The distinction between the two is the HTTP status a caller should
+/// return, and it is not cosmetic: `Busy` is retryable in a moment, and
+/// `Latched` is not retryable at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebuildRefused {
-    /// Still loading; there is no cache to rebuild yet.
-    NotReady,
     /// Another rebuild, or a stop, is already in flight.
     Busy(MaintenanceState),
     /// The engine is latched in maintenance; a restart is required.
@@ -106,9 +99,6 @@ pub enum RebuildRefused {
 impl std::fmt::Display for RebuildRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RebuildRefused::NotReady => {
-                write!(f, "model is still loading; cannot rebuild cache yet")
-            }
             RebuildRefused::Busy(MaintenanceState::Stopping) => {
                 write!(f, "engine stop is in progress")
             }
@@ -177,33 +167,10 @@ pub struct MaintenanceGate {
     sealed: Option<SealedAccounting>,
 }
 
-impl Default for MaintenanceGate {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl MaintenanceGate {
-    /// A new engine is [`Loading`](MaintenanceState::Loading), never
-    /// `Serving`: the gate must be closed before the weights are there,
-    /// not opened optimistically and closed on the first failure.
-    pub fn new() -> Self {
-        MaintenanceGate {
-            state: MaintenanceState::Loading,
-            sealed: None,
-        }
-    }
-
-    /// A gate for an engine whose weights are already resident.
-    ///
-    /// Only for a host that finished its load *before* it built the
-    /// gate: the server constructs its state after the startup
-    /// checkpoint is activated, so starting that gate in `Loading`
-    /// would refuse every request forever, since nothing would ever
-    /// call [`finish_loading`](Self::finish_loading). A host that loads
-    /// after building the gate must use [`new`](Self::new) instead --
-    /// an optimistically-open gate admits requests into weights that
-    /// are not there yet.
+    /// A gate for an engine whose weights are already resident, which is
+    /// the only kind the server builds: it constructs its state after the
+    /// startup checkpoint is activated.
     pub fn serving() -> Self {
         MaintenanceGate {
             state: MaintenanceState::Serving,
@@ -227,15 +194,6 @@ impl MaintenanceGate {
         }
     }
 
-    /// Loading finished. `ok == false` latches the engine.
-    pub fn finish_loading(&mut self, ok: bool) {
-        self.state = if ok {
-            MaintenanceState::Serving
-        } else {
-            MaintenanceState::Failed
-        };
-    }
-
     /// Latch the engine. Only a restart clears this.
     pub fn latch_failed(&mut self) {
         self.state = MaintenanceState::Failed;
@@ -244,7 +202,7 @@ impl MaintenanceGate {
     /// Take the gate for a cache rebuild.
     ///
     /// Refuses from every state but `Serving`, and the refusal says
-    /// which, because a caller turns that into three different HTTP
+    /// which, because a caller turns that into two different HTTP
     /// statuses.
     pub fn begin_rebuild(&mut self) -> Result<(), RebuildRefused> {
         match self.state {
@@ -252,43 +210,19 @@ impl MaintenanceGate {
                 self.state = MaintenanceState::Rebuilding;
                 Ok(())
             }
-            MaintenanceState::Loading => Err(RebuildRefused::NotReady),
             MaintenanceState::Failed => Err(RebuildRefused::Latched),
             other => Err(RebuildRefused::Busy(other)),
         }
     }
 
-    /// The rebuild request never reached the engine, so the engine is
-    /// untouched: reopen.
-    ///
-    /// The *only* path that reopens a rebuilding gate. A transient
-    /// enqueue error must not latch maintenance forever with no reply
-    /// ever arriving to clear it.
-    pub fn rebuild_never_dispatched(&mut self) {
+    /// The rebuild ended and the engine still has its pools, resized or
+    /// not: reopen. A rebuild that cost the engine its pools calls
+    /// [`latch_failed`](Self::latch_failed) instead.
+    pub fn finish_rebuild(&mut self) {
         if self.state == MaintenanceState::Rebuilding {
             self.state = MaintenanceState::Serving;
         }
     }
-
-    /// A real reply arrived for the rebuild.
-    pub fn finish_rebuild(&mut self, ok: bool) {
-        if self.state == MaintenanceState::Rebuilding {
-            self.state = if ok {
-                MaintenanceState::Serving
-            } else {
-                MaintenanceState::Failed
-            };
-        }
-    }
-
-    /// The rebuild's own timeout expired.
-    ///
-    /// Deliberately does nothing. The scheduler may still be mid-rebuild
-    /// and nothing cancelled it, so the gate stays closed until a real
-    /// reply says which way it went. Written as a named no-op rather
-    /// than as an omission, because "we chose not to reopen here" is the
-    /// rule and an absent call looks like a missing one.
-    pub fn rebuild_timed_out(&self) {}
 
     /// Close admission for a shutdown.
     ///
@@ -356,22 +290,7 @@ mod tests {
     }
 
     fn serving() -> MaintenanceGate {
-        let mut gate = MaintenanceGate::new();
-        gate.finish_loading(true);
-        gate
-    }
-
-    #[test]
-    fn an_engine_starts_closed_and_opens_only_when_loading_succeeds() {
-        let mut gate = MaintenanceGate::new();
-        assert!(gate.check_admission().is_err());
-        gate.finish_loading(true);
-        assert!(gate.check_admission().is_ok());
-
-        let mut gate = MaintenanceGate::new();
-        gate.finish_loading(false);
-        assert_eq!(gate.state(), MaintenanceState::Failed);
-        assert!(gate.check_admission().is_err());
+        MaintenanceGate::serving()
     }
 
     #[test]
@@ -382,38 +301,29 @@ mod tests {
         assert_eq!(err.to_string(), "server unavailable: engine is rebuilding");
     }
 
-    /// The fail-closed rule that costs the most to get wrong: nothing
-    /// cancelled the rebuild, so nothing may assume it finished.
+    /// A rebuild that ended reopens the gate, and only that state: a
+    /// stop that started meanwhile is not reopened by it.
     #[test]
-    fn a_rebuild_timeout_leaves_the_gate_closed() {
+    fn a_finished_rebuild_reopens_only_a_rebuilding_gate() {
         let mut gate = serving();
         gate.begin_rebuild().expect("rebuild starts");
-        gate.rebuild_timed_out();
-        assert_eq!(gate.state(), MaintenanceState::Rebuilding);
         assert!(gate.check_admission().is_err());
-
-        // Only a real reply moves it.
-        gate.finish_rebuild(true);
+        gate.finish_rebuild();
         assert!(gate.check_admission().is_ok());
-    }
 
-    /// And its exact exception: a request that never reached the engine
-    /// left the engine untouched, so latching on it would close the gate
-    /// forever with no reply ever coming to clear it.
-    #[test]
-    fn a_rebuild_that_never_dispatched_reopens_the_gate() {
-        let mut gate = serving();
-        gate.begin_rebuild().expect("rebuild starts");
-        gate.rebuild_never_dispatched();
-        assert_eq!(gate.state(), MaintenanceState::Serving);
-        assert!(gate.check_admission().is_ok());
+        let mut stopping = serving();
+        stopping.begin_stop().expect("stop starts");
+        stopping.finish_rebuild();
+        assert_eq!(stopping.state(), MaintenanceState::Stopping);
+
+        let mut latched = serving();
+        latched.latch_failed();
+        latched.finish_rebuild();
+        assert_eq!(latched.state(), MaintenanceState::Failed);
     }
 
     #[test]
     fn a_refused_rebuild_says_which_kind_of_no_it_is() {
-        let mut loading = MaintenanceGate::new();
-        assert_eq!(loading.begin_rebuild(), Err(RebuildRefused::NotReady));
-
         let mut latched = serving();
         latched.latch_failed();
         assert_eq!(latched.begin_rebuild(), Err(RebuildRefused::Latched));
