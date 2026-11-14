@@ -328,19 +328,23 @@ pub(crate) fn note_wait(
 /// while the CPU encodes the rest. llama.cpp does the same
 /// (`ggml_metal_graph_compute`: the first `max(64, n_nodes / 10)` nodes
 /// are committed before the rest are encoded). Without it a token waits
-/// for the whole stack's encoding (530 dispatches, ~1 ms on gpt-oss)
-/// before the GPU starts.
+/// for the whole stack's encoding (482 dispatches, ~0.45 ms on
+/// gpt-oss) before the GPU starts.
 ///
 /// `None` = one command buffer: under `FRINK_METAL_KERNEL_TIMING` (its
 /// spans belong to one command buffer), with `FRINK_METAL_EARLY_COMMIT=0`,
 /// or for a one-layer stack. `FRINK_METAL_EARLY_COMMIT=N` splits before
 /// layer `N` in either stack. Unset: the dense stack splits after the
-/// first third of its layers (at least one); the MoE stack does not.
+/// first third of its layers, the MoE stack after the first sixth (at
+/// least one layer either way).
 ///
 /// Measured on an M5 Max (tg128, best of interleaved runs): Llama-3.2-1B
-/// gains 4-10% anywhere from an eighth to a half. gpt-oss-20b gained
-/// with a split before the MoE prefill rework (59d0586f) and loses with
-/// one after it: 124 tok/s unsplit, 116 split at a third, 82 at a sixth.
+/// gains 4-10% anywhere from an eighth to a half. The MoE stack lost
+/// with a split while its host encode was 1.8 ms a token (gpt-oss-20b
+/// 124 tok/s unsplit, 82 at a sixth), most of it a byte compare of the
+/// expert-bias planes; with that gone (0.45 ms, #627) it gains at a
+/// sixth: gpt-oss-20b 158 -> 167, Qwen3-30B-A3B 148 -> 172, OLMoE
+/// 427 -> 468, each better than at a third or at the first layer.
 pub(crate) fn early_commit_layer(stack: Stack, n_layers: usize) -> Option<usize> {
     if crate::kernel_timing::kernel_timing_enabled() {
         return None;
@@ -368,7 +372,7 @@ fn split_layer(set: Option<Option<usize>>, stack: Stack, n_layers: usize) -> Opt
     let at = match (set, stack) {
         (Some(explicit), _) => explicit?,
         (None, Stack::Dense) => n_layers.div_ceil(3).max(1),
-        (None, Stack::Moe) => return None,
+        (None, Stack::Moe) => n_layers.div_ceil(6).max(1),
     };
     (at < n_layers).then_some(at)
 }
@@ -407,7 +411,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dense_stack_splits_a_third_of_the_way_in_and_the_moe_stack_does_not() {
+    fn the_dense_stack_splits_a_third_of_the_way_in_and_the_moe_stack_a_sixth() {
         use Stack::{Dense, Moe};
         assert_eq!(split_layer(None, Dense, 16), Some(6)); // Llama-3.2-1B
         assert_eq!(split_layer(None, Dense, 2), Some(1));
@@ -416,11 +420,10 @@ mod tests {
             None,
             "one layer has nothing to overlap"
         );
-        assert_eq!(
-            split_layer(None, Moe, 24),
-            None,
-            "the MoE stack measured slower split"
-        );
+        assert_eq!(split_layer(None, Moe, 24), Some(4)); // gpt-oss-20b
+        assert_eq!(split_layer(None, Moe, 48), Some(8)); // Qwen3-30B-A3B
+        assert_eq!(split_layer(None, Moe, 16), Some(3)); // OLMoE
+        assert_eq!(split_layer(None, Moe, 1), None);
         assert_eq!(split_layer(Some(None), Dense, 24), None, "0 turns it off");
         assert_eq!(
             split_layer(Some(Some(4)), Moe, 24),

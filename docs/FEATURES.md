@@ -43,8 +43,9 @@ run end to end on a real checkpoint, so they are not in the table.
 Limits that affect model choice:
 
 - On Metal, Llama 4 runs on the host path: its chunked window does not
-  fit the fused launches. gpt-oss runs on the fused stacks (#627): one
-  command buffer per decode token and per prefill chunk, with its sinks,
+  fit the fused launches. gpt-oss runs on the fused stacks (#627): two
+  command buffers per decode token (the GPU starts on the first layers
+  while the rest encode) and one per prefill chunk, with its sinks,
   biases, sliding window and clamped SwiGLU on the device. CUDA's
   resident stack runs it too.
 - Gemma-4 on Metal runs the fused dense stacks, level with llama.cpp

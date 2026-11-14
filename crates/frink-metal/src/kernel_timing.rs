@@ -53,6 +53,12 @@ struct Inner {
 }
 
 impl SpanClock {
+    /// A clock that never samples, for a caller that shares an encode
+    /// path with an instrumented stack but is not itself timed.
+    pub(crate) const fn off() -> Self {
+        Self(None)
+    }
+
     /// A clock for a command buffer that will open at most `max_spans`
     /// spans. Off (a no-op clock) unless `FRINK_METAL_KERNEL_TIMING` is
     /// set; also off, with one warning, on a device that cannot sample

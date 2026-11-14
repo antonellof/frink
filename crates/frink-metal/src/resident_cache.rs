@@ -105,17 +105,21 @@ pub(crate) fn get_or_build<V: Resident>(
     host: &[u8],
     build: impl FnOnce() -> Result<V, MetalError>,
 ) -> Result<Arc<V>, MetalError> {
-    get_or_build_within(global, mirror, host, budget_bytes(), build)
+    get_or_build_within(global, mirror, host, budget_bytes, build)
 }
 
 /// [`get_or_build`] with the budget stated rather than read from the
 /// environment, so a test can exercise a tight budget without a
 /// process-wide variable two tests would race over.
+///
+/// The budget is asked for only on a miss: a hit is the per-token path,
+/// and reading the environment there was a `getenv` per resident
+/// lookup, a dozen per layer per token.
 fn get_or_build_within<V: Resident>(
     global: &Global<V>,
     mirror: &'static Mirror<V>,
     host: &[u8],
-    budget: usize,
+    budget: impl FnOnce() -> usize,
     build: impl FnOnce() -> Result<V, MetalError>,
 ) -> Result<Arc<V>, MetalError> {
     let key = HostKey::of(host);
@@ -138,6 +142,7 @@ fn get_or_build_within<V: Resident>(
         match cache.get(&key).filter(|c| c.still_holds(host)) {
             Some(cached) => cached.clone(),
             None => {
+                let budget = budget();
                 let used: usize = cache.values().map(|b| b.resident_bytes()).sum();
                 if used.saturating_add(host.len()) > budget {
                     // Drop everything and retry with a clean slate for
@@ -204,12 +209,18 @@ mod tests {
             static TL: RefCell<HashMap<HostKey, Arc<FakeBuffer>>> = RefCell::new(HashMap::new());
         }
         let fetch = |host: &[u8], tag: u32| {
-            get_or_build_within(&CACHE, &TL, host, usize::MAX, || {
-                Ok(FakeBuffer {
-                    bytes: host.to_vec(),
-                    tag,
-                })
-            })
+            get_or_build_within(
+                &CACHE,
+                &TL,
+                host,
+                || usize::MAX,
+                || {
+                    Ok(FakeBuffer {
+                        bytes: host.to_vec(),
+                        tag,
+                    })
+                },
+            )
             .expect("build")
         };
 
@@ -239,12 +250,18 @@ mod tests {
             static TL: RefCell<HashMap<HostKey, Arc<FakeBuffer>>> = RefCell::new(HashMap::new());
         }
         let fetch = |host: &[u8], tag: u32| {
-            get_or_build_within(&CACHE, &TL, host, 0, || {
-                Ok(FakeBuffer {
-                    bytes: host.to_vec(),
-                    tag,
-                })
-            })
+            get_or_build_within(
+                &CACHE,
+                &TL,
+                host,
+                || 0,
+                || {
+                    Ok(FakeBuffer {
+                        bytes: host.to_vec(),
+                        tag,
+                    })
+                },
+            )
             .expect("build")
         };
 

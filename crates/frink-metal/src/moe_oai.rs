@@ -21,7 +21,9 @@
 //! `renormalize`.
 
 use crate::dispatch::dispatch_counted;
-use crate::gpu::{ensure_pipeline, resident_f32_buffer, MetalError, ResidentF32Buffer};
+use crate::gpu::{
+    ensure_pipeline, resident_f32_buffer, resident_f32_shared, MetalError, ResidentF32Buffer,
+};
 use crate::moe_ids::IdsBinding;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -32,16 +34,22 @@ use std::sync::Arc;
 /// One gpt-oss layer's FFN additions, as the stacks take them. The
 /// expert planes are expert-major: expert `e`'s gate bias is
 /// `gate_bias[e * ffn_rows .. (e + 1) * ffn_rows]`.
+///
+/// The three expert planes are shared allocations, not slices: they are
+/// 368 KB each on gpt-oss-20b, and a slice can only be proven to be the
+/// upload the cache holds by comparing every byte, per layer per token
+/// (`gpu::resident_f32_shared`). The router bias is 32 floats and stays
+/// a slice.
 #[derive(Clone, Copy)]
 pub struct MoeOaiMetal<'a> {
     /// `ffn_gate_inp.bias`, `[n_experts]`.
     pub router_bias: &'a [f32],
     /// `ffn_gate_exps.bias`, `[n_experts * ffn_rows]`.
-    pub gate_bias: &'a [f32],
+    pub gate_bias: &'a Arc<[f32]>,
     /// `ffn_up_exps.bias`, `[n_experts * ffn_rows]`.
-    pub up_bias: &'a [f32],
+    pub up_bias: &'a Arc<[f32]>,
     /// `ffn_down_exps.bias`, `[n_experts * hidden_rows]`.
-    pub down_bias: &'a [f32],
+    pub down_bias: &'a Arc<[f32]>,
     /// The sigmoid's steepness (llama's `alpha = 1.702`).
     pub alpha: f32,
     /// The clamp (llama's `limit = 7.0`).
@@ -76,9 +84,9 @@ impl MoeOaiResident {
     ) -> Result<Self, MetalError> {
         Ok(Self {
             router_bias: resident_f32_buffer(device, oai.router_bias)?,
-            gate_bias: resident_f32_buffer(device, oai.gate_bias)?,
-            up_bias: resident_f32_buffer(device, oai.up_bias)?,
-            down_bias: resident_f32_buffer(device, oai.down_bias)?,
+            gate_bias: resident_f32_shared(device, oai.gate_bias)?,
+            up_bias: resident_f32_shared(device, oai.up_bias)?,
+            down_bias: resident_f32_shared(device, oai.down_bias)?,
             alpha: oai.alpha,
             limit: oai.limit,
         })

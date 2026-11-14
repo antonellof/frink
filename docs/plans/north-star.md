@@ -40,7 +40,7 @@ own. Checked 2026-11-13, at 0.63.0.
 | 1. Loads | `frink archs`, `tests/arch_coverage.rs`, the triage in [`MODELS.md`](../MODELS.md) | Every text-generation architecture llama.cpp names runs or refuses by name. A few refuse as unaudited and need new code (#538). |
 | 2. Same tokens | `frink parity` and CI's oracle job (`scripts/oracle.sh`); the render census for prompts | Every served architecture matches on its fixtures on the CPU. A pure Q2_K checkpoint is WRONG on the CPU (#584). The Metal decode agrees with the CPU within rounding on every graph fixture; `hrm_text` amplifies that rounding past the line and is listed (`KNOWN_METAL_DIVERGENCES`). Some pre-tokenizer arms still fall back to GPT-2's (#629). The chat-prompt differences left are listed deviations |
 | 3. Backend | [`KERNELS.md`](../KERNELS.md), generated and drift-tested | Every kind has a kernel on CPU, Metal and CUDA. Some CUDA kinds have never run on a GPU (#405). Vulkan serves a decode and prefill stack for its kinds, opt-in (#409) |
-| 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead on dense and MoE models once an M5 runs the prefill on its matrix units (tensor API, #631); Gemma-4 is level since it runs the fused stacks; gpt-oss is ahead on prefill and behind on decode, where each token waits ~2 ms beyond its GPU time (#627); Qwen3-0.6B and SmolLM2 are behind on prefill. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Many published rows predate the current code (#542) |
+| 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | On an M5 Max, Metal is level with or ahead of llama.cpp on prefill and decode for every family measured (dense 135M to 12B, Gemma-2/3/4, gpt-oss, OLMoE, Qwen3-30B-A3B), in best-of interleaved runs on a shared host (#631); a quiet-host run by a person is still owed (ADR 0006). CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Many published rows predate the current code (#542) |
 | 5. Same command | `crates/frink-cli/src/llama_flags.rs`, which pins the gap | The common flags work. A tail of `llama-cli` / `llama-server` flags and `LLAMA_ARG_*` variables is still unaccepted (#404) |
 
 ## Priorities
@@ -95,46 +95,40 @@ without a rental.
    the private loop and once with `--cont-batching`: several
    temperature-0 requests return the same text as without the draft,
    and `usage` reports accepted draft tokens (#600, #533).
-7. **gpt-oss decode on Metal** (#627): it runs the fused MoE stacks
-   with every one of its additions on the device and its prefill is
-   ahead of llama.cpp, but decode is ~1.16x behind: ~6 ms of GPU per
-   token plus ~1 ms of encode for 530 dispatches. Metal residency sets
-   (llama.cpp's) measured no change, and the early-commit split now
-   slows the MoE stack, so it is off there.
-8. **Re-measure the stale Metal rows** (#542), on a quiet host, by a
+7. **Re-measure the stale Metal rows** (#542), on a quiet host, by a
    person (ADR 0006).
-9. **MoE larger than memory** (#406,
+8. **MoE larger than memory** (#406,
    [`out-of-core-moe.md`](out-of-core-moe.md)): the decode top-k path
    serves a stored expert; the packed `mul_mv_id` path and the Metal
    prefill MoE paths are still resident-only, then asynchronous reads
    and a run that really exceeds memory.
-10. **Bonsai PTQ1_0 prefill** (#540): decode is at parity, the prefill
+9. **Bonsai PTQ1_0 prefill** (#540): decode is at parity, the prefill
    GEMM is not.
 
 ### D. Architectures
 
-11. **One file per architecture** (#403,
+10. **One file per architecture** (#403,
    [`arch-registry-migration.md`](arch-registry-migration.md)): step
    9c (`step35`, `mimo2`, `lfm3`), then the audited list, the catalog
    and the layer plan derived from the registry.
-12. **The architectures that refuse as unaudited** (#538), each as one
+11. **The architectures that refuse as unaudited** (#538), each as one
     file with a libllama golden and a greedy decode, or a refusal with
     its reason in [`MODELS.md`](../MODELS.md).
-13. **Multimodal** (#407): the Qwen-family projector first (`--mmproj`,
+12. **Multimodal** (#407): the Qwen-family projector first (`--mmproj`,
     image input on chat completions, Responses and Messages), every
     other projector type refused by name. The largest group of models
     llama.cpp serves and frink does not.
 
 ### E. CUDA and other GPUs (one batched rental)
 
-14. **CUDA to parity**: decode (#133), prefill (#259), and the kinds
+13. **CUDA to parity**: decode (#133), prefill (#259), and the kinds
     that have never run on a GPU (#405). The largest speed gap, on the
     hardware most people own.
-15. **Run the queued CUDA hardware tests**: the commands in the bodies
+14. **Run the queued CUDA hardware tests**: the commands in the bodies
     of #606, #613, #615, #578 and #619. CUDA graph decode replay
     (`FRINK_CUDA_GRAPH=1`, #537) stays off until its test passes and
     the replay is measured.
-16. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
+15. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
     RDNA and CDNA, the Ryzen AI NPU spike (#494, [`amd.md`](amd.md)).
     Vulkan has run only on MoltenVK and lavapipe. Queued for a real
     driver (RADV, AMDVLK, or an Intel iGPU if no AMD rental exists):
@@ -146,7 +140,7 @@ without a rental.
 
 ### F. Same commands, same API
 
-17. **The flag and `LLAMA_ARG_*` tail** (#404), including automatic
+16. **The flag and `LLAMA_ARG_*` tail** (#404), including automatic
     memory planning (`--fit` and family, pricing target, draft and every
     slot) and `--cache-reuse`: implement, or refuse by name.
 
@@ -155,24 +149,24 @@ without a rental.
 Speculation inside the continuous batch has landed (#614, #615) and
 DFlash drafts with it (#606, #608).
 
-18. **Drafters still missing**: multi-token-prediction heads as a
+17. **Drafters still missing**: multi-token-prediction heads as a
     drafter (#533), recurrent targets drafting in the batch (needs a
     batched checkpoint), and per-token recurrent snapshots so a partial
     accept does not replay.
-19. **Scheduling**: preemption on by default after a measurement
+18. **Scheduling**: preemption on by default after a measurement
     (#408), and a request priority (#541).
-20. **Memory**: sliding-window eviction in the paged store and the pool
+19. **Memory**: sliding-window eviction in the paged store and the pool
     (#61); KV quantization on the host and CUDA stores (#535); the disk
     KV tier wired into serving, or deleted (#536); continuous batching
     on by default off Metal once a receipt exists.
 
 ### H. Reach
 
-21. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
+20. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
     quantizing a BF16 checkpoint while loading it (#539).
-22. **CPU decode scheduling** (#27): a persistent worker pool in place
+21. **CPU decode scheduling** (#27): a persistent worker pool in place
     of a fork-join per operation, and the quiet-host receipt.
-23. **Container images** for CPU and CUDA (#544). Small; lands whenever
+22. **Container images** for CPU and CUDA (#544). Small; lands whenever
     someone wants it.
 
 **Not now:** tensor, pipeline and multi-node parallelism,
@@ -189,9 +183,9 @@ each is a claim that can be measured:
 - **Serving under load.** Continuous batching, paged KV, a prefix
   cache, preemption and speculation inside the batch give higher
   aggregate tok/s at 16 concurrent requests than `llama-server` on the
-  same host (items 18 to 20).
+  same host (items 17 to 19).
 - **Models larger than memory.** A MoE whose weights exceed RAM decodes
-  at a stated tok/s on a 32 GB machine (item 9).
+  at a stated tok/s on a 32 GB machine (item 8).
 - **Never silently wrong.** An unaudited model refuses where llama.cpp
   often runs it approximately, and a request field frink does not
   implement is refused by name.

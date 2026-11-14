@@ -295,7 +295,7 @@ impl Decoder {
     #[cfg(feature = "metal")]
     pub(super) fn metal_moe_oai(&self, l: usize) -> Option<frink_metal::moe_oai::MoeOaiMetal<'_>> {
         let oai = self.gpt_oss.as_ref()?.layers.get(self.physical_index(l))?;
-        let (gate_bias, up_bias, down_bias) = oai.expert_bias.planes();
+        let (gate_bias, up_bias, down_bias) = oai.expert_bias.shared_planes();
         Some(frink_metal::moe_oai::MoeOaiMetal {
             router_bias: &oai.router_bias,
             gate_bias,
