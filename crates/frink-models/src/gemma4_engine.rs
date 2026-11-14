@@ -32,6 +32,13 @@ pub struct Gemma4Hparams {
     pub n_kv_heads: usize,
     pub head_dim_full: usize,
     pub head_dim_swa: usize,
+    /// RoPE width of a full layer (llama.cpp `n_rot_full`, GGUF
+    /// `rope.dimension_count`): channels `[rot_dim_full, head_dim_full)`
+    /// pass through unrotated.
+    pub rot_dim_full: usize,
+    /// RoPE width of a sliding layer (`n_rot_swa`,
+    /// `rope.dimension_count_swa`, defaulting to `rot_dim_full`).
+    pub rot_dim_swa: usize,
     pub sliding_window: usize,
     /// `true` = SWA layer; length == `n_layer`.
     pub is_swa: Vec<bool>,
@@ -56,6 +63,16 @@ impl Gemma4Hparams {
             self.head_dim_swa
         } else {
             self.head_dim_full
+        }
+    }
+
+    /// llama.cpp `hparams.n_rot(il)`: the leading channels of each
+    /// head that `ggml_rope_ext` rotates on layer `il`.
+    pub fn rot_dim(&self, il: usize) -> usize {
+        if self.is_swa_layer(il) {
+            self.rot_dim_swa
+        } else {
+            self.rot_dim_full
         }
     }
 
@@ -313,6 +330,29 @@ impl Gemma4Engine {
         Some(out)
     }
 
+    /// `ggml_rope_ext` (NeoX) on each of the `n` heads in `x` for layer
+    /// `il`: the first `hp.rot_dim(il)` channels rotate, the rest pass
+    /// through (`gemma4.cpp`, `n_rot_l`). Full layers divide by
+    /// `rope_freqs`, of which ggml reads the first `n_rot/2` bands.
+    fn rope_heads(&self, x: &mut [f32], n: usize, il: usize, pos: usize) {
+        let hp = &self.hp;
+        let head_dim = hp.head_dim(il);
+        let rot = hp.rot_dim(il);
+        let theta = hp.rope_theta_for(il);
+        let freq = if hp.is_swa_layer(il) {
+            None
+        } else {
+            self.weights.rope_freqs.as_deref().map(|f| &f[..rot / 2])
+        };
+        for h in 0..n {
+            let slice = &mut x[h * head_dim..h * head_dim + rot];
+            match freq {
+                Some(f) => apply_rope_with_freq_factors(slice, pos, theta, f),
+                None => apply_rope(slice, pos, theta),
+            }
+        }
+    }
+
     /// The host body: the reference every device path is checked
     /// against, and what serves a token no device path takes.
     pub(crate) fn forward_token_host(
@@ -335,19 +375,7 @@ impl Gemma4Engine {
             let mut q = layer.attn.q_proj.apply(&attn_in);
             q = rms_norm_per_head(&q, &layer.attn.q_norm, head_dim, hp.rms_norm_eps);
 
-            let theta = hp.rope_theta_for(il);
-            let freq = if hp.is_swa_layer(il) {
-                None
-            } else {
-                self.weights.rope_freqs.as_deref()
-            };
-            for h in 0..n_heads {
-                let slice = &mut q[h * head_dim..(h + 1) * head_dim];
-                match freq {
-                    Some(f) => apply_rope_with_freq_factors(slice, pos, theta, f),
-                    None => apply_rope(slice, pos, theta),
-                }
-            }
+            self.rope_heads(&mut q, n_heads, il, pos);
             // Gemma-4 attention_scale = 1.0: compensate kernel's 1/sqrt(d).
             let compensate = hp.attention_scale * (head_dim as f32).sqrt();
             for v in q.iter_mut() {
@@ -367,13 +395,7 @@ impl Gemma4Engine {
                     .as_ref()
                     .expect("has_kv layer missing attn_k_norm");
                 let mut k = rms_norm_per_head(&k_raw, k_norm, head_dim, hp.rms_norm_eps);
-                for h in 0..n_kv {
-                    let slice = &mut k[h * head_dim..(h + 1) * head_dim];
-                    match freq {
-                        Some(f) => apply_rope_with_freq_factors(slice, pos, theta, f),
-                        None => apply_rope(slice, pos, theta),
-                    }
-                }
+                self.rope_heads(&mut k, n_kv, il, pos);
 
                 // Without `attn_v`, V is K's projection before K's norm
                 // and RoPE (`gemma4.cpp`: `Vcur = Kcur` ahead of both).
@@ -564,6 +586,8 @@ mod tests {
             n_kv_heads: 1,
             head_dim_full: 32,
             head_dim_swa: 16,
+            rot_dim_full: 32,
+            rot_dim_swa: 16,
             sliding_window: 8,
             is_swa,
             n_layer_kv_from_start: 6,

@@ -12,6 +12,7 @@
 //! | SWA 256-wide / full 512-wide heads        | per-slot `MetalKvBuffers` geometry  |
 //! | sliding window (`is_masked_swa` STANDARD) | `window`, decode and prefill        |
 //! | `rope_freqs` on full layers only          | per-layer `LayerRope`               |
+//! | `n_rot(il)` (`rope.dimension_count[_swa]`)| `MetalRope::rot_dim`, one per run   |
 //! | `f_attention_scale = 1.0`                 | folded into the Q norm (below)      |
 //! | weightless RMSNorm on V                   | `AttnExtras::v_norm` of ones        |
 //! | per-layer embeddings and their gate       | `PleInputMetal`, `PerLayerGateMetal`|
@@ -70,10 +71,6 @@ struct DeviceKv {
     kvs: Vec<MetalKvBuffers>,
 }
 
-fn rope() -> MetalRope {
-    MetalRope::new(MetalRopeLayout::Neox)
-}
-
 /// A batched launch for `m`: the quantized GEMM, or f32 rows (which
 /// the GEMM takes 32 columns at a time; any other width stays on the
 /// host).
@@ -120,13 +117,41 @@ impl Gemma4Engine {
         crate::decoder::metal_attn_switched_on()
     }
 
+    /// The run's RoPE, or `None` when the stacks cannot rotate this
+    /// file as llama.cpp does. `MetalRope::rot_dim` is one width for
+    /// every layer, while llama.cpp rotates `n_rot(il)` channels per
+    /// layer (`gemma4.cpp`, `n_rot_l`): whole heads everywhere is
+    /// `None` (each layer its own head), one partial width shared by
+    /// every layer is that width, and anything else (a partial full
+    /// width beside a different sliding one) stays on the host body
+    /// rather than rotating some layer at the wrong width.
+    fn metal_rope(&self) -> Option<MetalRope> {
+        let hp = &self.hp;
+        let base = MetalRope::new(MetalRopeLayout::Neox);
+        let layers = 0..hp.n_layer;
+        if layers.clone().all(|il| hp.rot_dim(il) == hp.head_dim(il)) {
+            return Some(base);
+        }
+        let rot = hp.rot_dim(0);
+        layers
+            .clone()
+            .all(|il| hp.rot_dim(il) == rot)
+            .then_some(MetalRope {
+                rot_dim: Some(rot),
+                ..base
+            })
+    }
+
+    /// The divisors are the first `n_rot/2` of `rope_freqs`, which is
+    /// what ggml reads and the width `MetalRope::rot_dim` asks for.
     fn layer_rope(&self, il: usize) -> LayerRope<'_> {
         LayerRope {
             theta: self.hp.rope_theta_for(il),
             freq_factors: if self.hp.is_swa_layer(il) {
                 None
             } else {
-                self.weights.rope_freqs.as_deref()
+                let half = self.hp.rot_dim(il) / 2;
+                self.weights.rope_freqs.as_deref().map(|f| &f[..half])
             },
         }
     }
@@ -283,7 +308,8 @@ impl Gemma4Engine {
     /// each call and fall back per call.
     pub(crate) fn metal_stacks_cover(&self) -> bool {
         let tok: [f32; 0] = [];
-        self.decode_layers().is_some()
+        self.metal_rope().is_some()
+            && self.decode_layers().is_some()
             && self.prefill_layers().is_some()
             && crate::metal_launch::matvec(&self.weights.output_head).is_some()
             && self.ple_input(crate::metal_launch::matvec, &tok).is_some()
@@ -418,6 +444,7 @@ impl Gemma4Engine {
         pos: usize,
         state: &mut Gemma4DecodeState,
     ) -> Option<Vec<f32>> {
+        let rope = self.metal_rope()?;
         let layers = self.decode_layers()?;
         let output = crate::metal_launch::matvec(&self.weights.output_head)?;
         let tok_rows = self.per_layer_token_row(token_id).unwrap_or_default();
@@ -430,7 +457,7 @@ impl Gemma4Engine {
             &layers,
             &mut dev.kvs,
             self.hp.n_heads,
-            rope(),
+            rope,
             pos,
             self.hp.rms_norm_eps,
             Some(&self.weights.output_norm),
@@ -539,6 +566,7 @@ impl Gemma4Engine {
             }
         }
         let ple = self.ple_input(prefill_mat, &tok_rows)?;
+        let rope = self.metal_rope()?;
         let dev = self.ensure_device_kv(state, pos, chunk.len())?;
         let result = frink_metal::attn::launch_prefill_dense_stack(
             &hidden,
@@ -546,7 +574,7 @@ impl Gemma4Engine {
             &mut dev.kvs,
             hp.n_heads,
             chunk.len(),
-            rope(),
+            rope,
             pos,
             hp.rms_norm_eps,
             true,

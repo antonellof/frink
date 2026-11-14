@@ -17,7 +17,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Qwen-1 (`qwen`), Qwen2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen1.5-MoE / Qwen2-MoE (`qwen2moe`), Qwen3-MoE (`qwen3moe`) | |
 | Qwen3.5 dense and MoE (`qwen35`, `qwen35moe`), Qwen3-Next (`qwen3next`) | Recurrent: no prefix-cache reuse; speculates on the private loop only |
 | Gemma-1, Gemma-2, Gemma-3 (`gemma`, `gemma2`, `gemma3`) | |
-| Gemma-4-E2B | Dedicated engine, `gemma4` BPE tokenizer. Two fixtures hold it to libllama past its sliding window, one with a layer that reads K as V |
+| Gemma-4-E2B | Dedicated engine, `gemma4` BPE tokenizer. Three fixtures hold it to libllama past its sliding window, one with a layer that reads K as V and one rotating a RoPE width narrower than its heads (`rope.dimension_count`) |
 | Phi-2 / Phi-1.5 (`phi2`), Phi-3 / Phi-4-mini (`phi3`), Phi-3.5-MoE (`phimoe`) | |
 | OLMo (`olmo`), OLMo-2 / Olmo-3 (`olmo2`), OLMoE (`olmoe`), SmolLM3 (`smollm3`) | |
 | ChatGLM (`chatglm`), GLM-4-0414 / Z1 / OCR (`glm4`), GLM-4.5 / 4.5-Air / 4.6 (`glm4moe`) | A vision tower's `rope.dimension_sections` is refused by name on `glm4`, served on `glm4moe` |
