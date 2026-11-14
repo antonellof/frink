@@ -73,6 +73,19 @@ are the ones worth reading twice.
   28. The gate's bound against the CPU became per fixture with the sliding
   windows, above.
 
+### Fixed
+
+- **Gemma-4 reads `rope.dimension_count` and its `_swa` twin** (#635).
+  The loader ignored both and rotated every head whole, so a file whose
+  RoPE width is narrower than its head ran without error and answered
+  as a different model. Each layer now rotates llama.cpp's `n_rot(il)`
+  channels, with the sliding width defaulting to the full one as
+  `load_hparams` does, and the first `n_rot/2` bands of `rope_freqs`.
+  A width ggml aborts on (wider than the head, or odd) or zero is
+  refused at load by key. The Metal stacks take one rotary width per
+  run, so a file whose full and sliding widths differ stays on the host
+  body. Released Gemma-4 files rotate whole heads and are unchanged.
+
 ## [0.63.0] - 2026-11-13
 
 ### Added

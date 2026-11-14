@@ -69,6 +69,8 @@ fn fixture() -> Gemma4Engine {
         n_kv_heads: 1,
         head_dim_full: 512,
         head_dim_swa: 256,
+        rot_dim_full: 512,
+        rot_dim_swa: 256,
         sliding_window: WINDOW,
         is_swa: (0..n_layer).map(|il| (il + 1) % 3 != 0).collect(),
         n_layer_kv_from_start: 6,
@@ -338,4 +340,66 @@ fn engine_prefill_matches_the_token_loop_on_the_host() {
     }
     let mut b = e.new_state();
     assert_eq!(e.prefill(&toks, 0, &mut b), want);
+}
+
+/// The fixture rotating `rot` channels of every head on both layer
+/// kinds (`rope.dimension_count = rot`, no `_swa` key: llama.cpp's
+/// `n_rot_swa` defaults to `n_rot_full`).
+fn partial_rope_fixture(rot: usize) -> Gemma4Engine {
+    let mut e = fixture();
+    e.hp.rot_dim_full = rot;
+    e.hp.rot_dim_swa = rot;
+    e
+}
+
+/// `MetalRope::rot_dim` is one width for the run: whole heads on every
+/// layer is no width at all, one partial width on every layer rides the
+/// stacks with `rope_freqs` cut to its `n_rot/2` bands, and a full width
+/// different from the sliding one must not be claimed (#635).
+#[test]
+fn the_stacks_take_one_rope_width_or_none() {
+    let e = fixture();
+    assert_eq!(e.metal_rope().and_then(|r| r.rot_dim), None);
+
+    let e = partial_rope_fixture(128);
+    assert_eq!(e.metal_rope().and_then(|r| r.rot_dim), Some(128));
+    assert!(e.metal_stacks_cover());
+    let full = 2;
+    assert!(!e.hp.is_swa_layer(full));
+    let ff = e
+        .layer_rope(full)
+        .freq_factors
+        .expect("full layer divisors");
+    assert_eq!(ff.len(), 64, "ggml reads n_rot/2 bands of rope_freqs");
+
+    // 256 of 512 on the full layers and 256 of 256 on the sliding ones
+    // is one width; 128 beside 256 is two.
+    let mut e = fixture();
+    e.hp.rot_dim_full = 256;
+    assert_eq!(e.metal_rope().and_then(|r| r.rot_dim), Some(256));
+    e.hp.rot_dim_full = 128;
+    assert!(e.metal_rope().is_none());
+    assert!(!e.metal_stacks_cover());
+}
+
+#[test]
+#[ignore = "needs Metal"]
+fn metal_matches_the_host_body_under_partial_rope() {
+    let e = partial_rope_fixture(128);
+    let toks = tokens(2 * WINDOW + 3);
+    let mut host = e.new_state();
+    let mut want = Vec::new();
+    for (pos, &t) in toks.iter().enumerate() {
+        want = e.forward_token_host(t, pos, &mut host);
+    }
+    let mut dev = e.new_state();
+    let (done, got) = e.prefill_on_metal(&toks, 0, &mut dev);
+    assert_eq!(done, toks.len(), "batched past the window");
+    assert_close("partial-RoPE prefill", &want, &got);
+    for (i, t) in [5usize, 9, 13].into_iter().enumerate() {
+        let pos = toks.len() + i;
+        let want = e.forward_token_host(t, pos, &mut host);
+        let got = e.decode_on_metal(t, pos, &mut dev).expect("decode");
+        assert_close(&format!("partial-RoPE decode pos {pos}"), &want, &got);
+    }
 }

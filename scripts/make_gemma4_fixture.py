@@ -44,13 +44,20 @@ and the graph then reads K's projection as V, ahead of K's norm and
 RoPE (`Vcur = Kcur`, `:253-255`). The host body used K after both.
 
 Every head width is also the RoPE width (`rope.dimension_count` and
-`_swa`): the host body rotates whole heads.
+`_swa`), unless `--rope-dim N` is given (#635). It writes
+`rope.dimension_count = N` and NO `_swa` key, so llama.cpp rotates the
+first N channels of every head: `n_rot_full = N`, and `n_rot_swa`
+defaults to `n_rot_full` (`llama-model.cpp`, `load_hparams`), not to
+the sliding head width. At N = 4 the full layers rotate 4 of 16 and the
+sliding ones 4 of 8, so a body that rotates whole heads, defaults the
+sliding width to its head, or reads the wrong `rope_freqs` bands (ggml
+reads the first N/2) moves the logits.
 
 Weights are pseudo-random from a fixed seed so the file is byte-stable.
 
 Usage:
     PYTHONPATH=/path/to/llama.cpp/gguf-py \\
-        python3 scripts/make_gemma4_fixture.py OUT.gguf [--no-full-attn-v]
+        python3 scripts/make_gemma4_fixture.py OUT.gguf [--no-full-attn-v] [--rope-dim N]
 """
 
 import sys
@@ -81,7 +88,7 @@ IS_SWA = [True, True, False, True, True, False]
 SHARED_KV_LAYERS = 3
 
 
-def main(out_path: str, no_full_attn_v: bool = False) -> None:
+def main(out_path: str, no_full_attn_v: bool = False, rope_dim: int | None = None) -> None:
     n_layer = len(IS_SWA)
     n_kv_from_start = n_layer - SHARED_KV_LAYERS
     rng = np.random.default_rng(0x6E4A4)
@@ -104,8 +111,11 @@ def main(out_path: str, no_full_attn_v: bool = False) -> None:
     w.add_value_length(HEAD_DIM_FULL)
     w.add_key_length_swa(HEAD_DIM_SWA)
     w.add_value_length_swa(HEAD_DIM_SWA)
-    w.add_rope_dimension_count(HEAD_DIM_FULL)
-    w.add_uint32(f"{ARCH}.rope.dimension_count_swa", HEAD_DIM_SWA)
+    if rope_dim is None:
+        w.add_rope_dimension_count(HEAD_DIM_FULL)
+        w.add_uint32(f"{ARCH}.rope.dimension_count_swa", HEAD_DIM_SWA)
+    else:
+        w.add_rope_dimension_count(rope_dim)
     w.add_layer_norm_rms_eps(RMS_EPS)
     w.add_rope_freq_base(ROPE_BASE)
     w.add_rope_freq_base_swa(ROPE_BASE_SWA)
@@ -177,8 +187,28 @@ def main(out_path: str, no_full_attn_v: bool = False) -> None:
     print(f"wrote {out_path}")
 
 
+def parse(argv: list[str]) -> tuple[bool, int | None]:
+    no_full_attn_v = False
+    rope_dim = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--no-full-attn-v":
+            no_full_attn_v = True
+            i += 1
+        elif argv[i] == "--rope-dim" and i + 1 < len(argv):
+            rope_dim = int(argv[i + 1])
+            i += 2
+        else:
+            raise ValueError(argv[i])
+    return no_full_attn_v, rope_dim
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2 or any(a != "--no-full-attn-v" for a in sys.argv[2:]):
+    try:
+        if len(sys.argv) < 2:
+            raise ValueError("no output path")
+        flags = parse(sys.argv[2:])
+    except ValueError:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
-    main(sys.argv[1], no_full_attn_v="--no-full-attn-v" in sys.argv[2:])
+    main(sys.argv[1], *flags)
