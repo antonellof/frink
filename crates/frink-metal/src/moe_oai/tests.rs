@@ -164,3 +164,116 @@ fn a_dropped_bias_plane_is_never_served_to_the_next_one() {
         );
     }
 }
+
+/// Run `f` in a command buffer of its own and wait for it, so each step
+/// of a two-dispatch pair sees the previous one's writes.
+fn run(f: impl FnOnce(&ProtocolObject<dyn MTLComputeCommandEncoder>)) {
+    let shared = shared_metal().expect("metal");
+    let cmd = shared.queue.commandBuffer().unwrap();
+    let enc = cmd.computeCommandEncoder().unwrap();
+    f(&enc);
+    enc.endEncoding();
+    cmd.commit();
+    cmd.waitUntilCompleted();
+}
+
+fn bits(v: &[f32]) -> Vec<u32> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// The decode stack folds gpt-oss's router bias into the top-k kernel
+/// and its `down` expert bias into the weighted sum, where they used to
+/// be a `vec_add_rows` and a `moe_add_id` dispatch of their own. Each
+/// fused kernel must give exactly what the pair gave (ADR 0009: the pair
+/// is the one checked against ggml above), and the bias must matter in
+/// both, or the comparison proves nothing.
+#[test]
+#[ignore = "needs a real Metal GPU"]
+fn the_fused_bias_kernels_match_the_dispatch_pairs_they_replaced_bit_for_bit() {
+    let shared = shared_metal().expect("metal");
+    let device = &shared.device;
+
+    // Top-k over 32 router logits, a bias large enough to reorder them.
+    let (n_experts, top_k) = (32usize, 4usize);
+    let logits = fill(n_experts, 1.0, 1.0);
+    let router_bias = upload(device, &fill(n_experts, 9.0, 3.0)).unwrap();
+    let topk = |logits_buf: &ProtocolObject<dyn MTLBuffer>,
+                bias: Option<&ProtocolObject<dyn MTLBuffer>>| {
+        let (ids, w) = (alloc(device, top_k).unwrap(), alloc(device, top_k).unwrap());
+        run(|enc| {
+            crate::gpu::encode_moe_topk_softmax_batch(
+                enc,
+                device,
+                logits_buf,
+                IdsBinding::whole(&ids),
+                &w,
+                n_experts as u32,
+                top_k as u32,
+                true,
+                1,
+                bias,
+            )
+            .unwrap()
+        });
+        (bits(&read_f32(&ids, top_k)), bits(&read_f32(&w, top_k)))
+    };
+    let pair_logits = upload(device, &logits).unwrap();
+    run(|enc| {
+        crate::elem::encode_vec_add_rows(
+            enc,
+            device,
+            &pair_logits,
+            &router_bias,
+            n_experts as u32,
+            1,
+        )
+        .unwrap()
+    });
+    let pair = topk(&pair_logits, None);
+    let fused = topk(&upload(device, &logits).unwrap(), Some(&router_bias));
+    let unbiased = topk(&upload(device, &logits).unwrap(), None);
+    assert_ne!(unbiased.0, pair.0, "the bias must change the winners");
+    assert_eq!(
+        fused, pair,
+        "fused top-k (ids, weights) differ from the pair"
+    );
+
+    // The weighted sum over four slots, an expert used twice.
+    let (n_experts, hidden) = (5usize, 40usize);
+    let ids = upload_u32(device, &[3, 0, 3, 4]);
+    let n_slots = 4usize;
+    let expert_out = fill(n_slots * hidden, 13.0, 3.0);
+    let route = upload(device, &[0.4, 0.3, 0.2, 0.1]).unwrap();
+    let down_bias = upload(device, &fill(n_experts * hidden, 11.0, 2.0)).unwrap();
+    let h0 = fill(hidden, 17.0, 1.0);
+    let whole = IdsBinding::whole(&ids);
+    let combine =
+        |eo: &ProtocolObject<dyn MTLBuffer>,
+         add_id: Option<(IdsBinding<'_>, &ProtocolObject<dyn MTLBuffer>)>| {
+            let h = upload(device, &h0).unwrap();
+            run(|enc| {
+                crate::gpu::encode_moe_weighted_sum_residual(
+                    enc,
+                    device,
+                    eo,
+                    &route,
+                    &h,
+                    hidden,
+                    n_slots as u32,
+                    add_id,
+                )
+                .unwrap()
+            });
+            bits(&read_f32(&h, hidden))
+        };
+    let pair_eo = upload(device, &expert_out).unwrap();
+    run(|enc| encode_add_id(enc, device, &pair_eo, whole, &down_bias, hidden, n_slots).unwrap());
+    let pair = combine(&pair_eo, None);
+    let fused = combine(
+        &upload(device, &expert_out).unwrap(),
+        Some((whole, &down_bias)),
+    );
+    let unbiased = combine(&upload(device, &expert_out).unwrap(), None);
+    assert_ne!(unbiased, pair, "the bias must change the sum");
+    assert_eq!(fused, pair, "fused weighted sum differs from add_id + sum");
+}

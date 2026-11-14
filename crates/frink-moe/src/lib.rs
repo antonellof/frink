@@ -877,6 +877,9 @@ pub struct ExpertBias<'a> {
     pub down: &'a [f32],
 }
 
+/// One expert-major bias plane of [`ExpertBiasPlanes`], shared.
+pub type BiasPlane = Arc<[f32]>;
+
 /// One layer's per-expert biases as the file stores them: three
 /// expert-major planes, expert `e`'s gate bias at
 /// `gate[e * ffn_rows .. (e + 1) * ffn_rows]`.
@@ -894,9 +897,9 @@ pub struct ExpertBias<'a> {
 /// re-reading 368 KB per plane per layer per token (#627).
 #[derive(Debug, Clone)]
 pub struct ExpertBiasPlanes {
-    gate: Arc<[f32]>,
-    up: Arc<[f32]>,
-    down: Arc<[f32]>,
+    gate: BiasPlane,
+    up: BiasPlane,
+    down: BiasPlane,
     ffn_rows: usize,
     hidden_rows: usize,
 }
@@ -944,7 +947,7 @@ impl ExpertBiasPlanes {
 
     /// The planes as the shared allocations they are, for a device
     /// cache that keeps what it uploaded alive (see the type's docs).
-    pub fn shared_planes(&self) -> (&Arc<[f32]>, &Arc<[f32]>, &Arc<[f32]>) {
+    pub fn shared_planes(&self) -> (&BiasPlane, &BiasPlane, &BiasPlane) {
         (&self.gate, &self.up, &self.down)
     }
 

@@ -313,6 +313,7 @@ mod tests {
                 top_k as u32,
                 true,
                 1,
+                None,
             )
             .expect("encode topk");
         }

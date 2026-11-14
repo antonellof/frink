@@ -3878,21 +3878,6 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
-    if let Some(oai) = oai.as_ref() {
-        // gpt-oss: `ffn_gate_inp.bias` on the logits before selection.
-        spans.span(cmd_buf, encoder, "router_bias")?;
-        let r = [scratch.router.as_ref()];
-        mrs.begin_op(encoder, &r, &r);
-        encode_vec_add_rows(
-            encoder,
-            device,
-            &scratch.router,
-            &oai.router_bias.buffer,
-            layer.router.rows as u32,
-            1,
-        )?;
-        mrs.end_op(&r, &r);
-    }
     spans.span(cmd_buf, encoder, "topk")?;
     {
         let srcs = [scratch.router.as_ref()];
@@ -3916,6 +3901,8 @@ fn encode_moe_layer_fused(
             // (`gpt_oss_route` on the host).
             norm_topk_prob || oai.is_some(),
             1,
+            // gpt-oss: `ffn_gate_inp.bias` on the logits before selection.
+            oai.as_ref().map(|o| &*o.router_bias.buffer),
         )?;
         mrs.end_op(&srcs, &dsts);
     }
@@ -4216,14 +4203,10 @@ pub fn launch_moe_decode_stack(
         let early = crate::timing::early_commit_layer(crate::timing::Stack::Moe, layers.len());
         let mut mrs = MemRanges::new();
         // `FRINK_METAL_KERNEL_TIMING=1`: one sampled encoder per op
-        // group, as the dense stack does; a no-op otherwise. A layer
-        // opens at most 18 groups (gpt-oss, the widest, opens 17).
-        // The early-commit split cannot be timed: its first command
-        // buffer is never waited on, so the clock stays off with it.
-        let mut spans = match early {
-            None => crate::kernel_timing::SpanClock::begin(device, 18 * layers.len() + 8),
-            Some(_) => crate::kernel_timing::SpanClock::off(),
-        };
+        // group, as the dense stack does; a no-op otherwise, and never
+        // beside the early split (`early_commit_layer` is `None` under
+        // it). No layer opens more than 18 groups; gpt-oss opens 14.
+        let mut spans = crate::kernel_timing::SpanClock::begin(device, 18 * layers.len() + 8);
         spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
         let _embd_w = if let Some(e) = embd {
