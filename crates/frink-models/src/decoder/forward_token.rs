@@ -466,6 +466,9 @@ impl Decoder {
                                         o,
                                         extras: self.metal_attn_extras(layer),
                                         rope: self.metal_layer_rope(li),
+                                        // Refused upstream of here
+                                        // (`fused_attn_layer_ok`).
+                                        q_scale: None,
                                         window: self.config.layer_sliding_window(li),
                                     },
                                 ),
@@ -479,6 +482,8 @@ impl Decoder {
                                 post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
                                 per_layer: None,
                                 out_scale: None,
+                                // Fenced by `metal_can_serve_model`.
+                                residual_scale: None,
                             });
                         }
                         if ok {

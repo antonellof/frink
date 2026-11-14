@@ -136,9 +136,19 @@ pub mod shortconv;
 #[cfg(feature = "metal")]
 pub mod ssm_scan;
 
-/// A Mamba-1 block as a token mixer of the dense decode stack.
+/// The Mamba-1 and Mamba-2 blocks over any number of rows: a token
+/// mixer of the dense decode stack, and a prefill run's layers.
 #[cfg(feature = "metal")]
 pub mod ssm_decode;
+
+/// A prefill run: consecutive layers of every kind in one command
+/// buffer.
+#[cfg(feature = "metal")]
+pub mod prefill_run;
+
+/// The Mamba and short-conv layers of a prefill run (`prefill_run`).
+#[cfg(feature = "metal")]
+pub mod ssm_prefill;
 
 /// Gemma-4's per-layer embeddings, encoded into the dense stacks.
 #[cfg(feature = "metal")]

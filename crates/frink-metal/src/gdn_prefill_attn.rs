@@ -79,6 +79,8 @@ pub struct PrefillAttnLayer<'a> {
     pub rope: MetalRope,
     /// `None` for a layer that does not rotate.
     pub layer_rope: Option<LayerRope<'a>>,
+    /// Q's multiplier after RoPE (`crate::attn::AttnMixer::q_scale`).
+    pub q_scale: Option<f32>,
     pub o_proj: MulMmSgLaunch<'a>,
     pub fold_branch: Option<FoldPlan<'a>>,
     pub ffn: PrefillFfn<'a>,
@@ -175,10 +177,15 @@ pub(crate) fn encode_q_gate_split(
 /// One attention layer into the run, reading and writing the residual
 /// stream in `slot::H` and appending `rows` rows to `kv` (whose
 /// `seq_len` the run advances once it has waited).
+///
+/// `beside` is Falcon-H1's Mamba-2 block over the same normed rows
+/// (`falcon-h1.cpp:156-160`), summed into the branch after `wo`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_attn_layer(
     enc: &mut Enc<'_>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     w: &PrefillAttnLayer<'_>,
+    beside: Option<&crate::ssm_prefill::PrefillMamba2<'_>>,
     kv: &MetalKvBuffers,
     sc: &crate::scratch_pool::Scratch,
     rows: usize,
@@ -201,6 +208,9 @@ pub(crate) fn encode_attn_layer(
         rows as u32,
         w.eps,
     )?;
+    if let Some(m) = beside {
+        crate::ssm_prefill::encode_mamba2_block(enc, device, m, sc, b(slot::SSM_OUT), rows)?;
+    }
     let encoder = enc.span("pf_fold_x")?;
     encode_fold(
         encoder,
@@ -270,6 +280,10 @@ pub(crate) fn encode_attn_layer(
             )?;
         }
     }
+    if let Some(s) = w.q_scale {
+        let encoder = enc.span("pf_q_scale")?;
+        crate::elem::encode_scale(encoder, device, b(slot::AQR), s, (rows * q_width) as u32)?;
+    }
     let encoder = enc.span("pf_kv_append")?;
     crate::attn::encode_kv_store_append(
         encoder,
@@ -314,6 +328,7 @@ pub(crate) fn encode_attn_layer(
         &w.ffn,
         w.eps,
         b(slot::AATT),
+        beside.map(|_| b(slot::SSM_OUT)),
         sc,
         rows,
     )

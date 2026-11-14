@@ -77,17 +77,25 @@ using namespace metal;
 // The whole window is held in registers between the two, so the write
 // cannot race the read, and the rows of a batch step that window in
 // order exactly as `rows` calls would.
+//
+// Row r's input is at `r * dims.w` of `x` (a Mamba block reads its conv
+// channels out of a wider `in_proj` row); with `has_bias` the channel's
+// bias is added before the SiLU (`mamba-base.cpp:222`; the gated
+// delta-net has none).
 kernel void gdn_conv_silu(
     device float* state [[buffer(0)]],
     device const float* taps [[buffer(1)]],
     device const float* x [[buffer(2)]],
     device float* out [[buffer(3)]],
     constant uint4& dims [[buffer(4)]],
+    device const float* bias [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
     uint c [[thread_position_in_grid]]
 ) {
     const uint width = dims.x;
     const uint d_conv = dims.y;
     const uint rows = dims.z;
+    const uint x_stride = dims.w;
     if (c >= width) {
         return;
     }
@@ -97,7 +105,7 @@ kernel void gdn_conv_silu(
     }
     device const float* t = taps + (size_t)c * d_conv;
     for (uint r = 0; r < rows; ++r) {
-        const float xc = x[(size_t)r * width + c];
+        const float xc = x[(size_t)r * x_stride + c];
         // ops.cpp:9598-9603: a float accumulator over the window in
         // order, the newest input last, which is the order the host
         // keeps too.
@@ -106,6 +114,9 @@ kernel void gdn_conv_silu(
             acc += window[i] * t[i];
         }
         acc += xc * t[d_conv - 1];
+        if (has_bias != 0u) {
+            acc = acc + bias[c];
+        }
         out[(size_t)r * width + c] = acc / (1.0f + exp(-acc));
         // Drop the oldest row, append `x`.
         for (uint i = 0; i + 2 < d_conv; ++i) {
@@ -117,6 +128,69 @@ kernel void gdn_conv_silu(
     }
     for (uint i = 0; i + 1 < d_conv; ++i) {
         state[i * width + c] = window[i];
+    }
+}
+
+// `gdn_conv_silu` for a batch, one thread per (row, channel): row r's
+// window is inputs `r - (d_conv - 1) .. r`, the history rows where that
+// is negative, summed in the same order. It leaves the history alone;
+// `gdn_conv_state` advances it after, since rows read the old history
+// that the advance overwrites.
+kernel void gdn_conv_silu_par(
+    device const float* state [[buffer(0)]],
+    device const float* taps [[buffer(1)]],
+    device const float* x [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant uint4& dims [[buffer(4)]],
+    device const float* bias [[buffer(5)]],
+    constant uint& has_bias [[buffer(6)]],
+    uint i [[thread_position_in_grid]]
+) {
+    const uint width = dims.x;
+    const uint d_conv = dims.y;
+    const uint rows = dims.z;
+    const uint x_stride = dims.w;
+    if (i >= width * rows) {
+        return;
+    }
+    const uint r = i / width;
+    const uint c = i - r * width;
+    device const float* t = taps + (size_t)c * d_conv;
+    float acc = 0.0f;
+    for (uint j = 0; j + 1 < d_conv; ++j) {
+        const int src = int(r + j) - int(d_conv - 1u);
+        const float v = src < 0 ? state[(size_t)(int(d_conv - 1u) + src) * width + c]
+                                : x[(size_t)src * x_stride + c];
+        acc += v * t[j];
+    }
+    acc += x[(size_t)r * x_stride + c] * t[d_conv - 1];
+    if (has_bias != 0u) {
+        acc = acc + bias[c];
+    }
+    out[(size_t)r * width + c] = acc / (1.0f + exp(-acc));
+}
+
+// The history after `rows` inputs: the last `d_conv - 1` of (old
+// history, inputs), one thread per channel, in place (slot j reads slot
+// j + rows, never a slot already written).
+kernel void gdn_conv_state(
+    device float* state [[buffer(0)]],
+    device const float* x [[buffer(2)]],
+    constant uint4& dims [[buffer(4)]],
+    uint c [[thread_position_in_grid]]
+) {
+    const uint width = dims.x;
+    const uint d_conv = dims.y;
+    const uint rows = dims.z;
+    const uint x_stride = dims.w;
+    if (c >= width) {
+        return;
+    }
+    for (uint j = 0; j + 1 < d_conv; ++j) {
+        const int src = int(rows + j) - int(d_conv - 1u);
+        state[(size_t)j * width + c] = src < 0
+            ? state[(size_t)(j + rows) * width + c]
+            : x[(size_t)src * x_stride + c];
     }
 }
 
@@ -214,24 +288,113 @@ pub fn encode_conv_silu_rows(
     out: &ProtocolObject<dyn MTLBuffer>,
     rows: usize,
 ) -> Result<(), MetalError> {
+    let width = shape.conv_dim();
+    encode_conv_silu_strided(
+        encoder,
+        device,
+        ConvRows {
+            width,
+            d_conv: shape.d_conv,
+            state,
+            taps,
+            bias: None,
+            x: (x, 0),
+            x_stride: width,
+            out,
+            rows,
+        },
+    )
+}
+
+/// One causal conv over `rows` tokens, as [`encode_conv_silu_strided`]
+/// takes it: `width` channels read `x.1` bytes into `x.0`, row `r`
+/// `r * x_stride` floats on, written `[rows][width]` to `out`.
+pub struct ConvRows<'b> {
+    pub width: usize,
+    pub d_conv: usize,
+    pub state: &'b ProtocolObject<dyn MTLBuffer>,
+    pub taps: &'b ProtocolObject<dyn MTLBuffer>,
+    /// The channel bias a Mamba block adds before the SiLU.
+    pub bias: Option<&'b ProtocolObject<dyn MTLBuffer>>,
+    pub x: (&'b ProtocolObject<dyn MTLBuffer>, usize),
+    pub x_stride: usize,
+    pub out: &'b ProtocolObject<dyn MTLBuffer>,
+    pub rows: usize,
+}
+
+/// The ONE conv-and-SiLU encoder: the gated delta-net's (no bias, rows
+/// adjacent) and a Mamba block's prefill (a bias, rows read out of a
+/// wider projection) are this kernel with different arguments.
+pub fn encode_conv_silu_strided(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    c: ConvRows<'_>,
+) -> Result<(), MetalError> {
     // The window is held in registers, so the tap count is bounded by
     // the array the kernel declares; every real export is 4.
-    if shape.d_conv == 0 || shape.d_conv > 8 || rows == 0 {
+    if c.d_conv == 0 || c.d_conv > 8 || c.rows == 0 || c.x_stride < c.width {
         return Err(MetalError::CommandFailed);
     }
-    let pipe = ensure_pipeline(device, GDN_HEAD_KERNEL_SRC, "gdn_conv_silu")?;
+    // Rows are a serial loop in `gdn_conv_silu`'s one thread a channel,
+    // which a prompt batch spends most of its time in: past a few rows the
+    // (row, channel) grid and its history step are the faster pair, with
+    // the same sums.
+    let par = c.rows >= PAR_CONV_ROWS;
+    let name = if par {
+        "gdn_conv_silu_par"
+    } else {
+        "gdn_conv_silu"
+    };
+    let pipe = ensure_pipeline(device, GDN_HEAD_KERNEL_SRC, name)?;
+    let state_pipe = if par {
+        Some(ensure_pipeline(
+            device,
+            GDN_HEAD_KERNEL_SRC,
+            "gdn_conv_state",
+        )?)
+    } else {
+        None
+    };
     encoder.setComputePipelineState(&pipe.0);
-    let width = shape.conv_dim();
+    // SAFETY: every buffer outlives the caller's command buffer and the
+    // uniforms are copied by `setBytes`. With no bias the flag keeps
+    // index 5 unread; it is bound to `taps` so no index is left unbound.
     unsafe {
-        for (idx, buf) in [state, taps, x, out].into_iter().enumerate() {
-            encoder.setBuffer_offset_atIndex(Some(buf), 0, idx);
-        }
-        let mut dims: [u32; 4] = [width as u32, shape.d_conv as u32, rows as u32, 0];
+        encoder.setBuffer_offset_atIndex(Some(c.state), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(c.taps), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(c.x.0), c.x.1, 2);
+        encoder.setBuffer_offset_atIndex(Some(c.out), 0, 3);
+        let mut dims: [u32; 4] = [
+            c.width as u32,
+            c.d_conv as u32,
+            c.rows as u32,
+            c.x_stride as u32,
+        ];
         encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 16, 4);
+        encoder.setBuffer_offset_atIndex(Some(c.bias.unwrap_or(c.taps)), 0, 5);
+        let mut has_bias = u32::from(c.bias.is_some());
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut has_bias as *mut u32 as *mut _).unwrap(),
+            4,
+            6,
+        );
     }
-    dispatch_1d(encoder, &pipe.0, width);
+    match state_pipe {
+        None => dispatch_1d(encoder, &pipe.0, c.width),
+        Some(sp) => {
+            dispatch_1d(encoder, &pipe.0, c.width * c.rows);
+            // The step overwrites the history the conv reads: ordered
+            // after it on a concurrent encoder too.
+            crate::gpu::memory_barrier_resources(encoder, &[c.state]);
+            encoder.setComputePipelineState(&sp.0);
+            dispatch_1d(encoder, &sp.0, c.width);
+        }
+    }
     Ok(())
 }
+
+/// Rows from which [`encode_conv_silu_strided`] takes the parallel pair.
+const PAR_CONV_ROWS: usize = 8;
 
 /// The per-head l2 norm over `n_heads` heads of `head_dim`, in place.
 pub fn encode_l2_norm_heads(

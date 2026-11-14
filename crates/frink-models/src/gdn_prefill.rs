@@ -292,12 +292,13 @@ mod tests {
             // SAFETY: both states are page-aligned `AlignedF32`s
             // borrowed mutably for the call, which waits for the GPU.
             unsafe {
-                frink_metal::gdn_prefill::launch_gdn_prefill_run(
+                frink_metal::prefill_run::launch_prefill_run(
                     &hidden,
                     rows,
                     0,
                     Some(&tail),
-                    &mut [frink_metal::gdn_prefill::PrefillRunLayer::Gdn(layer, st)],
+                    &mut [frink_metal::prefill_run::PrefillRunLayer::Gdn(layer, st)],
+                    frink_metal::gdn_prefill::RunOptions::default(),
                 )
             }
             .expect("the run launches")

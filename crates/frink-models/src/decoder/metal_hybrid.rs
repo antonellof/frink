@@ -171,6 +171,31 @@ impl Decoder {
         }))
     }
 
+    /// `mamba-base.cpp:84-88`'s norms on dt, B and C as the device
+    /// blocks take them (`frink_metal::ssm_decode::DtBcNormMetal`).
+    pub(super) fn metal_dt_bc_norm<'a>(
+        &self,
+        m: &'a crate::mamba1::Mamba1,
+    ) -> Option<frink_metal::ssm_decode::DtBcNormMetal<'a>> {
+        let weights = match &m.dt_bc_norm {
+            DtBcNorm::None => return None,
+            DtBcNorm::Weightless => None,
+            DtBcNorm::Weighted { dt, b, c } => Some((&dt[..], &b[..], &c[..])),
+        };
+        Some(frink_metal::ssm_decode::DtBcNormMetal {
+            weights,
+            eps: self.config.rms_norm_eps,
+        })
+    }
+
+    /// Q's multiplier for a launch that scales Q after RoPE, as
+    /// [`Decoder::apply_attention_scale`] does on the host.
+    pub(super) fn metal_q_scale(&self) -> Option<f32> {
+        self.config
+            .attention_scale
+            .map(|s| s * (self.config.head_dim as f32).sqrt())
+    }
+
     /// `Some(())` when the layer's Mamba-2 block is one the stack runs:
     /// a Metal matvec for both projections, and no norm on the branch.
     fn hybrid_mamba2_ok(&self, layer: &LayerWeights) -> Option<()> {
@@ -188,7 +213,9 @@ impl Decoder {
     /// stack's.
     fn metal_hybrid_plan(&self) -> Option<HybridPlan> {
         if !super::metal_eligibility::metal_attn_switched_on()
-            || !Self::metal_can_serve_mixed_layers(&self.config, self.lora_attached())
+            // Granite's residual multiplier is the stack's own uniform
+            // (`DenseLayerMetal::residual_scale`).
+            || !Self::metal_can_serve_scaled_layers(&self.config, self.lora_attached())
             || self.gpt_oss.is_some()
         {
             return None;
@@ -221,10 +248,7 @@ impl Decoder {
                     let Some(SsmBlock::Mamba1(m)) = layer.attn.ssm.as_ref() else {
                         return None;
                     };
-                    // `mamba-base.cpp:84-88`'s norms on dt, B and C have
-                    // no kernel in the stack.
-                    if !matches!(m.dt_bc_norm, DtBcNorm::None)
-                        || layer.attn.post_attn_norm.is_some()
+                    if layer.attn.post_attn_norm.is_some()
                         || [&m.in_proj, &m.x_proj, &m.dt_proj, &m.out_proj]
                             .iter()
                             .any(|w| Self::metal_matvec_launch(w).is_none())
@@ -247,7 +271,7 @@ impl Decoder {
                         || n_heads != self.config.n_heads
                         || !self.fused_attn_layer_ok_beside_ssm(
                             layer,
-                            super::fused_view::FusedAttnCaps::METAL_STACK,
+                            super::fused_view::FusedAttnCaps::METAL_HYBRID_STACK,
                         )
                         || Self::metal_matvec_launch(&layer.attn.q_proj).is_none()
                         || Self::metal_matvec_launch(&layer.attn.k_proj).is_none()
@@ -392,9 +416,10 @@ impl Decoder {
                     // stack's own (`TokenMixer::Parallel`).
                     extras: self.metal_attn_view_from(Self::fused_attn_extras_beside_ssm(
                         layer,
-                        super::fused_view::FusedAttnCaps::METAL_STACK,
+                        super::fused_view::FusedAttnCaps::METAL_HYBRID_STACK,
                     )?),
                     rope: self.metal_layer_rope(l),
+                    q_scale: self.metal_q_scale(),
                     window: self.config.layer_sliding_window(l),
                 })
             };
@@ -421,6 +446,7 @@ impl Decoder {
                         conv_bias: &m.conv1d_bias,
                         d_conv: m.h.d_conv,
                         x_proj: Self::metal_matvec_launch(&m.x_proj)?,
+                        dt_bc_norm: self.metal_dt_bc_norm(m),
                         dt_proj: Self::metal_matvec_launch(&m.dt_proj)?,
                         dt_bias: &m.dt_bias,
                         a: &m.a,
@@ -477,6 +503,7 @@ impl Decoder {
                 post_ffn_norm: None,
                 per_layer: None,
                 out_scale: None,
+                residual_scale: self.config.residual_scale,
             });
         }
 

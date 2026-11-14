@@ -288,7 +288,8 @@ impl Decoder {
         kv_caches: &mut [frink_core::KvCache],
     ) -> bool {
         let cache = &mut kv_caches[l];
-        let Some(p) = self.resident_attn_parts(l, pos, cache) else {
+        let Some(p) = self.resident_attn_parts(l, pos, cache, super::gdn_prefill::RunKind::Decode)
+        else {
             return false;
         };
         let mv = crate::metal_launch::matvec;

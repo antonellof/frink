@@ -37,8 +37,9 @@ using namespace metal;
 // `[n_head][head_dim]` (head `tg / head_dim`); thread `k` is its state
 // element `k`. Row r's `x` is at `r * x_stride` of `x`, its `[B | C]`
 // at `r * bc_stride` of `bc` (one buffer at two offsets for a prompt's
-// conv output, two buffers for a decode token's). `dt` is
-// `[rows][n_head]` before softplus, plus `dt_bias` when flag bit 1 is
+// conv output, two buffers for a decode token's). Row r's `dt` is the
+// `n_head` floats at `r * dt_stride` (Mamba-2's sit at the end of each
+// `in_proj` row), before softplus, plus `dt_bias` when flag bit 1 is
 // set; `a` is `[n_head]` (Mamba-2) or `[n_head][d_state]` (Mamba-1,
 // flag bit 0).
 kernel void ssm_scan_rows(
@@ -51,6 +52,7 @@ kernel void ssm_scan_rows(
     constant uint4& dims [[buffer(6)]],
     constant uint4& batch [[buffer(7)]],
     device const float* dt_bias [[buffer(8)]],
+    constant uint& dt_stride [[buffer(9)]],
     threadgroup float* partial [[threadgroup(0)]],
     uint tg [[threadgroup_position_in_grid]],
     uint k [[thread_position_in_threadgroup]],
@@ -76,38 +78,167 @@ kernel void ssm_scan_rows(
     float s = state[(size_t)tg * d_state + k];
     const float av = per_state ? a[h * d_state + k] : a[h];
     const float bias = has_dt_bias ? dt_bias[h] : 0.0f;
-    for (uint r = 0; r < rows; ++r) {
-        device const float* bcr = bc + (size_t)r * bc_stride;
-        float dt0 = dt[(size_t)r * n_head + h];
-        if (has_dt_bias) {
-            dt0 = dt0 + bias;
-        }
-        // `frink_core::mamba2::softplus`, threshold and all.
-        const float dt_sp = dt0 > 20.0f ? dt0 : log(1.0f + exp(dt0));
-        const float x_dt = x[(size_t)r * x_stride + tg] * dt_sp;
-        s = s * exp(dt_sp * av) + bcr[b_at] * x_dt;
-        const float p = simd_sum(s * bcr[c_at]);
-        if (n_sg == 1u) {
+    if (n_sg == 1u) {
+        for (uint r = 0; r < rows; ++r) {
+            device const float* bcr = bc + (size_t)r * bc_stride;
+            float dt0 = dt[(size_t)r * dt_stride + h];
+            if (has_dt_bias) {
+                dt0 = dt0 + bias;
+            }
+            // `frink_core::mamba2::softplus`, threshold and all.
+            const float dt_sp = dt0 > 20.0f ? dt0 : log(1.0f + exp(dt0));
+            const float x_dt = x[(size_t)r * x_stride + tg] * dt_sp;
+            s = s * exp(dt_sp * av) + bcr[b_at] * x_dt;
+            const float p = simd_sum(s * bcr[c_at]);
             if (lane == 0u) {
                 y[(size_t)r * n_x + tg] = p;
             }
-        } else {
-            if (lane == 0u) {
-                partial[sg] = p;
+        }
+    } else {
+        // `kernel_ssm_scan_f32`'s batching (`ssm.metal:164-296`): `n_sg`
+        // rows at a time, each simdgroup's partial for each row parked
+        // in `partial[row][sg]`, then simdgroup `j` sums row `j`'s in
+        // order -- two barriers per `n_sg` rows instead of two per row,
+        // and the same sum, in the same order, as one row at a time.
+        // The row's softplus and `x * dt` are the head's, not the
+        // state element's, so `n_sg` threads compute them once, and so
+        // is Mamba-2's decay `exp(dt * A)` (one A a head): the same
+        // expression on the same operands as every thread computing it.
+        threadgroup float* x_dt_s = partial + n_sg * n_sg;
+        threadgroup float* dt_sp_s = x_dt_s + n_sg;
+        threadgroup float* da_s = dt_sp_s + n_sg;
+        for (uint r0 = 0; r0 < rows; r0 += n_sg) {
+            const uint batch_rows = min(n_sg, rows - r0);
+            if (k < batch_rows) {
+                const uint r = r0 + k;
+                float dt0 = dt[(size_t)r * dt_stride + h];
+                if (has_dt_bias) {
+                    dt0 = dt0 + bias;
+                }
+                const float dt_sp = dt0 > 20.0f ? dt0 : log(1.0f + exp(dt0));
+                dt_sp_s[k] = dt_sp;
+                x_dt_s[k] = x[(size_t)r * x_stride + tg] * dt_sp;
+                da_s[k] = exp(dt_sp * av);
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            if (k == 0u) {
+            for (uint t = 0; t < batch_rows; ++t) {
+                device const float* bcr = bc + (size_t)(r0 + t) * bc_stride;
+                const float da = per_state ? exp(dt_sp_s[t] * av) : da_s[t];
+                s = s * da + bcr[b_at] * x_dt_s[t];
+                const float p = simd_sum(s * bcr[c_at]);
+                if (lane == 0u) {
+                    partial[t * n_sg + sg] = p;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (lane == 0u && sg < batch_rows) {
                 float sum = 0.0f;
                 for (uint i = 0; i < n_sg; ++i) {
-                    sum += partial[i];
+                    sum += partial[sg * n_sg + i];
                 }
-                y[(size_t)r * n_x + tg] = sum;
+                y[(size_t)(r0 + sg) * n_x + tg] = sum;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
     state[(size_t)tg * d_state + k] = s;
 }
+// `ssm_scan_rows` for Mamba-2 (one A a head) over CH channels of one
+// head per threadgroup: thread `k` holds state element `k` of each, so a
+// row's B and C are read once for CH (four) channels instead of once each
+// (the scan of a 4096-channel Granite layer read 2 GiB of B and C a
+// 512-row prompt one channel at a time). Each channel's arithmetic, and
+// its sum's order, is `ssm_scan_rows`' batched arm's exactly.
+template <uint CH>
+kernel void ssm_scan_rows_ch(
+    device float* state [[buffer(0)]],
+    device const float* x [[buffer(1)]],
+    device const float* bc [[buffer(2)]],
+    device const float* dt [[buffer(3)]],
+    device const float* a [[buffer(4)]],
+    device float* y [[buffer(5)]],
+    constant uint4& dims [[buffer(6)]],
+    constant uint4& batch [[buffer(7)]],
+    device const float* dt_bias [[buffer(8)]],
+    constant uint& dt_stride [[buffer(9)]],
+    threadgroup float* partial [[threadgroup(0)]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint k [[thread_position_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint n_sg [[simdgroups_per_threadgroup]]
+) {
+    const uint n_head = dims.x;
+    const uint head_dim = dims.y;
+    const uint d_state = dims.z;
+    const uint n_group = dims.w;
+    const uint x_stride = batch.x;
+    const uint bc_stride = batch.y;
+    const uint rows = batch.z;
+    const bool has_dt_bias = (batch.w & 2u) != 0u;
+    const uint c0 = tg * CH;
+    const uint h = c0 / head_dim;
+    const uint g = h / (n_head / n_group);
+    const uint n_x = n_head * head_dim;
+    const uint n_bc = n_group * d_state;
+    const uint b_at = g * d_state + k;
+    const uint c_at = n_bc + g * d_state + k;
+    float s[CH];
+    for (uint c = 0; c < CH; ++c) {
+        s[c] = state[(size_t)(c0 + c) * d_state + k];
+    }
+    const float av = a[h];
+    const float bias = has_dt_bias ? dt_bias[h] : 0.0f;
+    // `[row][channel][sg]` partials, then per row the CH channels'
+    // `x * dt`, and the head's decay.
+    threadgroup float* x_dt_s = partial + n_sg * CH * n_sg;
+    threadgroup float* da_s = x_dt_s + CH * n_sg;
+    for (uint r0 = 0; r0 < rows; r0 += n_sg) {
+        const uint batch_rows = min(n_sg, rows - r0);
+        if (k < batch_rows) {
+            const uint r = r0 + k;
+            float dt0 = dt[(size_t)r * dt_stride + h];
+            if (has_dt_bias) {
+                dt0 = dt0 + bias;
+            }
+            const float dt_sp = dt0 > 20.0f ? dt0 : log(1.0f + exp(dt0));
+            for (uint c = 0; c < CH; ++c) {
+                x_dt_s[k * CH + c] = x[(size_t)r * x_stride + c0 + c] * dt_sp;
+            }
+            da_s[k] = exp(dt_sp * av);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint t = 0; t < batch_rows; ++t) {
+            device const float* bcr = bc + (size_t)(r0 + t) * bc_stride;
+            const float bv = bcr[b_at];
+            const float cv = bcr[c_at];
+            const float da = da_s[t];
+            for (uint c = 0; c < CH; ++c) {
+                s[c] = s[c] * da + bv * x_dt_s[t * CH + c];
+                const float p = simd_sum(s[c] * cv);
+                if (lane == 0u) {
+                    partial[(t * CH + c) * n_sg + sg] = p;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Simdgroup `j` sums row `j`'s CH channels, each in order.
+        if (lane < CH && sg < batch_rows) {
+            float sum = 0.0f;
+            for (uint i = 0; i < n_sg; ++i) {
+                sum += partial[(sg * CH + lane) * n_sg + i];
+            }
+            y[(size_t)(r0 + sg) * n_x + c0 + lane] = sum;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint c = 0; c < CH; ++c) {
+        state[(size_t)(c0 + c) * d_state + k] = s[c];
+    }
+}
+
+typedef decltype(ssm_scan_rows_ch<4>) ssm_scan_rows_ch_t;
+template [[host_name("ssm_scan_rows_ch4")]] kernel ssm_scan_rows_ch_t ssm_scan_rows_ch<4>;
 "#;
 
 /// The scan's geometry (`frink_core::mamba2::ScanDims`).
@@ -206,6 +337,7 @@ pub unsafe fn launch_scan_rows(
             x_stride: stride,
             bc_stride: stride,
             dt: (dt_b, 0),
+            dt_stride: shape.n_head,
             dt_bias: None,
             a: a_b,
             per_state,
@@ -237,6 +369,8 @@ pub(crate) struct ScanOperands<'b> {
     pub x_stride: usize,
     pub bc_stride: usize,
     pub dt: (&'b ProtocolObject<dyn MTLBuffer>, usize),
+    /// Floats from one row's `dt` to the next's.
+    pub dt_stride: usize,
     /// Added to `dt` before the softplus, when the caller has not.
     pub dt_bias: Option<&'b ProtocolObject<dyn MTLBuffer>>,
     pub a: &'b ProtocolObject<dyn MTLBuffer>,
@@ -257,9 +391,20 @@ pub(crate) fn encode_scan(
     if !shape.is_supported() || o.rows == 0 {
         return Err(MetalError::Unsupported("ssm scan shape"));
     }
-    let pipe = ensure_pipeline(device, SSM_SCAN_KERNEL_SRC, "ssm_scan_rows")?;
-    enc.setComputePipelineState(&pipe.0);
     let n_sg = shape.d_state.div_ceil(32);
+    // Four channels a threadgroup where a head's are a multiple of four
+    // and the decay is the head's (`ssm_scan_rows_ch4`).
+    // (Eight channels measured slower on an M5 Max: 1.69 ms against
+    // 1.62 for a Granite-4.0-H layer's block at 512 rows.)
+    const CHANS: usize = 4;
+    let ch4 = !o.per_state && n_sg > 1 && shape.head_dim.is_multiple_of(CHANS);
+    let name = if ch4 {
+        "ssm_scan_rows_ch4"
+    } else {
+        "ssm_scan_rows"
+    };
+    let pipe = ensure_pipeline(device, SSM_SCAN_KERNEL_SRC, name)?;
+    enc.setComputePipelineState(&pipe.0);
     let flags = o.per_state as u32 | (u32::from(o.dt_bias.is_some()) << 1);
     // SAFETY: every bound buffer outlives the command buffer (the caller
     // waits on it before dropping any of them); the uniforms are copied
@@ -283,12 +428,25 @@ pub(crate) fn encode_scan(
         // A buffer must be bound at every index the kernel names; with no
         // bias the flag keeps it unread.
         enc.setBuffer_offset_atIndex(Some(o.dt_bias.unwrap_or(o.dt.0)), 0, 8);
-        enc.setThreadgroupMemoryLength_atIndex(n_sg.max(1) * 4, 0);
+        let mut dt_stride = o.dt_stride as u32;
+        enc.setBytes_length_atIndex(
+            NonNull::new(&mut dt_stride as *mut u32 as *mut _).unwrap(),
+            4,
+            9,
+        );
+        // `[n_sg][n_sg]` partials, then a row batch's `x * dt`,
+        // softplus and decay; four channels' worth for `ch4`.
+        let floats = if ch4 {
+            CHANS * n_sg * n_sg + (CHANS + 1) * n_sg
+        } else {
+            n_sg * n_sg + 3 * n_sg
+        };
+        enc.setThreadgroupMemoryLength_atIndex(floats.next_multiple_of(4) * 4, 0);
     }
     crate::dispatch::dispatch_counted(
         enc,
         MTLSize {
-            width: shape.n_head * shape.head_dim,
+            width: shape.n_head * shape.head_dim / if ch4 { CHANS } else { 1 },
             height: 1,
             depth: 1,
         },

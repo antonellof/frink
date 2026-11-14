@@ -50,6 +50,12 @@ pub(crate) struct FusedAttnCaps {
     /// per head (`qwen35.cpp:191-199,229-230`): only the Metal prefill
     /// run splits it and gates the attention before `wo`.
     pub q_gate: bool,
+    /// `{arch}.attention.scale` (Granite's `kq_scale`,
+    /// `granite-hybrid.cpp:223-224`), applied to Q after RoPE as the
+    /// host bodies apply it (`Decoder::apply_attention_scale`): only the
+    /// launches that run Granite-4.0-H, the hybrid decode stack and the
+    /// Metal prefill run, have the uniform.
+    pub attention_scale: bool,
 }
 
 impl FusedAttnCaps {
@@ -60,6 +66,7 @@ impl FusedAttnCaps {
         sinks: false,
         o_bias: false,
         q_gate: false,
+        attention_scale: false,
     };
     /// Metal's fused stacks.
     #[cfg_attr(not(feature = "metal"), allow(dead_code))]
@@ -67,12 +74,14 @@ impl FusedAttnCaps {
         sinks: true,
         o_bias: true,
         q_gate: false,
+        attention_scale: false,
     };
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     pub(crate) const CUDA: Self = Self {
         sinks: true,
         o_bias: true,
         q_gate: false,
+        attention_scale: false,
     };
     /// The Metal prefill run's attention layers
     /// (`frink_metal::gdn_prefill_attn`): the interleaved Q gate, and
@@ -82,6 +91,14 @@ impl FusedAttnCaps {
         sinks: false,
         o_bias: false,
         q_gate: true,
+        attention_scale: true,
+    };
+    /// The recurrent decode stack (`decoder::metal_hybrid`): the fused
+    /// stacks' caps and the attention scale.
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
+    pub(crate) const METAL_HYBRID_STACK: Self = Self {
+        attention_scale: true,
+        ..Self::METAL_STACK
     };
     /// The Vulkan decode stack applies neither (`vulkan_stack`).
     #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
@@ -89,6 +106,7 @@ impl FusedAttnCaps {
         sinks: false,
         o_bias: false,
         q_gate: false,
+        attention_scale: false,
     };
 }
 
@@ -279,17 +297,18 @@ impl Decoder {
         // lm_head. Attention softcap runs inside every fused attention
         // kernel (decode + prefill, both backends).
         //
-        // NOT attention_scale, and this is a refusal rather than a
-        // comment. The extras have no field for it and no fused kernel
-        // applies it, so a checkpoint carrying one would be scaled by
-        // the host bodies and not by any fused launch -- the same
-        // weights answering at two different temperatures depending on
-        // which backend served the token.
+        // NOT attention_scale unless `caps` says the launch applies it,
+        // and this is a refusal rather than a comment. The extras have no
+        // field for it and only the hybrid decode stack and the Metal
+        // prefill run scale Q, so on any other launch a checkpoint
+        // carrying one would be scaled by the host bodies and not by the
+        // fused launch -- the same weights answering at two different
+        // temperatures depending on which backend served the token.
         //
         // LIVE, not latent: `capability::attention_scale_override` sets
         // it for Gemma-2-27B and Gemma-3-27B, so those two checkpoints
         // take the host path here and are scaled exactly once.
-        if self.config.attention_scale.is_some() {
+        if self.config.attention_scale.is_some() && !caps.attention_scale {
             return false;
         }
         if self.config.head_dim > 256 {

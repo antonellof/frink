@@ -33,19 +33,34 @@ impl Decoder {
     /// anyway, which the caller does.
     #[cfg(feature = "metal")]
     pub(crate) fn fused_attention_tail_eligible(&self, l: usize, layer: &LayerWeights) -> bool {
-        self.fused_attention_refusals(l, layer).is_some()
+        self.fused_attention_refusals(l, layer, false).is_some()
     }
 
-    /// `Some(())` when nothing refuses. One body, two callers.
+    /// [`Self::fused_attention_tail_eligible`] for the tail of an
+    /// attention layer a PREFILL run serves whole
+    /// (`frink_metal::prefill_run`), which applies Granite's
+    /// `residual_scale` itself and runs Falcon-H1's parallel Mamba-2
+    /// block beside the attention.
     #[cfg(feature = "metal")]
-    fn fused_attention_refusals(&self, l: usize, layer: &LayerWeights) -> Option<()> {
+    pub(crate) fn prefill_run_tail_eligible(&self, l: usize, layer: &LayerWeights) -> bool {
+        self.fused_attention_refusals(l, layer, true).is_some()
+    }
+
+    /// `Some(())` when nothing refuses. One body, three callers.
+    #[cfg(feature = "metal")]
+    fn fused_attention_refusals(
+        &self,
+        l: usize,
+        layer: &LayerWeights,
+        prefill_run: bool,
+    ) -> Option<()> {
         if !frink_core::weight_matrix::metal_dense_enabled() {
             return None;
         }
         let shape = self.config.layer_shape(l);
         if !matches!(shape.attention, AttnShape::Gqa { .. })
             || shape.ffn_dim == 0
-            || self.config.residual_scale.is_some()
+            || (self.config.residual_scale.is_some() && !prefill_run)
             || self.config.normed_residual_scale.is_some()
             || self.config.skip_stream
             // Everything the host body does AFTER the FFN, which a
@@ -65,7 +80,7 @@ impl Decoder {
             || layer.attn.o_bias.is_some()
             || self.config.attn_value_scale.is_some()
             || layer.attn.post_attn_norm.is_some()
-            || layer.attn.ssm.is_some()
+            || (layer.attn.ssm.is_some() && !prefill_run)
         {
             return None;
         }
@@ -157,7 +172,7 @@ impl Decoder {
         LayerFfnParts<'a>,
         crate::fused_layer::LayerFfnLaunches<'a>,
     )> {
-        self.fused_attention_refusals(l, layer)?;
+        self.fused_attention_refusals(l, layer, false)?;
         let (base, fold) = layer.attn.o_proj.launch_parts();
         let out_proj = crate::metal_launch::matvec(base)?;
         let fold_branch = match fold {

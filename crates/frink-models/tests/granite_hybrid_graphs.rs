@@ -214,6 +214,41 @@ fn granitehybrid_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match(GH, &GH_GOLDEN);
 }
 
+/// On Metal a Granite-4.0-H decode token runs whole in the dense stack,
+/// its Mamba-2 layers as token mixers and its `residual_scale` and
+/// `attention.scale` as the stack's own uniforms
+/// (`frink_metal::attn::DenseLayerMetal::residual_scale`,
+/// `AttnMixer::q_scale`), and the answer is still llama.cpp's, NoPE and
+/// rotated. The allocation check says the stack ran: the host bodies
+/// would match the golden too.
+///
+/// `cargo test -p frink-models --features metal --test granite_hybrid_graphs -- --ignored`
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "needs Apple Metal GPU"]
+fn metal_decode_runs_granite_hybrid_in_the_dense_stack() {
+    if frink_metal::gpu::probe().is_none() {
+        eprintln!("skip: no Metal GPU detected");
+        return;
+    }
+    common::pin_backend(common::Backend::Metal);
+    frink_models::set_metal_greedy_argmax(false);
+    for (name, golden) in [(GH, &GH_GOLDEN), (GH_ROPE, &GH_ROPE_GOLDEN)] {
+        let d = load_graph_fixture(name);
+        assert!(d.config.attention_scale.is_some() && d.config.residual_scale.is_some());
+        let got = decode(&d);
+        assert!(
+            d.metal_hybrid_allocated(),
+            "{name}: the hybrid stack never ran"
+        );
+        let worst = worst_vs(&got, golden);
+        assert!(
+            worst < common::METAL_GOLDEN_TOL,
+            "{name}: worst |metal - llama.cpp| {worst:.3e}"
+        );
+    }
+}
+
 /// `rope.scaling.finetuned = true`: the attention layer rotates (NORM).
 /// Its golden differs from the NoPE file's, so the switch is measured
 /// and not assumed.

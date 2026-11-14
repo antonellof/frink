@@ -5,7 +5,8 @@
 //! resident from the first layer of the run to the last. The attention
 //! layers between them ride in the same run whole
 //! (`crate::gdn_prefill_attn`), so a hybrid's prompt batch is one
-//! command buffer.
+//! command buffer. The Mamba and short-convolution layers ride in it the
+//! same way (`crate::ssm_prefill`).
 //!
 //! # Why
 //!
@@ -28,22 +29,17 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLDevice, MTLSize,
-};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputeCommandEncoder, MTLDevice, MTLSize};
 use std::ptr::NonNull;
 
-use crate::attn::MetalKvBuffers;
 use crate::gdn::{buffer_no_copy, encode_gated_norm, DeltaShape};
 use crate::gdn_chunk::{encode_delta_chunk, ChunkInputs};
 use crate::gdn_head::{
     encode_conv_silu_rows, encode_gates_rows, encode_l2_norm_heads_rows, HeadShape,
 };
-use crate::gdn_prefill_attn::PrefillAttnLayer;
 use crate::gpu::{
-    encode_mul_mm_sg, ensure_pipeline, resident_f32_buffer, resident_weight_buffer, shared_metal,
-    MetalError, MulMmSgLaunch,
+    encode_mul_mm_sg, ensure_pipeline, resident_f32_buffer, resident_weight_buffer, MetalError,
+    MulMmSgLaunch,
 };
 use crate::hadamard::FoldPlan;
 
@@ -316,7 +312,19 @@ pub(crate) mod slot {
     // weighted sum.
     pub const XN16: usize = 21;
     pub const MOE_OUT: usize = 22;
-    pub const COUNT: usize = 23;
+    // A Mamba or short-conv layer's (`crate::ssm_prefill`): `in_proj`'s
+    // output, the conv's, `x_proj`'s, `dt`, `dt`'s contiguous input, the
+    // scan's (or the conv's gated) output, Falcon-H1's block beside its
+    // attention, and every conv layer's history, in layer order.
+    pub const SSM_IN: usize = 23;
+    pub const SSM_CONV: usize = 24;
+    pub const SSM_XDB: usize = 25;
+    pub const SSM_DT: usize = 26;
+    pub const SSM_DTLOW: usize = 27;
+    pub const SSM_Y: usize = 28;
+    pub const SSM_OUT: usize = 29;
+    pub const CONV_HIST: usize = 30;
+    pub const COUNT: usize = 31;
 }
 
 fn signs_buffer(
@@ -415,9 +423,20 @@ fn encode_gate_proj(
 /// under `FRINK_METAL_KERNEL_TIMING` (serial spans: the steps rely on a
 /// serial encoder's ordering). Off, `span` hands back the one encoder.
 pub(crate) struct Enc<'c> {
-    encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
-    spans: crate::kernel_timing::SpanClock,
-    cmd: &'c ProtocolObject<dyn MTLCommandBuffer>,
+    pub(crate) encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    pub(crate) spans: crate::kernel_timing::SpanClock,
+    pub(crate) cmd: &'c ProtocolObject<dyn MTLCommandBuffer>,
+    /// [`RunOptions::residual_scale`], read by every residual add.
+    pub(crate) residual_scale: Option<f32>,
+}
+
+/// What the whole run applies, model-wide.
+#[derive(Clone, Copy, Default)]
+pub struct RunOptions {
+    /// Granite's `residual_scale`: every branch output (the mixer's and
+    /// the FFN's) multiplied by it before its residual add
+    /// (`granite-hybrid.cpp:236-238` and after the FFN).
+    pub residual_scale: Option<f32>,
 }
 
 impl Enc<'_> {
@@ -435,8 +454,8 @@ impl Enc<'_> {
 ///
 /// # Safety
 ///
-/// As [`launch_gdn_prefill_run`] for this layer's `state`.
-unsafe fn encode_layer(
+/// As [`crate::prefill_run::launch_prefill_run`] for this layer's `state`.
+pub(crate) unsafe fn encode_layer(
     enc: &mut Enc<'_>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     w: &PrefillGdnLayer<'_>,
@@ -611,6 +630,7 @@ pub(crate) fn encode_ffn_tail(
 ) -> Result<(), MetalError> {
     let b = |i: usize| sc.buf(i);
     let ffn_norm = resident_f32_buffer(device, f.norm)?;
+    encode_residual_scale(enc, device, b(slot::OUT), rows * hidden)?;
     let encoder = enc.span("pf_ffn_norm")?;
     crate::norm::encode_add_rms_norm_batch(
         encoder,
@@ -660,6 +680,7 @@ pub(crate) fn encode_ffn_tail(
         let encoder = enc.span("pf_shared_gate")?;
         crate::gdn_moe::encode_shared_gate(encoder, device, g, b(slot::XN), b(slot::OUT), rows)?;
     }
+    encode_residual_scale(enc, device, b(slot::OUT), rows * hidden)?;
     let encoder = enc.span("pf_residual")?;
     crate::elem::encode_vec_add(
         encoder,
@@ -699,12 +720,53 @@ pub(crate) fn encode_ffn_tail(
         b(slot::MOE_OUT),
         rows,
     )?;
+    encode_residual_scale(enc, device, b(slot::MOE_OUT), rows * hidden)?;
     let encoder = enc.span("pf_moe_residual")?;
     crate::elem::encode_vec_add(
         encoder,
         device,
         b(slot::H),
         b(slot::MOE_OUT),
+        (rows * hidden) as u32,
+    )
+}
+
+/// `buf[..n] *= residual_scale`, when the run has one.
+fn encode_residual_scale(
+    enc: &mut Enc<'_>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    buf: &ProtocolObject<dyn MTLBuffer>,
+    n: usize,
+) -> Result<(), MetalError> {
+    let Some(s) = enc.residual_scale else {
+        return Ok(());
+    };
+    let encoder = enc.span("pf_residual_scale")?;
+    crate::elem::encode_scale(encoder, device, buf, s, n as u32)
+}
+
+/// After a branch has left its output in `slot::OUT`: the FFN tail, or
+/// on a layer with none (a pure Mamba model's, `mamba.cpp:110-117`)
+/// the residual add alone.
+pub(crate) fn encode_tail(
+    enc: &mut Enc<'_>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    ffn: Option<&PrefillFfn<'_>>,
+    eps: f32,
+    sc: &crate::scratch_pool::Scratch,
+    rows: usize,
+    hidden: usize,
+) -> Result<(), MetalError> {
+    if let Some(f) = ffn {
+        return encode_ffn_tail(enc, device, f, eps, sc, rows, hidden);
+    }
+    encode_residual_scale(enc, device, sc.buf(slot::OUT), rows * hidden)?;
+    let encoder = enc.span("pf_residual")?;
+    crate::elem::encode_vec_add(
+        encoder,
+        device,
+        sc.buf(slot::H),
+        sc.buf(slot::OUT),
         (rows * hidden) as u32,
     )
 }
@@ -723,6 +785,7 @@ pub(crate) fn encode_wo_tail(
     ffn: &PrefillFfn<'_>,
     eps: f32,
     branch: &ProtocolObject<dyn MTLBuffer>,
+    beside: Option<&ProtocolObject<dyn MTLBuffer>>,
     sc: &crate::scratch_pool::Scratch,
     rows: usize,
 ) -> Result<(), MetalError> {
@@ -730,6 +793,18 @@ pub(crate) fn encode_wo_tail(
     encode_fold(encoder, device, branch, cols_of(o_proj), rows, fold)?;
     let encoder = enc.span("pf_o_proj")?;
     encode_gemm(encoder, device, o_proj, branch, sc.buf(slot::OUT), rows)?;
+    // `falcon-h1.cpp:160`: `attn_out + ssm_out`, before the one
+    // residual add.
+    if let Some(m) = beside {
+        let encoder = enc.span("pf_parallel_add")?;
+        crate::elem::encode_vec_add(
+            encoder,
+            device,
+            sc.buf(slot::OUT),
+            m,
+            (rows * o_proj.rows) as u32,
+        )?;
+    }
     encode_ffn_tail(enc, device, ffn, eps, sc, rows, o_proj.rows)
 }
 
@@ -758,205 +833,8 @@ pub struct PrefillAttnTail<'a> {
 }
 
 impl PrefillAttnTail<'_> {
-    fn is_supported(&self, rows: usize, hidden: usize) -> bool {
+    pub(crate) fn is_supported(&self, rows: usize, hidden: usize) -> bool {
         self.branch.len() == rows * cols_of(&self.o_proj)
             && wo_tail_supported(&self.o_proj, self.fold.as_ref(), &self.ffn, hidden)
-    }
-}
-
-/// One layer of a run: a recurrent layer with its state, or an
-/// attention layer whole (`crate::gdn_prefill_attn`) with the
-/// sequence's device KV mirror, which the run appends this batch to.
-pub enum PrefillRunLayer<'a, 'k> {
-    Gdn(PrefillGdnLayer<'a>, PrefillGdnState),
-    Attn(PrefillAttnLayer<'a>, &'k mut MetalKvBuffers),
-}
-
-impl PrefillRunLayer<'_, '_> {
-    fn hidden(&self) -> usize {
-        match self {
-            Self::Gdn(l, _) => l.attn_norm.len(),
-            Self::Attn(l, _) => l.attn_norm.len(),
-        }
-    }
-
-    fn is_supported(&self, rows: usize, start_pos: usize) -> bool {
-        match self {
-            Self::Gdn(l, _) => l.is_supported(),
-            Self::Attn(l, kv) => l.is_supported(kv, rows, start_pos),
-        }
-    }
-}
-
-/// `rows` tokens of one sequence, at positions `start_pos..`, through
-/// `layers`, in order, in ONE command buffer, the hidden batch uploaded
-/// once and read back once. Returns the batch as it leaves the last
-/// layer; each attention layer's mirror has then grown by `rows`.
-///
-/// Every layer is checked before anything is encoded, so an `Err` has
-/// touched no state.
-///
-/// # Safety
-///
-/// Each recurrent state's two pointers must address that many
-/// readable-writable, page-aligned bytes, held exclusively by the
-/// caller across the call, which waits for the GPU: the GPU writes
-/// those very bytes.
-pub unsafe fn launch_gdn_prefill_run(
-    hidden_batch: &[f32],
-    rows: usize,
-    start_pos: usize,
-    head: Option<&PrefillAttnTail<'_>>,
-    layers: &mut [PrefillRunLayer<'_, '_>],
-) -> Result<Vec<f32>, MetalError> {
-    let hidden = match (head, layers.first()) {
-        (Some(t), _) => t.o_proj.rows,
-        (None, Some(first)) => first.hidden(),
-        (None, None) => return Err(MetalError::CommandFailed),
-    };
-    if rows == 0
-        || hidden_batch.len() != rows * hidden
-        || head.is_some_and(|t| !t.is_supported(rows, hidden))
-        || layers
-            .iter()
-            .any(|l| !l.is_supported(rows, start_pos) || l.hidden() != hidden)
-    {
-        return Err(MetalError::CommandFailed);
-    }
-    let gdn = |f: fn(&PrefillGdnLayer<'_>) -> usize| {
-        layers
-            .iter()
-            .filter_map(|l| match l {
-                PrefillRunLayer::Gdn(g, _) => Some(f(g)),
-                PrefillRunLayer::Attn(..) => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .max(1)
-            * rows
-    };
-    let attn = |f: &dyn Fn(&PrefillAttnLayer<'_>, &MetalKvBuffers) -> usize| {
-        layers
-            .iter()
-            .filter_map(|l| match l {
-                PrefillRunLayer::Attn(a, kv) => Some(f(a, kv)),
-                PrefillRunLayer::Gdn(..) => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .max(1)
-            * rows
-    };
-    let mut lens = [0usize; slot::COUNT];
-    lens[slot::H] = rows * hidden;
-    lens[slot::XN] = rows * hidden;
-    lens[slot::QKV] = gdn(|l| l.head.conv_dim());
-    lens[slot::Z] = gdn(|l| l.head.value_dim());
-    lens[slot::BETA_IN] = gdn(|l| l.head.n_v_heads);
-    lens[slot::ALPHA_IN] = lens[slot::BETA_IN];
-    lens[slot::BETA] = lens[slot::BETA_IN];
-    lens[slot::G] = lens[slot::BETA_IN];
-    lens[slot::CONV] = lens[slot::QKV];
-    lens[slot::O] = lens[slot::Z];
-    lens[slot::Y] = lens[slot::Z];
-    lens[slot::BRANCH] = head.map_or(1, |t| t.branch.len());
-    lens[slot::OUT] = rows * hidden;
-    let ffn_rows = layers
-        .iter()
-        .map(|l| match l {
-            PrefillRunLayer::Gdn(g, _) => g.ffn.gate.rows,
-            PrefillRunLayer::Attn(a, _) => a.ffn.gate.rows,
-        })
-        .chain(head.map(|t| t.ffn.gate.rows))
-        .max()
-        .unwrap_or(1);
-    lens[slot::GATE] = ffn_rows * rows;
-    lens[slot::UP] = lens[slot::GATE];
-    lens[slot::AQ] = attn(&|a, _| a.q.rows);
-    lens[slot::AQR] = attn(&|a, kv| a.n_heads * kv.head_dim);
-    lens[slot::AG] = lens[slot::AQR];
-    lens[slot::AATT] = lens[slot::AQR];
-    lens[slot::AK] = attn(&|_, kv| kv.elems_per_token());
-    lens[slot::AV] = lens[slot::AK];
-    let routed = layers
-        .iter()
-        .map(|l| match l {
-            PrefillRunLayer::Gdn(g, _) => &g.ffn,
-            PrefillRunLayer::Attn(a, _) => &a.ffn,
-        })
-        .chain(head.map(|t| &t.ffn))
-        .any(|f| f.routed.is_some());
-    // Half the floats would hold the f16 copy; a whole width keeps the
-    // pool's sizes few.
-    lens[slot::XN16] = if routed { rows * hidden } else { 1 };
-    lens[slot::MOE_OUT] = lens[slot::XN16];
-
-    let shared = shared_metal()?;
-    let device = &shared.device;
-    let sc =
-        crate::scratch_pool::Scratch::take(device, &lens).ok_or(MetalError::BufferAllocFailed)?;
-    sc.write(slot::H, hidden_batch)
-        .ok_or(MetalError::CommandFailed)?;
-    let cmd_buf = shared
-        .queue
-        .commandBuffer()
-        .ok_or(MetalError::CommandFailed)?;
-    let mut enc = Enc {
-        encoder: cmd_buf
-            .computeCommandEncoder()
-            .ok_or(MetalError::CommandFailed)?,
-        spans: crate::kernel_timing::SpanClock::begin(device, 24 * (layers.len() + 1)),
-        cmd: &cmd_buf,
-    };
-    let encoded = (|| {
-        if let Some(t) = head {
-            let branch = sc
-                .write(slot::BRANCH, t.branch)
-                .ok_or(MetalError::CommandFailed)?;
-            encode_wo_tail(
-                &mut enc,
-                device,
-                &t.o_proj,
-                t.fold.as_ref(),
-                &t.ffn,
-                t.eps,
-                branch,
-                &sc,
-                rows,
-            )?;
-        }
-        for layer in layers.iter() {
-            match layer {
-                // SAFETY: the caller's contract, forwarded per layer.
-                PrefillRunLayer::Gdn(l, state) => {
-                    unsafe { encode_layer(&mut enc, device, l, state, &sc, rows) }?
-                }
-                PrefillRunLayer::Attn(l, kv) => crate::gdn_prefill_attn::encode_attn_layer(
-                    &mut enc, device, l, kv, &sc, rows, start_pos,
-                )?,
-            }
-        }
-        Ok(())
-    })();
-    // Ended either way; on an error nothing is committed and the buffer
-    // is dropped unsubmitted, so no state has moved.
-    enc.encoder.endEncoding();
-    encoded?;
-    let clock = crate::timing::SubmitClock::start();
-    crate::timing::commit_wait_note(&cmd_buf, "gdn-prefill", 16, clock);
-    enc.spans.finish(&cmd_buf, "gdn-prefill", 4);
-    if cmd_buf.status() != objc2_metal::MTLCommandBufferStatus::Completed {
-        return Err(MetalError::CommandFailed);
-    }
-    for layer in layers.iter_mut() {
-        if let PrefillRunLayer::Attn(_, kv) = layer {
-            kv.seq_len += rows;
-        }
-    }
-    // SAFETY: shared storage of `rows * hidden` floats, written by the
-    // kernels this call waited for.
-    unsafe {
-        let h = sc.buf(slot::H);
-        Ok(std::slice::from_raw_parts(h.contents().as_ptr() as *const f32, rows * hidden).to_vec())
     }
 }

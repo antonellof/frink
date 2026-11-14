@@ -131,10 +131,24 @@ kernel void softcap_f32(
 }
 "#;
 
-/// `y[i] += a * x[i]` — MoE weighted expert accumulate.
+/// `y[i] += a * x[i]` — MoE weighted expert accumulate; and `y[i] *= a`,
+/// Granite's residual multiplier and attention scale
+/// (`granite-hybrid.cpp:223-238`), as `frink_models::scalar_multipliers`
+/// applies them on the host.
 const AXPY_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
+
+kernel void scale_f32(
+    device float* y [[buffer(0)]],
+    constant float& a [[buffer(1)]],
+    constant uint& n [[buffer(2)]],
+    uint i [[thread_position_in_grid]]
+) {
+    if (i < n) {
+        y[i] = y[i] * a;
+    }
+}
 
 kernel void axpy_f32(
     device float* y [[buffer(0)]],
@@ -463,6 +477,50 @@ pub(crate) fn encode_softcap(
             NonNull::new(&mut inv_f as *mut f32 as *mut _).unwrap(),
             4,
             3,
+        );
+    }
+    let tg = 256usize;
+    dispatch_counted(
+        encoder,
+        MTLSize {
+            width: (n as usize).div_ceil(tg),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// `y[i] *= a` in place, over the first `n` floats.
+pub(crate) fn encode_scale(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    y: &ProtocolObject<dyn MTLBuffer>,
+    a: f32,
+    n: u32,
+) -> Result<(), MetalError> {
+    let pipe = ensure_pipeline(device, AXPY_KERNEL_SRC, "scale_f32")?;
+    encoder.setComputePipelineState(&pipe.0);
+    // SAFETY: `y` outlives the caller's command buffer; the two
+    // constants are copied by `setBytes`.
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(y), 0, 0);
+        let mut a_f = a;
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut a_f as *mut f32 as *mut _).unwrap(),
+            4,
+            1,
+        );
+        let mut n_u = n;
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut n_u as *mut u32 as *mut _).unwrap(),
+            4,
+            2,
         );
     }
     let tg = 256usize;
