@@ -3655,7 +3655,9 @@ fn moe_layer_resident(
 /// Fused Concurrent groups (fewer barriers): Q∥K∥V, extras+RoPE, KV stores.
 #[allow(clippy::too_many_arguments)]
 fn encode_moe_layer_fused(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     mrs: &mut MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     scratch: &MoeDecodeScratch,
@@ -3697,6 +3699,7 @@ fn encode_moe_layer_fused(
     let r_w = &bound.r_w;
 
     // attn_norm: h → x_attn
+    spans.span(cmd_buf, encoder, "attn_norm")?;
     {
         let srcs = [scratch.h.as_ref()];
         let dsts = [scratch.x_attn.as_ref()];
@@ -3713,6 +3716,7 @@ fn encode_moe_layer_fused(
         mrs.end_op(&srcs, &dsts);
     }
     // Q∥K∥V — one Concurrent set (shared src, disjoint dsts).
+    spans.span(cmd_buf, encoder, "qkv")?;
     {
         let srcs = [scratch.x_attn.as_ref()];
         let dsts = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
@@ -3725,6 +3729,7 @@ fn encode_moe_layer_fused(
     // extras + RoPE on q/k — fused group (one barrier before in-place chain).
     // A layer that does not rotate encodes no RoPE (see the dense stack).
     if let Some(layer_rope) = layer.rope {
+        spans.span(cmd_buf, encoder, "extras_rope")?;
         let srcs = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
         let dsts = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
         mrs.begin_op(encoder, &srcs, &dsts);
@@ -3767,6 +3772,7 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     } else if layer.extras.encodes_anything() {
+        spans.span(cmd_buf, encoder, "attn_extras")?;
         let srcs = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
         mrs.begin_op(encoder, &srcs, &srcs);
         encode_attn_extras(
@@ -3788,6 +3794,7 @@ fn encode_moe_layer_fused(
     }
     let token_elems = (n_kv_heads * head_dim) as u32;
     let offset = (pos * n_kv_heads * head_dim) as u32;
+    spans.span(cmd_buf, encoder, "kv_append")?;
     {
         let srcs = [scratch.k.as_ref(), scratch.v.as_ref()];
         let dsts = [kv.k.as_ref(), kv.v.as_ref()];
@@ -3804,6 +3811,8 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    // Attention, the sinks and the sliding window included.
+    spans.span(cmd_buf, encoder, "gqa")?;
     {
         // `encode_gqa_with_kv` tracks itself: with a quantized KV cache it
         // also writes a shared f16 dequant scratch no caller can name.
@@ -3825,6 +3834,7 @@ fn encode_moe_layer_fused(
             tail.sinks(),
         )?;
     }
+    spans.span(cmd_buf, encoder, "o_proj")?;
     {
         let srcs = [scratch.attn.as_ref()];
         let dsts = [scratch.o.as_ref()];
@@ -3832,7 +3842,11 @@ fn encode_moe_layer_fused(
         encode_matvec(encoder, device, &layer.o, o_w, &scratch.attn, &scratch.o)?;
         mrs.end_op(&srcs, &dsts);
     }
+    if layer.extras.o_bias.is_some() {
+        spans.span(cmd_buf, encoder, "o_bias")?;
+    }
     tail.encode_o_bias(encoder, mrs, device, &scratch.o, hidden_dim, 1)?;
+    spans.span(cmd_buf, encoder, "add_ffn_norm")?;
     {
         let srcs = [scratch.h.as_ref(), scratch.o.as_ref()];
         let dsts = [scratch.h.as_ref(), scratch.x2.as_ref()];
@@ -3849,6 +3863,7 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    spans.span(cmd_buf, encoder, "router")?;
     {
         let srcs = [scratch.x2.as_ref()];
         let dsts = [scratch.router.as_ref()];
@@ -3865,6 +3880,7 @@ fn encode_moe_layer_fused(
     }
     if let Some(oai) = oai.as_ref() {
         // gpt-oss: `ffn_gate_inp.bias` on the logits before selection.
+        spans.span(cmd_buf, encoder, "router_bias")?;
         let r = [scratch.router.as_ref()];
         mrs.begin_op(encoder, &r, &r);
         encode_vec_add_rows(
@@ -3877,6 +3893,7 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&r, &r);
     }
+    spans.span(cmd_buf, encoder, "topk")?;
     {
         let srcs = [scratch.router.as_ref()];
         let dsts = [scratch.ids.buffer(), scratch.route.as_ref()];
@@ -3902,6 +3919,7 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    spans.span(cmd_buf, encoder, "gate_up_id")?;
     {
         let srcs = [scratch.x2.as_ref(), scratch.ids.buffer()];
         let dsts = [scratch.gate.as_ref(), scratch.up.as_ref()];
@@ -3935,6 +3953,8 @@ fn encode_moe_layer_fused(
     mrs.begin_op(encoder, &srcs, &dsts);
     encode_q4_0_moe_id(
         encoder,
+        spans,
+        cmd_buf,
         device,
         &scratch.x2,
         &layer.packed,
@@ -4195,11 +4215,22 @@ pub fn launch_moe_decode_stack(
         let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
         let early = crate::timing::early_commit_layer(crate::timing::Stack::Moe, layers.len());
         let mut mrs = MemRanges::new();
+        // `FRINK_METAL_KERNEL_TIMING=1`: one sampled encoder per op
+        // group, as the dense stack does; a no-op otherwise. A layer
+        // opens at most 18 groups (gpt-oss, the widest, opens 17).
+        // The early-commit split cannot be timed: its first command
+        // buffer is never waited on, so the clock stays off with it.
+        let mut spans = match early {
+            None => crate::kernel_timing::SpanClock::begin(device, 18 * layers.len() + 8),
+            Some(_) => crate::kernel_timing::SpanClock::off(),
+        };
+        spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
         let _embd_w = if let Some(e) = embd {
             let w = resident_weight_buffer(device, e.weights)?;
             let srcs: [&ProtocolObject<dyn MTLBuffer>; 0] = [];
             let dsts = [scratch.h.as_ref()];
+            spans.span(&cmd_buf, &mut encoder, "embd_gather")?;
             mrs.begin_op(&encoder, &srcs, &dsts);
             encode_get_rows(
                 &encoder,
@@ -4226,7 +4257,9 @@ pub fn launch_moe_decode_stack(
                 mrs = MemRanges::new();
             }
             encode_moe_layer_fused(
-                &encoder,
+                &mut encoder,
+                &mut spans,
+                &cmd_buf,
                 &mut mrs,
                 device,
                 scratch,
@@ -4250,6 +4283,7 @@ pub fn launch_moe_decode_stack(
         let (download_n, download_logits, download_argmax) = if let Some(fnw) = final_norm_w {
             assert_eq!(fnw.len(), hidden_dim);
             let fn_buf = resident_f32_buffer(device, fnw)?;
+            spans.span(&cmd_buf, &mut encoder, "final_norm")?;
             {
                 let srcs = [scratch.h.as_ref()];
                 let dsts = [scratch.x_attn.as_ref()];
@@ -4269,6 +4303,7 @@ pub fn launch_moe_decode_stack(
                 let logits = scratch.logits.as_ref().ok_or(MetalError::CommandFailed)?;
                 assert_eq!(out_l.rows, scratch.logits_cap);
                 let out_w = resident_weight_buffer(device, out_l.weights)?;
+                spans.span(&cmd_buf, &mut encoder, "lm_head")?;
                 {
                     let srcs = [scratch.x_attn.as_ref()];
                     let dsts = [logits.as_ref()];
@@ -4277,6 +4312,7 @@ pub fn launch_moe_decode_stack(
                     mrs.end_op(&srcs, &dsts);
                 }
                 if argmax_only {
+                    spans.span(&cmd_buf, &mut encoder, "argmax")?;
                     {
                         let srcs = [logits.as_ref()];
                         let dsts = [scratch.argmax_idx.as_ref()];
@@ -4304,6 +4340,7 @@ pub fn launch_moe_decode_stack(
 
         encoder.endEncoding();
         crate::timing::commit_wait_note(&cmd_buf, "moe-decode/tok", 32, clock);
+        spans.finish(&cmd_buf, "moe-decode/tok", 32);
 
         for kv in kvs.iter_mut() {
             kv.seq_len = pos + 1;

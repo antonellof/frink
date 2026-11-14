@@ -15,6 +15,7 @@ pub mod selection;
 pub use selection::SelectionRule;
 
 use frink_core::weight_matrix::WeightMatrix;
+use std::sync::Arc;
 
 /// Where a given expert's weights currently live. `GpuDevice`-placed
 /// experts only actually execute on a GPU under `--features cuda` and/or
@@ -885,11 +886,17 @@ pub struct ExpertBias<'a> {
 /// the host reads one expert's rows through [`Self::expert`] and a GPU
 /// binds the plane whole, so the two read the same bytes and there is no
 /// second copy to fall out of step with the first.
-#[derive(Debug, Clone, Default)]
+///
+/// Shared (`Arc<[f32]>`) rather than owned, so a device cache can hold
+/// the plane it uploaded: a held allocation cannot be freed and its
+/// address reissued, and an `Arc` nobody else can write through cannot
+/// change under the upload, so "same `Arc`" proves "same bytes" without
+/// re-reading 368 KB per plane per layer per token (#627).
+#[derive(Debug, Clone)]
 pub struct ExpertBiasPlanes {
-    gate: Vec<f32>,
-    up: Vec<f32>,
-    down: Vec<f32>,
+    gate: Arc<[f32]>,
+    up: Arc<[f32]>,
+    down: Arc<[f32]>,
     ffn_rows: usize,
     hidden_rows: usize,
 }
@@ -908,10 +915,10 @@ impl ExpertBiasPlanes {
         (gate.len() == n_experts * ffn_rows
             && up.len() == n_experts * ffn_rows
             && down.len() == n_experts * hidden_rows)
-            .then_some(Self {
-                gate,
-                up,
-                down,
+            .then(|| Self {
+                gate: gate.into(),
+                up: up.into(),
+                down: down.into(),
                 ffn_rows,
                 hidden_rows,
             })
@@ -935,9 +942,21 @@ impl ExpertBiasPlanes {
         (&self.gate, &self.up, &self.down)
     }
 
-    /// The planes, writable in place (their lengths cannot change).
+    /// The planes as the shared allocations they are, for a device
+    /// cache that keeps what it uploaded alive (see the type's docs).
+    pub fn shared_planes(&self) -> (&Arc<[f32]>, &Arc<[f32]>, &Arc<[f32]>) {
+        (&self.gate, &self.up, &self.down)
+    }
+
+    /// The planes, writable in place (their lengths cannot change). A
+    /// plane some device cache still holds is copied first, so the
+    /// write lands in a new allocation the cache has never seen.
     pub fn planes_mut(&mut self) -> (&mut [f32], &mut [f32], &mut [f32]) {
-        (&mut self.gate, &mut self.up, &mut self.down)
+        (
+            Arc::make_mut(&mut self.gate),
+            Arc::make_mut(&mut self.up),
+            Arc::make_mut(&mut self.down),
+        )
     }
 }
 

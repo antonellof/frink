@@ -52,9 +52,9 @@ fn swiglu_oai_and_add_id_match_ggml() {
     let gate = fill(n_slots * ffn, 1.0, 12.0);
     let up = fill(n_slots * ffn, 7.0, 12.0);
     let router_bias = fill(n_experts, 2.0, 1.0);
-    let gate_bias = fill(n_experts * ffn, 3.0, 2.0);
-    let up_bias = fill(n_experts * ffn, 5.0, 2.0);
-    let down_bias = fill(n_experts * hidden, 11.0, 2.0);
+    let gate_bias: Arc<[f32]> = fill(n_experts * ffn, 3.0, 2.0).into();
+    let up_bias: Arc<[f32]> = fill(n_experts * ffn, 5.0, 2.0).into();
+    let down_bias: Arc<[f32]> = fill(n_experts * hidden, 11.0, 2.0).into();
     let down_out = fill(n_slots * hidden, 13.0, 3.0);
     let (alpha, limit) = (1.702f32, 7.0f32);
     let oai = MoeOaiMetal {
@@ -138,5 +138,29 @@ fn swiglu_oai_and_add_id_match_ggml() {
                 "add_id slot {s} row {r}"
             );
         }
+    }
+}
+
+/// The expert-bias planes are cached by address with no byte compare,
+/// on the strength of the entry holding the plane. A plane its owner
+/// drops must therefore stay allocated, so the next plane of the same
+/// size cannot land on its address and be served the old upload: the
+/// allocator hands a just-freed block straight back, so an entry that
+/// proved itself by address alone, without the hold, goes red here on
+/// the second iteration.
+#[test]
+#[ignore = "needs a real Metal GPU"]
+fn a_dropped_bias_plane_is_never_served_to_the_next_one() {
+    let shared = shared_metal().expect("metal");
+    let device = &shared.device;
+    for i in 0..32u32 {
+        let plane: Arc<[f32]> = vec![i as f32; 4096].into();
+        let res = crate::gpu::resident_f32_shared(device, &plane).unwrap();
+        let got = read_f32(&res.buffer, plane.len());
+        assert!(
+            got.iter().all(|&x| x == i as f32),
+            "plane {i} was served plane {}'s upload",
+            got[0]
+        );
     }
 }

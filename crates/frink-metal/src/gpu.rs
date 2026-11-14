@@ -5632,6 +5632,9 @@ fn build_resident_weight_buffer(
 pub(crate) struct ResidentF32Buffer {
     pub(crate) buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     nbytes: usize,
+    /// The shared plane this was uploaded from, held, when it came in
+    /// through [`resident_f32_shared`]; `None` for a borrowed slice.
+    keep: Option<Arc<[f32]>>,
 }
 
 impl Resident for ResidentF32Buffer {
@@ -5646,9 +5649,19 @@ impl Resident for ResidentF32Buffer {
     /// the compare costs a fraction of the upload it avoids. That
     /// leaves no residual probability of serving one model's norms to
     /// another (GitHub issue #180).
+    ///
+    /// An entry built from a shared plane proves it the way an mmap
+    /// alias does: it holds the allocation, so the address cannot have
+    /// been reissued, and nothing can write through an `Arc` this entry
+    /// also holds (`Arc::make_mut` copies first), so the bytes behind
+    /// the address are still the ones uploaded. The compare would cost
+    /// 26 MB a token on gpt-oss, whose expert biases are 368 KB planes.
     fn still_holds(&self, host: &[u8]) -> bool {
         if self.nbytes != host.len() {
             return false;
+        }
+        if let Some(keep) = &self.keep {
+            return std::ptr::eq(keep.as_ptr() as *const u8, host.as_ptr());
         }
         // SAFETY: `buffer` is a `StorageModeShared` buffer this process
         // allocated with exactly `nbytes` bytes and only ever reads on
@@ -5689,18 +5702,59 @@ pub(crate) fn resident_f32_buffer(
     // `data` outlives the view.
     let host = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, nbytes) };
     get_or_build(&F32_CACHE, &TL_F32_CACHE, host, || {
-        let mut data_owned = data.to_vec();
-        // SAFETY: `data_owned` holds `nbytes` initialised bytes and is
-        // alive across the call, which copies them into the buffer.
-        let buffer = unsafe {
-            device.newBufferWithBytes_length_options(
-                NonNull::new(data_owned.as_mut_ptr() as *mut _).unwrap(),
-                nbytes,
-                MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferAllocFailed)?;
-        Ok(ResidentF32Buffer { buffer, nbytes })
+        resident_f32_buffer_uncached(device, data)
+    })
+}
+
+/// Shared planes, cached apart from [`F32_CACHE`] so an entry here is
+/// always one that holds its plane: a borrowed-slice entry for the same
+/// address would otherwise be served to this path and compared in full.
+static SHARED_F32_CACHE: Mutex<Option<F32CacheMap>> = Mutex::new(None);
+
+thread_local! {
+    static TL_SHARED_F32_CACHE: RefCell<F32CacheMap> = RefCell::new(HashMap::new());
+}
+
+/// [`resident_f32_buffer`] for a plane its owner shares: the entry
+/// holds a clone of `plane`, which makes a hit an address compare
+/// instead of a byte compare (see [`ResidentF32Buffer::still_holds`]).
+/// The price is that the plane outlives its owner while the entry is
+/// cached, as a mapped file outlives its model behind an mmap alias.
+pub(crate) fn resident_f32_shared(
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    plane: &Arc<[f32]>,
+) -> Result<Arc<ResidentF32Buffer>, MetalError> {
+    let nbytes = std::mem::size_of_val(&**plane);
+    // SAFETY: as in `resident_f32_buffer`.
+    let host = unsafe { std::slice::from_raw_parts(plane.as_ptr() as *const u8, nbytes) };
+    get_or_build(&SHARED_F32_CACHE, &TL_SHARED_F32_CACHE, host, || {
+        let built = resident_f32_buffer_uncached(device, plane)?;
+        Ok(ResidentF32Buffer {
+            keep: Some(plane.clone()),
+            ..built
+        })
+    })
+}
+
+fn resident_f32_buffer_uncached(
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    data: &[f32],
+) -> Result<ResidentF32Buffer, MetalError> {
+    let nbytes = std::mem::size_of_val(data);
+    // SAFETY: `data` holds `nbytes` initialised bytes and outlives the
+    // call, which copies them into the buffer.
+    let buffer = unsafe {
+        device.newBufferWithBytes_length_options(
+            NonNull::new(data.as_ptr() as *mut _).unwrap(),
+            nbytes,
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+    .ok_or(MetalError::BufferAllocFailed)?;
+    Ok(ResidentF32Buffer {
+        buffer,
+        nbytes,
+        keep: None,
     })
 }
 
@@ -6671,7 +6725,9 @@ pub(crate) fn encode_q4_0_moe_gate_up_id(
 /// `out += weighted` (decode residual fuse); otherwise `out = weighted`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_q4_0_moe_id(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     x_buf: &ProtocolObject<dyn MTLBuffer>,
     packed: &MoePackedQ4<'_>,
@@ -6701,6 +6757,12 @@ pub(crate) fn encode_q4_0_moe_id(
         )?;
         memory_barrier_resources(encoder, &[gate_buf, up_buf]);
     }
+    let act_label = if oai.is_some() {
+        "swiglu_oai"
+    } else {
+        "silu_mul"
+    };
+    spans.span(cmd_buf, encoder, act_label)?;
     match oai {
         // gpt-oss: the expert gate/up biases and the clamped SwiGLU.
         Some(oai) => crate::moe_oai::encode_swiglu_oai_id(
@@ -6729,6 +6791,7 @@ pub(crate) fn encode_q4_0_moe_id(
     let weighted_sum = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, "moe_weighted_sum")?;
 
     let down_blocks = moe_row_blocks(packed.down_row_bytes, packed.down_kind)?;
+    spans.span(cmd_buf, encoder, "down_id")?;
     encode_moe_down_id(
         encoder,
         device,
@@ -6749,6 +6812,7 @@ pub(crate) fn encode_q4_0_moe_id(
     memory_barrier_resources(encoder, &[expert_out_buf]);
     if let Some(oai) = oai {
         // `down`'s expert bias, before the routing weights scale it.
+        spans.span(cmd_buf, encoder, "add_id")?;
         crate::moe_oai::encode_add_id(
             encoder,
             device,
@@ -6762,6 +6826,7 @@ pub(crate) fn encode_q4_0_moe_id(
     }
 
     const SUM_TG: usize = 256;
+    spans.span(cmd_buf, encoder, "weighted_sum")?;
     if residual_into_out && n_tokens == 1 {
         let fuse = ensure_pipeline(
             device,
@@ -7107,11 +7172,13 @@ pub fn launch_moe_prefill_q4_0(
             cmd_buf.commit();
             cmd_buf.waitUntilCompleted();
         } else {
-            let encoder = cmd_buf
+            let mut encoder = cmd_buf
                 .computeCommandEncoder()
                 .ok_or(MetalError::CommandFailed)?;
             let enc_result = encode_q4_0_moe_id(
-                &encoder,
+                &mut encoder,
+                &mut crate::kernel_timing::SpanClock::off(),
+                &cmd_buf,
                 device,
                 &x_buf,
                 packed,
