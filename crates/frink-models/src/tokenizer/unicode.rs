@@ -32,6 +32,9 @@ impl CptFlags {
     pub(super) fn is_number(self) -> bool {
         self.0 & data::NUMBER != 0
     }
+    pub(super) fn is_letter(self) -> bool {
+        self.0 & data::LETTER != 0
+    }
     pub(super) fn is_separator(self) -> bool {
         self.0 & data::SEPARATOR != 0
     }

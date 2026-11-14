@@ -112,6 +112,27 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **Every `tokenizer.ggml.pre` llama.cpp knows now splits as libllama
+  does, or is refused by name** (#629). Before, any `pre` without an
+  arm here was tokenized with the GPT-2 pattern, fluently and wrongly:
+  `falcon`, `jais-2`, `chameleon`, `kimi-k2`, `spark2_5`, `youtu`,
+  `tekken` (Mistral's), `dbrx`, `smaug-bpe`, `grok-2`, `bailingmoe`,
+  `seed-coder`, `ufakzeka`, `afmoe`, `laguna`, `exaone-moe`,
+  `minicpm5`, `granite-embed-multi-97m`, and a file with no `pre` at
+  all, which upstream gives its own four-regex `DEFAULT` list.
+  `pixtral` was on the llama3 arm; upstream sends it to tekken's. The
+  GPT-4o pattern now admits combining marks in its lookahead, as the
+  pin does, and runs on the engine upstream runs it on. `ignore_merges`
+  is honoured for the vocabularies that set it (llama3 and its arm,
+  glm4/glm5, tekken/pixtral, youtu, minicpm5, granite-embed-multi-97m):
+  a word that is a vocabulary entry the merges do not reach is now that
+  one token, as in llama.cpp, where frink split it. `flint` is served.
+  A `pre` llama.cpp does not know is refused, as llama.cpp refuses it;
+  `soprano`, `whitespace`, `sarvam-moe` and the SPM-style values under
+  `tokenizer.ggml.model = gpt2` stay refused, each with its reason.
+  `tools/oracle/regex_split.py` checks every served `pre` against
+  libllama's `unicode_regex_split`.
+
 - **The prefix cache stored nothing for a greedy request on Metal**,
   and greedy is the server's default. The Metal decode folds the last
   projection into an argmax and keeps one id, and the store refused any
