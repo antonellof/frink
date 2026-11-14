@@ -311,7 +311,7 @@ fn each_seam_is_visible_in_the_logits() {
     let saved: Vec<_> = d
         .layers
         .iter_mut()
-        .map(|l| std::mem::replace(&mut l.moe.norm_weight, NormOp::Rms(vec![1.0; 32])))
+        .map(|l| std::mem::replace(&mut l.moe.norm_weight, NormOp::Rms(vec![1.0; 32].into())))
         .collect();
     let worst = worst_vs(&decode(&d), &GLM4MOE_GOLDEN);
     assert!(
@@ -340,7 +340,7 @@ fn each_seam_is_visible_in_the_logits() {
     let saved: Vec<_> = d
         .layers
         .iter_mut()
-        .map(|l| l.attn.q_norm.replace(vec![1.0; 16]))
+        .map(|l| l.attn.q_norm.replace(vec![1.0; 16].into()))
         .collect();
     let worst = worst_vs(&decode(&d), &GLM4MOE_GOLDEN);
     assert!(worst > 1e-2, "attn_q_norm not seen: {worst}");

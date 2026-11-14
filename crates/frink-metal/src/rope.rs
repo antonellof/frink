@@ -18,6 +18,7 @@ use objc2_metal::{
     MTLDevice, MTLSize,
 };
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 /// RoPE pairing convention for Metal kernels. Mirrors
 /// `frink_models::config::RopeLayout` / llama.cpp `llama_rope_type`
@@ -111,7 +112,7 @@ pub struct LayerRope<'a> {
     /// This layer's per-band divisors (`rope_freqs.weight`, folded with
     /// any linear `freq_scale`), `n_rot/2` long. `None` = divide by
     /// nothing.
-    pub freq_factors: Option<&'a [f32]>,
+    pub freq_factors: Option<&'a Arc<[f32]>>,
 }
 
 /// [`LayerRope`] as the private encoders take it, once the divisors are

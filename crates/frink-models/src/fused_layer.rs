@@ -41,7 +41,7 @@ use crate::norm::NormOp;
 /// the only constructor, so the refusals cannot be bypassed by
 /// assembling one by hand.
 pub struct LayerFfnParts<'a> {
-    norm: &'a [f32],
+    norm: &'a std::sync::Arc<[f32]>,
     norm_eps: f32,
     gate: &'a WeightMatrix,
     up: &'a WeightMatrix,
@@ -71,7 +71,7 @@ struct RoutedParts<'a> {
     router: &'a WeightMatrix,
     packed: frink_metal::gpu::MoePackedQ4<'a>,
     routing: Routing,
-    shared_gate: Option<&'a [f32]>,
+    shared_gate: Option<&'a std::sync::Arc<[f32]>>,
 }
 
 /// The same, as Metal launches plus the rotations their inputs need.
@@ -81,7 +81,7 @@ struct RoutedParts<'a> {
 /// above are cheap to build and throw away.
 #[cfg(feature = "metal")]
 pub struct LayerFfnLaunches<'a> {
-    norm: &'a [f32],
+    norm: &'a std::sync::Arc<[f32]>,
     norm_eps: f32,
     gate: frink_metal::gpu::MatvecLaunch<'a>,
     up: frink_metal::gpu::MatvecLaunch<'a>,
@@ -97,7 +97,7 @@ struct RoutedLaunch<'a> {
     router: frink_metal::gpu::MatvecLaunch<'a>,
     packed: frink_metal::gpu::MoePackedQ4<'a>,
     routing: Routing,
-    shared_gate: Option<&'a [f32]>,
+    shared_gate: Option<&'a std::sync::Arc<[f32]>>,
 }
 
 #[cfg(feature = "metal")]
@@ -129,7 +129,7 @@ impl<'a> LayerFfnLaunches<'a> {
 /// The head of a layer as weights: the input norm and the four
 /// projections the recurrent branch reads.
 pub struct LayerHeadParts<'a> {
-    norm: &'a [f32],
+    norm: &'a std::sync::Arc<[f32]>,
     norm_eps: f32,
     qkv: &'a WeightMatrix,
     z: &'a WeightMatrix,
@@ -141,7 +141,7 @@ pub struct LayerHeadParts<'a> {
 /// share.
 #[cfg(feature = "metal")]
 pub struct LayerHeadLaunches<'a> {
-    norm: &'a [f32],
+    norm: &'a std::sync::Arc<[f32]>,
     norm_eps: f32,
     qkv: frink_metal::gpu::MatvecLaunch<'a>,
     z: frink_metal::gpu::MatvecLaunch<'a>,
@@ -174,7 +174,7 @@ impl<'a> LayerHeadParts<'a> {
     /// questions about storage and basis rather than about shape.
     #[allow(clippy::too_many_arguments)]
     pub fn for_block(
-        norm: &'a [f32],
+        norm: &'a std::sync::Arc<[f32]>,
         norm_eps: f32,
         qkv: &'a WeightMatrix,
         z: &'a WeightMatrix,
@@ -304,7 +304,7 @@ impl<'a> LayerFfnParts<'a> {
         // The pre-FFN norm has to be a plain weighted RMS: the kernel
         // is `encode_rms_norm` and nothing else.
         let norm = match norm_weight {
-            NormOp::Rms(w) => w.as_slice(),
+            NormOp::Rms(w) => w,
             _ => return None,
         };
         // A stored backing is the out-of-core path and has no business
@@ -372,7 +372,7 @@ impl<'a> LayerFfnParts<'a> {
                     router: &layer.moe.router,
                     packed,
                     routing,
-                    shared_gate: shared_expert_gate.as_deref(),
+                    shared_gate: shared_expert_gate.as_ref(),
                 }),
             })
         }
@@ -387,7 +387,7 @@ impl<'a> LayerFfnParts<'a> {
     /// has to remember them.
     #[cfg(test)]
     pub(crate) fn from_parts(
-        norm: &'a [f32],
+        norm: &'a std::sync::Arc<[f32]>,
         norm_eps: f32,
         gate: &'a WeightMatrix,
         up: &'a WeightMatrix,
@@ -409,7 +409,7 @@ impl<'a> LayerFfnParts<'a> {
     #[cfg(all(test, feature = "metal"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts_routed(
-        norm: &'a [f32],
+        norm: &'a std::sync::Arc<[f32]>,
         norm_eps: f32,
         gate: &'a WeightMatrix,
         up: &'a WeightMatrix,
@@ -417,7 +417,7 @@ impl<'a> LayerFfnParts<'a> {
         router: &'a WeightMatrix,
         packed: frink_metal::gpu::MoePackedQ4<'a>,
         routing: Routing,
-        shared_gate: Option<&'a [f32]>,
+        shared_gate: Option<&'a std::sync::Arc<[f32]>>,
     ) -> Self {
         Self {
             norm,
@@ -565,8 +565,8 @@ mod tests {
         eps: f32,
         wo: WeightMatrix,
         router: WeightMatrix,
-        ffn_norm: Vec<f32>,
-        shared_gate: Vec<f32>,
+        ffn_norm: std::sync::Arc<[f32]>,
+        shared_gate: std::sync::Arc<[f32]>,
         shared: Expert,
         routed: Vec<Expert>,
         branch: Vec<f32>,
@@ -610,8 +610,8 @@ mod tests {
         let wo = q8(hidden, branch_dim, &rnd(hidden * branch_dim, 0.2));
         let wo_host = deq(&wo);
         let router = f32m(n_exp, hidden, rnd(n_exp * hidden, 2.0));
-        let ffn_norm: Vec<f32> = rnd(hidden, 0.5).iter().map(|x| 1.0 + x).collect();
-        let shared_gate = rnd(hidden, 0.5);
+        let ffn_norm: std::sync::Arc<[f32]> = rnd(hidden, 0.5).iter().map(|x| 1.0 + x).collect();
+        let shared_gate: std::sync::Arc<[f32]> = rnd(hidden, 0.5).into();
         let mut expert = || -> Expert {
             (
                 q8(ffn, hidden, &rnd(ffn * hidden, 0.5)),

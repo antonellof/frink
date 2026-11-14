@@ -248,15 +248,15 @@ fn substituting_an_all_ones_rmsnorm_at_any_site_diverges_from_llama_cpp() {
         match site {
             "attn" => {
                 for layer in d.layers.iter_mut() {
-                    layer.attn.norm_weight = NormOp::Rms(vec![1.0; hidden]);
+                    layer.attn.norm_weight = NormOp::Rms(vec![1.0; hidden].into());
                 }
             }
             "ffn" => {
                 for layer in d.layers.iter_mut() {
-                    layer.moe.norm_weight = NormOp::Rms(vec![1.0; hidden]);
+                    layer.moe.norm_weight = NormOp::Rms(vec![1.0; hidden].into());
                 }
             }
-            _ => d.final_norm = NormOp::Rms(vec![1.0; hidden]),
+            _ => d.final_norm = NormOp::Rms(vec![1.0; hidden].into()),
         }
         let mut kv = graph_caches(&d);
         let worst = worst_vs(

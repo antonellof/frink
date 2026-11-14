@@ -339,9 +339,8 @@ pub(crate) fn note_wait(
 /// `None` = one command buffer: under `FRINK_METAL_KERNEL_TIMING` (its
 /// spans belong to one command buffer), with `FRINK_METAL_EARLY_COMMIT=0`,
 /// or for a one-layer stack. `FRINK_METAL_EARLY_COMMIT=N` splits before
-/// layer `N` in either stack. Unset: the dense stack splits after the
-/// first third of its layers, the MoE stack after the first sixth (at
-/// least one layer either way).
+/// layer `N` in either stack. Unset: either stack splits after the
+/// first sixth of its layers (at least one).
 ///
 /// Measured on an M5 Max (tg128, best of interleaved runs): Llama-3.2-1B
 /// gains 4-10% anywhere from an eighth to a half. The MoE stack lost
@@ -356,7 +355,16 @@ pub(crate) fn note_wait(
 /// traffic, so the split halved the rate (108 tok/s, 271 unsplit).
 /// Resident by address (`ssm_decode::Mamba1Weights`), it gains: 324
 /// split, 303 unsplit.
-pub(crate) fn early_commit_layer(stack: Stack, n_layers: usize) -> Option<usize> {
+///
+/// With every plane resident by address (the dense stack's norms,
+/// biases and conv taps had cost 0.5 to 1 MB of compare a token), the
+/// dense stack gains at a sixth as the MoE stack does, where it split
+/// at a third before: LFM2-1.2B 533 -> 538, Llama-3.2-1B 461 -> 465,
+/// level on Llama-3.1-8B (108.9, 109.2) and Gemma-4-E2B (184.3, 185.3).
+/// The MoE stack re-measured the same way still peaks at a sixth:
+/// gpt-oss-20b 167.7 (150 unsplit, 153 at the first layer, 157 at a
+/// third), Qwen3-30B-A3B 171 (153 unsplit, 160 at a third).
+pub(crate) fn early_commit_layer(n_layers: usize) -> Option<usize> {
     if crate::kernel_timing::kernel_timing_enabled() {
         return None;
     }
@@ -367,23 +375,15 @@ pub(crate) fn early_commit_layer(stack: Stack, n_layers: usize) -> Option<usize>
             .filter(|v| !v.trim().is_empty())
             .map(|v| v.trim().parse::<usize>().ok().filter(|&n| n > 0))
     });
-    split_layer(set, stack, n_layers)
-}
-
-/// Which decode stack asks [`early_commit_layer`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Stack {
-    Dense,
-    Moe,
+    split_layer(set, n_layers)
 }
 
 /// [`early_commit_layer`] without the environment: `set` is `None`
 /// when the variable is unset, `Some(None)` for `0` or garbage.
-fn split_layer(set: Option<Option<usize>>, stack: Stack, n_layers: usize) -> Option<usize> {
-    let at = match (set, stack) {
-        (Some(explicit), _) => explicit?,
-        (None, Stack::Dense) => n_layers.div_ceil(3).max(1),
-        (None, Stack::Moe) => n_layers.div_ceil(6).max(1),
+fn split_layer(set: Option<Option<usize>>, n_layers: usize) -> Option<usize> {
+    let at = match set {
+        Some(explicit) => explicit?,
+        None => n_layers.div_ceil(6).max(1),
     };
     (at < n_layers).then_some(at)
 }
@@ -422,30 +422,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dense_stack_splits_a_third_of_the_way_in_and_the_moe_stack_a_sixth() {
-        use Stack::{Dense, Moe};
-        assert_eq!(split_layer(None, Dense, 16), Some(6)); // Llama-3.2-1B
-        assert_eq!(split_layer(None, Dense, 2), Some(1));
+    fn a_stack_splits_a_sixth_of_the_way_in() {
+        assert_eq!(split_layer(None, 16), Some(3)); // Llama-3.2-1B, LFM2-1.2B, OLMoE
+        assert_eq!(split_layer(None, 24), Some(4)); // gpt-oss-20b
+        assert_eq!(split_layer(None, 48), Some(8)); // Qwen3-30B-A3B
+        assert_eq!(split_layer(None, 2), Some(1));
         assert_eq!(
-            split_layer(None, Dense, 1),
+            split_layer(None, 1),
             None,
             "one layer has nothing to overlap"
         );
-        assert_eq!(split_layer(None, Moe, 24), Some(4)); // gpt-oss-20b
-        assert_eq!(split_layer(None, Moe, 48), Some(8)); // Qwen3-30B-A3B
-        assert_eq!(split_layer(None, Moe, 16), Some(3)); // OLMoE
-        assert_eq!(split_layer(None, Moe, 1), None);
-        assert_eq!(split_layer(Some(None), Dense, 24), None, "0 turns it off");
+        assert_eq!(split_layer(Some(None), 24), None, "0 turns it off");
         assert_eq!(
-            split_layer(Some(Some(4)), Moe, 24),
+            split_layer(Some(Some(4)), 24),
             Some(4),
-            "an explicit N splits either"
+            "an explicit N splits there"
         );
-        assert_eq!(
-            split_layer(Some(Some(24)), Dense, 24),
-            None,
-            "past the last layer"
-        );
+        assert_eq!(split_layer(Some(Some(24)), 24), None, "past the last layer");
     }
     use crate::dispatch::EncodeStats;
 

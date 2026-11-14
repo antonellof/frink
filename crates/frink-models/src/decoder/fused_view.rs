@@ -21,18 +21,18 @@ use crate::config::ModelConfig;
 /// `frink_cuda::prefill::AttnExtrasCuda`.
 #[derive(Clone, Copy)]
 pub(crate) struct FusedAttnExtras<'a> {
-    pub q_bias: Option<&'a [f32]>,
-    pub k_bias: Option<&'a [f32]>,
-    pub v_bias: Option<&'a [f32]>,
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
+    pub q_bias: Option<&'a std::sync::Arc<[f32]>>,
+    pub k_bias: Option<&'a std::sync::Arc<[f32]>>,
+    pub v_bias: Option<&'a std::sync::Arc<[f32]>>,
+    pub q_norm: Option<&'a std::sync::Arc<[f32]>>,
+    pub k_norm: Option<&'a std::sync::Arc<[f32]>>,
     /// Only under caps that apply them ([`FusedAttnCaps`]); `None`
     /// otherwise, because a layer carrying one was refused. Read by the
     /// CUDA stack and the Metal stacks.
     #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(dead_code))]
-    pub sinks: Option<&'a [f32]>,
+    pub sinks: Option<&'a std::sync::Arc<[f32]>>,
     #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(dead_code))]
-    pub o_bias: Option<&'a [f32]>,
+    pub o_bias: Option<&'a std::sync::Arc<[f32]>>,
 }
 
 /// What a backend's fused attention applies beyond the extras every
@@ -192,13 +192,13 @@ impl Decoder {
             return None;
         }
         Some(FusedAttnExtras {
-            q_bias: q_bias.as_deref(),
-            k_bias: k_bias.as_deref(),
-            v_bias: v_bias.as_deref(),
-            q_norm: q_norm.as_deref(),
-            k_norm: k_norm.as_deref(),
-            sinks: sinks.as_deref(),
-            o_bias: o_bias.as_deref(),
+            q_bias: q_bias.as_ref(),
+            k_bias: k_bias.as_ref(),
+            v_bias: v_bias.as_ref(),
+            q_norm: q_norm.as_ref(),
+            k_norm: k_norm.as_ref(),
+            sinks: sinks.as_ref(),
+            o_bias: o_bias.as_ref(),
         })
     }
 
@@ -270,7 +270,7 @@ impl Decoder {
         }
         let q_len = self.config.n_heads * self.config.head_dim;
         let k_len = self.config.n_kv_heads * self.config.head_dim;
-        let qk_norm_ok = |w: Option<&Vec<f32>>, vec_len: usize| -> bool {
+        let qk_norm_ok = |w: Option<&std::sync::Arc<[f32]>>, vec_len: usize| -> bool {
             match w {
                 None => true,
                 Some(w) if w.len() == self.config.head_dim => true,
@@ -364,10 +364,10 @@ mod tests {
             post_attn_norm: None,
             post_ffn_norm: None,
             output_gate: None,
-            sinks: sinks.then(|| vec![0.5; 2]),
+            sinks: sinks.then(|| vec![0.5; 2].into()),
             attn_sub_norm: None,
             o_scale: None,
-            o_bias: o_bias.then(|| vec![0.25; 8]),
+            o_bias: o_bias.then(|| vec![0.25; 8].into()),
             shortconv: None,
             ssm: None,
             q_gate_interleaved: false,
@@ -384,8 +384,8 @@ mod tests {
         assert!(Decoder::attn_extras(&gpt_oss, FusedAttnCaps::METAL, false).is_none());
         for caps in [FusedAttnCaps::CUDA, FusedAttnCaps::METAL_STACK] {
             let both = Decoder::attn_extras(&gpt_oss, caps, false).expect("these caps apply both");
-            assert_eq!(both.sinks, Some(&[0.5f32; 2][..]));
-            assert_eq!(both.o_bias, Some(&[0.25f32; 8][..]));
+            assert_eq!(both.sinks.map(|w| &w[..]), Some(&[0.5f32; 2][..]));
+            assert_eq!(both.o_bias.map(|w| &w[..]), Some(&[0.25f32; 8][..]));
         }
         for (sinks, o_bias) in [(true, false), (false, true)] {
             let one = attn(sinks, o_bias);

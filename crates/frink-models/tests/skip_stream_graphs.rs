@@ -252,7 +252,7 @@ fn each_dropped_piece_is_visible() {
     let mut d = load_graph_fixture(WITH_GAINS);
     for layer in d.layers.iter_mut() {
         let n = layer.attn.q_norm.as_ref().unwrap().len();
-        layer.attn.q_norm = Some(vec![1.0; n]);
+        layer.attn.q_norm = Some(vec![1.0; n].into());
     }
     assert!(decode_worst(&d, golden) > 100.0 * GRAPH_TOL, "Q gains");
 

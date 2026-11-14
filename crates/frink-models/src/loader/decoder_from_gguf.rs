@@ -269,16 +269,16 @@ impl Decoder {
                         // Which tensor, which function, and whether there is a
                         // norm here at all: all three answered by the table.
                         norm_weight: layer_sites.load_pre_norm(layer_sites.attn, &file, Some(l))?,
-                        q_norm,
-                        k_norm,
+                        q_norm: q_norm.map(Into::into),
+                        k_norm: k_norm.map(Into::into),
                         // Qwen2/Qwen2-MoE-family real QKV bias (`attn_{q,k,v}.bias`,
                         // real config `qkv_bias`, `o_proj` has none) -- see
                         // `AttnWeights::q_bias`'s doc comment. Resolved above,
                         // alongside the projections they belong to, because a
                         // file that fuses the weight fuses the bias too.
-                        q_bias,
-                        k_bias,
-                        v_bias,
+                        q_bias: q_bias.map(Into::into),
+                        k_bias: k_bias.map(Into::into),
+                        v_bias: v_bias.map(Into::into),
                         post_attn_norm: crate::norm_sites::NormSites::load_post_norm(
                             norm_sites.post_attn,
                             &file,
@@ -661,7 +661,7 @@ impl Decoder {
                 router,
                 experts,
                 shared_experts,
-                shared_expert_gate,
+                shared_expert_gate: shared_expert_gate.map(Into::into),
                 exp_probs_bias,
                 exps_norm,
                 parallel_sum_scale,

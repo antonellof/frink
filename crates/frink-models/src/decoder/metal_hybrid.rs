@@ -180,7 +180,7 @@ impl Decoder {
         let weights = match &m.dt_bc_norm {
             DtBcNorm::None => return None,
             DtBcNorm::Weightless => None,
-            DtBcNorm::Weighted { dt, b, c } => Some((&dt[..], &b[..], &c[..])),
+            DtBcNorm::Weighted { dt, b, c } => Some((dt, b, c)),
         };
         Some(frink_metal::ssm_decode::DtBcNormMetal {
             weights,
@@ -499,7 +499,7 @@ impl Decoder {
                 ffn: self.hybrid_ffn(l, layer)?,
                 // `lfm3.cpp:178-181` norms the branch on BOTH kinds of
                 // layer; `lfm2.cpp` creates no such tensor.
-                post_attn_norm: layer.attn.post_attn_norm.as_deref(),
+                post_attn_norm: layer.attn.post_attn_norm.as_ref(),
                 post_ffn_norm: None,
                 per_layer: None,
                 out_scale: None,

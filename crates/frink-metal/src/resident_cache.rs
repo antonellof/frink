@@ -33,6 +33,16 @@
 //! an entry type that answers the question, and answering it `true`
 //! unconditionally is a thing a reviewer can see, unlike an absent
 //! check nobody wrote.
+//!
+//! The proof has to be cheap as well as exact, because it runs on every
+//! lookup of a decode token. The f32 cache's first proof was a compare
+//! of every byte of a borrowed slice; summed over a token's norms,
+//! biases, conv taps and SSM planes that read 1 to 94 MB a token. Its
+//! entries now hold the `Arc<[f32]>` they were built from, which makes
+//! the address an identity, and the stacks take planes in that type, so
+//! there is no slice left to compare. Holding the plane is what an
+//! entry's [`Resident::orphaned`] answers for: once the cache's clone
+//! is the last, the next miss drops it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -74,6 +84,16 @@ pub(crate) trait Resident {
     /// Bytes this entry retains, for the cache budget. Zero for an
     /// entry that aliases host memory it does not own.
     fn resident_bytes(&self) -> usize;
+
+    /// True when nobody but the cache can look this entry up any more:
+    /// an entry that keeps its host allocation alive and holds the last
+    /// reference to it. A miss drops such entries before it builds, so
+    /// a process that loads model after model does not keep every
+    /// earlier model's planes resident. Never true for an entry that
+    /// does not own what it was built from.
+    fn orphaned(&self) -> bool {
+        false
+    }
 }
 
 /// A process-wide cache and its per-thread mirror.
@@ -142,6 +162,8 @@ fn get_or_build_within<V: Resident>(
         match cache.get(&key).filter(|c| c.still_holds(host)) {
             Some(cached) => cached.clone(),
             None => {
+                cache.retain(|_, v| !v.orphaned());
+                mirror.with(|c| c.borrow_mut().retain(|_, v| !v.orphaned()));
                 let budget = budget();
                 let used: usize = cache.values().map(|b| b.resident_bytes()).sum();
                 if used.saturating_add(host.len()) > budget {
@@ -271,6 +293,68 @@ mod tests {
             fetch(&region, 8).tag,
             8,
             "nothing may be retained under a zero budget"
+        );
+    }
+
+    /// An entry that holds its host plane, as the f32 plane cache's do:
+    /// served by address, and orphaned once the cache's clone is the
+    /// last one.
+    struct HeldPlane(Arc<[u8]>);
+
+    impl Resident for HeldPlane {
+        fn still_holds(&self, host: &[u8]) -> bool {
+            std::ptr::eq(self.0.as_ptr(), host.as_ptr()) && self.0.len() == host.len()
+        }
+        fn resident_bytes(&self) -> usize {
+            self.0.len()
+        }
+        fn orphaned(&self) -> bool {
+            Arc::strong_count(&self.0) == 1
+        }
+    }
+
+    /// A model swapped out leaves its planes in the cache, held by the
+    /// entries; the next miss drops them, so one process loading model
+    /// after model does not keep every earlier one's planes resident.
+    ///
+    /// Sabotage: delete the `retain` on a miss in
+    /// [`get_or_build_within`] and this goes red with both entries held.
+    #[test]
+    fn a_miss_drops_entries_whose_plane_nobody_else_holds() {
+        static CACHE: Global<HeldPlane> = Mutex::new(None);
+        thread_local! {
+            static TL: RefCell<HashMap<HostKey, Arc<HeldPlane>>> = RefCell::new(HashMap::new());
+        }
+        let fetch = |plane: &Arc<[u8]>| {
+            get_or_build_within(
+                &CACHE,
+                &TL,
+                plane,
+                || usize::MAX,
+                || Ok(HeldPlane(plane.clone())),
+            )
+            .expect("build")
+        };
+        let held = || CACHE.lock().unwrap().as_ref().map_or(0, |c| c.len());
+
+        let first: Arc<[u8]> = vec![1u8; 64].into();
+        drop(fetch(&first));
+        assert_eq!(Arc::strong_count(&first), 2, "the entry holds the plane");
+        drop(first);
+        let second: Arc<[u8]> = vec![2u8; 64].into();
+        drop(fetch(&second));
+        assert_eq!(
+            held(),
+            1,
+            "the miss for the second plane must drop the first, which only the cache held"
+        );
+        TL.with(|m| {
+            assert_eq!(m.borrow().len(), 1, "and so must this thread's mirror");
+        });
+        assert_eq!(
+            Arc::strong_count(&second),
+            2,
+            "a plane its owner holds stays"
         );
     }
 }

@@ -243,7 +243,7 @@ fn qwen3moe_golden_is_not_vacuous() {
         let n_kv = decoder.config.n_kv_heads;
         decoder.config.qk_norm_style = QkNormStyle::WholeVector;
         for layer in &mut decoder.layers {
-            let tile = |w: &Vec<f32>, reps: usize| -> Vec<f32> {
+            let tile = |w: &[f32], reps: usize| -> std::sync::Arc<[f32]> {
                 (0..reps * head_dim).map(|i| w[i % head_dim]).collect()
             };
             layer.attn.q_norm = layer.attn.q_norm.as_ref().map(|w| tile(w, n_heads));

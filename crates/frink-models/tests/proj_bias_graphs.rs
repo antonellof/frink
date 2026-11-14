@@ -366,7 +366,11 @@ fn the_loaded_layers_are_the_three_graphs() {
         assert_eq!(d.config.n_kv_heads, kv_heads, "{name}");
         assert!(d.config.ffn_is_ungated(), "{name}");
         for layer in &d.layers {
-            assert_eq!(layer.attn.o_bias.as_ref().map(Vec::len), Some(32), "{name}");
+            assert_eq!(
+                layer.attn.o_bias.as_ref().map(|w| w.len()),
+                Some(32),
+                "{name}"
+            );
             let bias = layer
                 .moe
                 .dense_bias

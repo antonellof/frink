@@ -27,15 +27,19 @@
 //! `RecurrentState` is wrapped in place and advanced by the scan and the
 //! conv; a conv layer's history is the layer's `KvCache`, whose last
 //! `l_cache - 1` rows the caller hands in ([`PrefillConvState::window`])
-//! and whose new rows (`b * x`, one per token) come back in
-//! [`PrefillConvState::bx_out`] for the caller to push.
+//! and whose new rows (`b * x`, one per token) are handed to
+//! [`PrefillConvState::bx_out`] straight from the run's buffer, for the
+//! caller to push into that cache: one copy, not one into a `Vec` and a
+//! second into the cache (LFM2-1.2B's ten conv layers hand back 40 MB
+//! for a 512-token prompt).
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice};
+use std::sync::Arc;
 
 use crate::gdn_prefill::{cols_of, encode_gemm, slot, Enc, PrefillFfn};
-use crate::gpu::{resident_f32_buffer, MetalError, MulMmSgLaunch};
+use crate::gpu::{resident_f32_shared, MetalError, MulMmSgLaunch};
 use crate::mem_ranges::MemRanges;
 use crate::ssm_decode::{
     encode_mamba1, encode_mamba2, Mamba1Bufs, Mamba1Mixer, Mamba2Bufs, Mamba2Mixer, ScratchNeed,
@@ -48,24 +52,29 @@ pub type PrefillMamba2<'a> = Mamba2Mixer<'a, MulMmSgLaunch<'a>>;
 
 /// LFM2's short-convolution layer (`lfm2.cpp:139-208`).
 pub struct PrefillConvLayer<'a> {
-    pub attn_norm: &'a [f32],
+    pub attn_norm: &'a Arc<[f32]>,
     pub eps: f32,
     /// `[3 n_embd, n_embd]`, `[b | c | x]`.
     pub in_proj: MulMmSgLaunch<'a>,
     /// `[n_embd][l_cache]`, tap `l_cache - 1` on the newest input.
-    pub taps: &'a [f32],
+    pub taps: &'a Arc<[f32]>,
     pub l_cache: usize,
     pub out_proj: MulMmSgLaunch<'a>,
     pub ffn: Option<PrefillFfn<'a>>,
 }
+
+/// Where a conv layer's new history rows go: `[rows][n_embd]`, borrowed
+/// from the run's buffer for the call.
+pub type HistorySink<'k> = Box<dyn FnMut(&[f32]) + 'k>;
 
 /// A conv layer's history in and out (see the module doc).
 pub struct PrefillConvState<'k> {
     /// `[l_cache - 1][n_embd]`, the inputs before this batch, oldest
     /// first, zero rows before the sequence started.
     pub window: &'k [f32],
-    /// Set to `[rows][n_embd]`, each row's `b * x`, once the run waited.
-    pub bx_out: &'k mut Vec<f32>,
+    /// Called once the run waited, with `[rows][n_embd]`, each row's
+    /// `b * x`, borrowed from the run's buffer for the call.
+    pub bx_out: HistorySink<'k>,
 }
 
 impl PrefillConvLayer<'_> {
@@ -91,7 +100,7 @@ impl PrefillConvLayer<'_> {
 /// A Mamba layer: `attn_norm`, the block, the residual, and the FFN a
 /// hybrid's layer has after it (none on a pure Mamba model).
 pub struct PrefillMambaLayer<'a, M> {
-    pub attn_norm: &'a [f32],
+    pub attn_norm: &'a Arc<[f32]>,
     pub eps: f32,
     pub block: M,
     pub ffn: Option<PrefillFfn<'a>>,
@@ -173,12 +182,12 @@ impl SsmNeed {
 fn attn_norm(
     enc: &mut Enc<'_>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    w: &[f32],
+    w: &Arc<[f32]>,
     eps: f32,
     sc: &crate::scratch_pool::Scratch,
     rows: usize,
 ) -> Result<(), MetalError> {
-    let norm = resident_f32_buffer(device, w)?;
+    let norm = resident_f32_shared(device, w)?;
     let encoder = enc.span("pf_attn_norm")?;
     crate::norm::encode_rms_norm_batch(
         encoder,
@@ -204,7 +213,7 @@ pub(crate) fn encode_conv_layer(
 ) -> Result<(), MetalError> {
     let b = |i: usize| sc.buf(i);
     let n = w.attn_norm.len();
-    let taps = resident_f32_buffer(device, w.taps)?;
+    let taps = resident_f32_shared(device, w.taps)?;
     attn_norm(enc, device, w.attn_norm, w.eps, sc, rows)?;
     let encoder = enc.span("pf_conv_in_proj")?;
     encode_gemm(

@@ -233,8 +233,8 @@ mod tests {
             decoder.qk_norm_after_rope = after;
             let q_width = decoder.config.n_heads * decoder.config.head_dim;
             let kv_width = decoder.config.n_kv_heads * decoder.config.head_dim;
-            decoder.layers[0].attn.q_norm = Some(vec![2.0; q_width]);
-            decoder.layers[0].attn.k_norm = Some(vec![3.0; kv_width]);
+            decoder.layers[0].attn.q_norm = Some(vec![2.0; q_width].into());
+            decoder.layers[0].attn.k_norm = Some(vec![3.0; kv_width].into());
 
             let q0: Vec<f32> = (0..q_width).map(|i| 0.5 + i as f32 * 0.25).collect();
             let k0: Vec<f32> = (0..kv_width).map(|i| 1.0 - i as f32 * 0.1).collect();
@@ -294,8 +294,8 @@ mod metal_tests {
         let mut decoder = Decoder::new_random_small(crate::config::test_dense_fixture(), 1, 32);
         let q_width = decoder.config.n_heads * decoder.config.head_dim;
         let kv_width = decoder.config.n_kv_heads * decoder.config.head_dim;
-        decoder.layers[0].attn.q_norm = Some(vec![1.0; q_width]);
-        decoder.layers[0].attn.k_norm = Some(vec![1.0; kv_width]);
+        decoder.layers[0].attn.q_norm = Some(vec![1.0; q_width].into());
+        decoder.layers[0].attn.k_norm = Some(vec![1.0; kv_width].into());
 
         decoder.qk_norm_after_rope = false;
         assert!(

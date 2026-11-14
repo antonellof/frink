@@ -198,7 +198,7 @@ fn shared_expert_gate_scales_shared_output_by_sigmoid_of_the_gate_logit() {
         hidden_dim,
         None,
     );
-    decoder.layers[1].moe.shared_expert_gate = Some(gate_vec);
+    decoder.layers[1].moe.shared_expert_gate = Some(gate_vec.into());
     let gated_total = Decoder::combine_ffn_outputs_for_position(
         1,
         &decoder.layers[1],

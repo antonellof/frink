@@ -21,7 +21,7 @@ impl Gdn {
     /// storage.
     pub fn prefill_layer<'a>(
         &'a self,
-        attn_norm: &'a [f32],
+        attn_norm: &'a std::sync::Arc<[f32]>,
         rms_eps: f32,
         ffn: &LayerFfnParts<'a>,
     ) -> Option<frink_metal::gdn_prefill::PrefillGdnLayer<'a>> {
@@ -193,8 +193,8 @@ mod tests {
             h,
             qkv: q8(conv_dim, n_embd, rnd(conv_dim * n_embd, 0.2)),
             z_proj: q8(value_dim, n_embd, rnd(value_dim * n_embd, 0.2)),
-            conv1d: rnd(h.d_conv * conv_dim, 1.0),
-            dt_bias: rnd(h.n_v_heads, 1.0),
+            conv1d: rnd(h.d_conv * conv_dim, 1.0).into(),
+            dt_bias: rnd(h.n_v_heads, 1.0).into(),
             // Stored negative, as every export stores it (`ssm_a`): a
             // positive one grows the state without bound.
             a: rnd(h.n_v_heads, 1.0)
@@ -205,7 +205,7 @@ mod tests {
                 beta: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
                 alpha: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
             },
-            norm: rnd(h.head_dim, 1.0),
+            norm: rnd(h.head_dim, 1.0).into(),
             out_proj: q8(n_embd, value_dim, rnd(n_embd * value_dim, 0.2)),
         };
         m.qkv.fold_hadamard(fold_x.clone());
@@ -219,8 +219,8 @@ mod tests {
         down.fold_hadamard(fold_act);
         let mut o_proj = q8(n_embd, branch_w, rnd(n_embd * branch_w, 0.2));
         o_proj.fold_hadamard(fold_branch.clone());
-        let attn_norm: Vec<f32> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
-        let ffn_norm: Vec<f32> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let attn_norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let ffn_norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
         let (conv_len, ssm_len) = h.state_floats();
         let (conv0, ssm0) = (rnd(conv_len, 1.0), rnd(ssm_len, 0.5));
         let state0 = || {

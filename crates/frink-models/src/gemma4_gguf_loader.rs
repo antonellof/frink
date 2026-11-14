@@ -251,24 +251,25 @@ fn load_layer(
     };
     let _ = head_dim;
     Ok(Gemma4LayerWeights {
-        attn_norm: load_f32_vec(file, &format!("blk.{il}.attn_norm.weight"))?,
+        attn_norm: load_f32_vec(file, &format!("blk.{il}.attn_norm.weight"))?.into(),
         attn: Gemma4AttnWeights {
             q_proj: load_weight_matrix(file, &format!("blk.{il}.attn_q.weight"))?,
             k_proj,
             v_proj,
             o_proj: load_weight_matrix(file, &format!("blk.{il}.attn_output.weight"))?,
-            q_norm: load_f32_vec(file, &format!("blk.{il}.attn_q_norm.weight"))?,
-            k_norm,
-            post_attn_norm: load_f32_vec(file, &format!("blk.{il}.post_attention_norm.weight"))?,
+            q_norm: load_f32_vec(file, &format!("blk.{il}.attn_q_norm.weight"))?.into(),
+            k_norm: k_norm.map(Into::into),
+            post_attn_norm: load_f32_vec(file, &format!("blk.{il}.post_attention_norm.weight"))?
+                .into(),
         },
-        ffn_norm: load_f32_vec(file, &format!("blk.{il}.ffn_norm.weight"))?,
+        ffn_norm: load_f32_vec(file, &format!("blk.{il}.ffn_norm.weight"))?.into(),
         ffn_gate: load_weight_matrix(file, &format!("blk.{il}.ffn_gate.weight"))?,
         ffn_up: load_weight_matrix(file, &format!("blk.{il}.ffn_up.weight"))?,
         ffn_down: load_weight_matrix(file, &format!("blk.{il}.ffn_down.weight"))?,
-        ffn_post_norm: load_f32_vec(file, &format!("blk.{il}.post_ffw_norm.weight"))?,
+        ffn_post_norm: load_f32_vec(file, &format!("blk.{il}.post_ffw_norm.weight"))?.into(),
         per_layer_inp_gate,
         per_layer_proj,
-        per_layer_post_norm,
+        per_layer_post_norm: per_layer_post_norm.map(Into::into),
         out_scale,
     })
 }
@@ -381,9 +382,9 @@ pub fn load_gemma4_engine(file: &impl TensorSource) -> Result<Gemma4Engine, Load
             token_embd,
             per_layer_token_embd,
             per_layer_model_proj,
-            per_layer_proj_norm,
+            per_layer_proj_norm: per_layer_proj_norm.map(Into::into),
             layers,
-            output_norm: load_f32_vec(file, "output_norm.weight")?,
+            output_norm: load_f32_vec(file, "output_norm.weight")?.into(),
             output_head,
             rope_freqs,
         },

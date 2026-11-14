@@ -33,18 +33,29 @@ impl Decoder {
     ) -> Vec<f32> {
         #[cfg(feature = "cuda")]
         let step = frink_cuda::phases::phase("step");
+        let mut device_logits = None;
         let hiddens = {
             #[cfg(feature = "cuda")]
             let _t = frink_cuda::phases::phase("layers+norm");
-            self.forward_hidden_batch_inner(tokens, start_pos, kv_caches, host_kv_authoritative)
+            self.forward_hidden_batch_tapped(
+                tokens,
+                start_pos,
+                kv_caches,
+                host_kv_authoritative,
+                &mut LayerTaps::new(&[]),
+                Some(&mut device_logits),
+            )
         };
-        let Some(last) = hiddens.last() else {
-            return Vec::new();
-        };
-        let logits = {
-            #[cfg(feature = "cuda")]
-            let _t = frink_cuda::phases::phase("logits");
-            self.logits_from_normed(last)
+        let logits = match device_logits {
+            Some(logits) => logits,
+            None => {
+                let Some(last) = hiddens.last() else {
+                    return Vec::new();
+                };
+                #[cfg(feature = "cuda")]
+                let _t = frink_cuda::phases::phase("logits");
+                self.logits_from_normed(last)
+            }
         };
         // `FRINK_CUDA_COUNT=1`: this step's syncs and copies;
         // `FRINK_CUDA_TIME=1`: where its wall time went.
@@ -81,12 +92,19 @@ impl Decoder {
             kv_caches,
             host_kv_authoritative,
             &mut no_taps,
+            None,
         )
     }
 
     /// [`Self::forward_hidden_batch_inner`] that records the residual
     /// entering each layer `taps` names (`super::layer_taps`). The ONE
     /// batch body: with no taps it is the forward every caller runs.
+    ///
+    /// `last_logits` is for a caller that wants only the last row's
+    /// logits (`forward_batch_last`): the body then norms only that row,
+    /// and when a Metal prefill run ends the stack it computes the
+    /// logits in the run's own command buffer, fills the slot and
+    /// returns no rows at all.
     pub(super) fn forward_hidden_batch_tapped(
         &self,
         tokens: &[usize],
@@ -94,11 +112,15 @@ impl Decoder {
         kv_caches: &mut [KvCache],
         host_kv_authoritative: bool,
         taps: &mut LayerTaps,
+        last_logits: Option<&mut Option<Vec<f32>>>,
     ) -> Vec<Vec<f32>> {
         // Read only by the Metal arms below; a CPU-only build fills the
         // host cache with real rows on every path and has nothing to
         // choose between.
         let _ = host_kv_authoritative;
+        // Reborrowed by the Metal prefill run below, read after the loop.
+        #[cfg(feature = "metal")]
+        let mut last_logits = last_logits;
         assert_eq!(kv_caches.len(), self.config.n_layers);
         let batch_size = tokens.len();
         if batch_size == 0 {
@@ -310,6 +332,7 @@ impl Decoder {
                     &mut hidden_batch,
                     batch_size,
                     kv_caches,
+                    last_logits.as_deref_mut(),
                 ) {
                     l = end;
                     continue;
@@ -363,8 +386,8 @@ impl Decoder {
                                         kv: frink_metal::attn::LayerKv::Own { k, v, slot: 0 },
                                         o,
                                         ffn,
-                                        post_attn_norm: layer.attn.post_attn_norm.as_deref(),
-                                        post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
+                                        post_attn_norm: layer.attn.post_attn_norm.as_ref(),
+                                        post_ffn_norm: layer.attn.post_ffn_norm.as_ref(),
                                         extras: self.metal_attn_extras(layer),
                                         rope: self.metal_layer_rope(l),
                                         layer_idx: l as u32,
@@ -886,6 +909,15 @@ impl Decoder {
         // the stack, before the final norm.
         taps.capture(n_layers, &hidden_batch);
 
+        if let Some(slot) = last_logits {
+            if slot.is_some() {
+                return Vec::new();
+            }
+            if dump.is_none() {
+                let last = &hidden_batch[(batch_size - 1) * hidden_dim..];
+                return vec![self.final_norm.apply(last, self.config.rms_norm_eps)];
+            }
+        }
         let normed: Vec<Vec<f32>> = hidden_batch
             .par_chunks(hidden_dim)
             .map(|h| self.final_norm.apply(h, self.config.rms_norm_eps))

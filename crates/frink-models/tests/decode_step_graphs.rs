@@ -595,6 +595,39 @@ mod metal {
     /// `lfm3_no_post_norm`) and the loop norm (`nanbeige`).
     pub const KNOWN_METAL_DIVERGENCES: &[&str] = &["hrm_text"];
 
+    /// [`prefill_then_row`], with the resident f32 cache's `(hits,
+    /// uploads)` during each row token: `counts[i]` is the token that
+    /// produced row `i + 1`.
+    fn prefill_then_row_counted(d: &Decoder, prompt: &[usize]) -> (Vec<Vec<f32>>, Vec<(u64, u64)>) {
+        let mut kv = d.config.new_kv_caches();
+        let mut logits = d.forward_batch_last(prompt, 0, &mut kv);
+        let mut out = Vec::with_capacity(STEPS);
+        let mut counts = Vec::with_capacity(STEPS);
+        for pos in prompt.len()..prompt.len() + STEPS {
+            let next = argmax(&logits);
+            out.push(std::mem::take(&mut logits));
+            if out.len() < STEPS {
+                let (h0, u0) = frink_metal::gpu::resident_f32_counts();
+                logits = d.forward_token(next, pos, &mut kv);
+                let (h1, u1) = frink_metal::gpu::resident_f32_counts();
+                counts.push((h1 - h0, u1 - u0));
+            }
+        }
+        (out, counts)
+    }
+
+    /// `None` when every decode token from the third on found every f32
+    /// plane it bound already resident, else which token uploaded how
+    /// many (`tests/common`'s `decode_with_resident_planes` says why).
+    fn steady_state_reupload(counts: &[(u64, u64)]) -> Option<String> {
+        counts
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find(|(_, (_, up))| *up > 0)
+            .map(|(i, (_, up))| format!("decode token {} uploaded {up} f32 planes", i + 1))
+    }
+
     pub fn run() {
         if frink_metal::gpu::probe().is_none() {
             eprintln!("skip: no Metal GPU detected");
@@ -608,6 +641,7 @@ mod metal {
         let mut refused = Vec::new();
         let mut on_host = Vec::new();
         let mut spread = Vec::new();
+        let mut planes_bound = 0usize;
         for name in common::graph_fixture_names() {
             let Some(cpu) = device_gate::cpu_rows_from_child(
                 &name,
@@ -622,8 +656,10 @@ mod metal {
             let before = frink_metal::metal_encode_stats().dispatches;
             // A device launch that panics is a finding about one fixture,
             // not a reason to stop measuring the others.
-            let run = std::panic::AssertUnwindSafe(|| prefill_then_row(&d, &common::GRAPH_PROMPT));
-            let gpu = match std::panic::catch_unwind(run) {
+            let run = std::panic::AssertUnwindSafe(|| {
+                prefill_then_row_counted(&d, &common::GRAPH_PROMPT)
+            });
+            let (gpu, counts) = match std::panic::catch_unwind(run) {
                 Ok(rows) => rows,
                 Err(e) => {
                     let why = e
@@ -642,6 +678,10 @@ mod metal {
                 on_host.push(name);
                 continue;
             }
+            if let Some(why) = steady_state_reupload(&counts) {
+                failures.push((name.clone(), why));
+            }
+            planes_bound += usize::from(counts.iter().skip(2).any(|(hits, _)| *hits > 0));
             let a = device_gate::agreement(&gpu, &cpu);
             let vs_llama = GOLDENS.iter().find(|(g, _)| *g == name).map(|_| {
                 let golden = read_golden(&name);
@@ -703,6 +743,12 @@ mod metal {
             .map(|(w, n)| (*w, n.as_str()))
             .collect();
         within.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!("metal-decode: {planes_bound} fixtures bound resident f32 planes on steady-state tokens");
+        assert!(
+            planes_bound > 50,
+            "only {planes_bound} fixtures bound a resident f32 plane on a steady-state decode \
+             token (71 when this was written), so the upload check saw little"
+        );
         assert!(
             within.len() > 100,
             "only {} fixtures reached a Metal kernel and agreed; the switch is not live \

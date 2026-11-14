@@ -228,14 +228,14 @@ pub struct Gdn {
     /// `blk.N.attn_gate.weight`, `[value_dim, n_embd]`: the `z` gate.
     pub z_proj: WeightMatrix,
     /// `blk.N.ssm_conv1d.weight`, `[conv_dim][d_conv]`; no bias.
-    pub conv1d: Vec<f32>,
+    pub conv1d: std::sync::Arc<[f32]>,
     /// `blk.N.ssm_dt.bias`, `[n_v_heads]`.
-    pub dt_bias: Vec<f32>,
+    pub dt_bias: std::sync::Arc<[f32]>,
     /// `blk.N.ssm_a`, `[n_v_heads]`, stored negative.
-    pub a: Vec<f32>,
+    pub a: std::sync::Arc<[f32]>,
     pub beta_alpha: BetaAlpha,
     /// `blk.N.ssm_norm.weight`, `[head_dim]`, one weight for every head.
-    pub norm: Vec<f32>,
+    pub norm: std::sync::Arc<[f32]>,
     /// `blk.N.ssm_out.weight`, `[n_embd, value_dim]`.
     pub out_proj: WeightMatrix,
 }
@@ -308,11 +308,11 @@ impl Gdn {
             h,
             qkv: matrix("attn_qkv.weight", h.conv_dim(), hidden_dim)?,
             z_proj: matrix("attn_gate.weight", h.value_dim(), hidden_dim)?,
-            conv1d: vector("ssm_conv1d.weight", h.d_conv * h.conv_dim())?,
-            dt_bias: vector("ssm_dt.bias", h.n_v_heads)?,
-            a: vector("ssm_a", h.n_v_heads)?,
+            conv1d: vector("ssm_conv1d.weight", h.d_conv * h.conv_dim())?.into(),
+            dt_bias: vector("ssm_dt.bias", h.n_v_heads)?.into(),
+            a: vector("ssm_a", h.n_v_heads)?.into(),
             beta_alpha,
-            norm: vector("ssm_norm.weight", h.head_dim)?,
+            norm: vector("ssm_norm.weight", h.head_dim)?.into(),
             out_proj: matrix("ssm_out.weight", hidden_dim, h.value_dim())?,
         })
     }
@@ -510,7 +510,7 @@ impl Gdn {
     #[cfg(feature = "metal")]
     pub fn fused_layer(
         &self,
-        attn_norm: &[f32],
+        attn_norm: &std::sync::Arc<[f32]>,
         normed: &[f32],
         state: &mut RecurrentState,
         rms_eps: f32,
@@ -634,7 +634,7 @@ impl Gdn {
     pub unsafe fn run_layer(
         &self,
         run: &mut frink_metal::gdn_branch::GdnRun,
-        attn_norm: &[f32],
+        attn_norm: &std::sync::Arc<[f32]>,
         rms_eps: f32,
         ffn: &crate::fused_layer::LayerFfnParts<'_>,
         state: &mut RecurrentState,
@@ -986,14 +986,14 @@ mod tests {
                 h,
                 qkv: mat(conv_dim, n_embd, rnd(conv_dim * n_embd, 1.0)),
                 z_proj: mat(h.value_dim(), n_embd, rnd(h.value_dim() * n_embd, 1.0)),
-                conv1d: rnd(h.d_conv * conv_dim, 1.0),
-                dt_bias: rnd(h.n_v_heads, 1.0),
-                a: rnd(h.n_v_heads, 1.0),
+                conv1d: rnd(h.d_conv * conv_dim, 1.0).into(),
+                dt_bias: rnd(h.n_v_heads, 1.0).into(),
+                a: rnd(h.n_v_heads, 1.0).into(),
                 beta_alpha: BetaAlpha {
                     beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                     alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                 },
-                norm: rnd(h.head_dim, 1.0),
+                norm: rnd(h.head_dim, 1.0).into(),
                 out_proj: mat(n_embd, h.value_dim(), rnd(n_embd * h.value_dim(), 1.0)),
             };
             let qkv = rnd(conv_dim, 1.0);
@@ -1110,14 +1110,14 @@ mod tests {
                 h,
                 qkv: mat(conv_dim, n_embd, rnd(conv_dim * n_embd, 1.0)),
                 z_proj: mat(value_dim, n_embd, rnd(value_dim * n_embd, 1.0)),
-                conv1d: rnd(h.d_conv * conv_dim, 1.0),
-                dt_bias: rnd(h.n_v_heads, 1.0),
-                a: rnd(h.n_v_heads, 1.0),
+                conv1d: rnd(h.d_conv * conv_dim, 1.0).into(),
+                dt_bias: rnd(h.n_v_heads, 1.0).into(),
+                a: rnd(h.n_v_heads, 1.0).into(),
                 beta_alpha: BetaAlpha {
                     beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                     alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                 },
-                norm: rnd(h.head_dim, 1.0),
+                norm: rnd(h.head_dim, 1.0).into(),
                 out_proj: mat(n_embd, value_dim, rnd(n_embd * value_dim, 1.0)),
             };
             let (conv_len, ssm_len) = h.state_floats();
@@ -1258,14 +1258,14 @@ mod tests {
             h,
             qkv: mat(conv_dim, n_embd, rnd(conv_dim * n_embd, 1.0)),
             z_proj: mat(value_dim, n_embd, rnd(value_dim * n_embd, 1.0)),
-            conv1d: rnd(h.d_conv * conv_dim, 1.0),
-            dt_bias: rnd(h.n_v_heads, 1.0),
-            a: rnd(h.n_v_heads, 1.0),
+            conv1d: rnd(h.d_conv * conv_dim, 1.0).into(),
+            dt_bias: rnd(h.n_v_heads, 1.0).into(),
+            a: rnd(h.n_v_heads, 1.0).into(),
             beta_alpha: BetaAlpha {
                 beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                 alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
             },
-            norm: rnd(h.head_dim, 1.0),
+            norm: rnd(h.head_dim, 1.0).into(),
             out_proj: mat(n_embd, value_dim, rnd(n_embd * value_dim, 1.0)),
         };
         // `qkv` and `z` share ONE fold and the two gate matrices carry
@@ -1289,8 +1289,8 @@ mod tests {
         m.qkv.fold_hadamard(fold.clone());
         m.z_proj.fold_hadamard(fold.clone());
         let m = m;
-        let attn_norm = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect::<Vec<_>>();
-        let ffn_norm = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect::<Vec<_>>();
+        let attn_norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let ffn_norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
         let (gate_v, up_v, down_v) = (
             rnd(ffn_dim * n_embd, 1.0),
             rnd(ffn_dim * n_embd, 1.0),
@@ -1421,14 +1421,14 @@ mod tests {
             h,
             qkv: mat(h.conv_dim(), n_embd, rnd(h.conv_dim() * n_embd)),
             z_proj: mat(h.value_dim(), n_embd, rnd(h.value_dim() * n_embd)),
-            conv1d: rnd(h.d_conv * h.conv_dim()),
-            dt_bias: rnd(h.n_v_heads),
-            a: vec![-0.7, -1.2],
+            conv1d: rnd(h.d_conv * h.conv_dim()).into(),
+            dt_bias: rnd(h.n_v_heads).into(),
+            a: vec![-0.7, -1.2].into(),
             beta_alpha: BetaAlpha {
                 beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd)),
                 alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd)),
             },
-            norm: vec![1.1, 0.9],
+            norm: vec![1.1, 0.9].into(),
             out_proj: mat(n_embd, h.value_dim(), rnd(n_embd * h.value_dim())),
         };
         let tokens: Vec<Vec<f32>> = (0..4).map(|_| rnd(n_embd)).collect();

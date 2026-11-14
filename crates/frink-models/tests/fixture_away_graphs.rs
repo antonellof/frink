@@ -904,7 +904,7 @@ fn bailingmoe2_reads_its_routing_out_of_the_file_rather_than_guessing() {
     assert_eq!(d.config.qk_norm_style, QkNormStyle::PerHead);
     for (il, layer) in d.layers.iter().enumerate() {
         assert_eq!(
-            layer.attn.q_norm.as_ref().map(Vec::len),
+            layer.attn.q_norm.as_ref().map(|w| w.len()),
             Some(d.config.head_dim),
             "blk.{il}: per-head Q norm"
         );

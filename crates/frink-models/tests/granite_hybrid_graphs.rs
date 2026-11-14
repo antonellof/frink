@@ -236,7 +236,7 @@ fn metal_decode_runs_granite_hybrid_in_the_dense_stack() {
     for (name, golden) in [(GH, &GH_GOLDEN), (GH_ROPE, &GH_ROPE_GOLDEN)] {
         let d = load_graph_fixture(name);
         assert!(d.config.attention_scale.is_some() && d.config.residual_scale.is_some());
-        let got = decode(&d);
+        let got = common::decode_with_resident_planes(&d, name);
         assert!(
             d.metal_hybrid_allocated(),
             "{name}: the hybrid stack never ran"
@@ -416,7 +416,7 @@ fn each_seam_is_visible_in_the_logits() {
     let mut d = load_graph_fixture(GH);
     assert_decoder_matches_on_all_three_paths(&d, &GH_GOLDEN, GRAPH_TOL, "baseline");
 
-    let saved: Vec<Vec<f32>> = d
+    let saved: Vec<std::sync::Arc<[f32]>> = d
         .layers
         .iter()
         .filter_map(|l| {
@@ -429,7 +429,7 @@ fn each_seam_is_visible_in_the_logits() {
         .collect();
     for l in d.layers.iter_mut() {
         if let Some(m) = l.attn.ssm.as_mut().and_then(|b| b.mamba2_mut()) {
-            for a in m.a.iter_mut() {
+            for a in std::sync::Arc::make_mut(&mut m.a).iter_mut() {
                 *a = -30.0; // no memory at all
             }
         }
@@ -446,7 +446,7 @@ fn each_seam_is_visible_in_the_logits() {
 
     for l in d.layers.iter_mut() {
         if let Some(m) = l.attn.ssm.as_mut().and_then(|b| b.mamba2_mut()) {
-            for v in m.d.iter_mut() {
+            for v in std::sync::Arc::make_mut(&mut m.d).iter_mut() {
                 *v = 0.0;
             }
         }

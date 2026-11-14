@@ -30,8 +30,8 @@
 //! `frink-cuda::gpu::shared_device`/`ensure_module_loaded` fixed for
 //! CUDA. Quantized weight buffers are also cached by host pointer+length
 //! (`resident_weight_buffer`) so decode does not re-upload multi-GB
-//! matrices every token. f32 norm buffers are also cached by host
-//! pointer+length via `resident_f32_buffer`. Q4_K/Q6_K kernels are
+//! matrices every token. f32 planes (norms, biases, conv taps) are
+//! cached by the `Arc` they hold (`resident_f32_shared`). Q4_K/Q6_K kernels are
 //! multi-row (4 rows per threadgroup) and Q5_K is NSG=2 / N_R0=1
 //! (2 rows per TG — ggml keeps N_R0_Q5_K at 1 to avoid register spill);
 //! Q8_0 is NSG=4 / N_R0=2 (2 rows / 128 threads); Q4_0 is NSG=2 /
@@ -66,6 +66,7 @@ use objc2_metal::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(thiserror::Error, Debug)]
@@ -4091,7 +4092,7 @@ const ROUTER_TILE: (usize, usize) = (4, 8);
 pub(crate) fn encode_moe_router_mm_f32(
     enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    router_w: &ProtocolObject<dyn MTLBuffer>,
+    router_w: &ResidentWeightBuffer,
     x_buf: &ProtocolObject<dyn MTLBuffer>,
     logits_buf: &ProtocolObject<dyn MTLBuffer>,
     hidden: u32,
@@ -4102,7 +4103,7 @@ pub(crate) fn encode_moe_router_mm_f32(
         enc,
         device,
         ("moe_router_mm_f32", ROUTER_TILE),
-        router_w,
+        (&router_w.buffer, router_w.weight_offset),
         x_buf,
         logits_buf,
         hidden,
@@ -4117,7 +4118,7 @@ fn encode_moe_router_tiled(
     enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     (name, (rt, re)): (&'static str, (usize, usize)),
-    router_w: &ProtocolObject<dyn MTLBuffer>,
+    (router_w, router_off): (&ProtocolObject<dyn MTLBuffer>, usize),
     x_buf: &ProtocolObject<dyn MTLBuffer>,
     logits_buf: &ProtocolObject<dyn MTLBuffer>,
     hidden: u32,
@@ -4127,7 +4128,7 @@ fn encode_moe_router_tiled(
     let pipe = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, name)?;
     enc.setComputePipelineState(&pipe.0);
     unsafe {
-        enc.setBuffer_offset_atIndex(Some(router_w), 0, 0);
+        enc.setBuffer_offset_atIndex(Some(router_w), router_off, 0);
         enc.setBuffer_offset_atIndex(Some(x_buf), 0, 1);
         enc.setBuffer_offset_atIndex(Some(logits_buf), 0, 2);
         for (idx, mut v) in [(3usize, hidden), (4, n_experts), (5, n_tokens)] {
@@ -4232,7 +4233,7 @@ pub(crate) fn encode_moe_prefill_ffn(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     moe: &PrefillMoeMetal<'_>,
     bound: &MoePackedResident,
-    router_w: &ResidentF32Buffer,
+    router_w: &ResidentWeightBuffer,
     oai: Option<&crate::moe_oai::MoeOaiResident>,
     x_f32: &ProtocolObject<dyn MTLBuffer>,
     x_f16: &ProtocolObject<dyn MTLBuffer>,
@@ -4278,7 +4279,7 @@ pub(crate) fn encode_moe_prefill_ffn(
         encode_moe_router_mm_f32(
             enc,
             device,
-            &router_w.buffer,
+            router_w,
             x_f32,
             logits,
             hidden as u32,
@@ -5732,49 +5733,39 @@ fn build_resident_weight_buffer(
 pub(crate) struct ResidentF32Buffer {
     pub(crate) buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     nbytes: usize,
-    /// The shared plane this was uploaded from, held, when it came in
-    /// through [`resident_f32_shared`]; `None` for a borrowed slice.
-    keep: Option<Arc<[f32]>>,
+    /// The shared plane this was uploaded from, held so its address
+    /// stays an identity for as long as this entry lives.
+    keep: Arc<[f32]>,
 }
 
 impl Resident for ResidentF32Buffer {
-    /// An exhaustive compare, because this entry can prove nothing
-    /// else: it always copies, so it neither aliases the host bytes nor
-    /// keeps their allocation alive, and what it caches are the RMSNorm
-    /// gammas and RoPE frequency factors owned by a `Decoder` that
-    /// `/admin/models/load` drops.
+    /// An address compare, which is a proof here for the reason an mmap
+    /// alias's is: the entry holds the plane's allocation, so the
+    /// address cannot have been reissued to other bytes, and nothing
+    /// can write through an `Arc` this entry also holds
+    /// (`Arc::make_mut` copies first), so the bytes behind it are the
+    /// ones uploaded.
     ///
-    /// Exact rather than sampled, and affordable for the same reason it
-    /// is needed: these are `hidden_dim` floats, single-digit KB, so
-    /// the compare costs a fraction of the upload it avoids. That
-    /// leaves no residual probability of serving one model's norms to
-    /// another (GitHub issue #180).
-    ///
-    /// An entry built from a shared plane proves it the way an mmap
-    /// alias does: it holds the allocation, so the address cannot have
-    /// been reissued, and nothing can write through an `Arc` this entry
-    /// also holds (`Arc::make_mut` copies first), so the bytes behind
-    /// the address are still the ones uploaded. The compare would cost
-    /// 26 MB a token on gpt-oss, whose expert biases are 368 KB planes.
+    /// It used to be a compare of every byte, for a borrowed slice
+    /// whose allocation the entry could not keep alive (GitHub issue
+    /// #180). That was affordable for one norm and not for a decode
+    /// token's worth of them: 26 MB a token on gpt-oss's expert biases,
+    /// 35 to 94 MB on the Mamba planes, 1 to 8 MB of norms, biases and
+    /// conv taps on every other stack, read again on every token and
+    /// several times slower while the previous command buffer was
+    /// streaming weights. Borrowed slices no longer reach this cache.
     fn still_holds(&self, host: &[u8]) -> bool {
-        if self.nbytes != host.len() {
-            return false;
-        }
-        if let Some(keep) = &self.keep {
-            return std::ptr::eq(keep.as_ptr() as *const u8, host.as_ptr());
-        }
-        // SAFETY: `buffer` is a `StorageModeShared` buffer this process
-        // allocated with exactly `nbytes` bytes and only ever reads on
-        // the GPU, so its contents pointer is valid and readable for
-        // that length for as long as this entry lives.
-        let device = unsafe {
-            std::slice::from_raw_parts(self.buffer.contents().as_ptr() as *const u8, self.nbytes)
-        };
-        device == host
+        self.nbytes == host.len() && std::ptr::eq(self.keep.as_ptr() as *const u8, host.as_ptr())
     }
 
     fn resident_bytes(&self) -> usize {
         self.nbytes
+    }
+
+    /// The cache's clone is the last one: the model that owned the
+    /// plane is gone, and so is every caller who could look it up.
+    fn orphaned(&self) -> bool {
+        Arc::strong_count(&self.keep) == 1
     }
 }
 
@@ -5792,60 +5783,85 @@ thread_local! {
     static TL_F32_CACHE: RefCell<F32CacheMap> = RefCell::new(HashMap::new());
 }
 
-pub(crate) fn resident_f32_buffer(
-    device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    data: &[f32],
-) -> Result<Arc<ResidentF32Buffer>, MetalError> {
-    let nbytes = std::mem::size_of_val(data);
-    // SAFETY: an initialised `[f32]` is `nbytes` initialised bytes, and
-    // `u8` has no alignment requirement. Read-only, and the borrow of
-    // `data` outlives the view.
-    let host = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, nbytes) };
-    get_or_build(&F32_CACHE, &TL_F32_CACHE, host, || {
-        resident_f32_buffer_uncached(device, data)
-    })
+/// Lookups [`resident_f32_shared`] answered from the cache, and uploads
+/// it made, process-wide (`resident_f32_counts`).
+static F32_HITS: AtomicU64 = AtomicU64::new(0);
+static F32_UPLOADS: AtomicU64 = AtomicU64::new(0);
+
+/// `(hits, uploads)` of the resident f32 cache since the process
+/// started.
+///
+/// A steady-state decode token makes no uploads. One that does is
+/// handed a plane its caller rebuilt for the token, which costs the
+/// upload every token and which the cache then keeps until the next
+/// miss finds it orphaned. The Metal decode suites pin a steady-state
+/// token to zero (`tests/common`'s `decode_with_resident_planes`).
+/// Process-wide rather than per thread because a decode token's layers
+/// may be encoded on a pool worker; a test reading it must be the only
+/// Metal user in its process, which `pin_backend` already asks of it.
+pub fn resident_f32_counts() -> (u64, u64) {
+    (
+        F32_HITS.load(Ordering::Relaxed),
+        F32_UPLOADS.load(Ordering::Relaxed),
+    )
 }
 
-/// Shared planes, cached apart from [`F32_CACHE`] so an entry here is
-/// always one that holds its plane: a borrowed-slice entry for the same
-/// address would otherwise be served to this path and compared in full.
-static SHARED_F32_CACHE: Mutex<Option<F32CacheMap>> = Mutex::new(None);
-
-thread_local! {
-    static TL_SHARED_F32_CACHE: RefCell<F32CacheMap> = RefCell::new(HashMap::new());
-}
-
-/// [`resident_f32_buffer`] for a plane its owner shares: the entry
-/// holds a clone of `plane`, which makes a hit an address compare
-/// instead of a byte compare (see [`ResidentF32Buffer::still_holds`]).
-/// The price is that the plane outlives its owner while the entry is
-/// cached, as a mapped file outlives its model behind an mmap alias.
+/// The resident copy of an f32 plane its owner shares: norms, biases,
+/// conv taps, RoPE divisors, f32 routers. The entry holds a clone of
+/// `plane`, which makes a hit an address compare (see
+/// [`ResidentF32Buffer::still_holds`]); the plane outlives its owner
+/// while the entry is cached, as a mapped file outlives its model behind
+/// an mmap alias, until the next miss finds it orphaned and drops it.
+///
+/// There is no borrowed-slice twin. The plane types the stacks take are
+/// `&Arc<[f32]>` so that a caller holding a `Vec` cannot reach this
+/// cache with a slice it would then have to compare in full.
 pub(crate) fn resident_f32_shared(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     plane: &Arc<[f32]>,
 ) -> Result<Arc<ResidentF32Buffer>, MetalError> {
     let nbytes = std::mem::size_of_val(&**plane);
-    // SAFETY: as in `resident_f32_buffer`.
+    // SAFETY: an initialised `[f32]` is `nbytes` initialised bytes, and
+    // `u8` has no alignment requirement. Read-only, and the borrow of
+    // `plane` outlives the view.
     let host = unsafe { std::slice::from_raw_parts(plane.as_ptr() as *const u8, nbytes) };
-    get_or_build(&SHARED_F32_CACHE, &TL_SHARED_F32_CACHE, host, || {
-        let built = resident_f32_buffer_uncached(device, plane)?;
-        Ok(ResidentF32Buffer {
-            keep: Some(plane.clone()),
-            ..built
-        })
-    })
+    let mut uploaded = false;
+    let got = get_or_build(&F32_CACHE, &TL_F32_CACHE, host, || {
+        uploaded = true;
+        upload_f32_plane(device, plane)
+    })?;
+    let counter = if uploaded { &F32_UPLOADS } else { &F32_HITS };
+    counter.fetch_add(1, Ordering::Relaxed);
+    Ok(got)
 }
 
-fn resident_f32_buffer_uncached(
+/// An f32 WEIGHT MATRIX (a prefill router, `ffn_gate_inp`), resident
+/// through the weight cache: a `WeightMatrix::F32` owns a `Vec`, which
+/// is what that cache's sampled fingerprint proves at constant cost.
+/// The f32 plane cache's proof is an address it holds, which a matrix
+/// borrowed out of a `Tensor` cannot give it. Bind at `weight_offset`.
+pub(crate) fn resident_f32_matrix(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     data: &[f32],
+) -> Result<Arc<ResidentWeightBuffer>, MetalError> {
+    // SAFETY: an initialised `[f32]` is that many initialised bytes, and
+    // `u8` has no alignment requirement. Read-only, for the borrow.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+    };
+    resident_weight_buffer(device, bytes)
+}
+
+fn upload_f32_plane(
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    plane: &Arc<[f32]>,
 ) -> Result<ResidentF32Buffer, MetalError> {
-    let nbytes = std::mem::size_of_val(data);
-    // SAFETY: `data` holds `nbytes` initialised bytes and outlives the
+    let nbytes = std::mem::size_of_val(&**plane);
+    // SAFETY: `plane` holds `nbytes` initialised bytes and outlives the
     // call, which copies them into the buffer.
     let buffer = unsafe {
         device.newBufferWithBytes_length_options(
-            NonNull::new(data.as_ptr() as *mut _).unwrap(),
+            NonNull::new(plane.as_ptr() as *mut _).unwrap(),
             nbytes,
             MTLResourceOptions::StorageModeShared,
         )
@@ -5854,7 +5870,7 @@ fn resident_f32_buffer_uncached(
     Ok(ResidentF32Buffer {
         buffer,
         nbytes,
-        keep: None,
+        keep: plane.clone(),
     })
 }
 
@@ -9034,7 +9050,7 @@ mod tests {
                     &encoder,
                     device,
                     kernel,
-                    &w_buf,
+                    (&w_buf, 0),
                     &x_buf,
                     &out,
                     hidden as u32,
@@ -9215,7 +9231,7 @@ mod tests {
             )
             .expect("out buffer");
         let bound = moe_packed_resident(device, &moe.packed).expect("packed resident");
-        let router = resident_f32_buffer(device, &router_w).expect("router resident");
+        let router = resident_f32_matrix(device, &router_w).expect("router resident");
 
         let cmd_buf = queue.commandBuffer().expect("command buffer");
         let mut encoder = compute_encoder_concurrent(&cmd_buf).expect("encoder");

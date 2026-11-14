@@ -138,7 +138,7 @@ use frink_core::matmul::rms_norm;
 pub enum NormOp {
     /// RMSNorm with these learned weights. Every architecture on the
     /// generic path except the two families below.
-    Rms(Vec<f32>),
+    Rms(std::sync::Arc<[f32]>),
     /// Non-parametric LayerNorm: subtract the mean, divide by the
     /// standard deviation, no learned weight and no bias.
     ///
@@ -249,7 +249,7 @@ impl NormOp {
     /// Every fused Metal launch that bakes an RMSNorm into its kernel
     /// goes through here and falls back to the host body on `None`.
     /// See the module docs for why that is a `?` and not a comment.
-    pub fn rms_weights(&self) -> Option<&[f32]> {
+    pub fn rms_weights(&self) -> Option<&std::sync::Arc<[f32]>> {
         match self {
             Self::Rms(w) => Some(w),
             // A biased RMSNorm has RMS weights, and no fused kernel adds
@@ -330,7 +330,7 @@ impl NormFunction {
         mut load: impl FnMut(NormParam) -> Result<Vec<f32>, E>,
     ) -> Result<NormOp, E> {
         Ok(match self {
-            Self::Rms => NormOp::Rms(load(NormParam::Weight)?),
+            Self::Rms => NormOp::Rms(load(NormParam::Weight)?.into()),
             Self::LayerNorm => NormOp::LayerNorm(load(NormParam::Weight)?),
             Self::LayerNormBias => NormOp::LayerNormBias {
                 weight: load(NormParam::Weight)?,
@@ -469,7 +469,7 @@ mod tests {
 
         assert_eq!(NormOp::None.apply(&x, eps), x);
 
-        let ones = NormOp::Rms(vec![1.0; x.len()]);
+        let ones = NormOp::Rms(vec![1.0; x.len()].into());
         let normed = ones.apply(&x, eps);
         let worst = x
             .iter()
@@ -496,7 +496,7 @@ mod tests {
         let x = vec![3.0f32, -4.0, 12.0, 0.5];
         let eps = 1e-5;
         let ln = NormOp::LayerNormNoParams.apply(&x, eps);
-        let rms = NormOp::Rms(vec![1.0; x.len()]).apply(&x, eps);
+        let rms = NormOp::Rms(vec![1.0; x.len()].into()).apply(&x, eps);
 
         let mean: f32 = x.iter().sum::<f32>() / x.len() as f32;
         assert!(mean.abs() > 1.0, "the input must not be centred: {mean}");
@@ -559,7 +559,9 @@ mod tests {
     #[test]
     fn only_the_rms_variant_offers_weights_to_a_fused_kernel() {
         assert_eq!(
-            NormOp::Rms(vec![2.0, 3.0]).rms_weights(),
+            NormOp::Rms(vec![2.0, 3.0].into())
+                .rms_weights()
+                .map(|w| &w[..]),
             Some(&[2.0f32, 3.0][..])
         );
         assert_eq!(NormOp::None.rms_weights(), None);
@@ -596,7 +598,7 @@ mod tests {
         let w = vec![0.5f32, -2.0, 1.5, 4.0];
         let eps = 1e-5;
         let ln = NormOp::LayerNorm(w.clone()).apply(&x, eps);
-        let rms = NormOp::Rms(w).apply(&x, eps);
+        let rms = NormOp::Rms(w.into()).apply(&x, eps);
         let worst = ln
             .iter()
             .zip(rms.iter())
@@ -628,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             NormFunction::Rms.resolve(w),
-            Ok(NormOp::Rms(vec![1.0, 2.0]))
+            Ok(NormOp::Rms(vec![1.0, 2.0].into()))
         );
         assert_eq!(
             NormFunction::LayerNormBias.resolve(w),

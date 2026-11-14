@@ -275,9 +275,9 @@ fn the_loaded_decoder_is_the_graph() {
     }
     assert_eq!(c.layer_sliding_window(FULL), None);
     let freqs = c.rope_freqs.as_ref().expect("rope_freqs.weight");
-    assert_eq!(freqs.for_layer(false), &[1.0, 1.0, 1e30, 1e30]);
+    assert_eq!(&freqs.for_layer(false)[..], &[1.0, 1.0, 1e30, 1e30]);
     assert_eq!(
-        freqs.for_layer(true),
+        &freqs.for_layer(true)[..],
         &[1.0; 4],
         "lfm3.cpp:113: no factors on a sliding layer"
     );

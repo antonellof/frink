@@ -66,7 +66,7 @@ use crate::fa_vec_decode::{encode_gqa_fa_vec, gqa_fa_vec_supported};
 use crate::gpu::{
     compute_encoder_concurrent, encode_matvec, encode_moe_topk_softmax_batch, encode_mul_mm_sg_f16,
     encode_q4_0_moe_gate_up_id, encode_q4_0_moe_id, encode_q4_0_moe_topk, ensure_pipeline,
-    memory_barrier_resources, resident_f32_buffer, resident_weight_buffer, shared_metal,
+    memory_barrier_resources, resident_f32_shared, resident_weight_buffer, shared_metal,
     warm_mul_mm_sg_pipeline, MatvecLaunch, MetalError, MoeExpertLaunch, MoePackedQ4, MulMmSgLaunch,
     ResidentF32Buffer, ResidentWeightBuffer,
 };
@@ -84,6 +84,7 @@ use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
     MTLDevice, MTLResourceOptions, MTLSize,
 };
+use std::sync::Arc;
 // RoPE moved to `crate::rope`; re-exported here because `frink-models`
 // and the sibling stacks read it at `frink_metal::attn::`.
 pub(crate) use crate::rope::{
@@ -2969,35 +2970,35 @@ pub(crate) fn resident_attn_extras(
     Ok(AttnExtrasResident {
         q_bias: extras
             .q_bias
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         k_bias: extras
             .k_bias
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         v_bias: extras
             .v_bias
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         q_norm: extras
             .q_norm
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         k_norm: extras
             .k_norm
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         v_norm: extras
             .v_norm
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         sinks: extras
             .sinks
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
         o_bias: extras
             .o_bias
-            .map(|b| resident_f32_buffer(device, b))
+            .map(|b| resident_f32_shared(device, b))
             .transpose()?,
     })
 }
@@ -3051,7 +3052,7 @@ pub fn launch_decode_attn_block(
     if kv.seq_len >= kv.capacity {
         return Err(MetalError::CommandFailed);
     }
-    assert_freq_factors_len(freq_factors, rope_layout, head_dim);
+    assert_freq_factors_len(freq_factors.map(|f| &f[..]), rope_layout, head_dim);
 
     let shared = shared_metal()?;
     let device = &shared.device;
@@ -3323,13 +3324,13 @@ fn moe_scratch_ensure_logits(
 /// Downloads **only** router logits. Residual + FFN-normed stay resident.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_moe_decode_pre(
-    attn_norm_w: &[f32],
+    attn_norm_w: &Arc<[f32]>,
     q_launch: &MatvecLaunch<'_>,
     k_launch: &MatvecLaunch<'_>,
     v_launch: &MatvecLaunch<'_>,
     o_launch: &MatvecLaunch<'_>,
     kv: &mut MetalKvBuffers,
-    ffn_norm_w: &[f32],
+    ffn_norm_w: &Arc<[f32]>,
     router_launch: &MatvecLaunch<'_>,
     n_heads: usize,
     rope_layout: MetalRope,
@@ -3361,7 +3362,7 @@ pub fn launch_moe_decode_pre(
     if kv.seq_len >= kv.capacity {
         return Err(MetalError::CommandFailed);
     }
-    assert_freq_factors_len(freq_factors, rope_layout, head_dim);
+    assert_freq_factors_len(freq_factors.map(|f| &f[..]), rope_layout, head_dim);
 
     let shared = shared_metal()?;
     let device = &shared.device;
@@ -3383,8 +3384,8 @@ pub fn launch_moe_decode_pre(
             router_launch.rows,
         )?;
 
-        let attn_nw = resident_f32_buffer(device, attn_norm_w)?;
-        let ffn_nw = resident_f32_buffer(device, ffn_norm_w)?;
+        let attn_nw = resident_f32_shared(device, attn_norm_w)?;
+        let ffn_nw = resident_f32_shared(device, ffn_norm_w)?;
         let q_w = resident_weight_buffer(device, q_launch.weights)?;
         let k_w = resident_weight_buffer(device, k_launch.weights)?;
         let v_w = resident_weight_buffer(device, v_launch.weights)?;
@@ -3623,8 +3624,8 @@ pub fn launch_moe_decode_experts(experts: &[MoeExpertLaunch<'_>]) -> Result<(), 
 /// what it does not carry (the sandwich norms, a non-SwiGLU FFN) the
 /// decoder keeps off this stack.
 pub struct MoeLayerMetal<'a> {
-    pub attn_norm_w: &'a [f32],
-    pub ffn_norm_w: &'a [f32],
+    pub attn_norm_w: &'a Arc<[f32]>,
+    pub ffn_norm_w: &'a Arc<[f32]>,
     pub q: MatvecLaunch<'a>,
     pub k: MatvecLaunch<'a>,
     pub v: MatvecLaunch<'a>,
@@ -3669,8 +3670,8 @@ fn moe_layer_resident(
     layer: &MoeLayerMetal<'_>,
 ) -> Result<MoeLayerResident, MetalError> {
     Ok(MoeLayerResident {
-        attn_nw: resident_f32_buffer(device, layer.attn_norm_w)?,
-        ffn_nw: resident_f32_buffer(device, layer.ffn_norm_w)?,
+        attn_nw: resident_f32_shared(device, layer.attn_norm_w)?,
+        ffn_nw: resident_f32_shared(device, layer.ffn_norm_w)?,
         q_w: resident_weight_buffer(device, layer.q.weights)?,
         k_w: resident_weight_buffer(device, layer.k.weights)?,
         v_w: resident_weight_buffer(device, layer.v.weights)?,
@@ -3998,13 +3999,13 @@ fn encode_moe_layer_fused(
 /// Returns selected expert ids (for hotness accounting). Updates `kv.seq_len`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_moe_decode_layer_fused(
-    attn_norm_w: &[f32],
+    attn_norm_w: &Arc<[f32]>,
     q_launch: &MatvecLaunch<'_>,
     k_launch: &MatvecLaunch<'_>,
     v_launch: &MatvecLaunch<'_>,
     o_launch: &MatvecLaunch<'_>,
     kv: &mut MetalKvBuffers,
-    ffn_norm_w: &[f32],
+    ffn_norm_w: &Arc<[f32]>,
     router_launch: &MatvecLaunch<'_>,
     packed: &MoePackedQ4<'_>,
     top_k: usize,
@@ -4143,7 +4144,7 @@ pub fn launch_moe_decode_stack(
     rope_layout: MetalRope,
     pos: usize,
     rms_eps: f32,
-    final_norm_w: Option<&[f32]>,
+    final_norm_w: Option<&Arc<[f32]>>,
     output: Option<&MatvecLaunch<'_>>,
     argmax_only: bool,
     reuse_scratch_h: bool,
@@ -4187,7 +4188,7 @@ pub fn launch_moe_decode_stack(
 
     for layer in layers {
         assert_freq_factors_len(
-            layer.rope.and_then(|r| r.freq_factors),
+            layer.rope.and_then(|r| r.freq_factors).map(|f| &f[..]),
             rope_layout,
             head_dim,
         );
@@ -4202,7 +4203,7 @@ pub fn launch_moe_decode_stack(
     let ff_resident = layers
         .iter()
         .map(|l| match l.rope.and_then(|r| r.freq_factors) {
-            Some(ff) => resident_f32_buffer(device, ff).map(Some),
+            Some(ff) => resident_f32_shared(device, ff).map(Some),
             None => Ok(None),
         })
         .collect::<Result<Vec<_>, MetalError>>()?;
@@ -4231,7 +4232,7 @@ pub fn launch_moe_decode_stack(
         // llama.cpp / dense-stack: one Concurrent encoder for the full graph,
         // barriers only via MemRanges (ggml_mem_ranges).
         let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
-        let early = crate::timing::early_commit_layer(crate::timing::Stack::Moe, layers.len());
+        let early = crate::timing::early_commit_layer(layers.len());
         let mut mrs = MemRanges::new();
         // `FRINK_METAL_KERNEL_TIMING=1`: one sampled encoder per op
         // group, as the dense stack does; a no-op otherwise, and never
@@ -4296,7 +4297,7 @@ pub fn launch_moe_decode_stack(
         // final_norm → optional lm_head → optional argmax (dense-stack parity).
         let (download_n, download_logits, download_argmax) = if let Some(fnw) = final_norm_w {
             assert_eq!(fnw.len(), hidden_dim);
-            let fn_buf = resident_f32_buffer(device, fnw)?;
+            let fn_buf = resident_f32_shared(device, fnw)?;
             spans.span(&cmd_buf, &mut encoder, "final_norm")?;
             {
                 let srcs = [scratch.h.as_ref()];
@@ -4402,13 +4403,13 @@ pub fn launch_moe_decode_stack(
 #[allow(clippy::too_many_arguments)]
 pub fn launch_decode_dense_layer(
     hidden: &[f32],
-    attn_norm_w: &[f32],
+    attn_norm_w: &Arc<[f32]>,
     q_launch: &MatvecLaunch<'_>,
     k_launch: &MatvecLaunch<'_>,
     v_launch: &MatvecLaunch<'_>,
     o_launch: &MatvecLaunch<'_>,
     kv: &mut MetalKvBuffers,
-    ffn_norm_w: &[f32],
+    ffn_norm_w: &Arc<[f32]>,
     gate_launch: &MatvecLaunch<'_>,
     up_launch: &MatvecLaunch<'_>,
     down_launch: &MatvecLaunch<'_>,
@@ -4448,15 +4449,15 @@ pub fn launch_decode_dense_layer(
     if kv.seq_len >= kv.capacity {
         return Err(MetalError::CommandFailed);
     }
-    assert_freq_factors_len(freq_factors, rope_layout, head_dim);
+    assert_freq_factors_len(freq_factors.map(|f| &f[..]), rope_layout, head_dim);
 
     let shared = shared_metal()?;
     let device = &shared.device;
     let queue = &shared.queue;
 
     let h_buf = upload_f32(device, hidden)?;
-    let attn_nw = resident_f32_buffer(device, attn_norm_w)?;
-    let ffn_nw = resident_f32_buffer(device, ffn_norm_w)?;
+    let attn_nw = resident_f32_shared(device, attn_norm_w)?;
+    let ffn_nw = resident_f32_shared(device, ffn_norm_w)?;
     let x_buf = alloc_f32_buffer(device, hidden_dim)?;
     let x2_buf = alloc_f32_buffer(device, hidden_dim)?;
 
@@ -4590,8 +4591,8 @@ pub fn launch_decode_dense_layer(
 /// Per-layer `mul_mm_sg` launches for [`launch_prefill_dense_layer`] /
 /// [`launch_prefill_dense_stack`].
 pub struct PrefillDenseLayerMetal<'a> {
-    pub attn_norm_w: &'a [f32],
-    pub ffn_norm_w: &'a [f32],
+    pub attn_norm_w: &'a Arc<[f32]>,
+    pub ffn_norm_w: &'a Arc<[f32]>,
     pub q: MulMmSgLaunch<'a>,
     /// This layer's own K/V projections and cache slot, or the slot of
     /// an earlier layer it attends over; see [`LayerKv`].
@@ -4600,8 +4601,8 @@ pub struct PrefillDenseLayerMetal<'a> {
     /// Dense SwiGLU/GeGLU FFN, or a routed-expert MoE FFN. The attention
     /// half of the layer is identical either way.
     pub ffn: PrefillFfnMetal<'a>,
-    pub post_attn_norm: Option<&'a [f32]>,
-    pub post_ffn_norm: Option<&'a [f32]>,
+    pub post_attn_norm: Option<&'a Arc<[f32]>>,
+    pub post_ffn_norm: Option<&'a Arc<[f32]>>,
     /// QKV bias / QK-norm (Qwen2.5, Qwen3, Gemma-3). Applied after GEMM,
     /// before RoPE — same order as the CPU / decode paths.
     pub extras: AttnExtras<'a>,
@@ -4698,7 +4699,7 @@ enum PrefillFfnResident {
     },
     Moe {
         packed: crate::gpu::MoePackedResident,
-        router_w: std::sync::Arc<ResidentF32Buffer>,
+        router_w: std::sync::Arc<ResidentWeightBuffer>,
         oai: Option<crate::moe_oai::MoeOaiResident>,
     },
 }
@@ -4710,13 +4711,13 @@ fn resident_prefill_dense_layer(
 ) -> Result<PrefillDenseLayerResident, MetalError> {
     let post_attn_w = if let Some(post) = layer.post_attn_norm {
         assert_eq!(post.len(), hidden_dim);
-        Some(resident_f32_buffer(device, post)?)
+        Some(resident_f32_shared(device, post)?)
     } else {
         None
     };
     let post_ffn_w = if let Some(post) = layer.post_ffn_norm {
         assert_eq!(post.len(), hidden_dim);
-        Some(resident_f32_buffer(device, post)?)
+        Some(resident_f32_shared(device, post)?)
     } else {
         None
     };
@@ -4728,7 +4729,7 @@ fn resident_prefill_dense_layer(
         },
         PrefillFfnMetal::Moe(moe) => PrefillFfnResident::Moe {
             packed: crate::gpu::moe_packed_resident(device, &moe.packed)?,
-            router_w: resident_f32_buffer(device, moe.router_w)?,
+            router_w: crate::gpu::resident_f32_matrix(device, moe.router_w)?,
             oai: moe
                 .oai
                 .as_ref()
@@ -4744,8 +4745,8 @@ fn resident_prefill_dense_layer(
         },
     };
     Ok(PrefillDenseLayerResident {
-        attn_nw: resident_f32_buffer(device, layer.attn_norm_w)?,
-        ffn_nw: resident_f32_buffer(device, layer.ffn_norm_w)?,
+        attn_nw: resident_f32_shared(device, layer.attn_norm_w)?,
+        ffn_nw: resident_f32_shared(device, layer.ffn_norm_w)?,
         q_w: resident_weight_buffer(device, layer.q.weights)?,
         kv_w: match layer.kv.own() {
             Some((k, v)) => Some((
@@ -5248,7 +5249,7 @@ pub fn launch_prefill_dense_stack(
             return Err(MetalError::CommandFailed);
         }
         assert_freq_factors_len(
-            layer.rope.and_then(|r| r.freq_factors),
+            layer.rope.and_then(|r| r.freq_factors).map(|f| &f[..]),
             rope_layout,
             head_dim,
         );
@@ -5323,7 +5324,7 @@ pub fn launch_prefill_dense_stack(
     let ff_resident = layers
         .iter()
         .map(|l| match l.rope.and_then(|r| r.freq_factors) {
-            Some(ff) => resident_f32_buffer(device, ff).map(Some),
+            Some(ff) => resident_f32_shared(device, ff).map(Some),
             None => Ok(None),
         })
         .collect::<Result<Vec<_>, MetalError>>()?;
@@ -5630,7 +5631,7 @@ pub fn launch_prefill_attn_block(
     if kv.seq_len + n_q > kv.capacity {
         return Err(MetalError::CommandFailed);
     }
-    assert_freq_factors_len(freq_factors, rope_layout, head_dim);
+    assert_freq_factors_len(freq_factors.map(|f| &f[..]), rope_layout, head_dim);
     if n_q == 0 {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
@@ -7158,8 +7159,8 @@ mod tests {
     /// Deterministic weights for one dense decode layer, owned so the
     /// `MatvecLaunch` byte views below can borrow them.
     struct DenseLayerBytes {
-        attn_norm: Vec<f32>,
-        ffn_norm: Vec<f32>,
+        attn_norm: std::sync::Arc<[f32]>,
+        ffn_norm: std::sync::Arc<[f32]>,
         q: Vec<u8>,
         k: Vec<u8>,
         v: Vec<u8>,
@@ -7275,8 +7276,8 @@ mod tests {
         let eps = 1e-5f32;
         // Gemma-3's two sets: the full-attention layers divide every
         // band by the trained linear factor, the sliding ones do not.
-        let full_ff = vec![8.0f32; head_dim / 2];
-        let swa_ff = vec![1.0f32; head_dim / 2];
+        let full_ff: std::sync::Arc<[f32]> = vec![8.0f32; head_dim / 2].into();
+        let swa_ff: std::sync::Arc<[f32]> = vec![1.0f32; head_dim / 2].into();
         // ... and its two bases, so the layers differ in BOTH halves of
         // `LayerRope` at once, as a real checkpoint does.
         let full_rope = LayerRope {
@@ -7433,7 +7434,7 @@ mod tests {
             theta: 10_000.0,
             freq_factors: None,
         };
-        let identity_ff = vec![1e30f32; head_dim / 2];
+        let identity_ff: std::sync::Arc<[f32]> = vec![1e30f32; head_dim / 2].into();
         // Rotation by an angle of zero on every band: the oracle's
         // spelling of "no rotation" through a kernel that always ropes.
         let identity = LayerRope {
@@ -7557,8 +7558,8 @@ mod tests {
     /// Q8_0 weights for one dense PREFILL layer, owned like
     /// [`DenseLayerBytes`] so the `MulMmSgLaunch` views can borrow them.
     struct PrefillLayerBytes {
-        attn_norm: Vec<f32>,
-        ffn_norm: Vec<f32>,
+        attn_norm: std::sync::Arc<[f32]>,
+        ffn_norm: std::sync::Arc<[f32]>,
         q: Vec<u8>,
         k: Vec<u8>,
         v: Vec<u8>,
@@ -7668,8 +7669,8 @@ mod tests {
         let batch = 8usize;
         let rope = MetalRope::new(MetalRopeLayout::Norm);
         let eps = 1e-5f32;
-        let full_ff = vec![8.0f32; head_dim / 2];
-        let swa_ff = vec![1.0f32; head_dim / 2];
+        let full_ff: std::sync::Arc<[f32]> = vec![8.0f32; head_dim / 2].into();
+        let swa_ff: std::sync::Arc<[f32]> = vec![1.0f32; head_dim / 2].into();
         let ropes = [
             LayerRope {
                 theta: 10_000.0,
@@ -7792,7 +7793,7 @@ mod tests {
             theta: 10_000.0,
             freq_factors: None,
         };
-        let identity_ff = vec![1e30f32; head_dim / 2];
+        let identity_ff: std::sync::Arc<[f32]> = vec![1e30f32; head_dim / 2].into();
         let identity = LayerRope {
             theta: 10_000.0,
             freq_factors: Some(&identity_ff),

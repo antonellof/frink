@@ -369,8 +369,10 @@ fn the_layer_norm_bias_entry_is_backed_by_real_code() {
 
 #[test]
 fn the_gpt_oss_exemption_is_backed_by_real_fields() {
-    let _o_bias: fn(&frink_models::decoder::AttnWeights) -> &Option<Vec<f32>> = |a| &a.o_bias;
-    let _router_bias: fn(&frink_models::decoder::GptOssLayer) -> &Vec<f32> = |l| &l.router_bias;
+    let _o_bias: fn(&frink_models::decoder::AttnWeights) -> &Option<std::sync::Arc<[f32]>> =
+        |a| &a.o_bias;
+    let _router_bias: fn(&frink_models::decoder::GptOssLayer) -> &std::sync::Arc<[f32]> =
+        |l| &l.router_bias;
     assert!(matches!(
         resolve_profile(GPT_OSS_EXEMPTION).map(|p| p.path),
         Some(ArchPath::GenericGqa { .. })

@@ -15,7 +15,7 @@ use crate::attn::{
 use crate::elem::{encode_argmax, encode_gelu_mul, encode_scale, encode_silu_mul, encode_vec_add};
 use crate::embd::{encode_get_rows, EmbdKind};
 use crate::gpu::{
-    compute_encoder_concurrent, encode_matvec, resident_f32_buffer, resident_weight_buffer,
+    compute_encoder_concurrent, encode_matvec, resident_f32_shared, resident_weight_buffer,
     shared_metal, MatvecLaunch, MetalError,
 };
 use crate::kernel_timing::SpanClock;
@@ -25,6 +25,7 @@ use crate::ple::{PerLayerGateMetal, PleInputMetal};
 use crate::timing::{commit_wait_note, SubmitClock};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue};
+use std::sync::Arc;
 
 /// Optional attention epilogue ops applied between the QKV matvecs and
 /// RoPE, in CPU-path order: bias add (Qwen2-family `qkv_bias`), then
@@ -35,23 +36,23 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueu
 /// unless the FA-vec softcap path is enabled.
 #[derive(Default)]
 pub struct AttnExtras<'a> {
-    pub q_bias: Option<&'a [f32]>,
-    pub k_bias: Option<&'a [f32]>,
-    pub v_bias: Option<&'a [f32]>,
-    pub q_norm: Option<&'a [f32]>,
-    pub k_norm: Option<&'a [f32]>,
+    pub q_bias: Option<&'a Arc<[f32]>>,
+    pub k_bias: Option<&'a Arc<[f32]>>,
+    pub v_bias: Option<&'a Arc<[f32]>>,
+    pub q_norm: Option<&'a Arc<[f32]>>,
+    pub k_norm: Option<&'a Arc<[f32]>>,
     /// Per-head RMSNorm of V (`head_dim` weights). Gemma-4 norms V with
     /// no weight at all (`ggml_rms_norm` on `Vcur`); its caller passes
     /// ones, which is the same arithmetic.
-    pub v_norm: Option<&'a [f32]>,
+    pub v_norm: Option<&'a Arc<[f32]>>,
     pub attn_logit_softcap: Option<f32>,
     /// gpt-oss's attention sinks, one logit per Q head: a key with no
     /// value in every head's softmax. Read inside the attention kernels
     /// (`crate::attn::AttnMask`), so it encodes nothing here.
-    pub sinks: Option<&'a [f32]>,
+    pub sinks: Option<&'a Arc<[f32]>>,
     /// The bias on `wo`, added to the projected branch before the
     /// residual (gpt-oss). One `vec_add_rows` after the `o` projection.
-    pub o_bias: Option<&'a [f32]>,
+    pub o_bias: Option<&'a Arc<[f32]>>,
 }
 
 impl AttnExtras<'_> {
@@ -186,7 +187,7 @@ enum Download {
 
 /// Per-layer launches + norms for [`launch_decode_dense_stack`].
 pub struct DenseLayerMetal<'a> {
-    pub attn_norm_w: &'a [f32],
+    pub attn_norm_w: &'a Arc<[f32]>,
     /// What stands between `attn_norm` and the first residual add.
     pub mixer: TokenMixer<'a>,
     /// `ffn_norm` and the gated FFN, or `None` on a layer that has none
@@ -195,8 +196,8 @@ pub struct DenseLayerMetal<'a> {
     pub ffn: Option<DenseFfnMetal<'a>>,
     /// Gemma post-attention / post-FFN sandwich norms, applied to the
     /// block output *before* the residual add.
-    pub post_attn_norm: Option<&'a [f32]>,
-    pub post_ffn_norm: Option<&'a [f32]>,
+    pub post_attn_norm: Option<&'a Arc<[f32]>>,
+    pub post_ffn_norm: Option<&'a Arc<[f32]>>,
     /// Gemma-4's per-layer embedding gate, after the FFN residual; reads
     /// the stack's `ple` plane.
     pub per_layer: Option<PerLayerGateMetal<'a, MatvecLaunch<'a>>>,
@@ -211,7 +212,7 @@ pub struct DenseLayerMetal<'a> {
 
 /// A layer's gated FFN and the norm in front of it.
 pub struct DenseFfnMetal<'a> {
-    pub norm_w: &'a [f32],
+    pub norm_w: &'a Arc<[f32]>,
     pub gate: MatvecLaunch<'a>,
     pub up: MatvecLaunch<'a>,
     pub down: MatvecLaunch<'a>,
@@ -254,7 +255,7 @@ pub struct ShortConvMixer<'a> {
     /// `[3 n_embd, n_embd]`.
     pub in_proj: MatvecLaunch<'a>,
     /// `[n_embd][l_cache]`, tap `l_cache - 1` on the newest input.
-    pub taps: &'a [f32],
+    pub taps: &'a Arc<[f32]>,
     /// `[n_embd, n_embd]`.
     pub out_proj: MatvecLaunch<'a>,
     /// The token's windows and which one is this layer's.
@@ -331,7 +332,7 @@ pub fn launch_decode_dense_stack(
     rope_layout: MetalRope,
     pos: usize,
     rms_eps: f32,
-    final_norm_w: Option<&[f32]>,
+    final_norm_w: Option<&Arc<[f32]>>,
     output: Option<&MatvecLaunch<'_>>,
     argmax_only: bool,
     embd: Option<&EmbdGatherMetal<'_>>,
@@ -370,7 +371,7 @@ pub fn launch_decode_dense_stack(
                 let kv = &kvs[a.kv.slot()];
                 assert_eq!(a.q.rows, n_heads * kv.head_dim);
                 assert_freq_factors_len(
-                    a.rope.and_then(|r| r.freq_factors),
+                    a.rope.and_then(|r| r.freq_factors).map(|f| &f[..]),
                     rope_layout,
                     kv.head_dim,
                 );
@@ -495,8 +496,8 @@ pub fn launch_decode_dense_stack(
     let logits_buf = scratch.logits.as_ref();
     let argmax_idx_buf = &scratch.argmax_idx;
 
-    // One resident buffer PER LAYER. `resident_f32_buffer` keys its
-    // cache on (pointer, len), so the at-most-two distinct divisor sets
+    // One resident buffer PER LAYER. `resident_f32_shared` keys its
+    // cache on the plane's address, so the at-most-two distinct divisor sets
     // an alternating-SWA model has are uploaded once each and every
     // layer past the first two is a cache hit -- no per-layer upload,
     // and no table of "which set does layer i use" for a call site to
@@ -510,7 +511,7 @@ pub fn launch_decode_dense_stack(
                 .and_then(|a| a.rope)
                 .and_then(|r| r.freq_factors)
             {
-                Some(ff) => resident_f32_buffer(device, ff).map(Some),
+                Some(ff) => resident_f32_shared(device, ff).map(Some),
                 None => Ok(None),
             }
         })
@@ -528,7 +529,7 @@ pub fn launch_decode_dense_stack(
 
     let clock = SubmitClock::start();
     let mut cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
-    let early = crate::timing::early_commit_layer(crate::timing::Stack::Dense, layers.len());
+    let early = crate::timing::early_commit_layer(layers.len());
     // Gemma-style post-norms ("sandwich"), and Gemma-4's per-layer gate
     // and output scale: these layers take the EAGER residual path below,
     // which is what makes concurrent encode safe here.
@@ -608,7 +609,7 @@ pub fn launch_decode_dense_stack(
             assert_eq!(f.down.rows, hidden_dim);
             assert_eq!(f.gate.rows, f.up.rows);
         }
-        let attn_nw = resident_f32_buffer(device, layer.attn_norm_w)?;
+        let attn_nw = resident_f32_shared(device, layer.attn_norm_w)?;
 
         // Pre-LN: layer 0 norms raw hidden; later layers either fuse the
         // previous FFN residual into attn_norm (non-sandwich) or just
@@ -687,7 +688,7 @@ pub fn launch_decode_dense_stack(
                 // where the attention arm leaves its branch too.
                 let in_w = resident_weight_buffer(device, c.in_proj.weights)?;
                 let out_w = resident_weight_buffer(device, c.out_proj.weights)?;
-                let taps = resident_f32_buffer(device, c.taps)?;
+                let taps = resident_f32_shared(device, c.taps)?;
                 let win = c.windows.buffer();
                 spans.span(&cmd_buf, &mut encoder, "conv_in_proj")?;
                 mrs.begin_op(&encoder, &[x_buf], &[q_buf]);
@@ -899,7 +900,7 @@ pub fn launch_decode_dense_stack(
         // the barriered reduction, so out == x is safe).
         if let Some(post) = layer.post_attn_norm {
             assert_eq!(post.len(), hidden_dim);
-            let pw = resident_f32_buffer(device, post)?;
+            let pw = resident_f32_shared(device, post)?;
             spans.span(&cmd_buf, &mut encoder, "post_attn_norm")?;
             mrs.begin_op(&encoder, &[o_buf], &[o_buf]);
             encode_rms_norm(
@@ -936,7 +937,7 @@ pub fn launch_decode_dense_stack(
             mrs.end_op(&[h_buf, o_buf], &[h_buf]);
             continue;
         };
-        let ffn_nw = resident_f32_buffer(device, ffn.norm_w)?;
+        let ffn_nw = resident_f32_shared(device, ffn.norm_w)?;
         let gate_w = resident_weight_buffer(device, ffn.gate.weights)?;
         let up_w = resident_weight_buffer(device, ffn.up.weights)?;
         let down_w = resident_weight_buffer(device, ffn.down.weights)?;
@@ -990,7 +991,7 @@ pub fn launch_decode_dense_stack(
 
         if let Some(post) = layer.post_ffn_norm {
             assert_eq!(post.len(), hidden_dim);
-            let pw = resident_f32_buffer(device, post)?;
+            let pw = resident_f32_shared(device, post)?;
             spans.span(&cmd_buf, &mut encoder, "post_ffn_norm")?;
             mrs.begin_op(&encoder, &[down_buf], &[down_buf]);
             encode_rms_norm(
@@ -1051,7 +1052,7 @@ pub fn launch_decode_dense_stack(
     // non-sandwich still has a deferred last-layer `down` to fold in.
     let (download_n, download) = if let Some(fnw) = final_norm_w {
         assert_eq!(fnw.len(), hidden_dim);
-        let fn_buf = resident_f32_buffer(device, fnw)?;
+        let fn_buf = resident_f32_shared(device, fnw)?;
         if sandwich {
             spans.span(&cmd_buf, &mut encoder, "final_norm")?;
             mrs.begin_op(&encoder, &[h_buf], &[x_buf]);
@@ -1218,7 +1219,7 @@ mod tests {
 
     #[test]
     fn touches_kv_lists_every_field_on_k_or_v() {
-        let w = [1.0f32];
+        let w: std::sync::Arc<[f32]> = std::sync::Arc::from([1.0f32]);
         let none = AttnExtras {
             q_bias: Some(&w),
             q_norm: Some(&w),
@@ -1261,7 +1262,7 @@ mod tests {
     /// it encodes a dispatch.
     #[test]
     fn attn_extras_predicate_lists_every_field_that_encodes() {
-        let w = [1.0f32];
+        let w: std::sync::Arc<[f32]> = std::sync::Arc::from([1.0f32]);
         let base = AttnExtras::default();
         let AttnExtras {
             q_bias,

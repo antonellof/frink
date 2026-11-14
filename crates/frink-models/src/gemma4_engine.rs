@@ -107,22 +107,22 @@ pub struct Gemma4AttnWeights {
     pub k_proj: Option<WeightMatrix>,
     pub v_proj: Option<WeightMatrix>,
     pub o_proj: WeightMatrix,
-    pub q_norm: Vec<f32>,
-    pub k_norm: Option<Vec<f32>>,
-    pub post_attn_norm: Vec<f32>,
+    pub q_norm: std::sync::Arc<[f32]>,
+    pub k_norm: Option<std::sync::Arc<[f32]>>,
+    pub post_attn_norm: std::sync::Arc<[f32]>,
 }
 
 pub struct Gemma4LayerWeights {
-    pub attn_norm: Vec<f32>,
+    pub attn_norm: std::sync::Arc<[f32]>,
     pub attn: Gemma4AttnWeights,
-    pub ffn_norm: Vec<f32>,
+    pub ffn_norm: std::sync::Arc<[f32]>,
     pub ffn_gate: WeightMatrix,
     pub ffn_up: WeightMatrix,
     pub ffn_down: WeightMatrix,
-    pub ffn_post_norm: Vec<f32>,
+    pub ffn_post_norm: std::sync::Arc<[f32]>,
     pub per_layer_inp_gate: Option<WeightMatrix>,
     pub per_layer_proj: Option<WeightMatrix>,
-    pub per_layer_post_norm: Option<Vec<f32>>,
+    pub per_layer_post_norm: Option<std::sync::Arc<[f32]>>,
     pub out_scale: Option<f32>,
 }
 
@@ -130,9 +130,9 @@ pub struct Gemma4Weights {
     pub token_embd: WeightMatrix,
     pub per_layer_token_embd: Option<WeightMatrix>,
     pub per_layer_model_proj: Option<WeightMatrix>,
-    pub per_layer_proj_norm: Option<Vec<f32>>,
+    pub per_layer_proj_norm: Option<std::sync::Arc<[f32]>>,
     pub layers: Vec<Gemma4LayerWeights>,
-    pub output_norm: Vec<f32>,
+    pub output_norm: std::sync::Arc<[f32]>,
     pub output_head: WeightMatrix,
     /// Full-attn RoPE frequency factors (`rope_freqs.weight`), length `head_dim_full/2`.
     pub rope_freqs: Option<Vec<f32>>,

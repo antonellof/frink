@@ -242,7 +242,7 @@ fn applying_either_inner_norm_with_unit_weights_diverges_from_llama_cpp() {
 fn reading_attn_sub_norm_as_the_post_attention_norm_diverges_from_llama_cpp() {
     let mut d = load_graph_fixture(BITNET);
     for layer in d.layers.iter_mut() {
-        layer.attn.post_attn_norm = layer.attn.attn_sub_norm.take();
+        layer.attn.post_attn_norm = layer.attn.attn_sub_norm.take().map(Into::into);
     }
     let worst = decode_worst(&d, &BITNET_GOLDEN);
     assert!(worst > 100.0 * GRAPH_TOL, "{worst}");

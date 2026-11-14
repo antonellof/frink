@@ -106,9 +106,9 @@ pub enum DtBcNorm {
     Weightless,
     /// The three weights (`jamba.cpp:49,52-53`).
     Weighted {
-        dt: Vec<f32>,
-        b: Vec<f32>,
-        c: Vec<f32>,
+        dt: Arc<[f32]>,
+        b: Arc<[f32]>,
+        c: Arc<[f32]>,
     },
 }
 
@@ -200,7 +200,11 @@ impl Mamba1 {
                 check(name("ssm_dt_norm.weight"), dt.len(), h.dt_rank)?;
                 check(name("ssm_b_norm.weight"), b.len(), h.d_state)?;
                 check(name("ssm_c_norm.weight"), c.len(), h.d_state)?;
-                DtBcNorm::Weighted { dt, b, c }
+                DtBcNorm::Weighted {
+                    dt: dt.into(),
+                    b: b.into(),
+                    c: c.into(),
+                }
             }
             (None, None, None) if dt_b_c_rms => DtBcNorm::Weightless,
             (None, None, None) => DtBcNorm::None,
@@ -434,9 +438,9 @@ mod tests {
                 rnd((h.dt_rank + 2 * h.d_state) * h.d_inner),
             ),
             dt_bc_norm: DtBcNorm::Weighted {
-                dt: vec![1.1, 0.9],
-                b: vec![1.2, 0.8],
-                c: vec![0.7, 1.3],
+                dt: vec![1.1, 0.9].into(),
+                b: vec![1.2, 0.8].into(),
+                c: vec![0.7, 1.3].into(),
             },
             dt_proj: mat(h.d_inner, h.dt_rank, rnd(h.d_inner * h.dt_rank)),
             dt_bias: rnd(h.d_inner).into(),

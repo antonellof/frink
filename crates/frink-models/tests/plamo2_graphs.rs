@@ -246,8 +246,8 @@ fn the_loaded_decoder_is_the_graph() {
             );
             assert!(layer.attn.ssm.is_none());
             // One row per head: 4 x 8 for Q, 2 x 8 for K.
-            assert_eq!(layer.attn.q_norm.as_ref().map(Vec::len), Some(32));
-            assert_eq!(layer.attn.k_norm.as_ref().map(Vec::len), Some(16));
+            assert_eq!(layer.attn.q_norm.as_ref().map(|w| w.len()), Some(32));
+            assert_eq!(layer.attn.k_norm.as_ref().map(|w| w.len()), Some(16));
         } else {
             assert_eq!(shape, AttnShape::Plamo2Ssm, "blk.{il}");
             let m = match layer.attn.ssm.as_ref() {

@@ -101,7 +101,7 @@ impl Decoder {
         l: usize,
         layer: &'a LayerWeights,
     ) -> Option<(
-        &'a [f32],
+        &'a std::sync::Arc<[f32]>,
         frink_metal::gpu::MatvecLaunch<'a>,
         frink_metal::gpu::MatvecLaunch<'a>,
         frink_metal::gpu::MatvecLaunch<'a>,
@@ -252,7 +252,7 @@ mod tests {
             rnd(ffn_dim * hidden, 1.0),
             rnd(hidden * ffn_dim, 1.0),
         );
-        let ffn_norm: Vec<f32> = rnd(hidden, 0.5).iter().map(|x| 1.0 + x).collect();
+        let ffn_norm: std::sync::Arc<[f32]> = rnd(hidden, 0.5).iter().map(|x| 1.0 + x).collect();
         let branch = rnd(branch_dim, 1.0);
         let residual = rnd(hidden, 1.0);
         let eps = 1e-6f32;

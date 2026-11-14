@@ -97,7 +97,7 @@ impl Decoder {
         else {
             return;
         };
-        self.apply_rope_head_theta(slice, pos, theta, freq_factors, rot_dim)
+        self.apply_rope_head_theta(slice, pos, theta, freq_factors.map(|f| &f[..]), rot_dim)
     }
 
     /// llama.cpp's RoPE `mscale` (ggml `rope_yarn`), applied where the
@@ -411,8 +411,8 @@ mod tests {
         // Period 2, last-dense: layer 0 slides, layer 1 does not.
         cfg.swa_layers = crate::swa_layers::SwaLayers::period(2, false);
         cfg.rope_freqs = Some(RopeFreqs {
-            full: vec![FACTOR; 4],
-            swa: Some(vec![1.0; 4]),
+            full: vec![FACTOR; 4].into(),
+            swa: Some(vec![1.0; 4].into()),
         });
         assert_eq!(cfg.layer_sliding_window(0), Some(4), "layer 0 must slide");
         assert_eq!(cfg.layer_sliding_window(1), None, "layer 1 must be dense");
@@ -475,7 +475,7 @@ mod tests {
         cfg.sliding_window = Some(4);
         cfg.swa_layers = crate::swa_layers::SwaLayers::period(2, false);
         cfg.rope_freqs = Some(RopeFreqs {
-            full: vec![8.0; 4],
+            full: vec![8.0; 4].into(),
             swa: None,
         });
         assert!(

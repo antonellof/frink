@@ -445,7 +445,7 @@ fn apertus_is_a_neox_rope_llama_with_pre_rope_qk_norm_and_no_scalars() {
     assert_eq!(d.config.sliding_window, None);
     assert!(d.layers[0].attn.q_norm.is_some() && d.layers[0].attn.k_norm.is_some());
     assert_eq!(
-        d.layers[0].attn.q_norm.as_ref().map(Vec::len),
+        d.layers[0].attn.q_norm.as_ref().map(|w| w.len()),
         Some(6),
         "per head, apertus.cpp:49"
     );

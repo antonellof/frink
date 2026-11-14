@@ -51,7 +51,7 @@ fn swiglu_oai_and_add_id_match_ggml() {
     let n_slots = ids.len();
     let gate = fill(n_slots * ffn, 1.0, 12.0);
     let up = fill(n_slots * ffn, 7.0, 12.0);
-    let router_bias = fill(n_experts, 2.0, 1.0);
+    let router_bias: Arc<[f32]> = fill(n_experts, 2.0, 1.0).into();
     let gate_bias: Arc<[f32]> = fill(n_experts * ffn, 3.0, 2.0).into();
     let up_bias: Arc<[f32]> = fill(n_experts * ffn, 5.0, 2.0).into();
     let down_bias: Arc<[f32]> = fill(n_experts * hidden, 11.0, 2.0).into();

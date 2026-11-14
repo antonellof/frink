@@ -319,7 +319,7 @@ mod tests {
     /// An RMSNorm final norm, for the tests that are about the other
     /// two conditions.
     fn rms() -> crate::norm::NormOp {
-        crate::norm::NormOp::Rms(vec![1.0; 4])
+        crate::norm::NormOp::Rms(vec![1.0; 4].into())
     }
 
     /// The fold carries the decision about what comes back: an argmax

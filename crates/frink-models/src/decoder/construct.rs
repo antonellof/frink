@@ -135,7 +135,7 @@ impl Decoder {
                     rng.vec(hidden * n_heads * head_dim),
                     vec![hidden, n_heads * head_dim],
                 ),
-                norm_weight: NormOp::Rms(vec![1.0; hidden]),
+                norm_weight: NormOp::Rms(vec![1.0; hidden].into()),
                 q_norm: None,
                 k_norm: None,
                 q_bias: None,
@@ -201,7 +201,7 @@ impl Decoder {
                 experts: ExpertBacking::Resident(experts),
                 shared_experts,
                 shared_expert_gate: None,
-                norm_weight: NormOp::Rms(vec![1.0; hidden]),
+                norm_weight: NormOp::Rms(vec![1.0; hidden].into()),
                 activation_counts,
                 #[cfg(feature = "metal")]
                 packed_q4: None,
@@ -214,7 +214,7 @@ impl Decoder {
             });
         }
 
-        let final_norm = NormOp::Rms(vec![1.0; hidden]);
+        let final_norm = NormOp::Rms(vec![1.0; hidden].into());
         let output_head = wm(rng.vec(vocab_size * hidden), vec![vocab_size, hidden]);
         let execution_plan = crate::execution_plan::ExecutionPlan::from_config(
             &config,

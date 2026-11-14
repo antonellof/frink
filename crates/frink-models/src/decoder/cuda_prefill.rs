@@ -308,7 +308,7 @@ impl Decoder {
         let (gating, router_bias) = match &self.gpt_oss {
             Some(g) => (
                 DeviceGating::SoftmaxWeight,
-                Some(g.layers.get(self.physical_index(l))?.router_bias.as_slice()),
+                Some(&g.layers.get(self.physical_index(l))?.router_bias[..]),
             ),
             None => (
                 plain_softmax_gating(
@@ -464,7 +464,7 @@ impl Decoder {
         } = Self::fused_attn_extras(layer, FusedAttnCaps::CUDA)?;
         let rope = self.config.layer_rope(l).map(|r| LayerRopeCuda {
             theta: r.theta,
-            freq_factors: r.freq_factors,
+            freq_factors: r.freq_factors.map(|v| &**v),
             rot_dim: r.rot_dim.unwrap_or(head_dim),
             layout: match self.config.rope_layout {
                 crate::config::RopeLayout::Norm => RopeLayoutCuda::Norm,
@@ -516,13 +516,13 @@ impl Decoder {
             post_attn_norm: layer.attn.post_attn_norm.as_deref(),
             post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
             extras: AttnExtrasCuda {
-                q_bias,
-                k_bias,
-                v_bias,
-                q_norm,
-                k_norm,
-                sinks,
-                o_bias,
+                q_bias: q_bias.map(|v| &**v),
+                k_bias: k_bias.map(|v| &**v),
+                v_bias: v_bias.map(|v| &**v),
+                q_norm: q_norm.map(|v| &**v),
+                k_norm: k_norm.map(|v| &**v),
+                sinks: sinks.map(|v| &**v),
+                o_bias: o_bias.map(|v| &**v),
             },
             rope,
         };

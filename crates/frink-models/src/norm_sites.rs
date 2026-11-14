@@ -413,10 +413,10 @@ impl NormSites {
         site: Option<StoredNorm>,
         file: &impl TensorSource,
         layer: usize,
-    ) -> Result<Option<Vec<f32>>, LoadError> {
+    ) -> Result<Option<std::sync::Arc<[f32]>>, LoadError> {
         match site {
             None => Ok(None),
-            Some(stored) => stored.load(file, Some(layer)),
+            Some(stored) => Ok(stored.load(file, Some(layer))?.map(Into::into)),
         }
     }
 }

@@ -388,7 +388,7 @@ fn the_bias_and_the_weight_are_each_visible_in_the_logits() {
         // And RMSNorm with the weight -- what the generic path used to
         // compute for these files -- on the final norm.
         let weight = weight_of(&d.final_norm);
-        let saved = std::mem::replace(&mut d.final_norm, NormOp::Rms(weight));
+        let saved = std::mem::replace(&mut d.final_norm, NormOp::Rms(weight.into()));
         let worst = worst_vs(&decode(&d), golden);
         assert!(
             worst > 1e-2,

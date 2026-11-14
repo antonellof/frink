@@ -200,7 +200,7 @@ fn each_seam_is_visible_in_the_logits() {
     let saved: Vec<_> = d
         .layers
         .iter_mut()
-        .map(|l| l.attn.post_attn_norm.replace(vec![1.0; 32]))
+        .map(|l| l.attn.post_attn_norm.replace(vec![1.0; 32].into()))
         .collect();
     let worst = worst_vs(&decode(&d), &GLM4_GOLDEN);
     assert!(worst > 1e-2, "post_attention_norm not seen: {worst}");
@@ -211,7 +211,7 @@ fn each_seam_is_visible_in_the_logits() {
     let saved: Vec<_> = d
         .layers
         .iter_mut()
-        .map(|l| l.attn.post_ffn_norm.replace(vec![1.0; 32]))
+        .map(|l| l.attn.post_ffn_norm.replace(vec![1.0; 32].into()))
         .collect();
     let worst = worst_vs(&decode(&d), &GLM4_GOLDEN);
     assert!(worst > 1e-2, "post_ffw_norm not seen: {worst}");

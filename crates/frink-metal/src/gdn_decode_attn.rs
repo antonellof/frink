@@ -25,11 +25,12 @@
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue};
+use std::sync::Arc;
 
 use crate::attn::{AttnExtras, LayerRope, MetalKvBuffers, MetalKvDtype, MetalRope};
 use crate::gdn_branch::{encode_attn_tail, GdnRun, LayerFfn, ScratchSet};
 use crate::gpu::{
-    encode_matvec, resident_f32_buffer, resident_weight_buffer, shared_metal, MatvecLaunch,
+    encode_matvec, resident_f32_shared, resident_weight_buffer, shared_metal, MatvecLaunch,
     MetalError,
 };
 use crate::hadamard::FoldPlan;
@@ -39,7 +40,7 @@ use crate::hadamard::FoldPlan;
 /// encoded.
 pub struct DecodeAttnLayer<'a> {
     /// `blk.N.attn_norm.weight`; the model's RMS epsilon is `eps`.
-    pub attn_norm: &'a [f32],
+    pub attn_norm: &'a Arc<[f32]>,
     pub eps: f32,
     /// The rotation `wq`, `wk` and `wv` share on their input.
     pub fold_x: Option<&'a FoldPlan<'a>>,
@@ -74,8 +75,8 @@ impl DecodeAttnLayer<'_> {
         let q_width = self.n_heads * hd;
         let kv_width = n_kv * hd;
         let e = self.extras;
-        let norm_ok = |w: Option<&[f32]>| w.is_none_or(|w| w.len() == hd);
-        let bias_ok = |b: Option<&[f32]>, n: usize| b.is_none_or(|b| b.len() == n);
+        let norm_ok = |w: Option<&Arc<[f32]>>| w.is_none_or(|w| w.len() == hd);
+        let bias_ok = |b: Option<&Arc<[f32]>>, n: usize| b.is_none_or(|b| b.len() == n);
         let fold_ok = |p: Option<&FoldPlan<'_>>, w: usize| p.is_none_or(|p| p.check(w).is_ok());
         let rot = self.rope.rot_dim.unwrap_or(hd);
         let f = self.ffn;
@@ -130,7 +131,7 @@ pub(crate) fn encode_attn_head(
     encoder: &ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>,
     device: &objc2::rc::Retained<ProtocolObject<dyn objc2_metal::MTLDevice>>,
     hidden_buf: &ProtocolObject<dyn MTLBuffer>,
-    norm: &[f32],
+    norm: &Arc<[f32]>,
     norm_eps: f32,
     q: &MatvecLaunch<'_>,
     k: &MatvecLaunch<'_>,
@@ -159,14 +160,14 @@ fn encode_normed_projections(
     encoder: &ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>,
     device: &objc2::rc::Retained<ProtocolObject<dyn objc2_metal::MTLDevice>>,
     hidden_buf: &ProtocolObject<dyn MTLBuffer>,
-    norm: &[f32],
+    norm: &Arc<[f32]>,
     norm_eps: f32,
     fold_x: Option<&FoldPlan<'_>>,
     normed: &ProtocolObject<dyn MTLBuffer>,
     projections: &[(&MatvecLaunch<'_>, &ProtocolObject<dyn MTLBuffer>)],
 ) -> Result<(), MetalError> {
     let hidden = norm.len();
-    let norm_w = resident_f32_buffer(device, norm)?;
+    let norm_w = resident_f32_shared(device, norm)?;
     let signs = match fold_x.and_then(|p| p.signs) {
         None => None,
         Some(sg) => {
@@ -325,7 +326,7 @@ impl GdnRun {
     /// bias, multiplier and softcap as it does to a host projection.
     pub fn output_head(
         &mut self,
-        norm: &[f32],
+        norm: &Arc<[f32]>,
         norm_eps: f32,
         output: &MatvecLaunch<'_>,
         fold: Option<&FoldPlan<'_>>,
@@ -407,7 +408,7 @@ impl GdnRun {
             None
         };
         let ff = match w.layer_rope.and_then(|r| r.freq_factors) {
-            Some(ff) => Some(resident_f32_buffer(device, ff)?),
+            Some(ff) => Some(resident_f32_shared(device, ff)?),
             None => None,
         };
         let cmd_buf = shared

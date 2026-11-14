@@ -236,7 +236,7 @@ fn metal_decode_runs_the_conv_layers_in_the_dense_stack() {
     frink_models::set_metal_greedy_argmax(false);
     for name in [LFM2, LFM2_FUSED] {
         let d = load_graph_fixture(name);
-        let got = decode(&d);
+        let got = common::decode_with_resident_planes(&d, name);
         assert!(
             d.metal_hybrid_allocated(),
             "{name}: the hybrid stack never ran"
@@ -413,7 +413,7 @@ fn each_seam_is_visible_in_the_logits() {
     for layer in d.layers.iter_mut() {
         if let Some(conv) = layer.attn.shortconv.as_mut() {
             let l = conv.l_cache;
-            for taps in conv.conv.chunks_mut(l) {
+            for taps in std::sync::Arc::make_mut(&mut conv.conv).chunks_mut(l) {
                 taps.reverse();
             }
         }
@@ -423,7 +423,7 @@ fn each_seam_is_visible_in_the_logits() {
     for layer in d.layers.iter_mut() {
         if let Some(conv) = layer.attn.shortconv.as_mut() {
             let l = conv.l_cache;
-            for taps in conv.conv.chunks_mut(l) {
+            for taps in std::sync::Arc::make_mut(&mut conv.conv).chunks_mut(l) {
                 taps.reverse();
             }
         }
@@ -434,7 +434,7 @@ fn each_seam_is_visible_in_the_logits() {
     for layer in d.layers.iter_mut() {
         if let Some(conv) = layer.attn.shortconv.as_mut() {
             let l = conv.l_cache;
-            for taps in conv.conv.chunks_mut(l) {
+            for taps in std::sync::Arc::make_mut(&mut conv.conv).chunks_mut(l) {
                 for t in &mut taps[..l - 1] {
                     *t = 0.0;
                 }

@@ -8,6 +8,14 @@ use frink_moe::{ExpertWeights, PlacementPlan};
 
 use crate::norm::NormOp;
 
+/// One layer's attention weights.
+///
+/// The f32 planes a Metal stack binds (norms, biases, sinks) are
+/// `Arc<[f32]>`, as the RMS weights inside [`NormOp`] are: the stack's
+/// resident cache finds its copy by the allocation it holds, where a
+/// borrowed slice could only be proven by comparing every byte every
+/// token (`frink_metal`'s `resident_f32_shared`). Mutating one goes
+/// through `Arc::make_mut`, which copies a plane the cache shares.
 pub struct AttnWeights {
     pub q_proj: WeightMatrix, // [n_heads*head_dim, hidden_dim]
     pub k_proj: WeightMatrix, // [n_kv_heads*head_dim, hidden_dim]
@@ -29,8 +37,8 @@ pub struct AttnWeights {
     /// Qwen3 / Gemma3 ship the same tensor names with length `head_dim`
     /// (per-head). Which style is used is selected by
     /// [`ModelConfig::qk_norm_style`] (refined at load from weight length).
-    pub q_norm: Option<Vec<f32>>,
-    pub k_norm: Option<Vec<f32>>,
+    pub q_norm: Option<std::sync::Arc<[f32]>>,
+    pub k_norm: Option<std::sync::Arc<[f32]>>,
     /// Qwen2/Qwen2-MoE-family QKV attention bias (`attn_{q,k,v}.bias`
     /// GGUF tensors, real `config.qkv_bias`), added elementwise to the
     /// corresponding projection's output before QK-norm/RoPE -- confirmed
@@ -42,15 +50,15 @@ pub struct AttnWeights {
     /// entirely, producing fluent-but-wrong output on a real downloaded
     /// Qwen1.5-MoE checkpoint (same failure class as OLMoE's missing
     /// QK-norm). `None` for every model that doesn't ship these tensors.
-    pub q_bias: Option<Vec<f32>>,
-    pub k_bias: Option<Vec<f32>>,
-    pub v_bias: Option<Vec<f32>>,
+    pub q_bias: Option<std::sync::Arc<[f32]>>,
+    pub k_bias: Option<std::sync::Arc<[f32]>>,
+    pub v_bias: Option<std::sync::Arc<[f32]>>,
     /// Gemma 2+/3 post-attention RMSNorm (`blk.N.post_attention_norm.weight`
     /// / llama.cpp `attn_post_norm`). Applied to attention output before
     /// the residual add. `None` for Llama/Qwen/OLMoE.
-    pub post_attn_norm: Option<Vec<f32>>,
+    pub post_attn_norm: Option<std::sync::Arc<[f32]>>,
     /// Gemma 2+/3 post-FFN RMSNorm (`blk.N.post_ffw_norm.weight`).
-    pub post_ffn_norm: Option<Vec<f32>>,
+    pub post_ffn_norm: Option<std::sync::Arc<[f32]>>,
     /// The learned output gate, `blk.N.attn_gate.weight`, applied to the
     /// attention output before `o_proj` (`afmoe`, `laguna`, `step35`).
     /// See [`crate::attn_gate`] for the two axes it varies on and the
@@ -71,7 +79,7 @@ pub struct AttnWeights {
     /// `loader.rs` still refuses a gpt-oss file without one; the fused
     /// Metal launches refuse any layer that has one, by the exhaustive
     /// destructure in `Decoder::metal_attn_view`.
-    pub sinks: Option<Vec<f32>>,
+    pub sinks: Option<std::sync::Arc<[f32]>>,
     /// BitNet's `blk.N.attn_sub_norm.weight`, `[hidden_dim]`: an RMSNorm
     /// on the attention output BEFORE `o_proj` (`bitnet.cpp:101-106`),
     /// the other side of that matmul from `post_attn_norm`. Loaded
@@ -94,7 +102,7 @@ pub struct AttnWeights {
     /// everywhere else, where a present tensor is refused as unread.
     /// The fused Metal launches refuse a layer that has one through
     /// the destructure in `metal_attn_view`.
-    pub o_bias: Option<Vec<f32>>,
+    pub o_bias: Option<std::sync::Arc<[f32]>>,
     /// LFM2's short convolution, `Some` on exactly the layers whose
     /// shape is `AttnShape::ShortConv` (`crate::shortconv`); the four
     /// projections above are empty on such a layer. The host bodies
@@ -166,7 +174,7 @@ pub struct MoeWeights {
     /// not a `WeightMatrix`. `None` for every other architecture
     /// (DeepSeek-V3's shared experts, for one real confirmed contrast,
     /// add unconditionally with no gate at all).
-    pub shared_expert_gate: Option<Vec<f32>>,
+    pub shared_expert_gate: Option<std::sync::Arc<[f32]>>,
     /// The PRE-FFN norm, or [`NormOp::None`] for the post-norm-only
     /// topology (`olmo2` / `exaone4`), which runs the FFN on the raw
     /// post-attention residual. See [`crate::norm`].
@@ -500,7 +508,7 @@ pub struct GptOssLayer {
     /// (`attn_output.bias` used to be here too and is
     /// [`AttnWeights::o_bias`] now: `crate::proj_bias` fills that slot
     /// for every graph that creates the tensor, gpt-oss among them.)
-    pub router_bias: Vec<f32>,
+    pub router_bias: std::sync::Arc<[f32]>,
     /// `blk.N.ffn_{gate,up,down}_exps.bias`, the expert-major planes the
     /// file stores (the host reads one expert's rows, a device stack
     /// binds the planes whole).

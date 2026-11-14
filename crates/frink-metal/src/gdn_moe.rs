@@ -26,9 +26,10 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLDevice, MTLSize};
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::gpu::{
-    encode_matvec, ensure_pipeline, resident_f32_buffer, resident_weight_buffer, MatvecLaunch,
+    encode_matvec, ensure_pipeline, resident_f32_shared, resident_weight_buffer, MatvecLaunch,
     MetalError, MoePackedQ4,
 };
 use crate::moe_ids::IdsBinding;
@@ -46,7 +47,7 @@ pub struct RoutedExperts<'a> {
     /// `blk.N.ffn_gate_inp_shexp.weight`, `[hidden]`: the shared
     /// expert's output is scaled by `sigmoid(gate . x)`. `None` adds it
     /// unscaled.
-    pub shared_gate: Option<&'a [f32]>,
+    pub shared_gate: Option<&'a Arc<[f32]>>,
     /// The caller's name for this layer, handed back with the experts
     /// the run chose for it (`GdnRun::finish_with_head`).
     pub tag: usize,
@@ -140,12 +141,12 @@ kernel void sigmoid_dot_scale(
 pub(crate) fn encode_shared_gate(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    gate: &[f32],
+    gate: &Arc<[f32]>,
     x: &ProtocolObject<dyn MTLBuffer>,
     y: &ProtocolObject<dyn MTLBuffer>,
     rows: usize,
 ) -> Result<(), MetalError> {
-    let g = resident_f32_buffer(device, gate)?;
+    let g = resident_f32_shared(device, gate)?;
     let pipe = ensure_pipeline(device, SIGMOID_DOT_SCALE_SRC, "sigmoid_dot_scale")?;
     encoder.setComputePipelineState(&pipe.0);
     // SAFETY: three buffers that outlive the command buffer (the gate

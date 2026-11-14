@@ -171,7 +171,7 @@ fn gpt_oss_loader_wires_the_whole_graph() {
     // and the loader refuses a gpt-oss file without one.
     for layer in &decoder.layers {
         assert_eq!(
-            layer.attn.sinks.as_ref().map(Vec::len),
+            layer.attn.sinks.as_ref().map(|w| w.len()),
             Some(decoder.config.n_heads)
         );
     }
@@ -179,7 +179,7 @@ fn gpt_oss_loader_wires_the_whole_graph() {
     // graph that creates the tensor (`frink_models::proj_bias`).
     for layer in &decoder.layers {
         assert_eq!(
-            layer.attn.o_bias.as_ref().map(Vec::len),
+            layer.attn.o_bias.as_ref().map(|w| w.len()),
             Some(decoder.config.hidden_dim)
         );
     }
@@ -241,6 +241,7 @@ fn gpt_oss_golden_is_not_vacuous() {
                 .attn
                 .sinks
                 .as_mut()
+                .map(std::sync::Arc::make_mut)
                 .expect("gpt-oss layers carry sinks")
                 .iter_mut()
                 .for_each(|s| *s = f32::NEG_INFINITY);
@@ -257,7 +258,9 @@ fn gpt_oss_golden_is_not_vacuous() {
     {
         let mut decoder = load();
         for layer in decoder.gpt_oss.as_mut().unwrap().layers.iter_mut() {
-            layer.router_bias.iter_mut().for_each(|b| *b = 0.0);
+            std::sync::Arc::make_mut(&mut layer.router_bias)
+                .iter_mut()
+                .for_each(|b| *b = 0.0);
         }
         let mut caches: Vec<KvCache> = decoder.config.new_kv_caches();
         let broken = decoder.forward_batch_last(&PROMPT, 0, &mut caches);
