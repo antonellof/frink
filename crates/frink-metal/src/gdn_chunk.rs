@@ -1,26 +1,18 @@
-//! The chunked gated delta rule on the device.
+//! The gated delta rule over a batch of rows, on the device.
 //!
-//! `frink_core::gdn_chunk` is the definition and the oracle: same
-//! unrolling of the rank-one updates across a chunk, same products of
-//! decays (never quotients), same forward substitution. What changes is
-//! where it runs, and why THAT is now worth doing:
+//! The host chunks it (`frink_core::gdn_chunk`): the row-at-a-time
+//! recurrence is bandwidth-bound on a CPU (36 GB/s of state,
+//! `1ebda4fc:docs/plans/gdn-resident-state.md`), and chunking trades
+//! 1.5x the multiply-adds for a 32nd of that traffic. On the GPU the
+//! state never leaves registers, so the trade buys nothing: this steps
+//! the rule token by token, `frink_core::gdn::delta_step` row for row,
+//! the shape llama.cpp's own `kernel_gated_delta_net` has, and one
+//! layer's whole prefill recurrence is one dispatch.
 //!
-//! - The row-at-a-time recurrence is bandwidth-bound (36 GB/s of state),
-//!   and moving it to the GPU lost three ways
-//!   (`1ebda4fc:docs/plans/gdn-resident-state.md`).
-//! - Chunking trades 1.5x the multiply-adds for a 32nd of that traffic,
-//!   so the CPU version is now COMPUTE-bound, measured at ~20 GFLOP/s
-//!   across six cores and 47% of a Bonsai prefill step.
-//!
-//! Compute-dense work with its traffic already amortised is what a GPU
-//! is for, so the same algebra moves over and one layer's whole prefill
-//! recurrence becomes a single command buffer.
-//!
-//! One threadgroup per value head, one thread per state ROW, every
-//! chunk in one dispatch. The chunk's keys and
-//! queries live in threadgroup memory and each row's updates in its
-//! own registers, which is what bounds the chunk width here (`CHUNK`,
-//! 16, against the CPU's 32).
+//! A chunked version of this kernel (16 rows a chunk, one thread a
+//! state row, one threadgroup a head) ran first; on Bonsai-2-27B's 48
+//! heads it left the GPU nearly idle, 2.05 ms a layer at 512 rows on an
+//! M5 Max against this one's 0.50.
 
 use std::ptr::NonNull;
 
@@ -34,48 +26,57 @@ use objc2_metal::{
 use crate::gdn::{DeltaShape, HeadMapKind};
 use crate::gpu::{ensure_pipeline, MetalError};
 
-/// Rows per chunk on the device.
-///
-/// Two `CHUNK x head_dim` tiles of threadgroup memory (keys, queries)
-/// plus the `CHUNK x CHUNK` triangles have to fit in a threadgroup's 32
-/// KiB, and each row keeps `CHUNK` updates and reductions in registers:
-/// at `head_dim` 128 that is 16 KiB of tiles for 16 rows. The CPU path
-/// chunks by 32 because its limit is cache rather than threadgroup
-/// memory.
-pub const CHUNK: usize = 16;
+/// Simdgroups per threadgroup.
+const SG_PER_TG: usize = 4;
 
-/// The widest head this kernel serves, one thread per state row.
-///
-/// Two `CHUNK x MAX_HEAD_DIM` tiles is 16 KiB at this width, and the
-/// three `CHUNK x CHUNK` triangles 3 KiB, against a threadgroup's 32
-/// KiB; the kernel's tiles are declared at this width.
+/// The widest head this kernel serves: four `float4`s of a state row a
+/// lane, eight lanes a row.
 pub const MAX_HEAD_DIM: usize = 128;
+
+/// `(entry, lanes a state row takes)` for a head width, or `None` for
+/// a width with no instantiation: a power of two from 4 to
+/// [`MAX_HEAD_DIM`].
+fn seq_entry(head_dim: usize) -> Option<(&'static str, usize)> {
+    Some(match head_dim {
+        4 => ("gdn_seq_rows_1_1", 1),
+        8 => ("gdn_seq_rows_2_1", 2),
+        16 => ("gdn_seq_rows_4_1", 4),
+        32 => ("gdn_seq_rows_8_1", 8),
+        64 => ("gdn_seq_rows_8_2", 8),
+        128 => ("gdn_seq_rows_8_4", 8),
+        _ => return None,
+    })
+}
 
 pub const GDN_CHUNK_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-#define CHUNK 16
-
-// One thread per state row `j`, every chunk of the batch in ONE
-// dispatch.
+// `LPR` lanes per state row `j` of one value head, `32 / LPR` rows a
+// simdgroup, the row's `S = 4 LPR NV` columns held in registers as
+// `NV` float4s a lane (lane `c` of a row owns columns `4 (v LPR + c)
+// ..+4`), and every token of the batch stepped in order inside the
+// kernel:
 //
-//   M[t] = S_0[j] . k_t          (registers, one pass over the row)
-//   N[t] = S_0[j] . q_t
-//   pred = A_t M[t] + sum_{u<t} R[t][u] (k_u . k_t) d[u][j]
-//   d[t][j] = beta_t (v_t[j] - pred)
-//   out_t[j] = (A_t N[t] + sum_{u<=t} R[t][u] (k_u . q_t) d[u][j]) / sqrt(S)
-//   S_C[j] = A_C S_0[j] + sum_t R[C][t] d[t][j] k_t
+//   S[j] *= exp(g_t)
+//   d     = beta_t (v_t[j] - S[j] . k_t)
+//   S[j] += d k_t
+//   out_t[j] = (S[j] . q_t) / sqrt(S)
 //
-// which is `frink_core::gdn_chunk::delta_chunk` line for line, one
-// threadgroup per value head. Nothing a row computes reads another
-// row (`d[u][j]` is the row's own, so it lives in registers), and the
-// chunks run in order INSIDE the kernel rather than as one dependent
-// dispatch each: that was 32 drains of the whole GPU per layer on a
-// 512-row prefill, and measured 2.53 against 2.07 ms a Bonsai layer.
-// Splitting a head's rows over more, smaller threadgroups measured
-// slower (3.65 ms): each one repeats the serial decay products.
-kernel void gdn_chunk_step(
+// which is `frink_core::gdn::delta_step` and llama.cpp's own
+// `kernel_gated_delta_net` (`ggml-metal/kernels/gated_delta_net.metal`)
+// row for row. Nothing a row computes reads another row, so the only
+// reductions are the two dot products, across the row's `LPR` lanes.
+//
+// It replaced a chunked kernel (16 tokens at a time, one thread per
+// row, one threadgroup per head) that kept 48 threadgroups of 128
+// threads busy on Bonsai-2-27B's 48 heads: 2.05 ms a layer at 512 rows
+// on an M5 Max. A simdgroup a row, 32 lanes of four columns each, took
+// 1.08 ms, most of it the per-token reductions and loads rather than
+// the arithmetic; eight lanes of sixteen columns spend four times
+// fewer of those on the same row.
+template<short LPR, short NV>
+kernel void gdn_seq_rows(
     device float* state [[buffer(0)]],
     device const float* q [[buffer(1)]],
     device const float* k [[buffer(2)]],
@@ -85,9 +86,10 @@ kernel void gdn_chunk_step(
     device float* out [[buffer(6)]],
     constant uint4& dims [[buffer(7)]],
     constant uint4& span [[buffer(8)]],
-    uint tgid [[threadgroup_position_in_grid]],
-    uint tid [[thread_position_in_threadgroup]],
-    uint tcount [[threads_per_threadgroup]]
+    uint2 tgid [[threadgroup_position_in_grid]],
+    ushort lane [[thread_index_in_simdgroup]],
+    ushort sg [[simdgroup_index_in_threadgroup]],
+    ushort n_sg [[simdgroups_per_threadgroup]]
 ) {
     // dims: n_k_heads, n_v_heads, head_dim, map flag.
     // span: total rows, the floats between consecutive rows of q, k and
@@ -97,150 +99,84 @@ kernel void gdn_chunk_step(
     const uint n_k = dims.x;
     const uint n_v = dims.y;
     const uint S   = dims.z;
-    const uint rows  = span.x;
+    const uint rows = span.x;
+    constexpr ushort RPS = 32 / LPR;
 
-    const uint h = tgid;
-    if (h >= n_v || tid >= S) {
+    const uint h = tgid.y;
+    const ushort c = lane % LPR;
+    const uint j = (tgid.x * n_sg + sg) * RPS + lane / LPR;
+    // A row's lanes leave together, and the shuffles below never leave
+    // a row, so none of them reads a lane that has gone.
+    if (h >= n_v || j >= S) {
         return;
     }
-    // This thread's state row.
-    const uint j = tid;
     const uint kh = (dims.w == 0u) ? (h % n_k) : (h / (n_v / n_k));
     const uint key_row = n_k * S;
     const uint val_row = n_v * S;
     const uint qk_stride = (span.y == 0u) ? key_row : span.y;
     const uint v_stride = (span.y == 0u) ? val_row : span.y;
-
-    threadgroup float ks[CHUNK * 128];
-    threadgroup float qs[CHUNK * 128];
-    threadgroup float gram[CHUNK * CHUNK];
-    threadgroup float qk[CHUNK * CHUNK];
-    threadgroup float ratio[CHUNK * CHUNK];
-    threadgroup float acc[CHUNK];
-    // The row's own updates: never read by another thread.
-    float ds[CHUNK];
-
-    device float* row = state + (size_t)h * S * S + (size_t)j * S;
     const float scale = 1.0f / sqrt(float(S));
 
-    for (uint start = 0; start < rows; start += CHUNK) {
-        const uint c = min((uint)CHUNK, rows - start);
-        // The previous chunk's last reads of the tiles are done.
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        // The chunk's key and query tiles, ZERO-PADDED to the full
-        // `CHUNK` when the tail is short.
-        //
-        // The padding is what lets every hot loop below run to the
-        // compile-time `CHUNK` rather than to the runtime `c`: a loop
-        // whose trip count the compiler cannot see does not unroll, and
-        // an array indexed by a variable it cannot unroll is spilled out
-        // of registers into device memory. That spill measured 50
-        // GFLOP/s on a 6.8 TFLOP/s part.
-        for (uint idx = tid; idx < CHUNK * S; idx += tcount) {
-            const uint t = idx / S;
-            const uint i = idx % S;
-            const bool live = t < c;
-            ks[t * S + i] = live ? k[(start + t) * qk_stride + kh * S + i] : 0.0f;
-            qs[t * S + i] = live ? q[(start + t) * qk_stride + kh * S + i] : 0.0f;
-        }
-        for (uint idx = tid; idx < CHUNK * CHUNK; idx += tcount) {
-            ratio[idx] = 0.0f;
-            gram[idx] = 0.0f;
-            qk[idx] = 0.0f;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    device float4* row = (device float4*)(state + (size_t)h * S * S + (size_t)j * S);
+    float4 ls[NV];
+    for (short e = 0; e < NV; ++e) {
+        ls[e] = row[e * LPR + c];
+    }
+    device const float* kp = k + kh * S;
+    device const float* qp = q + kh * S;
+    device const float* vp = v + h * S + j;
+    device float* op = out + h * S + j;
 
-        // Decay products: `R[t][u]` for `u <= t`, and `A_t = R[t][-1]`.
-        // Every entry is a product and never a quotient, so a chunk of
-        // tiny decays underflows to zero rather than dividing by it.
-        if (tid == 0) {
-            for (uint t = 0; t < c; ++t) {
-                ratio[t * CHUNK + t] = 1.0f;
-                for (int u = int(t) - 1; u >= 0; --u) {
-                    ratio[t * CHUNK + u] =
-                        ratio[t * CHUNK + u + 1] * exp(g[(start + u + 1) * n_v + h]);
-                }
-                const float decay = exp(g[(start + t) * n_v + h]);
-                acc[t] = (t == 0) ? decay : acc[t - 1] * decay;
-            }
+    for (uint t = 0; t < rows; ++t) {
+        const float decay = exp(g[t * n_v + h]);
+        const float b = beta[t * n_v + h];
+        float4 kt[NV];
+        float4 qt[NV];
+        float4 sk4 = 0.0f;
+        for (short e = 0; e < NV; ++e) {
+            kt[e] = ((device const float4*)kp)[e * LPR + c];
+            qt[e] = ((device const float4*)qp)[e * LPR + c];
+            ls[e] *= decay;
+            sk4 += ls[e] * kt[e];
         }
-        // The two triangles over the chunk's own vectors.
-        for (uint idx = tid; idx < c * c; idx += tcount) {
-            const uint t = idx / c;
-            const uint u = idx % c;
-            if (u > t) {
-                continue;
-            }
-            float sk = 0.0f;
-            float sq = 0.0f;
-            for (uint i = 0; i < S; ++i) {
-                sk += ks[t * S + i] * ks[u * S + i];
-                sq += qs[t * S + i] * ks[u * S + i];
-            }
-            gram[t * CHUNK + u] = sk;
-            qk[t * CHUNK + u] = sq;
+        float sk = (sk4.x + sk4.y) + (sk4.z + sk4.w);
+        for (ushort o = LPR / 2; o > 0; o >>= 1) {
+            sk += simd_shuffle_xor(sk, o);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // This thread's state row, and its two reductions against the
-        // whole chunk from one pass over it.
-        float m[CHUNK];
-        float n[CHUNK];
-        #pragma unroll
-        for (uint t = 0; t < CHUNK; ++t) {
-            m[t] = 0.0f;
-            n[t] = 0.0f;
-            ds[t] = 0.0f;
+        const float d = b * (vp[0] - sk);
+        float4 y4 = 0.0f;
+        for (short e = 0; e < NV; ++e) {
+            ls[e] += kt[e] * d;
+            y4 += ls[e] * qt[e];
         }
-        for (uint i = 0; i < S; ++i) {
-            const float r = row[i];
-            #pragma unroll
-            for (uint t = 0; t < CHUNK; ++t) {
-                m[t] += r * ks[t * S + i];
-                n[t] += r * qs[t * S + i];
-            }
+        float y = (y4.x + y4.y) + (y4.z + y4.w);
+        for (ushort o = LPR / 2; o > 0; o >>= 1) {
+            y += simd_shuffle_xor(y, o);
         }
-
-        // The recurrence: sequential in `t`, parallel in `j`.
-        #pragma unroll
-        for (uint t = 0; t < CHUNK; ++t) {
-            if (t < c) {
-                float pred = acc[t] * m[t];
-                float read = acc[t] * n[t];
-                #pragma unroll
-                for (uint u = 0; u < CHUNK; ++u) {
-                    if (u < t) {
-                        const float w = ratio[t * CHUNK + u];
-                        pred += w * gram[t * CHUNK + u] * ds[u];
-                        read += w * qk[t * CHUNK + u] * ds[u];
-                    }
-                }
-                const float b = beta[(start + t) * n_v + h];
-                const float dj = b * (v[(start + t) * v_stride + h * S + j] - pred);
-                ds[t] = dj;
-                out[(start + t) * val_row + h * S + j] = (read + qk[t * CHUNK + t] * dj) * scale;
-            }
+        if (c == 0) {
+            op[0] = y * scale;
         }
-
-        // The state, updated once for the whole chunk.
-        const float a_last = acc[c - 1];
-        float w[CHUNK];
-        #pragma unroll
-        for (uint t = 0; t < CHUNK; ++t) {
-            // Zero past the tail: `ratio` and `ds` were zeroed, so a
-            // short chunk contributes nothing through the padded rows.
-            w[t] = ratio[(c - 1) * CHUNK + t] * ds[t];
-        }
-        for (uint i = 0; i < S; ++i) {
-            float r = row[i] * a_last;
-            #pragma unroll
-            for (uint t = 0; t < CHUNK; ++t) {
-                r += w[t] * ks[t * S + i];
-            }
-            row[i] = r;
-        }
+        kp += qk_stride;
+        qp += qk_stride;
+        vp += v_stride;
+        op += val_row;
+    }
+    for (short e = 0; e < NV; ++e) {
+        row[e * LPR + c] = ls[e];
     }
 }
+
+#define GDN_SEQ_ROWS(LPR, NV) \
+template [[host_name("gdn_seq_rows_" #LPR "_" #NV)]] kernel void gdn_seq_rows<LPR, NV>( \
+    device float*, device const float*, device const float*, device const float*, \
+    device const float*, device const float*, device float*, constant uint4&, \
+    constant uint4&, uint2, ushort, ushort, ushort);
+GDN_SEQ_ROWS(1, 1)
+GDN_SEQ_ROWS(2, 1)
+GDN_SEQ_ROWS(4, 1)
+GDN_SEQ_ROWS(8, 1)
+GDN_SEQ_ROWS(8, 2)
+GDN_SEQ_ROWS(8, 4)
 "#;
 
 /// Where a chunked recurrence reads Q, K and V: each a buffer and a
@@ -277,15 +213,20 @@ pub fn encode_delta_chunk(
         || !shape.n_v_heads.is_multiple_of(shape.n_k_heads)
         || (inputs.row_stride != 0
             && inputs.row_stride < shape.n_v_heads.max(shape.n_k_heads) * shape.head_dim)
+        // The kernel reads Q, K and the state as float4s.
+        || !inputs.row_stride.is_multiple_of(4)
+        || [inputs.q.1, inputs.k.1].iter().any(|o| !o.is_multiple_of(4))
     {
         return Err(MetalError::CommandFailed);
     }
-    let pipe = ensure_pipeline(device, GDN_CHUNK_KERNEL_SRC, "gdn_chunk_step")?;
-    encoder.setComputePipelineState(&pipe.0);
     let s = shape.head_dim;
-    if s > pipe.0.maxTotalThreadsPerThreadgroup() {
+    let (entry, lanes_per_row) = seq_entry(s).ok_or(MetalError::CommandFailed)?;
+    let pipe = ensure_pipeline(device, GDN_CHUNK_KERNEL_SRC, entry)?;
+    encoder.setComputePipelineState(&pipe.0);
+    if 32 * SG_PER_TG > pipe.0.maxTotalThreadsPerThreadgroup() {
         return Err(MetalError::CommandFailed);
     }
+    let rows_per_tg = SG_PER_TG * (32 / lanes_per_row);
     unsafe {
         for (idx, (buf, off)) in [
             (state, 0usize),
@@ -317,12 +258,12 @@ pub fn encode_delta_chunk(
     crate::dispatch::dispatch_counted(
         encoder,
         MTLSize {
-            width: shape.n_v_heads,
-            height: 1,
+            width: s.div_ceil(rows_per_tg),
+            height: shape.n_v_heads,
             depth: 1,
         },
         MTLSize {
-            width: s,
+            width: 32 * SG_PER_TG,
             height: 1,
             depth: 1,
         },

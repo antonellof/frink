@@ -102,11 +102,11 @@ without a rental.
    serves a stored expert; the packed `mul_mv_id` path and the Metal
    prefill MoE paths are still resident-only, then asynchronous reads
    and a run that really exceeds memory.
-9. **Bonsai PTQ1_0 prefill** (#540): the recurrent layers prefill as
-   one device run each (2.4x to 3.3x on an M5 Max, level with the
-   fork on a throttled GPU and at 0.6x of it on a quiet one); what is
-   left is the attention layers' head on the host and the chunked
-   recurrence kernel.
+9. **Bonsai PTQ1_0 prefill** (#540): a prompt batch is one device
+   command buffer, attention layers included, and pp512 is 1.07x the
+   fork's on a quiet M5 Max. The GEMMs are 80% of it and run at the
+   fork's rate (PTQ1_0 at Q8_0's, so not its dequant); decode (tg32
+   0.86x of the fork) is what is left.
 
 ### D. Architectures
 

@@ -100,7 +100,7 @@ mod tests {
     /// prefill run, against the host bodies the decoder runs otherwise:
     /// `wo` and the FFN for the tail, `Gdn::forward_rows` and the FFN for
     /// the layer. Every fold Bonsai carries is here, `ssm_out`'s head
-    /// permutation included, and 40 rows end the chunked recurrence on
+    /// permutation included, and 40 rows end the host's chunked recurrence on
     /// a short chunk. The run is repeated from the same state and must
     /// give the same bits: a first version did not.
     #[test]
@@ -269,8 +269,9 @@ mod tests {
                 frink_metal::gdn_prefill::launch_gdn_prefill_run(
                     &hidden,
                     rows,
+                    0,
                     Some(&tail),
-                    &[(layer, st)],
+                    &mut [frink_metal::gdn_prefill::PrefillRunLayer::Gdn(layer, st)],
                 )
             }
             .expect("the run launches")

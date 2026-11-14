@@ -296,15 +296,17 @@ impl Decoder {
                 continue;
             }
 
-            // A run of recurrent layers whole on the device, the batch
+            // A hybrid's run of recurrent layers, and the attention
+            // layers between them, whole on the device with the batch
             // resident across it (#540). Not under a tensor dump, which
             // wants every layer's intermediates on the host, nor with
             // HRM streams, which re-enter the stack between layers.
             #[cfg(feature = "metal")]
-            if dump.is_none() && hrm.is_none() && shape.attention.is_recurrent() {
-                if let Some(end) = self.metal_recurrent_prefill_run(
+            if dump.is_none() && hrm.is_none() {
+                if let Some(end) = self.metal_prefill_run_from(
                     l,
                     run_end,
+                    start_pos,
                     &mut hidden_batch,
                     batch_size,
                     kv_caches,
@@ -835,6 +837,7 @@ impl Decoder {
                         layer,
                         &branch,
                         run_end,
+                        start_pos,
                         &mut hidden_batch,
                         batch_size,
                         kv_caches,

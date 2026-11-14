@@ -46,6 +46,11 @@ pub mod gdn_branch;
 #[cfg(feature = "metal")]
 pub mod gdn_prefill;
 
+/// An attention layer whole inside that run, against the sequence's
+/// device KV mirror (#540).
+#[cfg(feature = "metal")]
+pub mod gdn_prefill_attn;
+
 /// Shared-storage buffers reused across launches, because allocating
 /// them per launch is host time the GPU ledger cannot see.
 #[cfg(feature = "metal")]

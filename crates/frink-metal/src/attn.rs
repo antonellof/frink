@@ -2106,7 +2106,7 @@ pub(crate) fn encode_gqa_with_kv(
 /// the next layer's dequant writes it again (WAR against this layer's GQA
 /// read) and nothing outside would know to order those.
 #[allow(clippy::too_many_arguments)]
-fn encode_gqa_prefill_with_kv(
+pub(crate) fn encode_gqa_prefill_with_kv(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     mrs: &mut MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
@@ -2759,7 +2759,7 @@ pub(crate) fn encode_attn_extras(
 
 /// Prefill (`batch ≥ 1`) extras using already-resident bias/norm buffers.
 #[allow(clippy::too_many_arguments)]
-fn encode_attn_extras_batch(
+pub(crate) fn encode_attn_extras_batch(
     encoder: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>,
     device: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>,
     extras: &AttnExtras<'_>,

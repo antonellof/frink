@@ -208,7 +208,96 @@ kernel void hadamard_fold_row(
         x[row_base + i] = tile[i] * scale;
     }
 }
+
+// `hadamard_fold` for a block of B = 128 to 1024, the butterflies in
+// registers: a thread holds four consecutive values for the stages
+// below 128 (two in the thread, five across the simdgroup by
+// `simd_shuffle_xor`), then a thread holds each of 128 columns'
+// `B / 128` values 128 apart for the stages above, through ONE
+// threadgroup barrier. Every butterfly is the tile kernel's -- the same
+// pair, the same stage order, `lo + hi` and `lo - hi` -- so the result
+// is the same to the bit; what goes is nine of its ten barriers and
+// most of its threadgroup traffic. At Bonsai's block of 1024 that
+// kernel ran a 512 x 17408 fold at 200 GB/s.
+template<ushort B>
+kernel void hadamard_fold_reg(
+    device float* x [[buffer(0)]],
+    device const float* signs [[buffer(1)]],
+    constant uint& block [[buffer(2)]],
+    constant uint& has_signs [[buffer(3)]],
+    constant uint4& perm [[buffer(4)]],
+    constant uint& row_width [[buffer(5)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    ushort tid [[thread_position_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]
+) {
+    threadgroup float tile[B];
+    const uint base = tgid * B;
+    const uint row_base = (base / row_width) * row_width;
+    float4 v = ((device const float4*)(x + base))[tid];
+    if (has_signs != 0u) {
+        v *= ((device const float4*)(signs + (base - row_base)))[tid];
+    }
+    // h = 1, then h = 2, inside the thread.
+    const float4 a = float4(v.x + v.y, v.x - v.y, v.z + v.w, v.z - v.w);
+    v = float4(a.x + a.z, a.y + a.w, a.x - a.z, a.y - a.w);
+    // h = 4 .. 64: the partner four values are lane `lane ^ m`'s.
+    for (ushort m = 1; m < 32; m <<= 1) {
+        const float4 p = simd_shuffle_xor(v, m);
+        v = (lane & m) ? (p - v) : (v + p);
+    }
+    const float scale = 1.0f / sqrt(float(B));
+    if (B == 128) {
+        ((device float4*)(x + base))[tid] = v * scale;
+        return;
+    }
+    ((threadgroup float4*)tile)[tid] = v;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // h = 128 .. B / 2: values 128 apart, in one thread. A block of
+    // 256 has 64 threads, so each takes two of the 128 columns.
+    constexpr ushort N = B / 128;
+    constexpr ushort T = B / 4;
+    for (ushort l = tid; l < 128; l += T) {
+        float r[N];
+        for (ushort i = 0; i < N; ++i) {
+            r[i] = tile[l + 128 * i];
+        }
+        for (ushort s = 1; s < N; s <<= 1) {
+            for (ushort i = 0; i < N; ++i) {
+                if ((i & s) == 0) {
+                    const float lo = r[i];
+                    const float hi = r[i + s];
+                    r[i] = lo + hi;
+                    r[i + s] = lo - hi;
+                }
+            }
+        }
+        for (ushort i = 0; i < N; ++i) {
+            x[base + l + 128 * i] = r[i] * scale;
+        }
+    }
+}
+
+#define HADAMARD_FOLD_REG(B) \
+template [[host_name("hadamard_fold_reg_" #B)]] kernel void hadamard_fold_reg<B>( \
+    device float*, device const float*, constant uint&, constant uint&, \
+    constant uint4&, constant uint&, uint, ushort, ushort);
+HADAMARD_FOLD_REG(128)
+HADAMARD_FOLD_REG(256)
+HADAMARD_FOLD_REG(512)
+HADAMARD_FOLD_REG(1024)
 "#;
+
+/// The register kernel for a block it is instantiated for.
+fn reg_entry(block: usize) -> Option<&'static str> {
+    Some(match block {
+        128 => "hadamard_fold_reg_128",
+        256 => "hadamard_fold_reg_256",
+        512 => "hadamard_fold_reg_512",
+        1024 => "hadamard_fold_reg_1024",
+        _ => return None,
+    })
+}
 
 /// Encodes the rotation of `x_buf` in place. `signs_buf` must be the
 /// plan's signs when it has any; the caller owns both buffers for the
@@ -237,6 +326,25 @@ pub fn encode_fold_rows(
     plan: &FoldPlan<'_>,
     signs_buf: Option<&ProtocolObject<dyn MTLBuffer>>,
 ) -> Result<(), MetalError> {
+    encode_fold_rows_on(
+        encoder, device, x_buf, row_width, rows, plan, signs_buf, true,
+    )
+}
+
+/// [`encode_fold_rows`], with the register kernel allowed (`reg`) or
+/// not: the tile kernel stays the reference the register one is held
+/// to bit for bit, and the kernel for blocks it is not instantiated for.
+#[allow(clippy::too_many_arguments)]
+fn encode_fold_rows_on(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    x_buf: &ProtocolObject<dyn MTLBuffer>,
+    row_width: usize,
+    rows: usize,
+    plan: &FoldPlan<'_>,
+    signs_buf: Option<&ProtocolObject<dyn MTLBuffer>>,
+    reg: bool,
+) -> Result<(), MetalError> {
     plan.check(row_width)?;
     if rows == 0 {
         return Ok(());
@@ -251,13 +359,18 @@ pub fn encode_fold_rows(
     if per_row && row_width > MAX_PERM_ROW {
         return Err(MetalError::CommandFailed);
     }
+    let reg = if per_row || !reg {
+        None
+    } else {
+        reg_entry(plan.block)
+    };
     let pipe = ensure_pipeline(
         device,
         HADAMARD_KERNEL_SRC,
-        if per_row {
-            "hadamard_fold_row"
-        } else {
-            "hadamard_fold"
+        match (per_row, reg) {
+            (true, _) => "hadamard_fold_row",
+            (false, Some(entry)) => entry,
+            (false, None) => "hadamard_fold",
         },
     )?;
     encoder.setComputePipelineState(&pipe.0);
@@ -294,6 +407,8 @@ pub fn encode_fold_rows(
     let (groups, threads) = if per_row {
         use objc2_metal::MTLComputePipelineState;
         (rows, pipe.0.maxTotalThreadsPerThreadgroup().clamp(1, 1024))
+    } else if reg.is_some() {
+        (width / plan.block, plan.block / 4)
     } else {
         (width / plan.block, THREADS.min(plan.block))
     };
@@ -361,6 +476,81 @@ mod tests {
     /// block another core has just rewritten mostly still reads the old
     /// bytes. The race showed on the real checkpoint instead, as a
     /// Bonsai parity KL that moved from run to run (#540).
+    /// The register kernel IS the tile kernel: every block it is
+    /// instantiated for, signed and not, several rows of several
+    /// blocks, the same bits out, and both within rounding of the host
+    /// definition.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn the_register_fold_is_the_tile_fold_to_the_bit() {
+        let shared = crate::gpu::shared_metal().expect("metal");
+        let device = &shared.device;
+        let new_buf = |data: &[f32]| unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    NonNull::new(data.as_ptr() as *mut _).unwrap(),
+                    std::mem::size_of_val(data),
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .expect("buffer")
+        };
+        for block in [128usize, 256, 512, 1024] {
+            for signed in [false, true] {
+                let (rows, width) = (5usize, 3 * block);
+                let signs: Vec<f32> = (0..width)
+                    .map(|i| if (i * 7) % 5 < 2 { -1.0 } else { 1.0 })
+                    .collect();
+                let plan = FoldPlan {
+                    block,
+                    signs: signed.then_some(&signs[..]),
+                    perm: None,
+                };
+                let x: Vec<f32> = (0..rows * width)
+                    .map(|i| ((i as f32) * 0.0137).sin() + (i % 97) as f32 * 0.01)
+                    .collect();
+                let signs_buf = new_buf(&signs);
+                let run = |reg: bool| {
+                    let x_buf = new_buf(&x);
+                    let cmd = shared.queue.commandBuffer().expect("cmd");
+                    let enc = cmd.computeCommandEncoder().expect("enc");
+                    encode_fold_rows_on(
+                        &enc,
+                        device,
+                        &x_buf,
+                        width,
+                        rows,
+                        &plan,
+                        signed.then_some(&*signs_buf),
+                        reg,
+                    )
+                    .expect("this block is servable");
+                    enc.endEncoding();
+                    cmd.commit();
+                    cmd.waitUntilCompleted();
+                    // SAFETY: shared storage of `rows * width` floats
+                    // the waited-for kernel wrote.
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            x_buf.contents().as_ptr() as *const f32,
+                            rows * width,
+                        )
+                        .to_vec()
+                    }
+                };
+                let (tile, reg) = (run(false), run(true));
+                let want = host_rows(&x, width, &plan);
+                for (i, ((t, r), w)) in tile.iter().zip(&reg).zip(&want).enumerate() {
+                    assert_eq!(
+                        t.to_bits(),
+                        r.to_bits(),
+                        "block {block} signed {signed} element {i}: tile {t} register {r}"
+                    );
+                    assert!((r - w).abs() <= 1e-4 * (1.0 + w.abs()), "element {i}");
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
     fn a_permuted_batch_rotates_in_place_without_a_race() {

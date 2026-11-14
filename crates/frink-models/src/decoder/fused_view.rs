@@ -46,6 +46,10 @@ pub(crate) struct FusedAttnExtras<'a> {
 pub(crate) struct FusedAttnCaps {
     pub sinks: bool,
     pub o_bias: bool,
+    /// Qwen3.5's double-width `wq` with the output gate interleaved
+    /// per head (`qwen35.cpp:191-199,229-230`): only the Metal prefill
+    /// run splits it and gates the attention before `wo`.
+    pub q_gate: bool,
 }
 
 impl FusedAttnCaps {
@@ -55,23 +59,36 @@ impl FusedAttnCaps {
     pub(crate) const METAL: Self = Self {
         sinks: false,
         o_bias: false,
+        q_gate: false,
     };
     /// Metal's fused stacks.
     #[cfg_attr(not(feature = "metal"), allow(dead_code))]
     pub(crate) const METAL_STACK: Self = Self {
         sinks: true,
         o_bias: true,
+        q_gate: false,
     };
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     pub(crate) const CUDA: Self = Self {
         sinks: true,
         o_bias: true,
+        q_gate: false,
+    };
+    /// The Metal prefill run's attention layers
+    /// (`frink_metal::gdn_prefill_attn`): the interleaved Q gate, and
+    /// neither the sinks nor `wo`'s bias.
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
+    pub(crate) const METAL_PREFILL_RUN: Self = Self {
+        sinks: false,
+        o_bias: false,
+        q_gate: true,
     };
     /// The Vulkan decode stack applies neither (`vulkan_stack`).
     #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
     pub(crate) const VULKAN: Self = Self {
         sinks: false,
         o_bias: false,
+        q_gate: false,
     };
 }
 
@@ -137,7 +154,7 @@ impl Decoder {
             || (o_bias.is_some() && !caps.o_bias)
             || shortconv.is_some()
             || ssm.is_some()
-            || *q_gate_interleaved
+            || (*q_gate_interleaved && !caps.q_gate)
         {
             return None;
         }
@@ -163,10 +180,16 @@ impl Decoder {
         layer: &LayerWeights,
         caps: FusedAttnCaps,
     ) -> bool {
+        Self::metal_can_serve_model(&self.config, self.lora_attached())
+            && self.fused_attn_layer_ok(layer, caps)
+    }
+
+    /// [`Self::layer_supports_fused_attn`] past the model-wide fence:
+    /// what this layer's attention carries. Asked on its own by a
+    /// launch that serves per-layer shapes (the Metal prefill run), on
+    /// top of [`Self::metal_can_serve_layers`].
+    pub(crate) fn fused_attn_layer_ok(&self, layer: &LayerWeights, caps: FusedAttnCaps) -> bool {
         use crate::config::RopeLayout;
-        if !Self::metal_can_serve_model(&self.config, self.lora_attached()) {
-            return false;
-        }
         // gpt-oss: a backend without the sinks and `wo`'s bias would
         // compute a *different* attention than the CPU path for the same
         // weights, so the family stays off it (Metal's per-layer

@@ -88,6 +88,16 @@ impl Decoder {
     /// properties of the model and not of the kernel language.
     #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
     pub(super) fn metal_can_serve_model(config: &ModelConfig, lora_attached: bool) -> bool {
+        Self::metal_can_serve_layers(config, lora_attached) && config.layer_shapes.is_uniform()
+    }
+
+    /// [`Self::metal_can_serve_model`] without the one fact that is
+    /// about a launch and not a kernel: that every layer has the same
+    /// head counts. The Metal prefill run takes each layer's own counts
+    /// and its own KV mirror (`frink_metal::gdn_prefill_attn`), so it
+    /// asks this; everything else asks the whole predicate.
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
+    pub(super) fn metal_can_serve_layers(config: &ModelConfig, lora_attached: bool) -> bool {
         !lora_attached
             && config.residual_scale.is_none()
             // `minimax-01.cpp:249,428`: the residual a fused kernel
@@ -151,7 +161,6 @@ impl Decoder {
                 .model_ffn_act()
                 .and_then(GluAct::fused_kernel_gelu_flag)
                 .is_some()
-            && config.layer_shapes.is_uniform()
             // Each fused launch takes ONE rotary width (`MetalRope::
             // rot_dim`); a model whose sliding layers rotate a
             // different width from its full ones (`rope_dim_swa`,
@@ -268,6 +277,16 @@ impl Decoder {
         &self,
         layer: &'a LayerWeights,
     ) -> Option<frink_metal::attn::AttnExtras<'a>> {
+        self.metal_attn_view_under(layer, fused_view::FusedAttnCaps::METAL_STACK)
+    }
+
+    /// [`Self::metal_attn_view`] under another launch family's caps.
+    #[cfg(feature = "metal")]
+    pub(super) fn metal_attn_view_under<'a>(
+        &self,
+        layer: &'a LayerWeights,
+        caps: fused_view::FusedAttnCaps,
+    ) -> Option<frink_metal::attn::AttnExtras<'a>> {
         let fused_view::FusedAttnExtras {
             q_bias,
             k_bias,
@@ -276,7 +295,7 @@ impl Decoder {
             k_norm,
             sinks,
             o_bias,
-        } = Self::fused_attn_extras(layer, fused_view::FusedAttnCaps::METAL_STACK)?;
+        } = Self::fused_attn_extras(layer, caps)?;
         Some(frink_metal::attn::AttnExtras {
             q_bias,
             k_bias,

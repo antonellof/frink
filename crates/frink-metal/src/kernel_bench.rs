@@ -240,3 +240,96 @@ fn serialized_small_kernel_costs() {
         eprintln!("  {name:<36} {us:>8.2} us");
     }
 }
+
+/// The prefill GEMM's rate on Bonsai-2-27B's FFN shape (`ffn_up`,
+/// 17408 x 5120, PTQ1_0) at 512 tokens, beside Q8_0 and Q4_0 on the
+/// same shape, with f32 and f16 activations: the number to put beside
+/// `test-backend-ops perf -o MUL_MAT`.
+///
+/// Run: `cargo test -p frink-metal --features metal --release --
+/// --ignored --nocapture prefill_gemm_rates`.
+#[test]
+#[ignore = "needs a real Metal GPU; prints a table"]
+fn prefill_gemm_rates() {
+    use crate::gpu::{encode_mul_mm_sg, encode_mul_mm_sg_f16, resident_weight_buffer};
+    let shared = shared_metal().expect("Metal");
+    let device = &shared.device;
+    let (rows, cols, batch) = (17408usize, 5120usize, 512usize);
+    let x = f32_buf(device, batch * cols).unwrap();
+    let xh = f16_buf(device, batch * cols).unwrap();
+    let out = f32_buf(device, batch * rows).unwrap();
+    let out2 = f32_buf(device, batch * rows).unwrap();
+    const N: usize = 8;
+    let mut seed = 99u32;
+    // SAFETY: shared buffers of exactly these lengths, no GPU work yet.
+    unsafe {
+        let xs = std::slice::from_raw_parts_mut(x.contents().as_ptr() as *mut f32, batch * cols);
+        let hs = std::slice::from_raw_parts_mut(xh.contents().as_ptr() as *mut u16, batch * cols);
+        for (a, h) in xs.iter_mut().zip(hs.iter_mut()) {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *a = ((seed >> 9) as f32 / (1u32 << 23) as f32) - 0.5;
+            *h = half::f16::from_f32(*a).to_bits();
+        }
+    }
+    // (kind, entry, block bytes, block elements, scale offset in a block)
+    for (name, fn_name, block_bytes, block_elems, scale_at) in [
+        ("ptq1_0", "ptq1_0_mul_mm_sg", 28usize, 128usize, 26usize),
+        ("q8_0", "q8_0_mul_mm_sg", 34, 32, 0),
+        ("q4_0", "q4_0_mul_mm_sg", 18, 32, 0),
+    ] {
+        let row_bytes = cols / block_elems * block_bytes;
+        let mut w = vec![0u8; rows * row_bytes];
+        for (i, b) in w.iter_mut().enumerate() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let at = i % block_bytes;
+            // Every block scale a small finite half (0x2000).
+            *b = if at == scale_at {
+                0
+            } else if at == scale_at + 1 {
+                0x20
+            } else {
+                (seed >> 24) as u8
+            };
+        }
+        let l = crate::gpu::MulMmSgLaunch {
+            weights: &w,
+            rows,
+            row_bytes,
+            fn_name,
+            block_bytes,
+            block_elems,
+        };
+        let wb = resident_weight_buffer(device, &w).unwrap();
+        let flops = 2.0 * (rows * cols * batch) as f64;
+        let f32_us = serialized_us(&shared, N, |e| {
+            encode_mul_mm_sg(e, device, &l, &wb, &x, &out, batch)
+        })
+        .unwrap();
+        let f16_us = serialized_us(&shared, N, |e| {
+            encode_mul_mm_sg_f16(e, device, &l, &wb, &xh, &out2, batch)
+        })
+        .unwrap();
+        // SAFETY: both written by command buffers that were waited for.
+        let (a, b) = unsafe {
+            (
+                std::slice::from_raw_parts(out.contents().as_ptr() as *const f32, batch * rows),
+                std::slice::from_raw_parts(out2.contents().as_ptr() as *const f32, batch * rows),
+            )
+        };
+        let same = a
+            .iter()
+            .zip(b)
+            .filter(|(x, y)| x.to_bits() == y.to_bits())
+            .count();
+        let maxd = a.iter().zip(b).fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+        eprintln!(
+            "  {name}: f32 vs f16-rounded activations: {same}/{} bit-identical, max |d| {maxd}",
+            a.len()
+        );
+        eprintln!(
+            "  {name:<8} f32 act {f32_us:>8.1} us {:>6.1} TFLOP/s   f16 act {f16_us:>8.1} us {:>6.1} TFLOP/s",
+            flops / f32_us / 1e6,
+            flops / f16_us / 1e6
+        );
+    }
+}

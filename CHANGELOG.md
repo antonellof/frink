@@ -118,6 +118,18 @@ are the ones worth reading twice.
   where the private loop, attending on the device, does 24.6 (llama.cpp
   does the same). `-cb`, `-np N` or `FRINK_CONTINUOUS_BATCHING=1` turn
   it on for many clients; without them concurrent requests serialize.
+- **A Qwen3.5 / Bonsai prompt batch prefills as ONE Metal command
+  buffer** (#540). The attention layers between the recurrent runs now
+  run on the device too: Q/K/V GEMMs, the interleaved Q gate, the
+  per-head QK norms, RoPE, the append to the sequence's f16 KV mirror
+  (the host cache gets the same rows back), the attention and the gate.
+  The device recurrence steps tokens one at a time as llama.cpp's
+  `kernel_gated_delta_net` does, eight lanes a state row, where it
+  chunked 16 tokens on a threadgroup a head (2.05 to 0.50 ms a layer);
+  the Hadamard fold keeps its butterflies in registers, bit for bit the
+  same (351 to 80 us at 512 x 17408); the f32 gate projections tile 8
+  rows by 8 outputs. Bonsai-2-27B pp512 on an M5 Max, interleaved on a
+  quiet GPU: 503 to 769 tok/s, the PrismML fork 718. Parity KL 1.18e-6.
 - **Host GQA decode attention reads each K/V row once per head group**,
   not once per query head, and the contiguous kernel spreads its head
   groups over the cores. Bit-identical; the batched decode above goes

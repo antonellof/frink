@@ -4600,6 +4600,7 @@ pub(crate) fn mul_mm_sg_f16_fn(fn_name: &str) -> Option<&'static str> {
         "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
         "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
         "f32_mul_mm_sg" => "f32_mul_mm_sg_f16",
+        "ptq1_0_mul_mm_sg" => "ptq1_0_mul_mm_sg_f16",
         _ => return crate::gen_kinds::f16_fn(fn_name),
     })
 }
