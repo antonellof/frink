@@ -1,4 +1,4 @@
-//! Rates, and values nothing has measured yet.
+//! Rates over a sliding window.
 //!
 //! [`RateWindow`] divides by the observed span, not by the window. A
 //! server running at 50 tok/s, polled one second into a five-second
@@ -8,9 +8,6 @@
 //! as the samples age out -- which is the property that matters, because
 //! a *cumulative* average would have an idle server reporting the rate
 //! it managed an hour ago forever.
-//!
-//! [`LastKnown`] is the other half of the same honesty rule: a pool that
-//! has never reported an occupancy reports nothing, not zero.
 
 use std::collections::VecDeque;
 
@@ -80,28 +77,6 @@ impl RateWindow {
         while self.samples.front().is_some_and(|(at, _)| *at < cutoff) {
             self.samples.pop_front();
         }
-    }
-}
-
-/// A value that is only reported once something has said what it is.
-///
-/// Pool occupancy arrives on replies that carry it and is absent from
-/// the ones that do not (a prompt-only reply, a non-hybrid model, a
-/// model with no window pool). Last-known-value, and `None` until there
-/// is one: reporting `0/0` would claim an empty pool was measured, which
-/// a client cannot tell apart from "there is no such pool here".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LastKnown<T: Copy> {
-    value: Option<T>,
-}
-
-impl<T: Copy> LastKnown<T> {
-    pub fn get(&self) -> Option<T> {
-        self.value
-    }
-
-    pub fn set(&mut self, value: T) {
-        self.value = Some(value);
     }
 }
 

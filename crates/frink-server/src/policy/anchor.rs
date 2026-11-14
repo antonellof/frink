@@ -39,9 +39,8 @@
 //! gap past it: at that distance the turn is clearly not about to end,
 //! and a prefix that far back is cheaper to recompute than to hold.
 //!
-//! That bound is exactly what the `anchor_checkpoints` term in
-//! [`crate::policy::pool_budget::swa_tokens_per_request`] pays for. Without the drop
-//! rule the pool sizing would be a fiction.
+//! That bound is what makes a per-request window cost finite at all:
+//! without the drop rule, any pool sized for one would be a fiction.
 //!
 //! Ported 1:1 from FreeToken's `scheduler/scheduler.py` (anchor
 //! detection), `scheduler/cache.py` (`maybe_free_swa_out_of_window`,

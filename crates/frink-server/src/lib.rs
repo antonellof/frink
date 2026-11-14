@@ -4464,6 +4464,7 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             Some(generate::KvPoolConfig {
                 pool: Arc::new(Mutex::new(KvBlockPool::new(block_size, total_blocks))),
                 queue_wait: Duration::from_millis(queue_wait_ms),
+                byte_budget: None,
             })
         }
         (Err(_), Ok(block_size), Ok(byte_budget)) => {
@@ -4511,6 +4512,10 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             Some(generate::KvPoolConfig {
                 pool: Arc::new(Mutex::new(KvBlockPool::new(block_size, total_blocks))),
                 queue_wait: Duration::from_millis(queue_wait_ms),
+                byte_budget: Some(generate::KvByteBudget {
+                    budget_bytes: budget,
+                    bytes_per_block: bytes_per_block as u64,
+                }),
             })
         }
         (Err(_), Err(_), Err(_)) => None,
@@ -4997,7 +5002,7 @@ pub(crate) mod tests {
     /// Declares a full 0..255 byte-compatible vocab so HTTP-level tests
     /// that render chat templates (ASCII role names) do not spuriously
     /// reject their own prompt prefixes.
-    fn test_model_full_byte_vocab() -> Model {
+    pub(crate) fn test_model_full_byte_vocab() -> Model {
         test_model_full_byte_vocab_with_eos(None)
     }
 
@@ -7926,7 +7931,7 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(refused["error"]["type"], "cache_rebuilding");
 
-        state.maintenance.lock().unwrap().finish_rebuild(true);
+        state.maintenance.lock().unwrap().finish_rebuild();
         let (status, _) = post_json_uri(&app, "/v1/chat/completions", body).await;
         assert_eq!(
             status,
@@ -10104,6 +10109,7 @@ pub(crate) mod tests {
         let config = generate::KvPoolConfig {
             pool,
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
         let result = run_generation(
             &model,
@@ -10142,6 +10148,7 @@ pub(crate) mod tests {
         let config = generate::KvPoolConfig {
             pool,
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
 
         let result = run_generation(
@@ -10214,6 +10221,7 @@ pub(crate) mod tests {
         let config = generate::KvPoolConfig {
             pool: pool.clone(),
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
 
         let produced = run_generation(
@@ -10836,6 +10844,7 @@ pub(crate) mod tests {
         let kv_pool_config = generate::KvPoolConfig {
             pool: pool.clone(),
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
         let pc = Mutex::new(PrefixCache::new(4));
 

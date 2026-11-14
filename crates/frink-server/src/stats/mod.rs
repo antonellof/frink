@@ -12,7 +12,7 @@
 //! | module | answers |
 //! |---|---|
 //! | [`ring`] | which finished requests a poller has not seen yet, and how many it missed |
-//! | [`rate`] | what the recent throughput is, and how to report a value nothing has measured |
+//! | [`rate`] | what the recent throughput is |
 //! | [`serving`] | what is in flight right now, and what completed or aborted |
 //! | [`requests`] | what `/admin/stats` and `/v1/requests` report about finished requests |
 //!
@@ -27,36 +27,27 @@
 //! request had one", this returns `None`. Zero is a measurement;
 //! absence is not.
 
-/// Wired: `RateWindow`, behind the two `/v1/stats` rates.
-/// Unwired: `LastKnown`, the "report nothing rather than zero" rule for
-/// a pool occupancy that only some replies carry. It has no reporter
-/// yet because the pool geometry it would hold is itself groundwork.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
+// `rate` and `serving` carry one unwired half between them, and it is a
+// live defect rather than spare capacity: nothing on any request path
+// calls `ServingStats::on_prefill`, `on_decode`, `on_admitted`,
+// `on_abort` or `on_finished`, so `RateWindow::record` has no caller,
+// the counter block is never incremented, and the two `/v1/stats`
+// throughput rates read 0.0 however busy the server is (`docs/API.md`
+// says so). Both allows go when the two decode paths report tokens as
+// they are produced, or when the rates and the counters are deleted.
+
+/// Wired: `RateWindow::new` and `tokens_per_second`, behind the two
+/// `/v1/stats` rates. Unwired: `record`; see above.
 #[allow(dead_code)]
 pub(crate) mod rate;
 
 /// A Prometheus histogram, behind `/metrics`' latency families.
 pub(crate) mod histogram;
 pub(crate) mod requests;
-
-/// Wired: `new`, `push`, `since`, `rows` and `recorded_total`, all from
-/// [`requests::Stats`].
-/// Unwired: `len`, `is_empty`, `capacity` -- the ring's own size, which
-/// `/admin/stats` does not report and its tests reach for directly.
-/// These became visible only when this module stopped sharing one
-/// crate-wide allow with the counters below; they are three accessors,
-/// not a roadmap item, and the honest closure is to delete them if
-/// nothing claims them.
-#[allow(dead_code)]
 pub(crate) mod ring;
 
-/// Wired: `ServingStats` and the two sliding-window rates `/v1/stats`
-/// reports. Unwired, and worth stating plainly: the counters
-/// (`inflight`, `completed`, `aborted`, `prompt_tokens_total`,
-/// `completion_tokens_total`) and `record` have NO caller, so the
-/// server holds a counter block it never increments. `/v1/stats`
-/// reports the rates only. Closes by wiring `record` into the request
-/// path, or by deleting the counters.
+/// Wired: `ServingStats::default` and the two rate reads `/v1/stats`
+/// makes. Unwired: every feeder and every counter; see above.
 #[allow(dead_code)]
 pub(crate) mod serving;
 

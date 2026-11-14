@@ -45,26 +45,25 @@
 
 // WHY THE `allow(dead_code)` BELOW, AND WHAT WOULD REMOVE EACH ONE.
 //
-// Every module here has live callers. Several also carry the UNWIRED
-// HALF of a roadmap item that is still open, and the item is named on
-// each. That is the only reason an allow is acceptable in this crate:
+// Every module here has live callers. Some also carry the UNWIRED
+// HALF of an issue that is still open, and the issue is named on each.
+// That is the only reason an allow is acceptable in this crate:
 // `grep -n "allow(dead_code)" policy/mod.rs` is meant to be the list of
-// what still owes a caller. An item that cannot name a roadmap entry
+// what still owes a caller. An item that cannot name an open issue
 // does not belong under one -- delete it instead.
 
 /// Wired: `decode_slide`, `AnchorState`, `SlidingRequest`,
 /// `WindowPolicy`, `resolve_anchor_token`.
-/// Unwired: `prefill_slide`, the prefill half of the same rule.
-/// Closes with `window-slide-during-decode` (roadmap `c3-serving-and-kv`).
+/// Unwired: `prefill_slide` and `SlideDecision::released`, the prompt
+/// half of the same rule. Closes with #61's prompt-region eviction.
 #[allow(dead_code)]
 pub(crate) mod anchor;
 
 pub(crate) mod detokenize;
 
 /// Wired: effort probing and the thinking-mode resolution behind
-/// `chat_template`. Unwired: `Effort::as_str` / `kwargs_for`, the
-/// name round-trip a user-supplied effort override would parse
-/// through. Closes with `t2-same-commands` (north star).
+/// `chat_template`. Unwired: `Effort::kwargs_for`, the round-trip a
+/// user-supplied effort override would go through. Closes with #404.
 #[allow(dead_code)]
 pub(crate) mod effort;
 
@@ -77,45 +76,20 @@ pub(crate) mod effort;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod footprint;
 
-/// Wired: the `MaintenanceGate` behind `/admin` admission and sealing.
-/// Unwired: `finish_loading`, `rebuild_never_dispatched`,
-/// `rebuild_timed_out`, the transitions a live pool rebuild drives.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
-#[allow(dead_code)]
 pub(crate) mod maintenance;
 
 pub(crate) mod outbox;
 
 /// Wired: both parsers, their formats and `infer`.
-/// Unwired: `ReasoningFormat`/`ToolCallFormat` `as_str` + `parse` (the
-/// name round-trip an explicit `--reasoning-format`-style override
-/// needs) and the `format()` accessors. Closes with `t2-same-commands`.
+/// Unwired: `ReasoningFormat`/`ToolCallFormat` `parse`, the name
+/// round-trip an explicit `--reasoning-format` override needs, the
+/// `format()` accessors and `ReasoningDelta::is_empty`. Closes with
+/// #404.
 #[allow(dead_code)]
 pub(crate) mod parser;
 
-/// Wired: `PoolSizes`, `RebuildRequest` and the two SWA constants.
-/// Unwired: `validate_rebuild`, `PoolFloors`, `RebuildRejected` -- the
-/// arithmetic that must refuse a re-split BEFORE the old pool is freed.
-/// `/admin/cache/rebuild` exists and does not yet consult it.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
-#[allow(dead_code)]
 pub(crate) mod pool_budget;
-
-/// Wired: `RadixCache::insert_prefix` / `match_prefix` / `lock` /
-/// `unlock`, from `generate::publish_to_radix`.
-/// Unwired, and this one is a live defect rather than spare capacity:
-/// `RadixCache::evict` HAS NO CALLER, so nothing ever releases the
-/// reference `generate.rs` takes when it publishes. The page pool
-/// shrinks monotonically until admission starts refusing.
-/// Closes with `wire-radix-prefix-cache` (roadmap `c3-serving-and-kv`).
-#[allow(dead_code)]
 pub(crate) mod radix;
-
-/// Wired: `RebuildTxn::open` and the outcome match in `cache_admin`.
-/// Unwired: the activity predicates and rollback accessors the
-/// transaction exposes for a caller that drives it to completion.
-/// Closes with the rebuild half of `c3-serving-and-kv`.
-#[allow(dead_code)]
 pub(crate) mod rebuild;
 
 /// The differential turn-boundary analyzer, beside `effort` because it

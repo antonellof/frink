@@ -109,7 +109,7 @@ default.
 | `FRINK_KV_POOL_BLOCKS` | KV block-pool size (blocks). Bounds the KV all requests may hold; each request still owns a private buffer |
 | `FRINK_KV_POOL_BLOCK_SIZE` | Tokens per KV pool block |
 | `FRINK_KV_POOL_QUEUE_TIMEOUT_MS` | How long a request waits for free KV before rejection (default `0`). Applies to the pool and paged KV |
-| `FRINK_KV_BYTE_BUDGET` | Byte ceiling for the KV block pool. Exclusive with `FRINK_KV_POOL_BLOCKS` |
+| `FRINK_KV_BYTE_BUDGET` | Byte ceiling for the KV block pool, and for a live re-split of it through `POST /v1/cache/rebuild`. Exclusive with `FRINK_KV_POOL_BLOCKS` |
 | `FRINK_PAGED_KV_BLOCKS` | Blocks per layer of paged KV: shared pages read through a block table. `frink-server` only. Exclusive with `FRINK_KV_POOL_BLOCKS`/`FRINK_KV_BYTE_BUDGET` and `FRINK_PREFIX_CACHE_ENTRIES` (the server stops naming both). Turns on [prefix sharing](#sharing-pages-between-prompts) |
 | `FRINK_PAGED_KV_BLOCK_SIZE` | Positions per paged-KV block. Required with `FRINK_PAGED_KV_BLOCKS` |
 | `FRINK_PAGED_KV_SLIDE_INTERVAL` | Decode steps between window slides on a paged store (default 128). Applies only when *every* layer slides by the same window |

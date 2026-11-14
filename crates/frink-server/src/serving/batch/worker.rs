@@ -292,12 +292,6 @@ pub(super) fn apply_aborts(
 
 /// The gauges both status lines carry.
 ///
-/// This is the block model's admission policy, and the only one on the
-/// serving path. `crate::serving::admission` holds the WINDOW and
-/// RECURRENT models' -- page-aligned chunks, window reclaim, recurrent
-/// slots -- which are precisely the cases this batcher excludes below.
-/// The two are not one policy written twice; see that module's docs
-/// before merging them.
 /// `window` and `recurrent` are `None` and not zero: frink serves no
 /// windowed or recurrent model through this batcher, and the reporter
 /// omits a pool it is given `None` for entirely rather than printing a

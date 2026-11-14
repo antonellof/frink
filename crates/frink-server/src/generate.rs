@@ -125,6 +125,17 @@ impl DecodeError {
 pub struct KvPoolConfig {
     pub pool: Arc<Mutex<KvBlockPool>>,
     pub queue_wait: Duration,
+    /// `Some` when the pool was sized from `FRINK_KV_BYTE_BUDGET`: the
+    /// ceiling `POST /v1/cache/rebuild` holds a re-split to. `None` for
+    /// a pool sized in blocks, which has no byte figure to hold it to.
+    pub byte_budget: Option<KvByteBudget>,
+}
+
+/// A KV pool's byte budget and what one block of it costs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvByteBudget {
+    pub budget_bytes: u64,
+    pub bytes_per_block: u64,
 }
 
 /// The paged counterpart to [`KvPoolConfig`]: per-layer
@@ -4736,7 +4747,11 @@ mod tests {
     }
 
     fn pool_config(pool: Arc<Mutex<KvBlockPool>>, queue_wait: Duration) -> KvPoolConfig {
-        KvPoolConfig { pool, queue_wait }
+        KvPoolConfig {
+            pool,
+            queue_wait,
+            byte_budget: None,
+        }
     }
 
     /// Published prefixes must come BACK, or a long-running server
