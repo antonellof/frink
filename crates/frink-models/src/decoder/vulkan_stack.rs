@@ -270,7 +270,14 @@ impl Decoder {
         let rope = c.layer_rope(li).map(|r| {
             let rot = r.rot_dim.unwrap_or(c.head_dim);
             let tables = (pos..pos + batch)
-                .flat_map(|p| frink_core::rope_table::rope_cos_sin(p, r.theta, rot, r.freq_factors))
+                .flat_map(|p| {
+                    frink_core::rope_table::rope_cos_sin(
+                        p,
+                        r.theta,
+                        rot,
+                        r.freq_factors.map(|v| &**v),
+                    )
+                })
                 .collect();
             (tables, rot)
         });
@@ -287,11 +294,11 @@ impl Decoder {
             up: job(&ex.up)?,
             down: job(&ex.down)?,
             rope,
-            q_bias,
-            k_bias,
-            v_bias,
-            q_norm,
-            k_norm,
+            q_bias: q_bias.map(|v| &**v),
+            k_bias: k_bias.map(|v| &**v),
+            v_bias: v_bias.map(|v| &**v),
+            q_norm: q_norm.map(|v| &**v),
+            k_norm: k_norm.map(|v| &**v),
             gelu,
             window,
         })

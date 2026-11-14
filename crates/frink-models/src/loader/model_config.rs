@@ -1214,8 +1214,8 @@ impl ModelConfig {
                     }
                     let full: Vec<f32> = full[..full_width / 2].to_vec();
                     return Ok(crate::config::RopeFreqs {
-                        full,
-                        swa: Some(vec![1.0; swa_width / 2]),
+                        full: full.into(),
+                        swa: Some(vec![1.0; swa_width / 2].into()),
                     });
                 }
                 // One width: the sliding layers take the file's own
@@ -1229,7 +1229,10 @@ impl ModelConfig {
                         _ => vec![1.0; full.len()],
                     })
                     .filter(|swa| *swa != full);
-                Ok(crate::config::RopeFreqs { full, swa })
+                Ok(crate::config::RopeFreqs {
+                    full: full.into(),
+                    swa: swa.map(Into::into),
+                })
             })
             .transpose()?;
 

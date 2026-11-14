@@ -21,13 +21,14 @@
 use crate::dispatch::dispatch_counted;
 use crate::gpu::{
     encode_matvec, encode_mul_mm_sg_f16, ensure_pipeline, f32_mul_mm_sg_launch,
-    resident_f32_buffer, resident_weight_buffer, MatvecLaunch, MetalError, MulMmSgLaunch,
+    resident_f32_shared, resident_weight_buffer, MatvecLaunch, MetalError, MulMmSgLaunch,
 };
 use crate::mem_ranges::MemRanges;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLDevice, MTLResourceOptions, MTLSize};
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// A weight the PREFILL stack multiplies a whole batch by: a quantized
@@ -75,7 +76,7 @@ impl PrefillMatMetal<'_> {
 /// host body and this one take them from the same expression.
 pub struct PleInputMetal<'a, L> {
     pub model_proj: L,
-    pub proj_norm_w: &'a [f32],
+    pub proj_norm_w: &'a Arc<[f32]>,
     pub tok_rows: &'a [f32],
     pub n_embd: usize,
     pub n_layer: usize,
@@ -92,7 +93,7 @@ pub struct PleInputMetal<'a, L> {
 pub struct PerLayerGateMetal<'a, L> {
     pub gate: L,
     pub proj: L,
-    pub post_norm: &'a [f32],
+    pub post_norm: &'a Arc<[f32]>,
     /// Which `n_embd` chunk of the prologue's plane this layer reads.
     pub slot: usize,
 }
@@ -336,7 +337,7 @@ impl<L> PleInputMetal<'_, L> {
         mrs.begin_op(enc, &[plane], &[plane]);
         encode_scale(enc, device, plane, self.proj_scale, n)?;
         mrs.end_op(&[plane], &[plane]);
-        let norm_w = resident_f32_buffer(device, self.proj_norm_w)?;
+        let norm_w = resident_f32_shared(device, self.proj_norm_w)?;
         mrs.begin_op(enc, &[plane], &[plane]);
         crate::norm::encode_rms_norm_batch(
             enc,
@@ -476,7 +477,7 @@ impl<L> PerLayerGateMetal<'_, L> {
         rms_eps: f32,
     ) -> Result<(), MetalError> {
         assert_eq!(self.post_norm.len(), hidden_dim);
-        let pw = resident_f32_buffer(device, self.post_norm)?;
+        let pw = resident_f32_shared(device, self.post_norm)?;
         mrs.begin_op(enc, &[s.out], &[s.out]);
         crate::norm::encode_rms_norm_batch(
             enc,

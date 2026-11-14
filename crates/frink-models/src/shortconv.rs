@@ -171,7 +171,7 @@ pub fn is_shortconv_architecture(arch: &str) -> bool {
 pub struct ShortConv {
     /// `blk.N.shortconv.conv.weight`, `[n_embd][l_cache]`: channel `c`'s
     /// taps, oldest first.
-    pub conv: Vec<f32>,
+    pub conv: std::sync::Arc<[f32]>,
     /// `{arch}.shortconv.l_cache`, the conv's width.
     pub l_cache: usize,
     /// `blk.N.shortconv.in_proj.weight`, `[3 n_embd, n_embd]`.
@@ -230,7 +230,7 @@ impl ShortConv {
             }
         }
         Ok(Self {
-            conv,
+            conv: conv.into(),
             l_cache,
             in_proj,
             out_proj,
@@ -363,7 +363,7 @@ mod tests {
             }
         }
         let sc = ShortConv {
-            conv: vec![1.0, 2.0, 3.0, 0.0, 0.0, 1.0],
+            conv: vec![1.0, 2.0, 3.0, 0.0, 0.0, 1.0].into(),
             l_cache: 3,
             in_proj: WeightMatrix::F32(Tensor::new(in_v, vec![3 * n, n])),
             out_proj: identity(n),

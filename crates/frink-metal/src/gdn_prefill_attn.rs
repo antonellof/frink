@@ -22,13 +22,14 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLDevice, MTLSize};
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::attn::{AttnExtras, LayerRope, MetalKvBuffers, MetalKvDtype, MetalRope};
 use crate::gdn_prefill::{
     cols_of, encode_fold, encode_gemm, encode_wo_tail, fold_ok, slot, wo_tail_supported, Enc,
     PrefillFfn,
 };
-use crate::gpu::{ensure_pipeline, resident_f32_buffer, MetalError, MulMmSgLaunch};
+use crate::gpu::{ensure_pipeline, resident_f32_shared, MetalError, MulMmSgLaunch};
 use crate::hadamard::FoldPlan;
 
 /// `qwen35.cpp:191-199`: each head of the double-width `wq` output is
@@ -61,7 +62,7 @@ kernel void q_gate_split_rows(
 /// is encoded.
 pub struct PrefillAttnLayer<'a> {
     /// `blk.N.attn_norm.weight`; the model's RMS epsilon is `eps`.
-    pub attn_norm: &'a [f32],
+    pub attn_norm: &'a Arc<[f32]>,
     pub eps: f32,
     /// The rotation `wq`, `wk` and `wv` share on their input.
     pub fold_x: Option<FoldPlan<'a>>,
@@ -96,8 +97,8 @@ impl PrefillAttnLayer<'_> {
         let q_width = self.n_heads * hd;
         let kv_width = n_kv * hd;
         let e = &self.extras;
-        let norm_ok = |w: Option<&[f32]>| w.is_none_or(|w| w.len() == hd);
-        let bias_ok = |b: Option<&[f32]>, n: usize| b.is_none_or(|b| b.len() == n);
+        let norm_ok = |w: Option<&Arc<[f32]>>| w.is_none_or(|w| w.len() == hd);
+        let bias_ok = |b: Option<&Arc<[f32]>>, n: usize| b.is_none_or(|b| b.len() == n);
         let rot = self.rope.rot_dim.unwrap_or(hd);
         hidden > 0
             && hd > 0
@@ -195,7 +196,7 @@ pub(crate) fn encode_attn_layer(
     let hidden = w.attn_norm.len();
     let (hd, n_kv) = (kv.head_dim, kv.n_kv_heads);
     let (q_width, kv_width) = (w.n_heads * hd, n_kv * hd);
-    let attn_norm = resident_f32_buffer(device, w.attn_norm)?;
+    let attn_norm = resident_f32_shared(device, w.attn_norm)?;
 
     let encoder = enc.span("pf_attn_norm")?;
     crate::norm::encode_rms_norm_batch(
@@ -260,7 +261,7 @@ pub(crate) fn encode_attn_layer(
     }
     if let Some(r) = w.layer_rope {
         let ff = match r.freq_factors {
-            Some(ff) => Some(resident_f32_buffer(device, ff)?),
+            Some(ff) => Some(resident_f32_shared(device, ff)?),
             None => None,
         };
         let ff = ff.as_ref().map(|f| &*f.buffer);

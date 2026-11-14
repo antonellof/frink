@@ -128,7 +128,7 @@ fn vec_digest(v: &[f32]) -> String {
     format!("len={} sum={sum:?} fnv={h:016x}", v.len())
 }
 
-fn opt_vec(v: &Option<Vec<f32>>) -> String {
+fn opt_vec<T: std::ops::Deref<Target = [f32]>>(v: &Option<T>) -> String {
     match v {
         Some(v) => vec_digest(v),
         None => "None".into(),
@@ -175,7 +175,7 @@ fn config_layers(c: &ModelConfig, out: &mut String) {
                 r.theta,
                 r.rot_dim,
                 r.freq_factors
-                    .map(vec_digest)
+                    .map(|f| vec_digest(f))
                     .unwrap_or_else(|| "None".into())
             ),
             None => "None".into(),

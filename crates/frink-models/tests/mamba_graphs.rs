@@ -308,7 +308,7 @@ fn metal_decode_runs_the_mamba1_blocks_in_the_dense_stack() {
         (MAMBA2, &MAMBA2_GOLDEN, true),
     ] {
         let d = load_graph_fixture(name);
-        let got = decode(&d);
+        let got = common::decode_with_resident_planes(&d, name);
         assert_eq!(
             d.metal_hybrid_allocated(),
             on_stack,

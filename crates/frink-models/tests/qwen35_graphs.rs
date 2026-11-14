@@ -400,7 +400,7 @@ fn the_loaded_decoder_is_the_graph() {
     let attn = &d.layers[3].attn;
     assert!(attn.q_gate_interleaved);
     assert_eq!(attn.q_proj.rows(), 2 * 4 * 8);
-    assert_eq!(attn.q_norm.as_ref().map(Vec::len), Some(8));
+    assert_eq!(attn.q_norm.as_ref().map(|w| w.len()), Some(8));
     assert!(attn.ssm.is_none());
 }
 
@@ -440,7 +440,7 @@ fn paged_decode_matches_contiguous() {
 fn each_seam_is_visible_in_the_logits() {
     let mut d = load_graph_fixture(Q35);
     assert_decoder_matches_on_all_three_paths(&d, &Q35_GOLDEN, GRAPH_TOL, "baseline");
-    let saved: Vec<f32> = d.layers[0]
+    let saved: std::sync::Arc<[f32]> = d.layers[0]
         .attn
         .ssm
         .as_ref()
@@ -449,16 +449,8 @@ fn each_seam_is_visible_in_the_logits() {
         .unwrap()
         .a
         .clone();
-    for a in d.layers[0]
-        .attn
-        .ssm
-        .as_mut()
-        .unwrap()
-        .gdn_mut()
-        .unwrap()
-        .a
-        .iter_mut()
-    {
+    let gdn = d.layers[0].attn.ssm.as_mut().unwrap().gdn_mut().unwrap();
+    for a in std::sync::Arc::make_mut(&mut gdn.a).iter_mut() {
         *a = -30.0;
     }
     let worst = worst_vs(&decode(&d), &Q35_GOLDEN);

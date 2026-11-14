@@ -206,8 +206,8 @@ impl Decoder {
                 },
                 o,
                 ffn,
-                post_attn_norm: layer.attn.post_attn_norm.as_deref(),
-                post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
+                post_attn_norm: layer.attn.post_attn_norm.as_ref(),
+                post_ffn_norm: layer.attn.post_ffn_norm.as_ref(),
                 extras: self.metal_attn_extras(layer),
                 rope: self.metal_layer_rope(li),
                 // The run-length check above saw a uniform window.

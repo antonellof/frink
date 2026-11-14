@@ -17,7 +17,6 @@ use super::fused_view::FusedAttnCaps;
 use super::{Decoder, LayerWeights};
 use crate::fused_layer::LayerFfnParts;
 use crate::layer_shapes::AttnShape;
-use frink_core::kv_store::KvRows;
 use frink_core::KvCache;
 use frink_metal::gdn_prefill_attn::PrefillAttnLayer;
 use frink_metal::prefill_run::PrefillRunLayer;
@@ -27,7 +26,7 @@ use frink_metal::prefill_run::PrefillRunLayer;
 pub(super) struct ResidentAttnParts<'a> {
     pub(super) n_heads: usize,
     pub(super) n_kv_heads: usize,
-    pub(super) attn_norm: &'a [f32],
+    pub(super) attn_norm: &'a std::sync::Arc<[f32]>,
     pub(super) eps: f32,
     pub(super) fold_x: Option<frink_metal::hadamard::FoldPlan<'a>>,
     pub(super) q: &'a frink_core::WeightMatrix,
@@ -54,7 +53,11 @@ pub(super) enum RunKind {
 
 /// One layer of a run as planned, before any cache is touched.
 pub(super) enum Planned<'a> {
-    Gdn(&'a crate::gdn::Gdn, &'a [f32], Box<LayerFfnParts<'a>>),
+    Gdn(
+        &'a crate::gdn::Gdn,
+        &'a std::sync::Arc<[f32]>,
+        Box<LayerFfnParts<'a>>,
+    ),
     Attn(Box<PrefillAttnLayer<'a>>),
     /// An attention layer and its parallel Mamba-2 block.
     Parallel(Box<PrefillAttnLayer<'a>>, &'a crate::mamba2::Mamba2),
@@ -68,6 +71,12 @@ impl Decoder {
     /// no further than `run_end`. Returns where the caller resumes, with
     /// `hidden` replaced by the batch as it leaves the run, or `None`
     /// when nothing ran and the host bodies take layer `start`.
+    ///
+    /// With `last_logits`, a run that ends the stack also runs the
+    /// output head on the last row in its own command buffer and fills
+    /// the slot, when the head is one the device can apply
+    /// ([`Self::metal_prefill_output_head`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn metal_prefill_run_from(
         &self,
         start: usize,
@@ -76,8 +85,45 @@ impl Decoder {
         hidden: &mut Vec<f32>,
         rows: usize,
         kv_caches: &mut [KvCache],
+        last_logits: Option<&mut Option<Vec<f32>>>,
     ) -> Option<usize> {
-        self.metal_prefill_run(start, run_end, start_pos, None, hidden, rows, kv_caches)
+        self.metal_prefill_run(
+            start,
+            run_end,
+            start_pos,
+            None,
+            hidden,
+            rows,
+            kv_caches,
+            last_logits,
+        )
+    }
+
+    /// The output head as a prefill run applies it: the final RMSNorm
+    /// and `lm_head`'s Metal matvec, on the terms the decode stacks fold
+    /// it on (`FoldedLmHead::permit`: an RMS final norm and no
+    /// `output.bias`). The softcap and the multiplier stay the host's,
+    /// applied to the raw logits as `FoldedLmHead::interpret` applies
+    /// them after a decode stack.
+    fn metal_prefill_output_head(
+        &self,
+    ) -> Option<(
+        frink_metal::prefill_run::PrefillOutputHead<'_>,
+        super::lm_head::FoldedLmHead<()>,
+    )> {
+        let lm_head = Self::metal_matvec_launch(&self.output_head)?;
+        let permit = super::lm_head::FoldedLmHead::permit(
+            false,
+            &self.final_norm,
+            self.output_bias.as_deref(),
+            Some(()),
+        )?;
+        let head = frink_metal::prefill_run::PrefillOutputHead {
+            norm: self.final_norm.rms_weights()?,
+            eps: self.config.rms_norm_eps,
+            lm_head,
+        };
+        Some((head, permit))
     }
 
     /// Attention layer `l`'s tail -- `wo` over `branch` (the attention
@@ -124,6 +170,7 @@ impl Decoder {
             hidden,
             rows,
             kv_caches,
+            None,
         )?;
         Self::record_fused_ffn(layer);
         Some(end)
@@ -300,6 +347,7 @@ impl Decoder {
         hidden: &mut Vec<f32>,
         rows: usize,
         kv_caches: &mut [KvCache],
+        last_logits: Option<&mut Option<Vec<f32>>>,
     ) -> Option<usize> {
         if !self.prefill_rows_take_device(rows) || !self.has_run_layers() {
             return None;
@@ -351,7 +399,7 @@ impl Decoder {
         }
         // Each conv layer's window in, and its new rows out, owned here
         // so the run can borrow them.
-        let mut conv_io = self.ssm_prefill_conv_io(&plan, &kv_caches[start..end], rows);
+        let mut conv_io = self.ssm_prefill_conv_io(&plan, &kv_caches[start..end]);
         let mut entries = Vec::with_capacity(plan.len());
         let mut io = conv_io.iter_mut();
         for (p, cache) in plan.into_iter().zip(kv_caches[start..end].iter_mut()) {
@@ -381,12 +429,18 @@ impl Decoder {
                 Planned::Ssm(s) => self.ssm_prefill_layer(*s, cache, &mut io)?,
             });
         }
+        // The output head rides in the run only when the run ends the
+        // stack: anything after it would change the last row.
+        let output = match &last_logits {
+            Some(_) if end == self.config.n_layers => self.metal_prefill_output_head(),
+            _ => None,
+        };
         // SAFETY: each state is page-aligned (`AlignedF32`) and lives in
         // its own cache element, borrowed mutably through `kv_caches`
         // for this whole call and touched by nothing else; the launch
         // waits for the GPU before returning.
-        let out = unsafe {
-            frink_metal::prefill_run::launch_prefill_run(
+        let (out, raw_logits) = unsafe {
+            frink_metal::prefill_run::launch_prefill_run_with_head(
                 hidden,
                 rows,
                 start_pos,
@@ -395,24 +449,28 @@ impl Decoder {
                 frink_metal::gdn_prefill::RunOptions {
                     residual_scale: self.config.residual_scale,
                 },
+                output.as_ref().map(|(o, _)| o),
             )
         }
         .ok()?;
+        if let (Some(slot), Some((_, permit)), Some(raw)) = (last_logits, &output, raw_logits) {
+            *slot = Some(permit.interpret(
+                raw,
+                self.output_head.rows(),
+                self.config.final_logit_softcap,
+                self.config.logit_multiplier,
+            ));
+        }
         drop(entries);
-        let mut io = conv_io.into_iter();
+        drop(conv_io);
         for (l, cache) in (start..end).zip(kv_caches[start..end].iter_mut()) {
             match self.config.layer_shape(l).attention {
                 AttnShape::Gdn | AttnShape::Mamba1 | AttnShape::Mamba2 => cache
                     .advance_len(rows)
                     .expect("unbounded/planned KvCache growth is infallible"),
-                AttnShape::ShortConv => {
-                    // The history the conv appended, one `b * x` row per
-                    // token, as `contiguous_step` pushes it on the host.
-                    let (_, bx) = io.next().expect("one io per conv layer");
-                    cache
-                        .push_rows(KvRows::F32(&bx), KvRows::F32(&[]), rows)
-                        .expect("unbounded/planned KvCache growth is infallible");
-                }
+                // The run pushed the conv's new history rows itself
+                // (`ssm_prefill_layer`'s `bx_out`).
+                AttnShape::ShortConv => {}
                 _ => {
                     // The host rows, from the mirror the run appended to:
                     // the host cache stays the authority, and the mirror
@@ -431,6 +489,8 @@ impl Decoder {
             // dense prefill stack's MoE, nothing reads them back.
             Self::record_fused_ffn(self.layer_for(l));
         }
+        // Empty when the run returned the logits instead: the stack ends
+        // here and the caller reads only the slot.
         *hidden = out;
         Some(end)
     }
@@ -491,10 +551,10 @@ mod tests {
         down: WeightMatrix,
         fold_x: Arc<HadamardFold>,
         fold_o: Arc<HadamardFold>,
-        attn_norm: Vec<f32>,
-        ffn_norm: Vec<f32>,
-        q_norm: Vec<f32>,
-        k_norm: Vec<f32>,
+        attn_norm: std::sync::Arc<[f32]>,
+        ffn_norm: std::sync::Arc<[f32]>,
+        q_norm: std::sync::Arc<[f32]>,
+        k_norm: std::sync::Arc<[f32]>,
         hidden: Vec<f32>,
         /// The mirror's earlier rows, f16 as it holds them.
         k0: Vec<f32>,
@@ -559,10 +619,10 @@ mod tests {
         gate.fold_hadamard(fold_ffn.clone());
         up.fold_hadamard(fold_ffn);
         down.fold_hadamard(fold_act);
-        let attn_norm: Vec<f32> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
-        let ffn_norm: Vec<f32> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
-        let q_norm: Vec<f32> = rnd(hd, 0.5).iter().map(|x| 1.0 + x).collect();
-        let k_norm: Vec<f32> = rnd(hd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let attn_norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let ffn_norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let q_norm: std::sync::Arc<[f32]> = rnd(hd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let k_norm: std::sync::Arc<[f32]> = rnd(hd, 0.5).iter().map(|x| 1.0 + x).collect();
         let hidden = rnd(rows * n_embd, 1.0);
         // Earlier rows as the mirror holds them: f16.
         let f16 = |v: Vec<f32>| -> Vec<f32> {
@@ -933,7 +993,7 @@ mod tests {
             kind: QuantKind::Q8_0,
         };
         output.fold_hadamard(fold);
-        let norm: Vec<f32> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let norm: std::sync::Arc<[f32]> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
         let hidden = rnd(n_embd, 8.0);
         // The host head, as `Decoder::logits_from_normed` projects.
         let want = output.apply(&rms_norm(&hidden, &norm, eps));

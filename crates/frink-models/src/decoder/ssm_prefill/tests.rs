@@ -100,7 +100,7 @@ fn a_conv_layer_in_the_run_matches_the_host_body() {
     let (n, ffn_dim, l, rows, prior) = (128usize, 192usize, 3usize, 24usize, 3usize);
     let mut r = Rng(9_101);
     let conv = ShortConv {
-        conv: r.v(n * l, 1.0),
+        conv: r.v(n * l, 1.0).into(),
         l_cache: l,
         in_proj: q8(3 * n, n, r.v(3 * n * n, 0.3)),
         out_proj: q8(n, n, r.v(n * n, 0.3)),
@@ -110,8 +110,8 @@ fn a_conv_layer_in_the_run_matches_the_host_body() {
         q8(ffn_dim, n, r.v(ffn_dim * n, 0.2)),
         q8(n, ffn_dim, r.v(n * ffn_dim, 0.2)),
     );
-    let attn_norm: Vec<f32> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
-    let ffn_norm: Vec<f32> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
+    let attn_norm: std::sync::Arc<[f32]> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
+    let ffn_norm: std::sync::Arc<[f32]> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
     let ffn = LayerFfnParts::from_parts(&ffn_norm, EPS, &gate, &up, &down);
     let hidden = r.v(rows * n, 2.0);
     let scale = Some(0.37f32);
@@ -148,7 +148,7 @@ fn a_conv_layer_in_the_run_matches_the_host_body() {
                 layer,
                 PrefillConvState {
                     window: &window,
-                    bx_out: &mut bx_out,
+                    bx_out: Box::new(|bx: &[f32]| bx_out.extend_from_slice(bx)),
                 },
             )],
             RunOptions {
@@ -215,7 +215,7 @@ fn a_mamba1_layer_in_the_run_matches_the_host_body() {
             },
         };
         let m = mamba1(&mut r, n, norm);
-        let attn_norm: Vec<f32> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
+        let attn_norm: std::sync::Arc<[f32]> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
         let hidden = r.v(rows * n, 2.0);
         let state0 = warm(m.zero_state(), &mut r);
 
@@ -237,7 +237,7 @@ fn a_mamba1_layer_in_the_run_matches_the_host_body() {
                 eps: EPS,
             }),
             DtBcNorm::Weighted { dt, b, c } => Some(DtBcNormMetal {
-                weights: Some((&dt[..], &b[..], &c[..])),
+                weights: Some((dt, b, c)),
                 eps: EPS,
             }),
         };
@@ -316,9 +316,9 @@ fn a_mamba2_layer_in_the_run_matches_the_host_body() {
         in_proj: q8(h.in_proj_rows(), n, r.v(h.in_proj_rows() * n, 0.3)),
         conv1d: r.v(h.conv_width() * h.d_conv, 1.0).into(),
         conv1d_bias: r.v(h.conv_width(), 0.5).into(),
-        dt_bias: r.v(h.n_head, 1.0),
+        dt_bias: r.v(h.n_head, 1.0).into(),
         a: r.v(h.n_head, 2.0).iter().map(|v| -v.abs()).collect(),
-        d: r.v(h.n_head, 1.0),
+        d: r.v(h.n_head, 1.0).into(),
         norm: Some(r.v(h.d_inner, 0.5).iter().map(|x| 1.0 + x).collect()),
         out_proj: q8(n, h.d_inner, r.v(n * h.d_inner, 0.3)),
     };
@@ -327,8 +327,8 @@ fn a_mamba2_layer_in_the_run_matches_the_host_body() {
         q8(ffn_dim, n, r.v(ffn_dim * n, 0.2)),
         q8(n, ffn_dim, r.v(n * ffn_dim, 0.2)),
     );
-    let attn_norm: Vec<f32> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
-    let ffn_norm: Vec<f32> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
+    let attn_norm: std::sync::Arc<[f32]> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
+    let ffn_norm: std::sync::Arc<[f32]> = r.v(n, 0.5).iter().map(|x| 1.0 + x).collect();
     let ffn = LayerFfnParts::from_parts(&ffn_norm, EPS, &gate, &up, &down);
     let hidden = r.v(rows * n, 2.0);
     let scale = Some(0.5f32);

@@ -25,7 +25,7 @@ use crate::ssm_block::SsmBlock;
 
 /// One Mamba or conv layer as planned.
 pub(super) struct SsmPlan<'a> {
-    attn_norm: &'a [f32],
+    attn_norm: &'a std::sync::Arc<[f32]>,
     ffn: Option<LayerFfnParts<'a>>,
     block: SsmPlanBlock<'a>,
 }
@@ -37,8 +37,8 @@ enum SsmPlanBlock<'a> {
     Mamba2(&'a crate::mamba2::Mamba2),
 }
 
-/// A conv layer's window in and new history rows out, in layer order.
-pub(super) type ConvIo = (Vec<f32>, Vec<f32>);
+/// A conv layer's window in, in layer order.
+pub(super) type ConvIo = Vec<f32>;
 
 /// The GEMM a projection runs as, or `None` for a folded matrix (no
 /// Mamba or conv projection carries a rotation, and the blocks apply
@@ -114,12 +114,11 @@ impl Decoder {
 
     /// Each planned conv layer's window (the last `l_cache - 1` rows of
     /// its history, zero rows before the sequence, as `contiguous_step`
-    /// reads it) and an empty vector for its new rows, in plan order.
+    /// reads it), in plan order.
     pub(super) fn ssm_prefill_conv_io(
         &self,
         plan: &[Planned<'_>],
         caches: &[KvCache],
-        rows: usize,
     ) -> Vec<ConvIo> {
         plan.iter()
             .zip(caches)
@@ -138,7 +137,7 @@ impl Decoder {
                         crate::shortconv::window_from_history(c.l_cache - 1, n, have, |r| {
                             &history[r * n..(r + 1) * n]
                         });
-                    Some((window, Vec::with_capacity(rows * n)))
+                    Some(window)
                 }
                 _ => None,
             })
@@ -160,7 +159,21 @@ impl Decoder {
         };
         Some(match s.block {
             SsmPlanBlock::Conv(c) => {
-                let (window, bx_out) = io.next()?;
+                let window = io.next()?;
+                // The new history rows go straight from the run's buffer
+                // into this layer's cache, as `contiguous_step` pushes
+                // them on the host, one `b * x` row per token.
+                let n = c.hidden_dim();
+                let bx_out = Box::new(move |bx: &[f32]| {
+                    let rows = bx.len() / n;
+                    cache
+                        .push_rows(
+                            frink_core::kv_store::KvRows::F32(bx),
+                            frink_core::kv_store::KvRows::F32(&[]),
+                            rows,
+                        )
+                        .expect("unbounded/planned KvCache growth is infallible");
+                });
                 PrefillRunLayer::Conv(
                     PrefillConvLayer {
                         attn_norm: s.attn_norm,

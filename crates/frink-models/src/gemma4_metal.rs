@@ -51,9 +51,15 @@ const PREFILL_MIN: usize = 4;
 /// Engine constants the stacks read; see [`Gemma4Engine::device_aux`].
 pub(crate) struct DeviceAux {
     /// Per layer: `q_norm * attention_scale * sqrt(head_dim)`.
-    q_norm: Vec<Vec<f32>>,
+    q_norm: Vec<std::sync::Arc<[f32]>>,
     /// `head_dim` ones per layer, V's weightless norm.
-    ones: Vec<Vec<f32>>,
+    ones: Vec<std::sync::Arc<[f32]>>,
+    /// Per layer: the first `n_rot/2` of `rope_freqs` on a full layer,
+    /// `None` on a sliding one or with no `rope_freqs`. Built once,
+    /// like the two above, so the stacks find their resident copy by
+    /// address (`frink_metal`'s `resident_f32_shared`) rather than
+    /// being handed a fresh plane every token.
+    rope_ff: Vec<Option<std::sync::Arc<[f32]>>>,
 }
 
 /// The device half of a [`Gemma4DecodeState`].
@@ -105,10 +111,23 @@ impl Gemma4Engine {
                     // expression.
                     let compensate = hp.attention_scale * (hd as f32).sqrt();
                     let q = l.attn.q_norm.iter().map(|w| w * compensate).collect();
-                    (q, vec![1.0f32; hd])
+                    (q, vec![1.0f32; hd].into())
                 })
                 .unzip();
-            DeviceAux { q_norm, ones }
+            let rope_ff = (0..hp.n_layer)
+                .map(|il| {
+                    if hp.is_swa_layer(il) {
+                        return None;
+                    }
+                    let half = hp.rot_dim(il) / 2;
+                    self.weights.rope_freqs.as_deref().map(|f| f[..half].into())
+                })
+                .collect();
+            DeviceAux {
+                q_norm,
+                ones,
+                rope_ff,
+            }
         })
     }
 
@@ -148,12 +167,7 @@ impl Gemma4Engine {
     fn layer_rope(&self, il: usize) -> LayerRope<'_> {
         LayerRope {
             theta: self.hp.rope_theta_for(il),
-            freq_factors: if self.hp.is_swa_layer(il) {
-                None
-            } else {
-                let half = self.hp.rot_dim(il) / 2;
-                self.weights.rope_freqs.as_deref().map(|f| &f[..half])
-            },
+            freq_factors: self.device_aux().rope_ff[il].as_ref(),
         }
     }
 
@@ -166,11 +180,11 @@ impl Gemma4Engine {
         Some(AttnExtras {
             q_norm: Some(&aux.q_norm[il]),
             k_norm: if own {
-                Some(attn.k_norm.as_deref()?)
+                Some(attn.k_norm.as_ref()?)
             } else {
                 None
             },
-            v_norm: own.then(|| aux.ones[il].as_slice()),
+            v_norm: own.then(|| &aux.ones[il]),
             ..AttnExtras::default()
         })
     }

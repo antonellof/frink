@@ -231,7 +231,7 @@ fn metal_decode_runs_both_branches_in_the_dense_stack() {
     frink_models::set_metal_greedy_argmax(false);
     for (name, golden) in [(FH1, &FH1_GOLDEN), (FH1_NOSSMNORM, &FH1_NOSSMNORM_GOLDEN)] {
         let d = load_graph_fixture(name);
-        let got = decode(&d);
+        let got = common::decode_with_resident_planes(&d, name);
         assert!(
             d.metal_hybrid_allocated(),
             "{name}: the hybrid stack never ran"

@@ -79,6 +79,35 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **Every f32 plane a Metal stack binds is found by address, and an
+  LFM2 prompt's output head rides its prefill run.** Norms, biases, QK
+  norms, sinks, RoPE divisors, conv taps and the gated delta-net and
+  Mamba planes are `Arc<[f32]>` from the loader to the launch, and the
+  resident cache proves a hit by the allocation it holds. A borrowed
+  slice could only be proven by comparing every byte, on every lookup:
+  per decode token 1.1 MB on Llama-3.1-8B, 2.1 MB on gpt-oss-20b, 4.3 MB
+  on Qwen3.5-9B, 5.9 MB on Qwen3-Next-80B and 10.6 MB on Bonsai-2-27B
+  (most of it the conv taps), read twice and slower while the previous command
+  buffer streams weights. The slice entry point is gone, so a caller
+  holding a `Vec` does not compile; f32 router and gate matrices go
+  through the weight cache's sampled fingerprint instead. An entry
+  whose plane only the cache still holds is dropped on the next miss.
+  The Metal decode gate and the hybrid suites hold every steady-state
+  decode token to zero plane uploads (`resident_f32_counts`). LFM2's
+  prefill run hands each conv layer's new history rows straight to the
+  layer's cache (one 40 MB copy for a 512-token prompt instead of two),
+  and when the run ends the stack it norms the last row and runs
+  `lm_head` in its own command buffer, returning the logits instead of
+  the batch; `forward_batch_last` norms only the last row on the host.
+  With the compares gone the dense decode stack's early commit
+  (`FRINK_METAL_EARLY_COMMIT`) gains at a sixth of its layers, as the
+  MoE stack's does, where it split at a third: LFM2-1.2B tg128 533 to
+  538, Llama-3.2-1B 461 to 465, level on the 8B and Gemma-4-E2B. M5 Max, interleaved best-of on a shared host, before, after,
+  llama.cpp: LFM2-1.2B pp512 15301, 15813, 16137; tg128 within noise
+  on every model measured (Llama-3.1-8B 109.0, 109.2, 102.2;
+  Qwen3.5-9B 89.4, 89.6, 86.4; gpt-oss-20b 168.2, 168.5, 156.1;
+  Gemma-4-E2B 184.1, 185.7, 176.7; Qwen3-Next-80B 107.6, 108.5, 101.4;
+  Bonsai-2-27B 47.3, 47.4, PrismML fork 44.1). Greedy text unchanged.
 - **A Mamba, short-conv or Granite-4.0-H prompt is one Metal command
   buffer, and Granite-4.0-H and FalconMamba decode on the device.** The
   prefill run the gated delta-net models use now takes LFM2's short

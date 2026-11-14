@@ -58,10 +58,10 @@ fn with_sandwich_norms(attn: bool, ffn: bool) -> impl Fn(&mut Decoder) {
                 .map(|j| 0.5 + (i * hidden + j) as f32 * 0.01)
                 .collect();
             if attn {
-                layer.attn.post_attn_norm = Some(w.clone());
+                layer.attn.post_attn_norm = Some(w.clone().into());
             }
             if ffn {
-                layer.attn.post_ffn_norm = Some(w);
+                layer.attn.post_ffn_norm = Some(w.into());
             }
         }
     }

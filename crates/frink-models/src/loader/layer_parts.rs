@@ -104,7 +104,7 @@ pub(super) fn load_gpt_oss_layer(
             .expect("bias plane lengths checked above");
 
     Ok(crate::decoder::GptOssLayer {
-        router_bias,
+        router_bias: router_bias.into(),
         expert_bias,
     })
 }
@@ -121,7 +121,7 @@ pub(super) fn load_attn_sinks(
     file: &impl TensorSource,
     l: usize,
     n_heads: usize,
-) -> Result<Option<Vec<f32>>, LoadError> {
+) -> Result<Option<std::sync::Arc<[f32]>>, LoadError> {
     let name = format!("blk.{l}.attn_sinks.weight");
     let Some(sinks) = load_f32_vec_optional(file, &name)? else {
         return Ok(None);
@@ -136,7 +136,7 @@ pub(super) fn load_attn_sinks(
             ),
         ));
     }
-    Ok(Some(sinks))
+    Ok(Some(sinks.into()))
 }
 
 /// Dense-layer FFN tensors: standard gate/up/down, Phi-3 fused

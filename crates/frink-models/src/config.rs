@@ -547,7 +547,7 @@ pub struct LayerRopeParams<'a> {
     pub theta: f32,
     /// This layer's per-band divisors, `rot_dim/2` long, or `None` to
     /// divide by nothing.
-    pub freq_factors: Option<&'a [f32]>,
+    pub freq_factors: Option<&'a std::sync::Arc<[f32]>>,
     /// This layer's rotary width when narrower than `head_dim`; `None`
     /// rotates the whole head. llama.cpp's `n_rot(il)`.
     pub rot_dim: Option<usize>,
@@ -588,7 +588,7 @@ pub struct LayerRopeParams<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RopeFreqs {
     /// What the FULL-ATTENTION layers divide each band's theta by.
-    pub full: Vec<f32>,
+    pub full: std::sync::Arc<[f32]>,
     /// What the SLIDING layers divide by, when the architecture does not
     /// let them inherit the model's trained RoPE scale
     /// (`capability::swa_rope_scale_follows_model`). `None` means they
@@ -599,12 +599,12 @@ pub struct RopeFreqs {
     /// "No divisors at all" is spelled as an all-ones vector rather than
     /// a third state: dividing by one is exactly not dividing, and one
     /// fewer state is one fewer thing two call sites can disagree about.
-    pub swa: Option<Vec<f32>>,
+    pub swa: Option<std::sync::Arc<[f32]>>,
 }
 
 impl RopeFreqs {
     /// The divisors layer `il` uses, given whether it slides.
-    pub fn for_layer(&self, sliding: bool) -> &[f32] {
+    pub fn for_layer(&self, sliding: bool) -> &std::sync::Arc<[f32]> {
         match (sliding, &self.swa) {
             (true, Some(swa)) => swa,
             _ => &self.full,
@@ -762,7 +762,7 @@ impl ModelConfig {
             .or(self.rope_freqs_short.as_ref())
         {
             self.rope_freqs = Some(RopeFreqs {
-                full: f.clone(),
+                full: f.clone().into(),
                 swa: None,
             });
         }
@@ -1950,7 +1950,7 @@ mod longrope_tests {
     fn an_explicit_rope_freqs_tensor_is_never_overridden() {
         let mut c = test_dense_fixture();
         c.rope_freqs = Some(RopeFreqs {
-            full: vec![7.0; 48],
+            full: vec![7.0; 48].into(),
             swa: None,
         });
         c.rope_orig_ctx = Some(4096);

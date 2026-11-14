@@ -428,7 +428,7 @@ impl Decoder {
     pub(crate) fn fused_layer_parts(
         &self,
         l: usize,
-    ) -> Option<(&crate::gdn::Gdn, &[f32], LayerFfnParts<'_>)> {
+    ) -> Option<(&crate::gdn::Gdn, &std::sync::Arc<[f32]>, LayerFfnParts<'_>)> {
         let layer = self.layer_for(l);
         let shape = self.config.layer_shape(l);
         if !matches!(shape.attention, AttnShape::Gdn)

@@ -492,12 +492,12 @@ fn both_post_rope_architectures_resolve_per_head_qk_norm_and_the_ordering_flag()
         assert_eq!(d.config.head_dim, head_dim, "{name}");
         for (il, layer) in d.layers.iter().enumerate() {
             assert_eq!(
-                layer.attn.q_norm.as_ref().map(Vec::len),
+                layer.attn.q_norm.as_ref().map(|w| w.len()),
                 Some(head_dim),
                 "{name} blk.{il}: per-head Q norm"
             );
             assert_eq!(
-                layer.attn.k_norm.as_ref().map(Vec::len),
+                layer.attn.k_norm.as_ref().map(|w| w.len()),
                 Some(head_dim),
                 "{name} blk.{il}: per-head K norm"
             );

@@ -167,7 +167,7 @@ fn every_norm_site_is_the_weighted_layer_norm() {
 #[test]
 fn substituting_an_rmsnorm_with_the_same_weight_at_any_site_diverges_from_llama_cpp() {
     let as_rms = |op: &NormOp| match op {
-        NormOp::LayerNorm(w) => NormOp::Rms(w.clone()),
+        NormOp::LayerNorm(w) => NormOp::Rms(w.clone().into()),
         other => panic!("expected a weighted LayerNorm, got {other:?}"),
     };
     for site in ["attn", "ffn", "final"] {

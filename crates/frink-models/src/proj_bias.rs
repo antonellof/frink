@@ -209,17 +209,18 @@ pub fn load_attn_out_bias(
     row: Option<Presence>,
     l: usize,
     hidden_dim: usize,
-) -> Result<Option<Vec<f32>>, LoadError> {
+) -> Result<Option<std::sync::Arc<[f32]>>, LoadError> {
     let Some(presence) = row else {
         return Ok(None);
     };
-    load_bias(
+    Ok(load_bias(
         file,
         arch,
         &format!("blk.{l}.attn_output.bias"),
         presence,
         hidden_dim,
-    )
+    )?
+    .map(Into::into))
 }
 
 /// Layer `l`'s dense FFN biases, on a DENSE layer only: `Some` when the

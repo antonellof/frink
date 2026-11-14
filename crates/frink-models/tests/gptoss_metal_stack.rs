@@ -284,8 +284,23 @@ mod metal {
         d.forward_batch_last(&SYNTH_PROMPT, 0, &mut kv);
         let prefill = (stats() - at) as usize;
         let at = stats();
+        let (hits, uploads) = frink_metal::gpu::resident_f32_counts();
         d.forward_token(tokens[0], SYNTH_PROMPT.len(), &mut kv);
         let one = (stats() - at) as usize;
+        // The run above decoded with this decoder, so every plane this
+        // token binds (norms, sinks, the router and expert biases) is
+        // already resident and found by address (`tests/common`'s
+        // `decode_with_resident_planes` says why that is the check).
+        let (hits_after, uploads_after) = frink_metal::gpu::resident_f32_counts();
+        assert_eq!(
+            uploads_after - uploads,
+            0,
+            "a steady-state gpt-oss decode token uploaded f32 planes"
+        );
+        assert!(
+            hits_after > hits,
+            "the decode token bound no resident f32 plane"
+        );
         eprintln!(
             "synthetic gpt-oss: worst |metal - cpu| {worst:.3e}, {total} dispatches for the run, \
              {prefill} for a {}-token prefill, {one} for one decode token",

@@ -21,9 +21,7 @@
 //! `renormalize`.
 
 use crate::dispatch::dispatch_counted;
-use crate::gpu::{
-    ensure_pipeline, resident_f32_buffer, resident_f32_shared, MetalError, ResidentF32Buffer,
-};
+use crate::gpu::{ensure_pipeline, resident_f32_shared, MetalError, ResidentF32Buffer};
 use crate::moe_ids::IdsBinding;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -38,12 +36,12 @@ use std::sync::Arc;
 /// The three expert planes are shared allocations, not slices: they are
 /// 368 KB each on gpt-oss-20b, and a slice can only be proven to be the
 /// upload the cache holds by comparing every byte, per layer per token
-/// (`gpu::resident_f32_shared`). The router bias is 32 floats and stays
-/// a slice.
+/// (`gpu::resident_f32_shared`). The router bias is shared too, as
+/// every plane a stack binds is.
 #[derive(Clone, Copy)]
 pub struct MoeOaiMetal<'a> {
     /// `ffn_gate_inp.bias`, `[n_experts]`.
-    pub router_bias: &'a [f32],
+    pub router_bias: &'a Arc<[f32]>,
     /// `ffn_gate_exps.bias`, `[n_experts * ffn_rows]`.
     pub gate_bias: &'a Arc<[f32]>,
     /// `ffn_up_exps.bias`, `[n_experts * ffn_rows]`.
@@ -83,7 +81,7 @@ impl MoeOaiResident {
         oai: &MoeOaiMetal<'_>,
     ) -> Result<Self, MetalError> {
         Ok(Self {
-            router_bias: resident_f32_buffer(device, oai.router_bias)?,
+            router_bias: resident_f32_shared(device, oai.router_bias)?,
             gate_bias: resident_f32_shared(device, oai.gate_bias)?,
             up_bias: resident_f32_shared(device, oai.up_bias)?,
             down_bias: resident_f32_shared(device, oai.down_bias)?,

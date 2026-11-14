@@ -359,7 +359,7 @@ fn gemma3_linear_scaling_reaches_the_full_layers_and_not_the_sliding_ones() {
         cfg.layer_rope(0),
         Some(crate::config::LayerRopeParams {
             theta: 10_000.0,
-            freq_factors: Some(&[1.0f32; 128][..]),
+            freq_factors: Some(&std::sync::Arc::from([1.0f32; 128])),
             rot_dim: None,
         })
     );
@@ -367,7 +367,7 @@ fn gemma3_linear_scaling_reaches_the_full_layers_and_not_the_sliding_ones() {
         cfg.layer_rope(5),
         Some(crate::config::LayerRopeParams {
             theta: 1_000_000.0,
-            freq_factors: Some(&[8.0f32; 128][..]),
+            freq_factors: Some(&std::sync::Arc::from([8.0f32; 128])),
             rot_dim: None,
         })
     );

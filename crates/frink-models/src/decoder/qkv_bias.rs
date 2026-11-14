@@ -45,7 +45,7 @@ impl Decoder {
         kv_width: usize,
         v_width: usize,
     ) {
-        let add_bias = |x: &mut [f32], bias: Option<&Vec<f32>>, width: usize| {
+        let add_bias = |x: &mut [f32], bias: Option<&std::sync::Arc<[f32]>>, width: usize| {
             if let Some(bias) = bias {
                 debug_assert_eq!(bias.len(), width);
                 for row in x.chunks_mut(width) {
@@ -89,8 +89,8 @@ mod tests {
         let mut d = Decoder::new_random_small(cfg, 1, 32);
         let q_width = d.config.n_heads * d.config.head_dim;
         let kv_width = d.config.n_kv_heads * d.config.head_dim;
-        d.layers[0].attn.q_bias = Some(vec![1.0; q_width]);
-        d.layers[0].attn.k_bias = Some(vec![-1.0; kv_width]);
+        d.layers[0].attn.q_bias = Some(vec![1.0; q_width].into());
+        d.layers[0].attn.k_bias = Some(vec![-1.0; kv_width].into());
 
         let mut q = vec![7.5f32; q_width];
         let mut k = vec![-7.5f32; kv_width];
@@ -112,7 +112,7 @@ mod tests {
         assert_eq!(d.config.clamp_kqv, None);
         let q_width = d.config.n_heads * d.config.head_dim;
         let kv_width = d.config.n_kv_heads * d.config.head_dim;
-        d.layers[0].attn.v_bias = Some(vec![0.5; kv_width]);
+        d.layers[0].attn.v_bias = Some(vec![0.5; kv_width].into());
 
         // Two rows, to exercise the batch shape.
         let mut q = vec![100.0f32; 2 * q_width];

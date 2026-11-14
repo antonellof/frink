@@ -238,8 +238,8 @@ impl Decoder {
         self.check_layer_taps(layers)?;
         Ok(par::on_workers(move || {
             let mut taps = super::layer_taps::LayerTaps::new(layers);
-            let hidden =
-                self.forward_hidden_batch_tapped(tokens, start_pos, kv_caches, false, &mut taps);
+            let hidden = self
+                .forward_hidden_batch_tapped(tokens, start_pos, kv_caches, false, &mut taps, None);
             if hidden.is_empty() {
                 return TappedBatch {
                     logits: Vec::new(),
@@ -273,8 +273,9 @@ impl Decoder {
         self.check_layer_taps(layers)?;
         Ok(par::on_workers(move || {
             let mut taps = super::layer_taps::LayerTaps::new(layers);
-            let hidden =
-                self.forward_hidden_batch_tapped(tokens, start_pos, kv_caches, host_kv, &mut taps);
+            let hidden = self.forward_hidden_batch_tapped(
+                tokens, start_pos, kv_caches, host_kv, &mut taps, None,
+            );
             let Some(last) = hidden.last() else {
                 return (Vec::new(), Vec::new());
             };

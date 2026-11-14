@@ -280,7 +280,7 @@ fn each_seam_is_visible_in_the_logits() {
         .iter_mut()
         .map(|l| {
             let (weight, _) = parts(&l.attn.norm_weight);
-            std::mem::replace(&mut l.attn.norm_weight, NormOp::Rms(weight))
+            std::mem::replace(&mut l.attn.norm_weight, NormOp::Rms(weight.into()))
         })
         .collect();
     let worst = worst_vs(&decode(&d), &PHIMOE_GOLDEN);

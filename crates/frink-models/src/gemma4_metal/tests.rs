@@ -48,7 +48,7 @@ impl Rng {
         WeightMatrix::F32(Tensor::new(v, vec![rows, cols]))
     }
 
-    fn norm(&mut self, n: usize) -> Vec<f32> {
+    fn norm(&mut self, n: usize) -> std::sync::Arc<[f32]> {
         (0..n).map(|_| 1.0 + 0.2 * self.next()).collect()
     }
 }

@@ -31,6 +31,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputeCommandEncoder, MTLDevice, MTLSize};
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use crate::gdn::{buffer_no_copy, encode_gated_norm, DeltaShape};
 use crate::gdn_chunk::{encode_delta_chunk, ChunkInputs};
@@ -38,7 +39,7 @@ use crate::gdn_head::{
     encode_conv_silu_rows, encode_gates_rows, encode_l2_norm_heads_rows, HeadShape,
 };
 use crate::gpu::{
-    encode_mul_mm_sg, ensure_pipeline, resident_f32_buffer, resident_weight_buffer, MetalError,
+    encode_mul_mm_sg, ensure_pipeline, resident_f32_shared, resident_weight_buffer, MetalError,
     MulMmSgLaunch,
 };
 use crate::hadamard::FoldPlan;
@@ -134,7 +135,7 @@ pub struct PrefillGdnLayer<'a> {
     pub head: HeadShape,
     /// `blk.N.attn_norm.weight` and the model's RMS epsilon, which the
     /// l2 norms and the gated norm use too.
-    pub attn_norm: &'a [f32],
+    pub attn_norm: &'a Arc<[f32]>,
     pub eps: f32,
     pub qkv: MulMmSgLaunch<'a>,
     pub z: MulMmSgLaunch<'a>,
@@ -143,10 +144,10 @@ pub struct PrefillGdnLayer<'a> {
     pub fold_x: Option<FoldPlan<'a>>,
     /// `blk.N.ssm_beta.weight` / `ssm_alpha.weight`, `[n_v_heads][hidden]`.
     pub gates: GateProj<'a>,
-    pub conv1d: &'a [f32],
-    pub dt_bias: &'a [f32],
-    pub a: &'a [f32],
-    pub ssm_norm: &'a [f32],
+    pub conv1d: &'a Arc<[f32]>,
+    pub dt_bias: &'a Arc<[f32]>,
+    pub a: &'a Arc<[f32]>,
+    pub ssm_norm: &'a Arc<[f32]>,
     pub out_proj: MulMmSgLaunch<'a>,
     pub fold_y: Option<FoldPlan<'a>>,
     pub ffn: PrefillFfn<'a>,
@@ -180,7 +181,7 @@ impl GateProj<'_> {
 /// The dense half of the layer: `h += down(silu(gate(n)) * up(n))`
 /// with `n = rms_norm(h + branch)`.
 pub struct PrefillFfn<'a> {
-    pub norm: &'a [f32],
+    pub norm: &'a Arc<[f32]>,
     pub gate: MulMmSgLaunch<'a>,
     pub up: MulMmSgLaunch<'a>,
     pub down: MulMmSgLaunch<'a>,
@@ -198,7 +199,7 @@ pub struct PrefillFfn<'a> {
 pub struct PrefillRouted<'a> {
     pub moe: crate::gpu::PrefillMoeMetal<'a>,
     /// `blk.N.ffn_gate_inp_shexp.weight`, `[hidden]`.
-    pub shared_gate: Option<&'a [f32]>,
+    pub shared_gate: Option<&'a Arc<[f32]>>,
 }
 
 impl PrefillFfn<'_> {
@@ -324,7 +325,11 @@ pub(crate) mod slot {
     pub const SSM_Y: usize = 28;
     pub const SSM_OUT: usize = 29;
     pub const CONV_HIST: usize = 30;
-    pub const COUNT: usize = 31;
+    // The output head's normed last row and its logits
+    // (`crate::prefill_run::PrefillOutputHead`).
+    pub const HEAD_X: usize = 31;
+    pub const LOGITS: usize = 32;
+    pub const COUNT: usize = 33;
 }
 
 fn signs_buffer(
@@ -386,8 +391,8 @@ fn encode_gate_proj(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     x: &ProtocolObject<dyn MTLBuffer>,
-    w_beta: &ProtocolObject<dyn MTLBuffer>,
-    w_alpha: &ProtocolObject<dyn MTLBuffer>,
+    w_beta: &crate::gpu::ResidentWeightBuffer,
+    w_alpha: &crate::gpu::ResidentWeightBuffer,
     beta: &ProtocolObject<dyn MTLBuffer>,
     alpha: &ProtocolObject<dyn MTLBuffer>,
     cols: usize,
@@ -397,8 +402,15 @@ fn encode_gate_proj(
     let pipe = ensure_pipeline(device, GATE_PROJ_SRC, "gdn_gate_proj_rows")?;
     encoder.setComputePipelineState(&pipe.0);
     unsafe {
-        for (idx, buf) in [x, w_beta, w_alpha, beta, alpha].into_iter().enumerate() {
-            encoder.setBuffer_offset_atIndex(Some(buf), 0, idx);
+        let bound = [
+            (x, 0),
+            (&*w_beta.buffer, w_beta.weight_offset),
+            (&*w_alpha.buffer, w_alpha.weight_offset),
+            (beta, 0),
+            (alpha, 0),
+        ];
+        for (idx, (buf, off)) in bound.into_iter().enumerate() {
+            encoder.setBuffer_offset_atIndex(Some(buf), off, idx);
         }
         let mut dims: [u32; 4] = [cols as u32, n_out as u32, rows as u32, 0];
         encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 16, 5);
@@ -475,11 +487,11 @@ pub(crate) unsafe fn encode_layer(
     // SAFETY: the caller's contract, forwarded.
     let conv_state = unsafe { buffer_no_copy(device, state.conv_ptr, state.conv_bytes) }
         .ok_or(MetalError::BufferAllocFailed)?;
-    let attn_norm = resident_f32_buffer(device, w.attn_norm)?;
-    let taps = resident_f32_buffer(device, w.conv1d)?;
-    let dt = resident_f32_buffer(device, w.dt_bias)?;
-    let a = resident_f32_buffer(device, w.a)?;
-    let ssm_norm = resident_f32_buffer(device, w.ssm_norm)?;
+    let attn_norm = resident_f32_shared(device, w.attn_norm)?;
+    let taps = resident_f32_shared(device, w.conv1d)?;
+    let dt = resident_f32_shared(device, w.dt_bias)?;
+    let a = resident_f32_shared(device, w.a)?;
+    let ssm_norm = resident_f32_shared(device, w.ssm_norm)?;
     let b = |i: usize| sc.buf(i);
     let (n, eps) = (rows as u32, w.eps);
 
@@ -500,14 +512,14 @@ pub(crate) unsafe fn encode_layer(
     // rewrites that buffer in place.
     match &w.gates {
         GateProj::F32 { beta, alpha } => {
-            let w_beta = resident_f32_buffer(device, beta)?;
-            let w_alpha = resident_f32_buffer(device, alpha)?;
+            let w_beta = crate::gpu::resident_f32_matrix(device, beta)?;
+            let w_alpha = crate::gpu::resident_f32_matrix(device, alpha)?;
             encode_gate_proj(
                 encoder,
                 device,
                 b(slot::XN),
-                &w_beta.buffer,
-                &w_alpha.buffer,
+                &w_beta,
+                &w_alpha,
                 b(slot::BETA_IN),
                 b(slot::ALPHA_IN),
                 hidden,
@@ -629,7 +641,7 @@ pub(crate) fn encode_ffn_tail(
     hidden: usize,
 ) -> Result<(), MetalError> {
     let b = |i: usize| sc.buf(i);
-    let ffn_norm = resident_f32_buffer(device, f.norm)?;
+    let ffn_norm = resident_f32_shared(device, f.norm)?;
     encode_residual_scale(enc, device, b(slot::OUT), rows * hidden)?;
     let encoder = enc.span("pf_ffn_norm")?;
     crate::norm::encode_add_rms_norm_batch(
@@ -701,7 +713,7 @@ pub(crate) fn encode_ffn_tail(
         (rows * hidden) as u32,
     )?;
     let bound = crate::gpu::moe_packed_resident(device, &r.moe.packed)?;
-    let router_w = resident_f32_buffer(device, r.moe.router_w)?;
+    let router_w = crate::gpu::resident_f32_matrix(device, r.moe.router_w)?;
     // Opens its own spans, one per part (`moe_router`, ...); the run's
     // encoder is serial, so the hazard tracker only adds barriers it
     // would not need.

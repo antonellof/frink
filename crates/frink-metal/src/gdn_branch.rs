@@ -31,6 +31,7 @@
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue};
+use std::sync::Arc;
 
 use crate::attn::MetalKvBuffers;
 use crate::gdn::{buffer_no_copy, encode_delta_step_at, encode_gated_norm, DeltaShape};
@@ -45,12 +46,12 @@ pub struct BranchWeights<'a> {
     pub shape: DeltaShape,
     pub head: HeadShape,
     /// `blk.N.ssm_conv1d.weight`, `[conv_dim][d_conv]`.
-    pub conv1d: &'a [f32],
+    pub conv1d: &'a Arc<[f32]>,
     /// `blk.N.ssm_dt.bias` and `blk.N.ssm_a`, `[n_v_heads]` each.
-    pub dt_bias: &'a [f32],
-    pub a: &'a [f32],
+    pub dt_bias: &'a Arc<[f32]>,
+    pub a: &'a Arc<[f32]>,
     /// `blk.N.ssm_norm.weight`, `[head_dim]`.
-    pub ssm_norm: &'a [f32],
+    pub ssm_norm: &'a Arc<[f32]>,
     /// The model's RMS epsilon, which the l2 norms clamp by and the
     /// gated norm uses.
     pub eps: f32,
@@ -81,7 +82,7 @@ pub struct BranchWeights<'a> {
 /// `beta` and `alpha` are one projection each; a checkpoint that stores
 /// them as one (`qwen3next`'s `ssm_ba`) is split by row at load.
 pub struct LayerHeadIn<'a> {
-    pub norm: &'a [f32],
+    pub norm: &'a Arc<[f32]>,
     pub norm_eps: f32,
     pub qkv: &'a MatvecLaunch<'a>,
     pub z: &'a MatvecLaunch<'a>,
@@ -100,7 +101,7 @@ pub struct LayerHeadIn<'a> {
 /// named at the call site, field by field.
 pub struct LayerFfn<'a> {
     /// `blk.N.ffn_norm.weight` and the model's RMS epsilon.
-    pub norm: &'a [f32],
+    pub norm: &'a Arc<[f32]>,
     pub norm_eps: f32,
     pub gate: &'a MatvecLaunch<'a>,
     pub up: &'a MatvecLaunch<'a>,
@@ -237,7 +238,7 @@ fn encode_ffn_tail<'b>(
     };
     let x_signs = ffn_signs(f.fold_x)?;
     let act_signs = ffn_signs(f.fold_act)?;
-    let norm_w = crate::gpu::resident_f32_buffer(device, f.norm)?;
+    let norm_w = crate::gpu::resident_f32_shared(device, f.norm)?;
     let gate_w = resident_weight_buffer(device, f.gate.weights)?;
     let up_w = resident_weight_buffer(device, f.up.weights)?;
     let down_w = resident_weight_buffer(device, f.down.weights)?;
@@ -372,10 +373,10 @@ unsafe fn encode_layer(
     // did exactly that for five operands and measured SLOWER than the
     // host body it replaced, which is what the ledger's GPU time going
     // UP by 3.1 ms was.
-    let taps_buf = crate::gpu::resident_f32_buffer(device, w.conv1d)?;
-    let dt_buf = crate::gpu::resident_f32_buffer(device, w.dt_bias)?;
-    let a_buf = crate::gpu::resident_f32_buffer(device, w.a)?;
-    let norm_buf = crate::gpu::resident_f32_buffer(device, w.ssm_norm)?;
+    let taps_buf = crate::gpu::resident_f32_shared(device, w.conv1d)?;
+    let dt_buf = crate::gpu::resident_f32_shared(device, w.dt_bias)?;
+    let a_buf = crate::gpu::resident_f32_shared(device, w.a)?;
+    let norm_buf = crate::gpu::resident_f32_shared(device, w.ssm_norm)?;
     // SAFETY: the caller's contract, forwarded.
     let conv_buf = unsafe { buffer_no_copy(device, conv_ptr, conv_bytes) }
         .ok_or(MetalError::BufferAllocFailed)?;
@@ -472,7 +473,7 @@ unsafe fn encode_layer(
             None => sc.write(0, res).ok_or(MetalError::CommandFailed)?,
         };
         let normed = sc.buf(1);
-        let norm_w = crate::gpu::resident_f32_buffer(device, hd.norm)?;
+        let norm_w = crate::gpu::resident_f32_shared(device, hd.norm)?;
         crate::norm::encode_rms_norm(
             encoder,
             device,
@@ -986,7 +987,7 @@ impl GdnRun {
     #[allow(clippy::too_many_arguments)]
     pub fn attn_head(
         &mut self,
-        norm: &[f32],
+        norm: &Arc<[f32]>,
         norm_eps: f32,
         q: &MatvecLaunch<'_>,
         k: &MatvecLaunch<'_>,

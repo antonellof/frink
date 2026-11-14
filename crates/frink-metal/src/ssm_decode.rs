@@ -331,9 +331,12 @@ impl SsmProj for MulMmSgLaunch<'_> {
 /// `mamba-base.cpp:84-88`'s RMS norms on dt, B and C: the three weights
 /// (Jamba), or none of them (FalconMamba's `ssm.dt_b_c_rms`, a
 /// weightless norm on each).
+/// One of the three, a shared plane (see [`Mamba1Weights`]).
+type Plane<'a> = &'a Arc<[f32]>;
+
 #[derive(Clone, Copy)]
 pub struct DtBcNormMetal<'a> {
-    pub weights: Option<(&'a [f32], &'a [f32], &'a [f32])>,
+    pub weights: Option<(Plane<'a>, Plane<'a>, Plane<'a>)>,
     pub eps: f32,
 }
 
@@ -540,7 +543,7 @@ pub(crate) fn encode_mamba1<P: SsmProj>(
     b: &Mamba1Bufs<'_>,
     rows: usize,
 ) -> Result<(), MetalError> {
-    use crate::gpu::{resident_f32_buffer, resident_f32_shared};
+    use crate::gpu::resident_f32_shared;
     let w = &m.w;
     let n = w.d_inner;
     let x_db_w = w.dt_rank + 2 * w.d_state;
@@ -608,9 +611,9 @@ pub(crate) fn encode_mamba1<P: SsmProj>(
     if let Some(norm) = w.dt_bc_norm {
         let (wdt, wb, wc) = match norm.weights {
             Some((dt, bw, cw)) => (
-                Some(resident_f32_buffer(device, dt)?),
-                Some(resident_f32_buffer(device, bw)?),
-                Some(resident_f32_buffer(device, cw)?),
+                Some(resident_f32_shared(device, dt)?),
+                Some(resident_f32_shared(device, bw)?),
+                Some(resident_f32_shared(device, cw)?),
             ),
             None => (None, None, None),
         };
@@ -712,16 +715,16 @@ pub struct Mamba2Mixer<'a, P = MatvecLaunch<'a>> {
 }
 
 /// The weights [`Mamba2Mixer::new`] takes, by name. The conv planes and
-/// `ssm_norm` are shared, as [`Mamba1Weights`]' are; the per-head
-/// vectors are `n_head` floats, cheap to compare.
+/// `ssm_norm` are shared, as [`Mamba1Weights`]' are, and so are the
+/// per-head vectors: every plane a stack binds is found by address.
 pub struct Mamba2Weights<'a, P = MatvecLaunch<'a>> {
     pub in_proj: P,
     pub conv1d: &'a Arc<[f32]>,
     pub conv_bias: &'a Arc<[f32]>,
     pub d_conv: usize,
-    pub dt_bias: &'a [f32],
-    pub a: &'a [f32],
-    pub d: &'a [f32],
+    pub dt_bias: &'a Arc<[f32]>,
+    pub a: &'a Arc<[f32]>,
+    pub d: &'a Arc<[f32]>,
     /// `ssm_norm`, `[d_inner]`, applied per group of `d_inner / n_group`.
     pub norm: Option<&'a Arc<[f32]>>,
     pub norm_eps: f32,
@@ -815,7 +818,7 @@ pub(crate) fn encode_mamba2<P: SsmProj>(
     b: &Mamba2Bufs<'_>,
     rows: usize,
 ) -> Result<(), MetalError> {
-    use crate::gpu::{resident_f32_buffer, resident_f32_shared};
+    use crate::gpu::resident_f32_shared;
     let w = &m.w;
     let (n, width) = (w.d_inner, w.conv_width());
     let stride = w.in_proj.out_rows();
@@ -835,9 +838,9 @@ pub(crate) fn encode_mamba2<P: SsmProj>(
     ) = (&conv_state, &ssm_state);
     let taps = resident_f32_shared(device, w.conv1d)?;
     let conv_b = resident_f32_shared(device, w.conv_bias)?;
-    let dt_b = resident_f32_buffer(device, w.dt_bias)?;
-    let a = resident_f32_buffer(device, w.a)?;
-    let d = resident_f32_buffer(device, w.d)?;
+    let dt_b = resident_f32_shared(device, w.dt_bias)?;
+    let a = resident_f32_shared(device, w.a)?;
+    let d = resident_f32_shared(device, w.d)?;
     let norm = match w.norm {
         Some(nw) => Some(resident_f32_shared(device, nw)?),
         None => None,

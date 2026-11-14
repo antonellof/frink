@@ -373,7 +373,8 @@ fn each_seam_is_visible_in_the_logits() {
         l.attn.norm_weight = s;
     }
 
-    let saved: Vec<Option<Vec<f32>>> = d.layers.iter_mut().map(|l| l.attn.k_bias.take()).collect();
+    let saved: Vec<Option<std::sync::Arc<[f32]>>> =
+        d.layers.iter_mut().map(|l| l.attn.k_bias.take()).collect();
     let worst = worst_vs(&decode(&d), &STABLELM_GOLDEN);
     assert!(worst > 1e-2, "attn_k.bias not seen: {worst}");
     for (l, s) in d.layers.iter_mut().zip(saved) {

@@ -288,6 +288,46 @@ pub fn assert_decoder_matches_on_all_three_paths(
     assert_close(&out, golden, tol, &format!("{name}: multi-seq"));
 }
 
+/// [`GRAPH_PROMPT`] decoded one token at a time on the Metal stacks,
+/// asserting that every token from the third on bound its resident f32
+/// planes (norms, biases, conv taps, RoPE divisors, SSM planes) without
+/// uploading one. Returns the last token's logits.
+///
+/// The planes are `Arc<[f32]>` so that the cache proves a hit by the
+/// address it holds; a borrowed slice could only be proven by comparing
+/// every byte, which on the per-token path was 1 to 94 MB a token. What
+/// can still go wrong is a caller that builds a plane per token: it
+/// compiles, uploads every token and leaves an entry behind each time.
+/// The first two tokens may upload what prefill never bound.
+#[cfg(feature = "metal")]
+#[allow(dead_code)] // each suite links its own copy of this module
+pub fn decode_with_resident_planes(decoder: &Decoder, name: &str) -> Vec<f32> {
+    let mut kv = graph_caches(decoder);
+    let mut out = Vec::new();
+    let mut steady_hits = 0;
+    for (pos, &tok) in GRAPH_PROMPT.iter().enumerate() {
+        let (h0, u0) = frink_metal::gpu::resident_f32_counts();
+        out = decoder.forward_token(tok, pos, &mut kv);
+        let (h1, u1) = frink_metal::gpu::resident_f32_counts();
+        if pos >= 2 {
+            assert_eq!(
+                u1 - u0,
+                0,
+                "{name}: decode token {pos} uploaded {} f32 planes; a steady-state token \
+                 must find every plane resident",
+                u1 - u0
+            );
+            steady_hits += h1 - h0;
+        }
+    }
+    assert!(
+        steady_hits > 0,
+        "{name}: no steady-state token bound a resident f32 plane, so the check above \
+         saw nothing (did the device stack run?)"
+    );
+    out
+}
+
 /// The worst absolute difference from the golden values, for the
 /// sabotage tests: a mutation that does not move this is a mutation the
 /// suite cannot see.

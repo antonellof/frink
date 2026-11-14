@@ -14,7 +14,7 @@ use crate::gdn_prefill::{
     PrefillGdnState, RunOptions,
 };
 use crate::gdn_prefill_attn::PrefillAttnLayer;
-use crate::gpu::{shared_metal, MetalError};
+use crate::gpu::{shared_metal, MatvecLaunch, MetalError};
 use crate::ssm_prefill::{
     PrefillConvLayer, PrefillConvState, PrefillMamba1, PrefillMamba2, PrefillMambaLayer, SsmNeed,
 };
@@ -90,11 +90,53 @@ impl PrefillRunLayer<'_, '_> {
     }
 }
 
+/// The model's output head on the batch's LAST row, when the run ends
+/// the stack: `rms_norm(h) * norm`, then `lm_head`, in the run's own
+/// command buffer. A prefill only samples from the last row, and as a
+/// second submission this cost LFM2-1.2B's 512-token prompt 0.5 ms of
+/// its 33 for 0.2 ms of GPU work. Raw logits: the caller applies what
+/// its host head would after the matvec (`decoder::lm_head`). With a
+/// head the run returns the logits INSTEAD of the hidden batch, which a
+/// caller sampling the last row has no use for (4 MB read back there).
+pub struct PrefillOutputHead<'a> {
+    pub norm: &'a std::sync::Arc<[f32]>,
+    pub eps: f32,
+    pub lm_head: MatvecLaunch<'a>,
+}
+
+impl PrefillOutputHead<'_> {
+    fn is_supported(&self, hidden: usize) -> bool {
+        self.norm.len() == hidden
+            && self.lm_head.rows > 0
+            && self.lm_head.row_bytes / self.lm_head.block_bytes * self.lm_head.block_elems
+                == hidden
+    }
+}
+
+/// [`launch_prefill_run_with_head`] without an output head.
+///
+/// # Safety
+///
+/// As [`launch_prefill_run_with_head`]'s.
+pub unsafe fn launch_prefill_run(
+    hidden_batch: &[f32],
+    rows: usize,
+    start_pos: usize,
+    head: Option<&PrefillAttnTail<'_>>,
+    layers: &mut [PrefillRunLayer<'_, '_>],
+    opts: RunOptions,
+) -> Result<Vec<f32>, MetalError> {
+    // SAFETY: the caller's contract, forwarded.
+    unsafe { launch_prefill_run_with_head(hidden_batch, rows, start_pos, head, layers, opts, None) }
+        .map(|(h, _)| h)
+}
+
 /// `rows` tokens of one sequence, at positions `start_pos..`, through
 /// `layers`, in order, in ONE command buffer, the hidden batch uploaded
 /// once and read back once. Returns the batch as it leaves the last
-/// layer; each attention layer's mirror has then grown by `rows`, and
-/// each conv layer's `bx_out` holds its new history rows.
+/// layer, or with `output` the last row's raw logits and no batch; each
+/// attention layer's mirror has then grown by `rows`, and each conv
+/// layer's `bx_out` has been handed its new history rows.
 ///
 /// Every layer is checked before anything is encoded, so an `Err` has
 /// touched no state.
@@ -105,14 +147,15 @@ impl PrefillRunLayer<'_, '_> {
 /// readable-writable, page-aligned bytes, held exclusively by the
 /// caller across the call, which waits for the GPU: the GPU writes
 /// those very bytes.
-pub unsafe fn launch_prefill_run(
+pub unsafe fn launch_prefill_run_with_head(
     hidden_batch: &[f32],
     rows: usize,
     start_pos: usize,
     head: Option<&PrefillAttnTail<'_>>,
     layers: &mut [PrefillRunLayer<'_, '_>],
     opts: RunOptions,
-) -> Result<Vec<f32>, MetalError> {
+    output: Option<&PrefillOutputHead<'_>>,
+) -> Result<(Vec<f32>, Option<Vec<f32>>), MetalError> {
     let hidden = match (head, layers.first()) {
         (Some(t), _) => t.o_proj.rows,
         (None, Some(first)) => first.hidden(),
@@ -121,6 +164,7 @@ pub unsafe fn launch_prefill_run(
     if rows == 0
         || hidden_batch.len() != rows * hidden
         || head.is_some_and(|t| !t.is_supported(rows, hidden))
+        || output.is_some_and(|o| !o.is_supported(hidden))
         || layers
             .iter()
             .any(|l| !l.is_supported(rows, start_pos) || l.hidden() != hidden)
@@ -221,6 +265,8 @@ pub unsafe fn launch_prefill_run(
         })
         .sum::<usize>()
         .max(1);
+    lens[slot::HEAD_X] = output.map_or(1, |_| hidden);
+    lens[slot::LOGITS] = output.map_or(1, |o| o.lm_head.rows);
 
     let shared = shared_metal()?;
     let device = &shared.device;
@@ -300,6 +346,9 @@ pub unsafe fn launch_prefill_run(
                 }
             }
         }
+        if let Some(o) = output {
+            encode_output_head(&mut enc, device, o, &sc, rows, hidden)?;
+        }
         Ok(())
     })();
     // Ended either way; on an error nothing is committed and the buffer
@@ -323,16 +372,56 @@ pub unsafe fn launch_prefill_run(
                 // SAFETY: this layer's region of the shared history slot,
                 // written by the command buffer waited for above.
                 let bx = unsafe { std::slice::from_raw_parts(hist_ptr.add(from), rows * n) };
-                s.bx_out.clear();
-                s.bx_out.extend_from_slice(bx);
+                (s.bx_out)(bx);
             }
             _ => {}
         }
     }
-    // SAFETY: shared storage of `rows * hidden` floats, written by the
-    // kernels this call waited for.
+    // SAFETY: shared storage of `rows * hidden` floats (and of the
+    // head's `lm_head.rows`), written by the kernels this call waited for.
     unsafe {
-        let h = sc.buf(slot::H);
-        Ok(std::slice::from_raw_parts(h.contents().as_ptr() as *const f32, rows * hidden).to_vec())
+        let read = |i: usize, n: usize| {
+            std::slice::from_raw_parts(sc.buf(i).contents().as_ptr() as *const f32, n).to_vec()
+        };
+        Ok(match output {
+            // The caller asked for the logits, not the stream.
+            Some(o) => (Vec::new(), Some(read(slot::LOGITS, o.lm_head.rows))),
+            None => (read(slot::H, rows * hidden), None),
+        })
     }
+}
+
+/// The last row of the residual stream normed into `HEAD_X`, and
+/// `lm_head` of it into `LOGITS`.
+fn encode_output_head(
+    enc: &mut Enc<'_>,
+    device: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>,
+    o: &PrefillOutputHead<'_>,
+    sc: &crate::scratch_pool::Scratch,
+    rows: usize,
+    hidden: usize,
+) -> Result<(), MetalError> {
+    let norm = crate::gpu::resident_f32_shared(device, o.norm)?;
+    let w = crate::gpu::resident_weight_buffer(device, o.lm_head.weights)?;
+    let encoder = enc.span("pf_output_norm")?;
+    crate::norm::encode_rms_norm_at(
+        encoder,
+        device,
+        sc.buf(slot::H),
+        (rows - 1) * hidden * 4,
+        &norm.buffer,
+        sc.buf(slot::HEAD_X),
+        0,
+        hidden as u32,
+        o.eps,
+    )?;
+    let encoder = enc.span("pf_lm_head")?;
+    crate::gpu::encode_matvec(
+        encoder,
+        device,
+        &o.lm_head,
+        &w,
+        sc.buf(slot::HEAD_X),
+        sc.buf(slot::LOGITS),
+    )
 }

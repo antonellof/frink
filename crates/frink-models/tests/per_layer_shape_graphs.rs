@@ -416,7 +416,7 @@ fn openelm_splits_each_layer_s_fused_qkv_by_its_own_counts() {
             .moe
             .with_expert(0, |ex| assert_eq!(ex.up.rows(), *nff, "blk.{il} n_ff"));
         assert_eq!(
-            layer.attn.q_norm.as_ref().map(Vec::len),
+            layer.attn.q_norm.as_ref().map(|w| w.len()),
             Some(6),
             "openelm.cpp:36: {{n_embd_head_k}}"
         );

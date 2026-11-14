@@ -154,9 +154,9 @@ impl Mamba2Hparams {
     }
 }
 
-/// One Mamba-2 layer's weights. The conv planes and `ssm_norm` are
-/// shared allocations for the reason [`crate::mamba1::Mamba1`]'s are;
-/// the per-head vectors are `n_head` floats and stay `Vec`s.
+/// One Mamba-2 layer's weights. The planes, the per-head vectors among
+/// them, are shared allocations for the reason [`crate::mamba1::Mamba1`]'s
+/// are.
 pub struct Mamba2 {
     pub h: Mamba2Hparams,
     /// `blk.N.ssm_in.weight`, `[in_proj_rows, n_embd]`.
@@ -167,11 +167,11 @@ pub struct Mamba2 {
     /// module doc.
     pub conv1d_bias: Arc<[f32]>,
     /// `blk.N.ssm_dt.bias`, `[n_head]`.
-    pub dt_bias: Vec<f32>,
+    pub dt_bias: Arc<[f32]>,
     /// `blk.N.ssm_a`, `[n_head]`, stored negative (`-exp(A_log)`).
-    pub a: Vec<f32>,
+    pub a: Arc<[f32]>,
     /// `blk.N.ssm_d`, `[n_head]`.
-    pub d: Vec<f32>,
+    pub d: Arc<[f32]>,
     /// `blk.N.ssm_norm.weight`, `[d_inner]` read as `[n_group][d_inner / n_group]`.
     pub norm: Option<Arc<[f32]>>,
     /// `blk.N.ssm_out.weight`, `[n_embd, d_inner]`.
@@ -268,9 +268,9 @@ impl Mamba2 {
             in_proj,
             conv1d: conv1d.into(),
             conv1d_bias: conv1d_bias.into(),
-            dt_bias,
-            a,
-            d,
+            dt_bias: dt_bias.into(),
+            a: a.into(),
+            d: d.into(),
             norm: norm.map(Into::into),
             out_proj,
         })
@@ -329,7 +329,7 @@ impl Mamba2 {
         let mut dt_all = vec![0.0f32; rows * n_head];
         for (r, dt) in dt_all.chunks_exact_mut(n_head).enumerate() {
             let row = &zxbcdt[r * stride + d_inner + w..(r + 1) * stride];
-            for (o, (t, bias)) in dt.iter_mut().zip(row.iter().zip(&self.dt_bias)) {
+            for (o, (t, bias)) in dt.iter_mut().zip(row.iter().zip(self.dt_bias.iter())) {
                 *o = t + bias;
             }
         }
@@ -432,9 +432,9 @@ mod tests {
             )),
             conv1d: rnd(h.d_conv * h.conv_width()).into(),
             conv1d_bias: rnd(h.conv_width()).into(),
-            dt_bias: rnd(h.n_head),
-            a: vec![-0.5, -1.5],
-            d: rnd(h.n_head),
+            dt_bias: rnd(h.n_head).into(),
+            a: vec![-0.5, -1.5].into(),
+            d: rnd(h.n_head).into(),
             norm: Some(rnd(h.d_inner).iter().map(|v| v + 1.0).collect()),
             out_proj: WeightMatrix::F32(Tensor::new(
                 rnd(n_embd * h.d_inner),

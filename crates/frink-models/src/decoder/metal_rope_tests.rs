@@ -576,7 +576,7 @@ fn an_output_gate_or_attention_sinks_keep_the_layer_off_the_launches_without_the
     );
 
     // Sinks on layer 1, with `gpt_oss` still `None`.
-    d.layers[1].attn.sinks = Some(vec![0.5; n_heads]);
+    d.layers[1].attn.sinks = Some(vec![0.5; n_heads].into());
     assert!(d.gpt_oss.is_none());
     assert!(
         !d.layer_supports_metal_attn(&d.layers[1]),
@@ -591,7 +591,7 @@ fn an_output_gate_or_attention_sinks_keep_the_layer_off_the_launches_without_the
         "and only the stacks: the per-layer arm must not take the layer"
     );
     let view = d.metal_attn_view(&d.layers[1]).expect("the stacks' view");
-    assert_eq!(view.sinks, d.layers[1].attn.sinks.as_deref());
+    assert_eq!(view.sinks, d.layers[1].attn.sinks.as_ref());
     assert!(view.stack_only());
 }
 
@@ -676,8 +676,8 @@ fn gemma3_4b_shaped_config() -> ModelConfig {
     cfg.sliding_window = Some(4);
     cfg.swa_layers = crate::swa_layers::SwaLayers::period(6, false);
     cfg.rope_freqs = Some(crate::config::RopeFreqs {
-        full: vec![8.0; 4],
-        swa: Some(vec![1.0; 4]),
+        full: vec![8.0; 4].into(),
+        swa: Some(vec![1.0; 4].into()),
     });
     // One full period, so the run holds five sliding layers and one
     // full-attention layer -- Gemma-3's ratio, and the smallest one
@@ -722,8 +722,8 @@ fn the_metal_stacks_are_handed_each_layer_s_own_rope_pair() {
     // different answers.
     let sliding = decoder.metal_layer_rope(0).unwrap();
     let full = decoder.metal_layer_rope(5).unwrap();
-    assert_eq!(sliding.freq_factors, Some(&[1.0f32; 4][..]));
-    assert_eq!(full.freq_factors, Some(&[8.0f32; 4][..]));
+    assert_eq!(sliding.freq_factors.map(|f| &f[..]), Some(&[1.0f32; 4][..]));
+    assert_eq!(full.freq_factors.map(|f| &f[..]), Some(&[8.0f32; 4][..]));
     assert_ne!(
         sliding, full,
         "a run of layers that all rope alike proves nothing here"

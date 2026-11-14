@@ -275,7 +275,7 @@ fn neither_row_has_a_pre_attention_norm_or_a_pre_ffn_norm() {
 /// pre-norms, load a vector of ones". An RMSNorm with unit weights is
 /// not the identity -- it still divides by the RMS of the residual --
 /// and this test measures how far from the truth that lands. Without
-/// it, `NormOp::None` and `NormOp::Rms(vec![1.0; n])` would be
+/// it, `NormOp::None` and `NormOp::Rms(vec![1.0; n].into())` would be
 /// indistinguishable to this suite and the enum would be decoration.
 #[test]
 fn restoring_an_all_ones_pre_norm_in_either_slot_diverges_from_llama_cpp() {
@@ -285,9 +285,9 @@ fn restoring_an_all_ones_pre_norm_in_either_slot_diverges_from_llama_cpp() {
             let hidden = d.config.hidden_dim;
             for layer in d.layers.iter_mut() {
                 if slot == "attn" {
-                    layer.attn.norm_weight = NormOp::Rms(vec![1.0; hidden]);
+                    layer.attn.norm_weight = NormOp::Rms(vec![1.0; hidden].into());
                 } else {
-                    layer.moe.norm_weight = NormOp::Rms(vec![1.0; hidden]);
+                    layer.moe.norm_weight = NormOp::Rms(vec![1.0; hidden].into());
                 }
             }
             let mut kv = graph_caches(&d);

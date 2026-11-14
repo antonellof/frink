@@ -279,8 +279,8 @@ fn qk_norm_present_changes_output_versus_absent() {
     let without_norm = host_decoder(cfg.clone(), 1, vocab);
     let mut with_norm = host_decoder(cfg, 1, vocab);
     for layer in &mut with_norm.layers {
-        layer.attn.q_norm = Some(vec![2.0; q_width]);
-        layer.attn.k_norm = Some(vec![2.0; kv_width]);
+        layer.attn.q_norm = Some(vec![2.0; q_width].into());
+        layer.attn.k_norm = Some(vec![2.0; kv_width].into());
     }
 
     let mut caches_a: Vec<KvCache> = without_norm.config.new_kv_caches();
@@ -370,9 +370,9 @@ fn qkv_bias_present_changes_output_versus_absent() {
     let without_bias = host_decoder(cfg.clone(), 1, vocab);
     let mut with_bias = host_decoder(cfg, 1, vocab);
     for layer in &mut with_bias.layers {
-        layer.attn.q_bias = Some(vec![0.5; q_width]);
-        layer.attn.k_bias = Some(vec![0.5; kv_width]);
-        layer.attn.v_bias = Some(vec![0.5; kv_width]);
+        layer.attn.q_bias = Some(vec![0.5; q_width].into());
+        layer.attn.k_bias = Some(vec![0.5; kv_width].into());
+        layer.attn.v_bias = Some(vec![0.5; kv_width].into());
     }
 
     let mut caches_a: Vec<KvCache> = without_bias.config.new_kv_caches();

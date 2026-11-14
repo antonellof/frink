@@ -478,8 +478,8 @@ impl Decoder {
                                     up: u,
                                     down: d,
                                 }),
-                                post_attn_norm: layer.attn.post_attn_norm.as_deref(),
-                                post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
+                                post_attn_norm: layer.attn.post_attn_norm.as_ref(),
+                                post_ffn_norm: layer.attn.post_ffn_norm.as_ref(),
                                 per_layer: None,
                                 out_scale: None,
                                 // Fenced by `metal_can_serve_model`.
