@@ -127,6 +127,10 @@ pub mod shortconv;
 #[cfg(feature = "metal")]
 pub mod ssm_scan;
 
+/// A Mamba-1 block as a token mixer of the dense decode stack.
+#[cfg(feature = "metal")]
+pub mod ssm_decode;
+
 /// Gemma-4's per-layer embeddings, encoded into the dense stacks.
 #[cfg(feature = "metal")]
 pub mod ple;

@@ -459,7 +459,6 @@ impl Decoder {
                             };
                             dense_layers.push(frink_metal::attn::DenseLayerMetal {
                                 attn_norm_w: an,
-                                ffn_norm_w: fnw,
                                 mixer: frink_metal::attn::TokenMixer::Attention(
                                     frink_metal::attn::AttnMixer {
                                         q,
@@ -470,9 +469,12 @@ impl Decoder {
                                         window: self.config.layer_sliding_window(li),
                                     },
                                 ),
-                                gate: g,
-                                up: u,
-                                down: d,
+                                ffn: Some(frink_metal::attn::DenseFfnMetal {
+                                    norm_w: fnw,
+                                    gate: g,
+                                    up: u,
+                                    down: d,
+                                }),
                                 post_attn_norm: layer.attn.post_attn_norm.as_deref(),
                                 post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
                                 per_layer: None,

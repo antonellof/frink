@@ -187,12 +187,12 @@ enum Download {
 /// Per-layer launches + norms for [`launch_decode_dense_stack`].
 pub struct DenseLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
-    pub ffn_norm_w: &'a [f32],
     /// What stands between `attn_norm` and the first residual add.
     pub mixer: TokenMixer<'a>,
-    pub gate: MatvecLaunch<'a>,
-    pub up: MatvecLaunch<'a>,
-    pub down: MatvecLaunch<'a>,
+    /// `ffn_norm` and the gated FFN, or `None` on a layer that has none
+    /// (a pure Mamba model's: `mamba.cpp:110-117` adds the block's
+    /// output to the residual and goes on to the next layer).
+    pub ffn: Option<DenseFfnMetal<'a>>,
     /// Gemma post-attention / post-FFN sandwich norms, applied to the
     /// block output *before* the residual add.
     pub post_attn_norm: Option<&'a [f32]>,
@@ -203,6 +203,14 @@ pub struct DenseLayerMetal<'a> {
     /// Gemma-4's `layer_output_scale`: the whole residual stream is
     /// multiplied by it at the end of the layer.
     pub out_scale: Option<f32>,
+}
+
+/// A layer's gated FFN and the norm in front of it.
+pub struct DenseFfnMetal<'a> {
+    pub norm_w: &'a [f32],
+    pub gate: MatvecLaunch<'a>,
+    pub up: MatvecLaunch<'a>,
+    pub down: MatvecLaunch<'a>,
 }
 
 /// A layer's token mixer: attention, or LFM2's short convolution
@@ -217,6 +225,8 @@ pub struct DenseLayerMetal<'a> {
 pub enum TokenMixer<'a> {
     Attention(AttnMixer<'a>),
     ShortConv(ShortConvMixer<'a>),
+    /// A Mamba-1 block (`crate::ssm_decode`).
+    Mamba1(crate::ssm_decode::Mamba1Mixer<'a>),
 }
 
 impl<'a> TokenMixer<'a> {
@@ -224,7 +234,7 @@ impl<'a> TokenMixer<'a> {
     pub fn attn(&self) -> Option<&AttnMixer<'a>> {
         match self {
             Self::Attention(a) => Some(a),
-            Self::ShortConv(_) => None,
+            Self::ShortConv(_) | Self::Mamba1(_) => None,
         }
     }
 }
@@ -271,6 +281,9 @@ impl DenseLayerMetal<'_> {
             || self.post_ffn_norm.is_some()
             || self.per_layer.is_some()
             || self.out_scale.is_some()
+            // No FFN: the block's output is added straight to `h`, and
+            // there is no `down` for the next norm to fold in.
+            || self.ffn.is_none()
     }
 }
 
@@ -352,9 +365,19 @@ pub fn launch_decode_dense_stack(
                 assert_eq!(c.out_proj.rows, n);
                 assert_eq!(c.taps.len(), n * l);
             }
+            TokenMixer::Mamba1(m) => assert_eq!(m.out_rows(), hidden_dim),
         }
         if layer.per_layer.is_some() {
             assert!(ple.is_some(), "a per-layer gate with no PLE plane");
+        }
+        if layer.ffn.is_none() {
+            // Everything after the FFN is skipped on an FFN-free layer.
+            assert!(
+                layer.post_ffn_norm.is_none()
+                    && layer.per_layer.is_none()
+                    && layer.out_scale.is_none(),
+                "an FFN-free layer with an FFN epilogue"
+            );
         }
     }
     if let Some(p) = ple {
@@ -367,33 +390,50 @@ pub fn launch_decode_dense_stack(
         .iter()
         .filter_map(|l| match &l.mixer {
             TokenMixer::ShortConv(c) => Some(c.windows.n()),
-            TokenMixer::Attention(_) => None,
+            TokenMixer::Attention(_) | TokenMixer::Mamba1(_) => None,
         })
         .max()
         .unwrap_or(0);
+    // A Mamba block's `xz`, `x_db` / `dt` and `xc` / `y` widths
+    // (`ssm_decode::Mamba1Mixer::widths`).
+    let (ssm_q, ssm_kv, ssm_inner) = layers
+        .iter()
+        .filter_map(|l| match &l.mixer {
+            TokenMixer::Mamba1(m) => Some(m.widths()),
+            _ => None,
+        })
+        .fold((0, 0, 0), |acc, w| {
+            (acc.0.max(w.0), acc.1.max(w.1), acc.2.max(w.2))
+        });
     let max_q = layers
         .iter()
         .filter_map(|l| l.mixer.attn().map(|a| a.q.rows))
         .max()
         .unwrap_or(0)
-        .max(3 * conv_width);
+        .max(3 * conv_width)
+        .max(ssm_q);
     let max_kv = layers
         .iter()
         .filter_map(|l| l.mixer.attn())
         .filter_map(|a| a.kv.own().map(|(k, v)| k.rows.max(v.rows)))
         .max()
-        .unwrap_or(1);
+        .unwrap_or(1)
+        .max(ssm_kv);
     let max_gate = layers
         .iter()
         .map(|l| {
-            l.gate
-                .rows
+            l.ffn
+                .as_ref()
+                .map_or(0, |f| f.gate.rows)
                 .max(l.per_layer.as_ref().map_or(0, |p| p.gate.rows))
         })
         .max()
-        .unwrap();
-    let attn_elems =
-        (n_heads * kvs.iter().map(|kv| kv.head_dim).max().unwrap_or(0)).max(conv_width);
+        .unwrap()
+        .max(ssm_inner)
+        .max(1);
+    let attn_elems = (n_heads * kvs.iter().map(|kv| kv.head_dim).max().unwrap_or(0))
+        .max(conv_width)
+        .max(ssm_inner);
     let logits_rows = output.map(|o| o.rows);
 
     let shared = shared_metal()?;
@@ -544,15 +584,12 @@ pub fn launch_decode_dense_stack(
             mrs = MemRanges::new();
         }
         assert_eq!(layer.attn_norm_w.len(), hidden_dim);
-        assert_eq!(layer.ffn_norm_w.len(), hidden_dim);
-        assert_eq!(layer.down.rows, hidden_dim);
-        assert_eq!(layer.gate.rows, layer.up.rows);
-
+        if let Some(f) = &layer.ffn {
+            assert_eq!(f.norm_w.len(), hidden_dim);
+            assert_eq!(f.down.rows, hidden_dim);
+            assert_eq!(f.gate.rows, f.up.rows);
+        }
         let attn_nw = resident_f32_buffer(device, layer.attn_norm_w)?;
-        let ffn_nw = resident_f32_buffer(device, layer.ffn_norm_w)?;
-        let gate_w = resident_weight_buffer(device, layer.gate.weights)?;
-        let up_w = resident_weight_buffer(device, layer.up.weights)?;
-        let down_w = resident_weight_buffer(device, layer.down.weights)?;
 
         // Pre-LN: layer 0 norms raw hidden; later layers either fuse the
         // previous FFN residual into attn_norm (non-sandwich) or just
@@ -587,6 +624,24 @@ pub fn launch_decode_dense_stack(
         }
 
         match &layer.mixer {
+            TokenMixer::Mamba1(m) => {
+                spans.span(&cmd_buf, &mut encoder, "mamba1")?;
+                crate::ssm_decode::encode_mamba1(
+                    &encoder,
+                    &mut mrs,
+                    device,
+                    m,
+                    &crate::ssm_decode::Mamba1Bufs {
+                        x: x_buf,
+                        xz: q_buf,
+                        xc: attn_buf,
+                        x_db: k_buf,
+                        dt: v_buf,
+                        y: gate_buf,
+                        out: o_buf,
+                    },
+                )?;
+            }
             TokenMixer::ShortConv(c) => {
                 // `lfm-base.cpp:26-110`: `bcx = in_proj(x)` into the Q
                 // buffer (sized for it above), the conv and its gate into
@@ -797,6 +852,19 @@ pub fn launch_decode_dense_stack(
         // compute `h += o` then `x2 = rms_norm(h)`. The split was a leftover
         // from the serial-encoder era -- `encode_add_rms_norm` writes `h`
         // itself, so the residual is just as eager as the two-dispatch form.
+        let Some(ffn) = &layer.ffn else {
+            // No FFN (a pure Mamba layer): `h += o`, eagerly, which is
+            // why such a layer counts as `needs_eager_residual`.
+            spans.span(&cmd_buf, &mut encoder, "residual_add")?;
+            mrs.begin_op(&encoder, &[h_buf, o_buf], &[h_buf]);
+            encode_vec_add(&encoder, device, h_buf, o_buf, hidden_dim as u32)?;
+            mrs.end_op(&[h_buf, o_buf], &[h_buf]);
+            continue;
+        };
+        let ffn_nw = resident_f32_buffer(device, ffn.norm_w)?;
+        let gate_w = resident_weight_buffer(device, ffn.gate.weights)?;
+        let up_w = resident_weight_buffer(device, ffn.up.weights)?;
+        let down_w = resident_weight_buffer(device, ffn.down.weights)?;
         spans.span(&cmd_buf, &mut encoder, "add_ffn_norm")?;
         mrs.begin_op(&encoder, &[h_buf, o_buf], &[h_buf, x2_buf]);
         encode_add_rms_norm(
@@ -813,8 +881,8 @@ pub fn launch_decode_dense_stack(
         // gate ∥ up (llama concurrent)
         spans.span(&cmd_buf, &mut encoder, "gate_up")?;
         mrs.begin_op(&encoder, &[x2_buf], &[gate_buf, up_buf]);
-        encode_matvec(&encoder, device, &layer.gate, &gate_w, x2_buf, gate_buf)?;
-        encode_matvec(&encoder, device, &layer.up, &up_w, x2_buf, up_buf)?;
+        encode_matvec(&encoder, device, &ffn.gate, &gate_w, x2_buf, gate_buf)?;
+        encode_matvec(&encoder, device, &ffn.up, &up_w, x2_buf, up_buf)?;
         mrs.end_op(&[x2_buf], &[gate_buf, up_buf]);
 
         spans.span(&cmd_buf, &mut encoder, "glu")?;
@@ -826,7 +894,7 @@ pub fn launch_decode_dense_stack(
                 gate_buf,
                 up_buf,
                 act_buf,
-                layer.gate.rows as u32,
+                ffn.gate.rows as u32,
             )?;
         } else {
             encode_silu_mul(
@@ -835,14 +903,14 @@ pub fn launch_decode_dense_stack(
                 gate_buf,
                 up_buf,
                 act_buf,
-                layer.gate.rows as u32,
+                ffn.gate.rows as u32,
             )?;
         }
         mrs.end_op(&[gate_buf, up_buf], &[act_buf]);
 
         spans.span(&cmd_buf, &mut encoder, "down")?;
         mrs.begin_op(&encoder, &[act_buf], &[down_buf]);
-        encode_matvec(&encoder, device, &layer.down, &down_w, act_buf, down_buf)?;
+        encode_matvec(&encoder, device, &ffn.down, &down_w, act_buf, down_buf)?;
         mrs.end_op(&[act_buf], &[down_buf]);
 
         if let Some(post) = layer.post_ffn_norm {
