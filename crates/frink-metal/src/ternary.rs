@@ -107,12 +107,8 @@ MUL_MM_SG_ENTRY(ptq1_0_mul_mm_sg, PTQ1_0Dequant)
 MUL_MM_SG_F16_ENTRY(ptq1_0_mul_mm_sg_f16, PTQ1_0Dequant)
 "#;
 
-/// The decode matvec: two simdgroups of four rows each (`rows_per_tg
-/// 8`, 64 threads, the `q4_0_matvec` geometry). Each lane owns the
-/// blocks `lane, lane + 32, ...` of its rows; for every sub-block of
-/// sixteen the activation slice is loaded once and dotted against each
-/// of the four rows' decoded values, then the lanes reduce with
-/// `simd_sum`.
+/// The decode matvec source: the trit decode and
+/// [`PTQ1_0_MATVEC_BODY_MSL`]'s kernel, one simdgroup on four rows.
 pub fn ptq1_0_matvec_src() -> &'static str {
     use std::sync::LazyLock;
     static SRC: LazyLock<&'static str> = LazyLock::new(|| {
@@ -140,67 +136,22 @@ pub fn ptq1_0_matvec_src() -> &'static str {
 /// once. The first version of this kernel gave a lane a whole block and
 /// decoded with integer ops; it reached 2.4 tok/s on Bonsai-2-27B
 /// where the fork reaches 11 on the same GPU.
+///
+/// Each row's base pointer is computed ONCE, before the block loop, and
+/// the dot reads its bytes straight from it, as the fork does. A
+/// previous version recomputed `row * row_bytes + ib * 28` (with a
+/// `min` clamp) for every row on every block and gathered the four
+/// rows' bytes into a struct before decoding them; on the M5 Max that
+/// cost 9% of the kernel (`kernel_bench::decode_matvec_rates`, Bonsai's
+/// five shapes 220 us against 200; 4096 x 14336 38.4 us against the
+/// fork's `test-backend-ops` 35.9 and this form's 34.8). The kernel is
+/// ALU-bound (about three float ops a weight), so integer address math
+/// in the loop is not free. Eight rows per simdgroup (220 us), two rows
+/// (209) and two simdgroups per threadgroup (198, no better) were
+/// measured and are not used.
 const PTQ1_0_MATVEC_BODY_MSL: &str = r#"
-// One row's five bytes, read BEFORE any of them is used.
-//
-// The bytes a lane needs from a block are five separate non-contiguous
-// loads, and the kernel's four rows used to be loaded and consumed one
-// at a time: one memory request in flight per lane, with the whole
-// float-pipe decode waiting on it. The probe said what that costs --
-// PTQ1_0 at Bonsai's `17408x5120` took 1.004 ms against Q4_0's 0.897 on
-// the same shape while reading 2.6x FEWER bytes -- so the kernel is
-// latency-bound and not bandwidth-bound, and the fix is to have four
-// rows' requests outstanding at once.
-struct ptq1_0_row {
-    ushort b01; // qs[2 it] and qs[2 it + 1], one aligned load
-    uchar b2;   // qs[16 + it]
-    uchar bh;   // qh[it & 1]
-    half  d;    // the block scale
-};
-
-static inline ptq1_0_row ptq1_0_load_row(device const uchar* qb, short it) {
-    ptq1_0_row r;
-    // `2 * it` is even, so the pair of bytes this lane owns is one
-    // aligned 16-bit load rather than two 8-bit ones. The memory side
-    // of this kernel measures 34 GB/s against Q4_0's 55 on the same
-    // rows, with the decode removed, so the load COUNT is what it is
-    // bound by and not the byte count.
-    r.b01 = *(device const ushort*)(qb + 2 * it);
-    r.b2 = qb[16 + it];
-    r.bh = qb[24 + (it & 1)];
-    r.d  = *(device const half*)(qb + 26);
-    return r;
-}
-
-static inline float ptq1_0_dot_loaded(ptq1_0_row r, thread const float* yl, float sumy) {
-    float acc = 0.0f;
-    const uchar bs[2] = { uchar(r.b01 & 0xFFu), uchar(r.b01 >> 8) };
-    for (short k = 0; k < 2; ++k) {
-        const float u = float(bs[k]) * (1.0f / 256.0f);
-        thread const float* c = yl + 5 * k;
-        acc += floor(  3.0f * u) * c[0];
-        acc += floor(  9.0f * u) * c[1];
-        acc += floor( 27.0f * u) * c[2];
-        acc += floor( 81.0f * u) * c[3];
-        acc += floor(243.0f * u) * c[4];
-    }
-    {
-        const float u = float(r.b2) * (1.0f / 256.0f);
-        thread const float* c = yl + 10;
-        acc += floor(  3.0f * u) * c[0];
-        acc += floor(  9.0f * u) * c[1];
-        acc += floor( 27.0f * u) * c[2];
-        acc += floor( 81.0f * u) * c[3];
-        acc += floor(243.0f * u) * c[4];
-    }
-    {
-        const float u  = float(r.bh) * (1.0f / 256.0f);
-        const float p0 = yl[16];
-        acc += (floor(3.0f * p0 * u) - 3.0f * floor(p0 * u)) * yl[15];
-    }
-    return (acc - sumy) * float(r.d);
-}
-
+// One row's dot over the block at `qb`, from the coefficients the
+// caller staged in `yl`: the fork's `ptq1_0_dot_reg`.
 static inline float ptq1_0_dot_coeffs(device const uchar* qb, thread const float* yl, float sumy, short it) {
     float acc = 0.0f;
     for (short k = 0; k < 2; ++k) {
@@ -258,6 +209,10 @@ kernel void ptq1_0_matvec(
         yl[16] = pow3f[it >> 1];
     }
 
+    device const uchar* ax[NR];
+    for (uint rr = 0u; rr < NR; ++rr) {
+        ax[rr] = weights + (size_t)min(first_row + rr, n_rows - 1u) * row_bytes;
+    }
     device const float* yb = x + ix * 128;
     for (uint ib = uint(ix); ib < n_blocks_per_row; ib += 4u) {
         float sumy = 0.0f;
@@ -289,19 +244,9 @@ kernel void ptq1_0_matvec(
             yl[15] = v;
             sumy += v;
         }
-        // All four rows' bytes requested first, then decoded: four
-        // outstanding requests per lane instead of one.
-        ptq1_0_row rows[NR];
         #pragma unroll
         for (uint rr = 0u; rr < NR; ++rr) {
-            const uint row = min(first_row + rr, n_rows - 1u);
-            device const uchar* block = weights + (size_t)row * row_bytes + (size_t)ib * 28u;
-            rows[rr] = ptq1_0_load_row(block, it);
-        }
-        #pragma unroll
-        for (uint rr = 0u; rr < NR; ++rr) {
-            if (first_row + rr >= n_rows) continue;
-            sumf[rr] += ptq1_0_dot_loaded(rows[rr], yl, sumy);
+            sumf[rr] += ptq1_0_dot_coeffs(ax[rr] + (size_t)ib * 28u, yl, sumy, it);
         }
         yb += 128 * 4;
     }

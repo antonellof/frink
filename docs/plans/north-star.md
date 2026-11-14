@@ -102,40 +102,31 @@ without a rental.
    serves a stored expert; the packed `mul_mv_id` path and the Metal
    prefill MoE paths are still resident-only, then asynchronous reads
    and a run that really exceeds memory.
-9. **Gated delta-net hybrids on Metal** (#540): a prompt batch is
-   one command buffer and a decode token one wait, attention layers,
-   routed MoE layers with their shared expert, and the output head
-   included. On an M5 Max Qwen3.5-9B and Qwen3-Next-80B-A3B decode at
-   or above llama.cpp and prefill at 0.93x of it; Bonsai PTQ1_0
-   prefills at 1.07x the fork and decodes at 0.94x to 0.98x, all of it
-   GPU time in the PTQ1_0 matvecs (22 ms a token, no gaps between
-   command buffers). What is left: Bonsai's matvec rate, and the
-   overlap a concurrent encoder would give independent dispatches.
 
 ### D. Architectures
 
-10. **One file per architecture** (#403,
+9. **One file per architecture** (#403,
    [`arch-registry-migration.md`](arch-registry-migration.md)): step
    9c (`step35`, `mimo2`, `lfm3`), then the audited list, the catalog
    and the layer plan derived from the registry.
-11. **The architectures that refuse as unaudited** (#538), each as one
+10. **The architectures that refuse as unaudited** (#538), each as one
     file with a libllama golden and a greedy decode, or a refusal with
     its reason in [`MODELS.md`](../MODELS.md).
-12. **Multimodal** (#407): the Qwen-family projector first (`--mmproj`,
+11. **Multimodal** (#407): the Qwen-family projector first (`--mmproj`,
     image input on chat completions, Responses and Messages), every
     other projector type refused by name. The largest group of models
     llama.cpp serves and frink does not.
 
 ### E. CUDA and other GPUs (one batched rental)
 
-13. **CUDA to parity**: decode (#133), prefill (#259), and the kinds
+12. **CUDA to parity**: decode (#133), prefill (#259), and the kinds
     that have never run on a GPU (#405). The largest speed gap, on the
     hardware most people own.
-14. **Run the queued CUDA hardware tests**: the commands in the bodies
+13. **Run the queued CUDA hardware tests**: the commands in the bodies
     of #606, #613, #615, #578 and #619. CUDA graph decode replay
     (`FRINK_CUDA_GRAPH=1`, #537) stays off until its test passes and
     the replay is measured.
-15. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
+14. **Vulkan beyond its current stack** (#409), and **AMD**: ROCm on
     RDNA and CDNA, the Ryzen AI NPU spike (#494, [`amd.md`](amd.md)).
     Vulkan has run only on MoltenVK and lavapipe. Queued for a real
     driver (RADV, AMDVLK, or an Intel iGPU if no AMD rental exists):
@@ -147,7 +138,7 @@ without a rental.
 
 ### F. Same commands, same API
 
-16. **The flag and `LLAMA_ARG_*` tail** (#404), including automatic
+15. **The flag and `LLAMA_ARG_*` tail** (#404), including automatic
     memory planning (`--fit` and family, pricing target, draft and every
     slot) and `--cache-reuse`: implement, or refuse by name.
 
@@ -156,24 +147,24 @@ without a rental.
 Speculation inside the continuous batch has landed (#614, #615) and
 DFlash drafts with it (#606, #608).
 
-17. **Drafters still missing**: multi-token-prediction heads as a
+16. **Drafters still missing**: multi-token-prediction heads as a
     drafter (#533), recurrent targets drafting in the batch (needs a
     batched checkpoint), and per-token recurrent snapshots so a partial
     accept does not replay.
-18. **Scheduling**: preemption on by default after a measurement
+17. **Scheduling**: preemption on by default after a measurement
     (#408), and a request priority (#541).
-19. **Memory**: sliding-window eviction in the paged store and the pool
+18. **Memory**: sliding-window eviction in the paged store and the pool
     (#61); KV quantization on the host and CUDA stores (#535); the disk
     KV tier wired into serving, or deleted (#536); continuous batching
     on by default off Metal once a receipt exists.
 
 ### H. Reach
 
-20. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
+19. **Quantized safetensors** (FP8 blockwise, GPTQ, AWQ) and
     quantizing a BF16 checkpoint while loading it (#539).
-21. **CPU decode scheduling** (#27): a persistent worker pool in place
+20. **CPU decode scheduling** (#27): a persistent worker pool in place
     of a fork-join per operation, and the quiet-host receipt.
-22. **Container images** for CPU and CUDA (#544). Small; lands whenever
+21. **Container images** for CPU and CUDA (#544). Small; lands whenever
     someone wants it.
 
 **Not now:** tensor, pipeline and multi-node parallelism,

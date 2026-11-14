@@ -8243,7 +8243,9 @@ mod tests {
 
     /// The PTQ1_0 matvec against `frink_quant::ternary`'s scalar dot on
     /// a ternary row the quantizer packed: rows=6 exercises the row
-    /// guard (NR=4 x NSG=2), 5 blocks/row leaves lanes idle.
+    /// guard (NR=4 rows a threadgroup; the second group's last two row
+    /// pointers clamp onto row 5 and are never written), 5 blocks/row
+    /// leaves lanes idle.
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
     fn launch_ptq1_0_matvec_matches_cpu_reference() {

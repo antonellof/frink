@@ -89,6 +89,17 @@ are the ones worth reading twice.
   had sent ~300 Metal buffers back and forth every Bonsai token. M5 Max,
   interleaved best-of on a shared host: Bonsai-2-27B tg32 38.7 to 43.0
   (PrismML fork 45.8).
+- **The PTQ1_0 decode matvec is the fork's loop again, and Bonsai
+  decodes past the fork on Metal** (#540). Each row's base pointer is
+  computed once before the block loop, where the kernel recomputed
+  `row * row_bytes + ib * 28` with a clamp for every row on every block
+  and staged the four rows' bytes in a struct first; the kernel is
+  ALU-bound, so the integer address math cost 9% of it (Bonsai's five
+  matvec shapes 220 us to 200, `kernel_bench::decode_matvec_rates`;
+  4096 x 14336 38.4 us to 34.8 against the fork's `test-backend-ops`
+  35.9). M5 Max, interleaved best-of on a shared host: Bonsai-2-27B
+  tg32 43.7 to 47.6 (PrismML fork 44.6). Greedy text and parity
+  unchanged.
 - **Qwen3-Next and `qwen35moe` run on the Metal device runs** (#540).
   A routed FFN with one shared expert rides the decode run (router,
   softmax top-k, `mul_mv_id` experts, the shared expert's sigmoid gate)
