@@ -27,18 +27,7 @@
 //! request had one", this returns `None`. Zero is a measurement;
 //! absence is not.
 
-// `rate` and `serving` carry one unwired half between them, and it is a
-// live defect rather than spare capacity: nothing on any request path
-// calls `ServingStats::on_prefill`, `on_decode`, `on_admitted`,
-// `on_abort` or `on_finished`, so `RateWindow::record` has no caller,
-// the counter block is never incremented, and the two `/v1/stats`
-// throughput rates read 0.0 however busy the server is (`docs/API.md`
-// says so). Both allows go when the two decode paths report tokens as
-// they are produced, or when the rates and the counters are deleted.
-
-/// Wired: `RateWindow::new` and `tokens_per_second`, behind the two
-/// `/v1/stats` rates. Unwired: `record`; see above.
-#[allow(dead_code)]
+/// What the recent throughput is, behind the two `/v1/stats` rates.
 pub(crate) mod rate;
 
 /// A Prometheus histogram, behind `/metrics`' latency families.
@@ -46,10 +35,11 @@ pub(crate) mod histogram;
 pub(crate) mod requests;
 pub(crate) mod ring;
 
-/// Wired: `ServingStats::default` and the two rate reads `/v1/stats`
-/// makes. Unwired: every feeder and every counter; see above.
-#[allow(dead_code)]
+/// The live counters and the feed both decode paths write them through.
 pub(crate) mod serving;
 
+#[cfg(test)]
+mod http_tests;
+
 pub(crate) use requests::{entry, Record, Stats, MAX_PAGE};
-pub(crate) use serving::ServingStats;
+pub(crate) use serving::ServingFeed;

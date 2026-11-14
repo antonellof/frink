@@ -79,6 +79,15 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **`/v1/stats` throughput and request counts are true.** Nothing fed
+  them: `throughput.decode_tps` and `prefill_tps` read `0.0` on every
+  reply, and `requests.active` counted only streamed requests. Both
+  decode paths now count prompt tokens as they are computed and
+  completion tokens as they are committed, and every generation,
+  streamed or not, is counted in flight, then `completed` or, after a
+  cancel, the new `aborted`. `completed` used to count every row the
+  request ring recorded, errors and embeddings included.
+
 - **`POST /v1/cache/rebuild` holds a re-split to `FRINK_KV_BYTE_BUDGET`**
   (#632). A pool sized from a byte budget could be grown past it: the
   endpoint never consulted the pre-check that exists to refuse a split

@@ -42,7 +42,7 @@ impl RateWindow {
         }
     }
 
-    /// Records `tokens` produced at `at_ms`.
+    /// Records `tokens` produced at `at_ms`, in any order.
     ///
     /// Bounded by [`RATE_SAMPLE_CAPACITY`] independently of the window,
     /// because age-based eviction only happens on a read.
@@ -53,7 +53,16 @@ impl RateWindow {
         if self.samples.len() == RATE_SAMPLE_CAPACITY {
             self.samples.pop_front();
         }
-        self.samples.push_back((at_ms, tokens));
+        // Kept in time order, which eviction and the span both read off
+        // the front. Concurrent requests stamp a prefill at its START
+        // and record it at its end, so a sample can arrive older than
+        // the newest one held; it is almost always near the back.
+        let at = self
+            .samples
+            .iter()
+            .rposition(|(t, _)| *t <= at_ms)
+            .map_or(0, |i| i + 1);
+        self.samples.insert(at, (at_ms, tokens));
     }
 
     /// Tokens per second over the window ending at `now_ms`.
@@ -71,6 +80,12 @@ impl RateWindow {
         // the smallest span it can honestly claim to have measured.
         let span_ms = now_ms.saturating_sub(oldest).max(1);
         tokens as f64 * 1000.0 / span_ms as f64
+    }
+
+    /// Tokens held, without evicting: what a test checks a path fed.
+    #[cfg(test)]
+    pub(crate) fn tokens(&self) -> u64 {
+        self.samples.iter().map(|(_, t)| *t).sum()
     }
 
     fn evict_before(&mut self, cutoff: u64) {
@@ -117,5 +132,17 @@ mod tests {
             window.record(step, 1);
         }
         assert_eq!(window.samples.len(), RATE_SAMPLE_CAPACITY);
+    }
+
+    /// A sample older than the newest still counts from its own time:
+    /// the span is measured from the oldest sample, wherever it was
+    /// recorded, and it ages out when its time does.
+    #[test]
+    fn a_sample_recorded_out_of_order_is_held_in_time_order() {
+        let mut window = RateWindow::new(1_000);
+        window.record(500, 10);
+        window.record(100, 10);
+        assert_eq!(window.tokens_per_second(600), 40.0);
+        assert_eq!(window.tokens_per_second(1_200), 10.0 * 1000.0 / 700.0);
     }
 }

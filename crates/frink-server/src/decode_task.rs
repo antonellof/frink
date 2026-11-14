@@ -47,6 +47,7 @@ pub(crate) struct DecodeHandles {
     batcher: Option<serving::batch::ContinuousBatcher>,
     ceiling: Option<Arc<budget::ContextCeiling>>,
     metal_private_decode_gate: Option<Arc<std::sync::Mutex<()>>>,
+    serving: crate::stats::ServingFeed,
 }
 
 impl DecodeHandles {
@@ -71,6 +72,7 @@ impl DecodeHandles {
             batcher: active.batcher.clone(),
             ceiling: active.ceiling.clone(),
             metal_private_decode_gate: state.metal_private_decode_gate.clone(),
+            serving: state.serving.clone(),
         })
     }
 
@@ -107,6 +109,7 @@ impl DecodeHandles {
             self.batcher.as_ref(),
             self.ceiling.as_deref(),
             self.metal_private_decode_gate.as_deref(),
+            Some(&self.serving),
         )
     }
 
@@ -129,6 +132,7 @@ impl DecodeHandles {
             self.batcher.as_ref(),
             self.ceiling.as_deref(),
             self.metal_private_decode_gate.as_deref(),
+            Some(&self.serving),
             emit,
         )
     }

@@ -265,7 +265,7 @@ budget.
 | `radix` | which prefix of a new prompt is already computed, page-keyed and node-sharing | the paged-KV serving path, where it shares KV pages between prompts by reference count; its occupancy is `pools.prefix_cache` on `/v1/stats` |
 | `anchor` | how far a window may slide, and where a tool call pins it so the next agentic turn rejoins rather than recomputes | the paged-KV serving path, on both the private generate loop and the continuous batcher |
 | `effort` | which reasoning-effort dialect a checkpoint speaks | probed once per checkpoint at load, then applied to every request's `chat_template_kwargs`, and advertised on `/v1/models` |
-| `stats` | what a server may honestly claim about its own throughput and latency | `/v1/stats`, `/v1/requests`, `/admin/stats`. The two `/v1/stats` throughput rates are not fed yet and read 0 |
+| `stats` | what a server may honestly claim about its own throughput and latency | `/v1/stats`, `/v1/requests`, `/admin/stats`. Both decode paths feed the `/v1/stats` rates and request counts |
 | `maintenance` | whether a request, a cache rebuild or a stop may proceed right now | `POST /v1/cache/rebuild` and `POST /v1/admin/prepare-stop` |
 | `pool_budget` | whether a live re-split fits its floors and byte budget, before anything is freed | `POST /v1/cache/rebuild`, which refuses a KV target over `FRINK_KV_BYTE_BUDGET` |
 | `rebuild` · `outbox` · `footprint` | whether a re-split rolls back, what a stop receipt is worth, what this process really occupies | the same two admin endpoints |

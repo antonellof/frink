@@ -768,11 +768,23 @@ the two resolve as llama.cpp resolves them
 `GET /v1/stats` is one object for a status bar: `model`, `state`,
 `uptime_s`, recent throughput (`throughput.decode_tps`,
 `throughput.prefill_tps`), request counts and latencies
-(`requests.active`, `completed`, `p95_ms`, `ttft_mean_ms`,
+(`requests.active`, `completed`, `aborted`, `p95_ms`, `ttft_mean_ms`,
 `prompt_tokens_total`, `completion_tokens_total`), pool gauges
 (`pools`) and the live memory footprint (`memory`, `null` when it cannot
-be read). The two throughput rates read `0.0` today on every reply:
-nothing on either decode path feeds them yet.
+be read).
+
+Both decode paths (the private loop and `FRINK_CONTINUOUS_BATCHING`)
+feed the two rates, for streamed and buffered requests alike.
+`prefill_tps` counts prompt tokens actually computed, so a prefix the
+cache served is not in it; `decode_tps` counts completion tokens as
+they are committed. Each is tokens over the span from the oldest sample
+in the last 5 seconds to now, so an idle server decays to `0.0`.
+`active` counts generations in flight on either path, queued for the
+batch worker included; `completed` counts those answered and `aborted`
+those answered after a cancel (`POST /v1/cancel` or a dropped stream).
+A generation that failed is in neither, and a reply the response cache
+served ran no generation and is in none of the three. The token totals
+are summed from each finished request's `usage`.
 
 `pools.kv_pages` is the shared KV pool (`used`, `total`, `evictable`,
 `page_size`); `pools.prefix_cache` is what paged KV's prefix tree holds,
