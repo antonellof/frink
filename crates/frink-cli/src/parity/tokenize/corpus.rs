@@ -146,6 +146,16 @@ pub(super) const CORPUS: &[Case] = &[
                e\u{301}t\u{e9} (x) [y] \"z\" a.b,c\u{2026}d\u{3002}e\u{3001}f",
     },
     Case {
+        name: "whole-word-entries",
+        why: "words that are vocabulary entries the merges do not reach: Llama 3 has \
+              ` vi\u{1ec7}c`, ` dikkat` and ` \u{434}\u{430}\u{436}\u{435}` but no merge path \
+              to them, so they are one token only where `ignore_merges` is set (#629) and \
+              several where it is not.",
+        text: " vi\u{1ec7}c nhi\u{1ec1}u \u{111}i\u{1ec1}u Vi\u{1ec7}t k\u{fc}\u{e7}\u{fc}k \
+               dikkat \u{434}\u{430}\u{436}\u{435} \u{445}\u{430}\u{440}\u{430}\u{43a}\u{442}\u{435}\u{440} \
+               milyon merkez .:.:.:.:.:.:.:.:",
+    },
+    Case {
         name: "special-markers-as-prose",
         why: "special-token markers MENTIONED in text. Under parse_special=false llama.cpp \
               tokenizes a CONTROL marker as the characters it is written with; frink used \
@@ -298,6 +308,10 @@ mod tests {
         assert!(seq.contains('\u{661}'), "an Arabic-Indic digit");
         assert!(seq.contains('\u{ff01}'), "fullwidth punctuation");
         assert!(seq.contains("ab1234cd"), "digits glued to letters");
+        assert!(
+            case("whole-word-entries").starts_with(" vi\u{1ec7}c "),
+            "a Llama 3 entry its merges do not reach, as the piece the llama3 arm cuts"
+        );
         assert!(
             case("special-markers-glued").starts_with("<s>"),
             "a marker at the very start of the input"
