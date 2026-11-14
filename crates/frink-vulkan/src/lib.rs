@@ -20,12 +20,12 @@
 //! matrix, [`runtime::Runtime::gemm`]) waiting for its own result,
 //! about three queue round
 //! trips. It began as the `vulkan-beachhead`
-//! GO/NO-GO (`docs/plans/archive/vulkan-beachhead-verdict.md`), and its seam
+//! GO/NO-GO (`bc5074aa:docs/plans/archive/vulkan-beachhead-verdict.md`), and its seam
 //! guard tests still go red if a kind is claimed without a shader.
 //!
 //! # What has actually run
 //!
-//! See `docs/plans/archive/vulkan-beachhead-verdict.md`. The rule this repo
+//! See `bc5074aa:docs/plans/archive/vulkan-beachhead-verdict.md`. The rule this repo
 //! holds CUDA to applies here unchanged: nothing in this crate may be
 //! described as a measured capability in `docs/FEATURES.md` or
 //! `docs/MODELS.md` on the strength of compiling.

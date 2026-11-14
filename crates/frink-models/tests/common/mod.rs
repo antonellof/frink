@@ -16,6 +16,7 @@
 mod backend;
 pub mod iq_encode;
 pub mod quant_encode;
+pub mod synthetic_gptoss;
 pub mod synthetic_llama;
 #[allow(unused_imports)]
 pub use backend::{backend, pin_backend, tolerance, Backend, METAL_GOLDEN_TOL};
@@ -111,7 +112,7 @@ pub const GRAPH_TOL: f32 = 3e-5;
 /// agrees to ~1e-6 and the one GeGLU row does not.
 ///
 /// This is the same shape as the K-quant `vec_dot_type` divergence in
-/// `docs/plans/llama-cpp-gap-inventory.md` §10: two defensible
+/// `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` §10: two defensible
 /// implementations, one of them the reference's, and the gap is not a
 /// frink bug. It was measured rather than assumed. An independent numpy
 /// forward pass over the same fixture
@@ -305,7 +306,7 @@ pub fn worst_vs(got: &[f32], golden: &[f32]) -> f32 {
 /// instrument on a 48-wide synthetic vocabulary. KL is reported beside
 /// it because it is the number `frink parity` speaks in and the one a
 /// reader can compare against the K-quant drift in
-/// `docs/plans/llama-cpp-gap-inventory.md` §10 -- a comparison that only
+/// `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` §10 -- a comparison that only
 /// means anything if both sides are quoted in the same unit.
 ///
 /// Here rather than in each suite: it had grown two copies

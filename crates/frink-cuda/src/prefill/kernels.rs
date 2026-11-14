@@ -1,6 +1,6 @@
 //! CUDA C for the five elementwise / per-row ops a dense prefill layer
 //! needs between its matmuls, so that the layer never returns to the
-//! host between them (`docs/plans/cpu-cuda-parity.md`, step 2b, #259).
+//! host between them (`1ebda4fc:docs/plans/cpu-cuda-parity.md`, step 2b, #259).
 //!
 //! Each kernel is the CUDA spelling of ONE host function, named in its
 //! doc comment; the hardware tests in [`super::tests`] hold every one

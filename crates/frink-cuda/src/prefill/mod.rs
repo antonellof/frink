@@ -7,7 +7,7 @@
 //! result) with the norms, RoPE, attention, SwiGLU and residual adds
 //! on the host between them: 111 MB over PCIe per Llama-3.2-3B layer at
 //! pp512, 3.1 GB and 196 syncs per step, and a GPU idle two thirds of
-//! the time (#259, `docs/plans/cpu-cuda-parity.md` step 2b). This is
+//! the time (#259, `1ebda4fc:docs/plans/cpu-cuda-parity.md` step 2b). This is
 //! the Metal shape (`frink_metal::attn::launch_prefill_dense_layer`)
 //! for CUDA: the hidden batch goes up once, every op between the
 //! matmuls is a kernel, and what comes back, in ONE download at the

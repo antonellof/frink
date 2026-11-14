@@ -32,7 +32,7 @@
 //!
 //! This module is identity only -- no storage, no eviction, no I/O.
 //! The disk tier that will consume it is `kv-ssd-tier` in
-//! `docs/plans/serving-and-tiered-kv.md`.
+//! `4dc195e5:docs/plans/serving-and-tiered-kv.md`.
 
 use sha2::{Digest, Sha256};
 

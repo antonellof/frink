@@ -86,6 +86,10 @@ pub enum MetalError {
     /// before anything is encoded (#448).
     #[error("no Metal MoE id kernel (mul_mv_id) for {0} expert weights")]
     NoMoeIdKernel(&'static str),
+    /// A launch handed something it does not implement, refused before
+    /// anything is encoded.
+    #[error("unsupported on this Metal launch: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Concurrent compute encoder (llama.cpp `MTLDispatchTypeConcurrent`).
@@ -329,7 +333,7 @@ pub fn launch_q8_0_matvec(
 /// router meant the entire GEMM ran as a *single* 64-thread threadgroup
 /// on one GPU core with each lane striding its own 8 KB row: ~1.1-1.8
 /// ms/tok on OLMoE (see the MoE decode diagnosis in
-/// `docs/plans/llama-cpp-parity-push.md`).
+/// `4dc195e5:docs/plans/llama-cpp-parity-push.md`).
 ///
 /// Host dispatches `ceil(rows/2)` threadgroups of `32 * nsg` threads.
 pub const F32_MATVEC_KERNEL_SRC: &str = r#"
@@ -899,6 +903,34 @@ kernel void moe_weighted_sum(
 
 /// Decode: `h += weighted_sum(expert_out, route)` — fuses MoE combine +
 /// residual (llama graph `ggml_add` after down). Prefill keeps plain sum.
+///
+/// `BIAS` folds gpt-oss's `down` expert bias in first (`ggml_add_id`,
+/// then the routing weight): the biased value is rounded to f32 before
+/// it is scaled, exactly as when `moe_add_id` stored it, so the fused
+/// kernel's sums are the unfused pair's bit for bit.
+template <bool BIAS>
+static inline void moe_weighted_sum_residual_impl(
+    device const float* expert_out,
+    device const float* route,
+    device float* h,
+    uint hidden_rows,
+    uint n_experts,
+    device const int* ids,
+    device const float* bias,
+    uint i
+) {
+    if (i >= hidden_rows) return;
+    float sum = 0.0f;
+    for (uint e = 0u; e < n_experts; ++e) {
+        float v = expert_out[(size_t)e * hidden_rows + i];
+        if (BIAS) {
+            v = v + bias[(size_t)uint(ids[e]) * hidden_rows + i];
+        }
+        sum += route[e] * v;
+    }
+    h[i] += sum;
+}
+
 kernel void moe_weighted_sum_residual(
     device const float* expert_out [[buffer(0)]],
     device const float* route [[buffer(1)]],
@@ -907,12 +939,22 @@ kernel void moe_weighted_sum_residual(
     constant uint& n_experts [[buffer(4)]],
     uint i [[thread_position_in_grid]]
 ) {
-    if (i >= hidden_rows) return;
-    float sum = 0.0f;
-    for (uint e = 0u; e < n_experts; ++e) {
-        sum += route[e] * expert_out[(size_t)e * hidden_rows + i];
-    }
-    h[i] += sum;
+    moe_weighted_sum_residual_impl<false>(
+        expert_out, route, h, hidden_rows, n_experts, nullptr, nullptr, i);
+}
+
+kernel void moe_weighted_sum_residual_add_id(
+    device const float* expert_out [[buffer(0)]],
+    device const float* route [[buffer(1)]],
+    device float* h [[buffer(2)]],
+    constant uint& hidden_rows [[buffer(3)]],
+    constant uint& n_experts [[buffer(4)]],
+    device const int* ids [[buffer(5)]],
+    device const float* bias [[buffer(6)]],
+    uint i [[thread_position_in_grid]]
+) {
+    moe_weighted_sum_residual_impl<true>(
+        expert_out, route, h, hidden_rows, n_experts, ids, bias, i);
 }
 
 /// llama.cpp `mul_mv_id` style: packed Q4_0 plane, `ids[slot]` selects
@@ -1101,7 +1143,8 @@ static inline void moe_mm_id_map0_impl(
     uint n_tokens,
     ushort tpitg,
     ushort ntg,
-    threadgroup ushort* shmem
+    threadgroup ushort* shmem,
+    threadgroup uint* cnt
 ) {
     const short ide = short(tpitg);
     uint32_t n_all = 0;
@@ -1132,7 +1175,23 @@ static inline void moe_mm_id_map0_impl(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    htpe[ide] = n_all;
+    cnt[ide] = n_all;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // One descriptor per 32-entry tile with work, expert by expert:
+    // `mm_id_tiles` is the host twin and the test holds them equal.
+    if (tpitg == 0) {
+        uint tile = 0;
+        for (ushort e = 0; e < ntg; ++e) {
+            const uint n = cnt[e];
+            for (uint k = 0; k < n; k += 32u) {
+                htpe[1 + 3 * tile] = e;
+                htpe[1 + 3 * tile + 1] = k;
+                htpe[1 + 3 * tile + 2] = min(n - k, 32u);
+                tile++;
+            }
+        }
+        htpe[0] = tile;
+    }
 }
 
 kernel void moe_mm_id_map0_ne20_2(
@@ -1142,8 +1201,9 @@ kernel void moe_mm_id_map0_ne20_2(
     constant uint& n_tokens [[buffer(3)]],
     ushort tpitg [[thread_position_in_threadgroup]],
     ushort ntg [[threads_per_threadgroup]],
-    threadgroup ushort* shmem [[threadgroup(0)]]
-) { moe_mm_id_map0_impl<2>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem); }
+    threadgroup ushort* shmem [[threadgroup(0)]],
+    threadgroup uint* cnt [[threadgroup(1)]]
+) { moe_mm_id_map0_impl<2>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem, cnt); }
 
 kernel void moe_mm_id_map0_ne20_4(
     device const int* src2 [[buffer(0)]],
@@ -1152,8 +1212,9 @@ kernel void moe_mm_id_map0_ne20_4(
     constant uint& n_tokens [[buffer(3)]],
     ushort tpitg [[thread_position_in_threadgroup]],
     ushort ntg [[threads_per_threadgroup]],
-    threadgroup ushort* shmem [[threadgroup(0)]]
-) { moe_mm_id_map0_impl<4>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem); }
+    threadgroup ushort* shmem [[threadgroup(0)]],
+    threadgroup uint* cnt [[threadgroup(1)]]
+) { moe_mm_id_map0_impl<4>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem, cnt); }
 
 kernel void moe_mm_id_map0_ne20_6(
     device const int* src2 [[buffer(0)]],
@@ -1162,8 +1223,9 @@ kernel void moe_mm_id_map0_ne20_6(
     constant uint& n_tokens [[buffer(3)]],
     ushort tpitg [[thread_position_in_threadgroup]],
     ushort ntg [[threads_per_threadgroup]],
-    threadgroup ushort* shmem [[threadgroup(0)]]
-) { moe_mm_id_map0_impl<6>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem); }
+    threadgroup ushort* shmem [[threadgroup(0)]],
+    threadgroup uint* cnt [[threadgroup(1)]]
+) { moe_mm_id_map0_impl<6>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem, cnt); }
 
 kernel void moe_mm_id_map0_ne20_8(
     device const int* src2 [[buffer(0)]],
@@ -1172,8 +1234,9 @@ kernel void moe_mm_id_map0_ne20_8(
     constant uint& n_tokens [[buffer(3)]],
     ushort tpitg [[thread_position_in_threadgroup]],
     ushort ntg [[threads_per_threadgroup]],
-    threadgroup ushort* shmem [[threadgroup(0)]]
-) { moe_mm_id_map0_impl<8>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem); }
+    threadgroup ushort* shmem [[threadgroup(0)]],
+    threadgroup uint* cnt [[threadgroup(1)]]
+) { moe_mm_id_map0_impl<8>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem, cnt); }
 
 /// Gather rows for `mul_mm_id` host map0: `dst[i*dst_stride+j] =
 /// src[ids[i]*src_stride+j]`. One threadgroup per batch row.
@@ -1227,36 +1290,89 @@ kernel void moe_scatter_rows(
 
 /// Prefill router GEMM with **F32** weights (`ffn_gate_inp` ships F32 in
 /// every MoE GGUF we load): `out[t*n_experts + e] = dot(w[e], x[t])`.
-/// One simdgroup per (expert, token); `hidden` is the reduction length.
-/// Kept in f32 end to end — the top-k selection below is sensitive to
+/// Kept in f32 end to end: the top-k selection below is sensitive to
 /// near-ties, so this is the one prefill GEMM that does not go through
 /// the f16 activation plane.
-kernel void moe_router_mm_f32(
-    device const float* w [[buffer(0)]],
-    device const float* x [[buffer(1)]],
-    device float* out [[buffer(2)]],
-    constant uint& hidden [[buffer(3)]],
-    constant uint& n_experts [[buffer(4)]],
-    constant uint& n_tokens [[buffer(5)]],
-    uint2 tgpig [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]]
+///
+/// One simdgroup per `RT` tokens x `RE` experts. Each lane keeps one
+/// accumulator per pair and walks `i = lane, lane + 32, ...` exactly as
+/// a simdgroup per pair would, so every logit is the same sum in the
+/// same order whatever the tile: `<1, 1>` is the one-pair-per-simdgroup
+/// form, and `moe_router_tile_is_bit_exact` holds `<8, 8>` to it. The
+/// tile only stops each weight row being read once per token (that
+/// cost OLMoE about 150 us a layer at 512 tokens).
+template<short RT, short RE>
+static inline void moe_router_mm_f32_impl(
+    device const float* w,
+    device const float* x,
+    device float* out,
+    uint hidden,
+    uint n_experts,
+    uint n_tokens,
+    uint2 tgpig,
+    uint lane
 ) {
-    const uint e = tgpig.x;
-    const uint t = tgpig.y;
-    if (e >= n_experts || t >= n_tokens) {
-        return;
+    const uint e0 = tgpig.x * RE;
+    const uint t0 = tgpig.y * RT;
+    device const float* wr[RE];
+    device const float* xr[RT];
+#pragma clang loop unroll(full)
+    for (short j = 0; j < RE; ++j) {
+        wr[j] = w + (size_t)min(e0 + j, n_experts - 1u) * hidden;
     }
-    device const float* wr = w + (size_t)e * hidden;
-    device const float* xr = x + (size_t)t * hidden;
-    float acc = 0.0f;
+#pragma clang loop unroll(full)
+    for (short j = 0; j < RT; ++j) {
+        xr[j] = x + (size_t)min(t0 + j, n_tokens - 1u) * hidden;
+    }
+    float acc[RT][RE];
+#pragma clang loop unroll(full)
+    for (short a = 0; a < RT; ++a) {
+    #pragma clang loop unroll(full)
+    for (short b = 0; b < RE; ++b) {
+            acc[a][b] = 0.0f;
+        }
+    }
     for (uint i = lane; i < hidden; i += 32u) {
-        acc += wr[i] * xr[i];
+        float wv[RE];
+    #pragma clang loop unroll(full)
+    for (short b = 0; b < RE; ++b) {
+            wv[b] = wr[b][i];
+        }
+    #pragma clang loop unroll(full)
+    for (short a = 0; a < RT; ++a) {
+            const float xv = xr[a][i];
+        #pragma clang loop unroll(full)
+    for (short b = 0; b < RE; ++b) {
+                acc[a][b] += wv[b] * xv;
+            }
+        }
     }
-    acc = simd_sum(acc);
-    if (lane == 0u) {
-        out[(size_t)t * n_experts + e] = acc;
+#pragma clang loop unroll(full)
+    for (short a = 0; a < RT; ++a) {
+    #pragma clang loop unroll(full)
+    for (short b = 0; b < RE; ++b) {
+            const float sum = simd_sum(acc[a][b]);
+            if (lane == 0u && t0 + a < n_tokens && e0 + b < n_experts) {
+                out[(size_t)(t0 + a) * n_experts + e0 + b] = sum;
+            }
+        }
     }
 }
+
+#define FRINK_ROUTER_KERNEL(NAME, RT, RE) \
+kernel void NAME( \
+    device const float* w [[buffer(0)]], \
+    device const float* x [[buffer(1)]], \
+    device float* out [[buffer(2)]], \
+    constant uint& hidden [[buffer(3)]], \
+    constant uint& n_experts [[buffer(4)]], \
+    constant uint& n_tokens [[buffer(5)]], \
+    uint2 tgpig [[threadgroup_position_in_grid]], \
+    uint lane [[thread_index_in_simdgroup]] \
+) { moe_router_mm_f32_impl<RT, RE>(w, x, out, hidden, n_experts, n_tokens, tgpig, lane); }
+
+FRINK_ROUTER_KERNEL(moe_router_mm_f32, 4, 8)
+FRINK_ROUTER_KERNEL(moe_router_mm_f32_1x1, 1, 1)
 
 /// Softmax over `n` logits (`n<=256`) per token, writing top-`k` ids +
 /// probs. `renormalize!=0` divides selected probs by their sum (Mixtral);
@@ -1269,33 +1385,49 @@ kernel void moe_router_mm_f32(
 /// Tie policy: lowest expert index wins. Decode calls this with
 /// `n_tokens == 1`; the single-lane kernel it replaced cost ~1.3-2.2
 /// ms/tok across OLMoE's 16 layers.
-kernel void moe_topk_softmax_batch(
-    device const float* logits [[buffer(0)]],
-    device int* ids [[buffer(1)]],
-    device float* weights [[buffer(2)]],
-    constant uint& n [[buffer(3)]],
-    constant uint& k [[buffer(4)]],
-    constant uint& renormalize [[buffer(5)]],
-    constant uint& n_tokens [[buffer(6)]],
-    uint tg [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]],
-    threadgroup float* probs [[threadgroup(0)]]
+///
+/// `BIAS` adds gpt-oss's router bias (`ffn_gate_inp.bias`) to each logit
+/// as it is read: the same f32 sum `vec_add_rows` stored, so selection
+/// and weights are the unfused pair's exactly.
+template <bool BIAS>
+static inline void moe_topk_softmax_impl(
+    device const float* logits,
+    device const float* bias,
+    device int* ids,
+    device float* weights,
+    uint n,
+    uint k,
+    uint renormalize,
+    uint n_tokens,
+    uint tg,
+    uint lane,
+    threadgroup float* probs
 ) {
     const uint t = tg;
     if (t >= n_tokens) {
         return;
     }
     device const float* row = logits + (size_t)t * n;
+    // The biased logits are staged in `probs` behind a barrier, so fast
+    // math cannot reassociate `(l + b) - mx`: the exp must see the
+    // rounded sum `vec_add_rows` would have stored.
+    if (BIAS) {
+        for (uint i = lane; i < n; i += 32u) {
+            probs[i] = row[i] + bias[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    auto logit = [&](uint i) { return BIAS ? probs[i] : row[i]; };
 
     float lmax = -INFINITY;
     for (uint i = lane; i < n; i += 32u) {
-        lmax = max(lmax, row[i]);
+        lmax = max(lmax, logit(i));
     }
     const float mx = simd_max(lmax);
 
     float lsum = 0.0f;
     for (uint i = lane; i < n; i += 32u) {
-        const float p = exp(row[i] - mx);
+        const float p = exp(logit(i) - mx);
         probs[i] = p;
         lsum += p;
     }
@@ -1338,6 +1470,39 @@ kernel void moe_topk_softmax_batch(
             }
         }
     }
+}
+
+kernel void moe_topk_softmax_batch(
+    device const float* logits [[buffer(0)]],
+    device int* ids [[buffer(1)]],
+    device float* weights [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& k [[buffer(4)]],
+    constant uint& renormalize [[buffer(5)]],
+    constant uint& n_tokens [[buffer(6)]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    threadgroup float* probs [[threadgroup(0)]]
+) {
+    moe_topk_softmax_impl<false>(
+        logits, logits, ids, weights, n, k, renormalize, n_tokens, tg, lane, probs);
+}
+
+kernel void moe_topk_softmax_bias_batch(
+    device const float* logits [[buffer(0)]],
+    device int* ids [[buffer(1)]],
+    device float* weights [[buffer(2)]],
+    constant uint& n [[buffer(3)]],
+    constant uint& k [[buffer(4)]],
+    constant uint& renormalize [[buffer(5)]],
+    constant uint& n_tokens [[buffer(6)]],
+    device const float* bias [[buffer(7)]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    threadgroup float* probs [[threadgroup(0)]]
+) {
+    moe_topk_softmax_impl<true>(
+        logits, bias, ids, weights, n, k, renormalize, n_tokens, tg, lane, probs);
 }
 "#;
 
@@ -2321,7 +2486,13 @@ pub static K_QUANT_MUL_MM_SG_KERNEL_SRC: std::sync::LazyLock<&'static str> =
                 &crate::gen_kinds::gemm_entries_msl(),
                 1,
             )
-            .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1);
+            .replacen("// @FRINK_GET_ROWS@", &crate::embd::get_rows_msl(), 1)
+            .replacen(
+                "// @FRINK_TENSOR_IMPL@",
+                crate::tensor_mm::TENSOR_IMPL_MSL,
+                1,
+            );
+        let src = crate::tensor_mm::gemm_prelude() + &src;
         Box::leak(src.into_boxed_str())
     });
 
@@ -2385,6 +2556,21 @@ struct Q4KDequant {
     static constexpr constant short BLOCK_BYTES = 144;
     static inline void get(device const uchar* xb, short il, thread float4x4& reg) {
         q4k_dequant_16(xb, il, reg);
+    }
+};
+
+// llama `dequantize_f32` for `kernel_mul_mm_f32_f32`: plain f32 rows,
+// taken 32 at a time (NL = 2, `il` selects the low or high 16). The GEMM
+// rounds them to half in its tile, as llama's f32 mul_mm does. Scalar
+// loads: a row is only 4-byte aligned.
+struct F32Dequant {
+    static constexpr constant short NL = 2;
+    static constexpr constant short BLOCK_BYTES = 128;
+    static inline void get(device const uchar* xb, short il, thread float4x4& reg) {
+        device const float* p = (device const float*)(xb) + 16 * il;
+        for (short i = 0; i < 16; ++i) {
+            reg[i / 4][i % 4] = p[i];
+        }
     }
 };
 
@@ -2559,6 +2745,24 @@ struct Q6KDequant {
     }
 };
 
+// The work tile `tile` of a `mul_mm_id` grid, from the descriptors
+// `moe_mm_id_map0` (or `mm_id_tiles` on the host) wrote: `tpe[0]` tiles,
+// then per tile (expert, first entry in the expert's id slice, entries).
+// The grid is sized by `mm_id_max_tiles`, so the tail has no work (llama
+// `kernel_mul_mm_id`'s `htpe`). `[r1, neh1)` is the tile's entry range.
+static inline bool mm_id_tile(
+    device const uint* tpe, uint tile, thread uint& im, thread int& r1, thread int& neh1
+) {
+    if (tile >= tpe[0]) {
+        return false;
+    }
+    im = tpe[1 + 3 * tile];
+    r1 = int(tpe[1 + 3 * tile + 1]);
+    neh1 = r1 + int(tpe[1 + 3 * tile + 2]);
+    return true;
+}
+
+#ifndef FRINK_METAL_HAS_TENSOR
 template<typename DQ, bool BC_OUT>
 static inline void mul_mm_sg_impl(
     device const uchar* src0,
@@ -2872,10 +3076,11 @@ static inline void mul_mm_sg_impl_f16(
 }
 
 
+
 // llama `kernel_mul_mm_id`: simdgroup GEMM with indexed src1 rows and
-// scattered dst rows (MoE prefill). One z-slice per expert; `tpe[im]` is
-// the batch count for that expert; `ids[im*ids_stride + j]` encodes
-// `token*top_k + slot` for output layout `dst[id*rows + r]`.
+// scattered dst rows (MoE prefill). One threadgroup per (work tile, 64
+// rows), the tile read from `tpe` by `mm_id_tile`; `ids[im*ids_stride +
+// j]` encodes `token*top_k + slot` for output layout `dst[id*rows + r]`.
 template<typename DQ>
 static inline void mul_mm_id_impl(
     device const uchar* src0,
@@ -2906,14 +3111,13 @@ static inline void mul_mm_id_impl(
     constexpr short NL1 = NK / 8;
     constexpr short NL  = DQ::NL;
 
-    const uint im = tgpig.z;
-    const int r0 = int(tgpig.y) * NR0;
-    const int r1 = int(tgpig.x) * NR1;
-
-    const int neh1 = int(tpe[im]);
-    if (r1 >= neh1) {
+    uint im;
+    int r1;
+    int neh1;
+    if (!mm_id_tile(tpe, tgpig.x, im, r1, neh1)) {
         return;
     }
+    const int r0 = int(tgpig.y) * NR0;
 
     const short nr0 = (int(n_rows) - r0 < NR0) ? short(int(n_rows) - r0) : NR0;
     const short nr1 = (neh1 - r1 < NR1) ? short(neh1 - r1) : NR1;
@@ -3054,14 +3258,13 @@ static inline void mul_mm_id_impl_f16(
     constexpr short NL1 = NK / 8;
     constexpr short NL  = DQ::NL;
 
-    const uint im = tgpig.z;
-    const int r0 = int(tgpig.y) * NR0;
-    const int r1 = int(tgpig.x) * NR1;
-
-    const int neh1 = int(tpe[im]);
-    if (r1 >= neh1) {
+    uint im;
+    int r1;
+    int neh1;
+    if (!mm_id_tile(tpe, tgpig.x, im, r1, neh1)) {
         return;
     }
+    const int r0 = int(tgpig.y) * NR0;
 
     const short nr0 = (int(n_rows) - r0 < NR0) ? short(int(n_rows) - r0) : NR0;
     const short nr1 = (neh1 - r1 < NR1) ? short(neh1 - r1) : NR1;
@@ -3170,6 +3373,9 @@ static inline void mul_mm_id_impl_f16(
         }
     }
 }
+
+#endif // FRINK_METAL_HAS_TENSOR
+// @FRINK_TENSOR_IMPL@
 
 #define MUL_MM_ID_ENTRY(NAME, DQ)                                           \
 kernel void NAME(                                                           \
@@ -3319,6 +3525,7 @@ MUL_MM_SG_F16_ENTRY(q8_0_mul_mm_sg_f16, Q8_0Dequant)
 MUL_MM_SG_F16_ENTRY(q4_0_mul_mm_sg_f16, Q4_0Dequant)
 MUL_MM_SG_F16_ENTRY(q5_0_mul_mm_sg_f16, Q5_0Dequant)
 MUL_MM_SG_F16_ENTRY(iq4_xs_mul_mm_sg_f16, IQ4XSDequant)
+MUL_MM_SG_F16_ENTRY(f32_mul_mm_sg_f16, F32Dequant)
 // @FRINK_GET_ROWS@
 "#;
 
@@ -3588,6 +3795,7 @@ fn borrow_scratch(
 
 /// One quantized matrix bound for the simdgroup GEMM, as a descriptor
 /// so several can be encoded into a single command buffer.
+#[derive(Clone, Copy)]
 pub struct MulMmSgLaunch<'a> {
     pub weights: &'a [u8],
     pub rows: usize,
@@ -3655,6 +3863,37 @@ pub fn mul_mm_sg_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
     }
 }
 
+/// The half-activation GEMM over plain f32 weights, llama
+/// `kernel_mul_mm_f32_f32` (weights and activations rounded to half in
+/// the tile, f32 accumulation), or `None` when `cols` is not a whole
+/// number of its 32-wide blocks. Not a [`mul_mm_sg_meta`] row: no GGUF
+/// quant kind is f32, and only the f16-activation entry exists.
+pub fn f32_mul_mm_sg_launch(
+    weights: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Option<MulMmSgLaunch<'_>> {
+    if cols == 0 || !cols.is_multiple_of(32) || weights.len() != rows * cols {
+        return None;
+    }
+    // SAFETY: an initialised `[f32]` is `4 * len` initialised bytes, and
+    // `u8` has no alignment requirement; the view borrows `weights`.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            weights.as_ptr() as *const u8,
+            std::mem::size_of_val(weights),
+        )
+    };
+    Some(MulMmSgLaunch {
+        weights: bytes,
+        rows,
+        row_bytes: cols * 4,
+        fn_name: "f32_mul_mm_sg",
+        block_bytes: 128,
+        block_elems: 32,
+    })
+}
+
 /// MoE indexed simdgroup GEMM (`kernel_mul_mm_id_*`).
 pub fn mul_mm_id_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
     match kind {
@@ -3694,6 +3933,33 @@ pub fn mul_mm_id_f16_meta(kind: &str) -> Option<(&'static str, usize, usize)> {
     })
 }
 
+/// Upper bound on the work tiles of a `mul_mm_id` over `n_slots`
+/// (token, expert) entries and `n_experts` experts: the full 32-entry
+/// tiles plus at most one partial tile per expert (llama
+/// `ggml_metal_op_mul_mat_id_max_tiles`). The grid's width.
+pub(crate) fn mm_id_max_tiles(n_slots: usize, n_experts: usize) -> usize {
+    let tiles = n_slots.div_ceil(32) + n_experts.min(n_slots).saturating_sub(1);
+    n_slots.min(tiles).max(1)
+}
+
+/// u32s of a tile-descriptor buffer for [`mm_id_max_tiles`] tiles.
+pub(crate) fn mm_id_tpe_words(n_slots: usize, n_experts: usize) -> usize {
+    1 + 3 * mm_id_max_tiles(n_slots, n_experts)
+}
+
+/// The tile descriptors `moe_mm_id_map0` writes, from each expert's
+/// entry count: `[n_tiles, (expert, first entry, entries) per tile]`.
+pub(crate) fn mm_id_tiles(counts: &[u32]) -> Vec<u32> {
+    let mut out = vec![0u32];
+    for (e, &n) in counts.iter().enumerate() {
+        for k in (0..n).step_by(32) {
+            out.extend_from_slice(&[e as u32, k, (n - k).min(32)]);
+            out[0] += 1;
+        }
+    }
+    out
+}
+
 fn moe_mm_id_map0_fn(top_k: usize) -> Option<&'static str> {
     match top_k {
         2 => Some("moe_mm_id_map0_ne20_2"),
@@ -3726,6 +3992,7 @@ pub(crate) fn encode_moe_mm_id_map0(
         let mut nt = n_tokens;
         enc.setBytes_length_atIndex(NonNull::new(&mut nt as *mut u32 as *mut _).unwrap(), 4, 3);
         enc.setThreadgroupMemoryLength_atIndex(smem, 0);
+        enc.setThreadgroupMemoryLength_atIndex((n_experts as usize) * 4, 1);
     }
     dispatch_counted(
         enc,
@@ -3789,9 +4056,9 @@ pub(crate) fn encode_mul_mm_id_f16(
         dispatch_counted(
             enc,
             MTLSize {
-                width: (n_tokens as usize).div_ceil(32),
+                width: mm_id_max_tiles(n_tokens as usize * top_k as usize, n_experts as usize),
                 height: (rows as usize).div_ceil(64),
-                depth: n_experts as usize,
+                depth: 1,
             },
             MTLSize {
                 width: 128,
@@ -3802,6 +4069,10 @@ pub(crate) fn encode_mul_mm_id_f16(
     }
     Ok(())
 }
+
+/// Tokens and experts per simdgroup of the production router kernel
+/// (`moe_router_mm_f32`'s `<RT, RE>`).
+const ROUTER_TILE: (usize, usize) = (4, 8);
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_moe_router_mm_f32(
@@ -3814,7 +4085,33 @@ pub(crate) fn encode_moe_router_mm_f32(
     n_experts: u32,
     n_tokens: u32,
 ) -> Result<(), MetalError> {
-    let pipe = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, "moe_router_mm_f32")?;
+    encode_moe_router_tiled(
+        enc,
+        device,
+        ("moe_router_mm_f32", ROUTER_TILE),
+        router_w,
+        x_buf,
+        logits_buf,
+        hidden,
+        n_experts,
+        n_tokens,
+    )
+}
+
+/// The router kernel `name`, whose simdgroup covers `(tokens, experts)`.
+#[allow(clippy::too_many_arguments)]
+fn encode_moe_router_tiled(
+    enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    (name, (rt, re)): (&'static str, (usize, usize)),
+    router_w: &ProtocolObject<dyn MTLBuffer>,
+    x_buf: &ProtocolObject<dyn MTLBuffer>,
+    logits_buf: &ProtocolObject<dyn MTLBuffer>,
+    hidden: u32,
+    n_experts: u32,
+    n_tokens: u32,
+) -> Result<(), MetalError> {
+    let pipe = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, name)?;
     enc.setComputePipelineState(&pipe.0);
     unsafe {
         enc.setBuffer_offset_atIndex(Some(router_w), 0, 0);
@@ -3831,8 +4128,8 @@ pub(crate) fn encode_moe_router_mm_f32(
     dispatch_counted(
         enc,
         MTLSize {
-            width: n_experts as usize,
-            height: n_tokens as usize,
+            width: (n_experts as usize).div_ceil(re),
+            height: (n_tokens as usize).div_ceil(rt),
             depth: 1,
         },
         MTLSize {
@@ -3857,13 +4154,23 @@ pub(crate) fn encode_moe_topk_softmax_batch(
     k: u32,
     renormalize: bool,
     n_tokens: u32,
+    // gpt-oss's router bias, `[n]`, added to every token's logits.
+    bias: Option<&ProtocolObject<dyn MTLBuffer>>,
 ) -> Result<(), MetalError> {
-    let pipe = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, "moe_topk_softmax_batch")?;
+    let name = if bias.is_some() {
+        "moe_topk_softmax_bias_batch"
+    } else {
+        "moe_topk_softmax_batch"
+    };
+    let pipe = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, name)?;
     enc.setComputePipelineState(&pipe.0);
     unsafe {
         enc.setBuffer_offset_atIndex(Some(logits), 0, 0);
         enc.setBuffer_offset_atIndex(Some(ids.buf), ids.offset, 1);
         enc.setBuffer_offset_atIndex(Some(weights), 0, 2);
+        if let Some(b) = bias {
+            enc.setBuffer_offset_atIndex(Some(b), 0, 7);
+        }
         for (idx, mut v) in [
             (3usize, n),
             (4, k),
@@ -3905,12 +4212,15 @@ pub(crate) fn encode_moe_topk_softmax_batch(
 /// expert GEMM input). `out` receives `[T, H]`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_moe_prefill_ffn(
-    enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     mrs: &mut crate::mem_ranges::MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     moe: &PrefillMoeMetal<'_>,
     bound: &MoePackedResident,
     router_w: &ResidentF32Buffer,
+    oai: Option<&crate::moe_oai::MoeOaiResident>,
     x_f32: &ProtocolObject<dyn MTLBuffer>,
     x_f16: &ProtocolObject<dyn MTLBuffer>,
     out: &ProtocolObject<dyn MTLBuffer>,
@@ -3949,6 +4259,8 @@ pub(crate) fn encode_moe_prefill_ffn(
         let half_slots = scratch.half_in.as_ref();
         let expert_out = scratch.expert_out.as_ref();
 
+        spans.span(cmd_buf, encoder, "moe_router")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         mrs.begin_op(enc, &[x_f32], &[logits]);
         encode_moe_router_mm_f32(
             enc,
@@ -3961,6 +4273,8 @@ pub(crate) fn encode_moe_prefill_ffn(
             n_tokens as u32,
         )?;
         mrs.end_op(&[x_f32], &[logits]);
+        spans.span(cmd_buf, encoder, "moe_topk")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         mrs.begin_op(enc, &[logits], &[route_ids, route_w]);
         encode_moe_topk_softmax_batch(
             enc,
@@ -3970,10 +4284,16 @@ pub(crate) fn encode_moe_prefill_ffn(
             route_w,
             n_experts as u32,
             top_k as u32,
-            moe.renormalize,
+            // gpt-oss's gating is a softmax over the winners alone
+            // (`gpt_oss_route`), whatever the file's flag says.
+            moe.renormalize || oai.is_some(),
             n_tokens as u32,
+            // gpt-oss: `ffn_gate_inp.bias` on every token's logits.
+            oai.map(|o| &*o.router_bias.buffer),
         )?;
         mrs.end_op(&[logits], &[route_ids, route_w]);
+        spans.span(cmd_buf, encoder, "moe_id_map")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         mrs.begin_op(enc, &[route_ids], &[tpe, mm_ids]);
         encode_moe_mm_id_map0(
             enc,
@@ -3987,6 +4307,8 @@ pub(crate) fn encode_moe_prefill_ffn(
         )?;
         mrs.end_op(&[route_ids], &[tpe, mm_ids]);
 
+        spans.span(cmd_buf, encoder, "moe_gate_up")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         mrs.begin_op(enc, &[x_f16, mm_ids, tpe], &[gate_buf, up_buf]);
         encode_mul_mm_id_f16(
             enc,
@@ -4025,18 +4347,43 @@ pub(crate) fn encode_moe_prefill_ffn(
             0,
         )?;
         mrs.end_op(&[x_f16, mm_ids, tpe], &[gate_buf, up_buf]);
+        spans.span(cmd_buf, encoder, "moe_act")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         // SwiGLU straight to f16 — the staging convert is folded in.
-        mrs.begin_op(enc, &[gate_buf, up_buf], &[half_slots]);
-        crate::elem::encode_act_mul_f32_to_f16(
-            enc,
-            device,
-            gate_buf,
-            up_buf,
-            half_slots,
-            (n_slots * ffn) as u32,
-            false,
-        )?;
-        mrs.end_op(&[gate_buf, up_buf], &[half_slots]);
+        // gpt-oss's clamped form takes the expert biases with it.
+        match oai {
+            Some(oai) => {
+                mrs.begin_op(enc, &[gate_buf, up_buf, route_ids], &[half_slots]);
+                crate::moe_oai::encode_swiglu_oai_id(
+                    enc,
+                    device,
+                    oai,
+                    gate_buf,
+                    up_buf,
+                    IdsBinding::whole(route_ids),
+                    half_slots,
+                    ffn,
+                    n_slots,
+                    true,
+                )?;
+                mrs.end_op(&[gate_buf, up_buf, route_ids], &[half_slots]);
+            }
+            None => {
+                mrs.begin_op(enc, &[gate_buf, up_buf], &[half_slots]);
+                crate::elem::encode_act_mul_f32_to_f16(
+                    enc,
+                    device,
+                    gate_buf,
+                    up_buf,
+                    half_slots,
+                    (n_slots * ffn) as u32,
+                    false,
+                )?;
+                mrs.end_op(&[gate_buf, up_buf], &[half_slots]);
+            }
+        }
+        spans.span(cmd_buf, encoder, "moe_down")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         mrs.begin_op(enc, &[half_slots, mm_ids, tpe], &[expert_out]);
         encode_mul_mm_id_f16(
             enc,
@@ -4057,6 +4404,22 @@ pub(crate) fn encode_moe_prefill_ffn(
             1,
         )?;
         mrs.end_op(&[half_slots, mm_ids, tpe], &[expert_out]);
+        if let Some(oai) = oai {
+            // `down`'s expert bias, before the routing weights scale it.
+            mrs.begin_op(enc, &[expert_out, route_ids], &[expert_out]);
+            crate::moe_oai::encode_add_id(
+                enc,
+                device,
+                expert_out,
+                IdsBinding::whole(route_ids),
+                &oai.down_bias.buffer,
+                hidden,
+                n_slots,
+            )?;
+            mrs.end_op(&[expert_out, route_ids], &[expert_out]);
+        }
+        spans.span(cmd_buf, encoder, "moe_wsum")?;
+        let enc: &ProtocolObject<dyn MTLComputeCommandEncoder> = encoder;
         mrs.begin_op(enc, &[expert_out, route_w], &[out]);
         encode_moe_prefill_weighted_sum(
             enc,
@@ -4161,9 +4524,9 @@ pub(crate) fn encode_mul_mm_id(
         dispatch_counted(
             enc,
             MTLSize {
-                width: (n_tokens as usize).div_ceil(32),
+                width: mm_id_max_tiles(n_tokens as usize * top_k as usize, n_experts as usize),
                 height: (rows as usize).div_ceil(64),
-                depth: n_experts as usize,
+                depth: 1,
             },
             MTLSize {
                 width: 128,
@@ -4205,6 +4568,7 @@ pub(crate) fn mul_mm_sg_aligned_fn(fn_name: &str) -> Option<&'static str> {
         "q6_k_mul_mm_sg_f16" => "q6_k_mul_mm_sg_f16_a",
         "q8_0_mul_mm_sg_f16" => "q8_0_mul_mm_sg_f16_a",
         "q4_0_mul_mm_sg_f16" => "q4_0_mul_mm_sg_f16_a",
+        "f32_mul_mm_sg_f16" => "f32_mul_mm_sg_f16_a",
         "q5_0_mul_mm_sg_f16" => "q5_0_mul_mm_sg_f16_a",
         "iq4_xs_mul_mm_sg_f16" => "iq4_xs_mul_mm_sg_f16_a",
         "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_a",
@@ -4235,6 +4599,8 @@ pub(crate) fn mul_mm_sg_f16_fn(fn_name: &str) -> Option<&'static str> {
         "mxfp4_mul_mm_sg" => "mxfp4_mul_mm_sg_f16",
         "q2_k_mul_mm_sg" => "q2_k_mul_mm_sg_f16",
         "q3_k_mul_mm_sg" => "q3_k_mul_mm_sg_f16",
+        "f32_mul_mm_sg" => "f32_mul_mm_sg_f16",
+        "ptq1_0_mul_mm_sg" => "ptq1_0_mul_mm_sg_f16",
         _ => return crate::gen_kinds::f16_fn(fn_name),
     })
 }
@@ -4245,6 +4611,22 @@ pub(crate) fn mul_mm_sg_variant(
     rows: usize,
     batch: usize,
 ) -> (&'static str, usize) {
+    mul_mm_sg_variant_for(crate::tensor_mm::has_tensor(), fn_name, rows, batch)
+}
+
+/// [`mul_mm_sg_variant`] for a device with (`tensor`) or without the
+/// Metal 4 tensor arm, so both answers are testable on any host.
+fn mul_mm_sg_variant_for(
+    tensor: bool,
+    fn_name: &'static str,
+    rows: usize,
+    batch: usize,
+) -> (&'static str, usize) {
+    if tensor {
+        // One body for both pipelines: the tensor store clips the edge
+        // tile itself, so there is no staging buffer to size for.
+        return (fn_name, crate::tensor_mm::SMEM);
+    }
     if rows.is_multiple_of(64) && batch.is_multiple_of(32) {
         if let Some(a) = mul_mm_sg_aligned_fn(fn_name) {
             return (a, MUL_MM_SG_SMEM_ALIGNED);
@@ -4300,7 +4682,7 @@ pub(crate) fn encode_mul_mm_sg_f16(
         dispatch_counted(
             enc,
             MTLSize {
-                width: batch_size.div_ceil(32),
+                width: batch_size.div_ceil(crate::tensor_mm::mm_tile().0),
                 height: l.rows.div_ceil(64),
                 depth: 1,
             },
@@ -4375,7 +4757,7 @@ pub(crate) fn encode_mul_mm_sg_offset_ex(
         dispatch_counted(
             enc,
             MTLSize {
-                width: batch_size.div_ceil(32),
+                width: batch_size.div_ceil(crate::tensor_mm::mm_tile().0),
                 height: l.rows.div_ceil(64),
                 depth: 1,
             },
@@ -4601,7 +4983,7 @@ fn launch_k_quant_mul_mm_sg(
         enc.setThreadgroupMemoryLength_atIndex(smem, 0);
 
         let grid = MTLSize {
-            width: batch_size.div_ceil(32),
+            width: batch_size.div_ceil(crate::tensor_mm::mm_tile().0),
             height: rows.div_ceil(64),
             depth: 1,
         };
@@ -5012,7 +5394,10 @@ pub(crate) fn ensure_pipeline(
         } else {
             let src = NSString::from_str(kernel_src);
             let library = device
-                .newLibraryWithSource_options_error(&src, None)
+                .newLibraryWithSource_options_error(
+                    &src,
+                    crate::tensor_mm::compile_options(kernel_src).as_deref(),
+                )
                 .map_err(|e| MetalError::CompileFailed(e.to_string()))?;
             let func_name = NSString::from_str(fn_name);
             let function = library
@@ -5334,6 +5719,9 @@ fn build_resident_weight_buffer(
 pub(crate) struct ResidentF32Buffer {
     pub(crate) buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     nbytes: usize,
+    /// The shared plane this was uploaded from, held, when it came in
+    /// through [`resident_f32_shared`]; `None` for a borrowed slice.
+    keep: Option<Arc<[f32]>>,
 }
 
 impl Resident for ResidentF32Buffer {
@@ -5348,9 +5736,19 @@ impl Resident for ResidentF32Buffer {
     /// the compare costs a fraction of the upload it avoids. That
     /// leaves no residual probability of serving one model's norms to
     /// another (GitHub issue #180).
+    ///
+    /// An entry built from a shared plane proves it the way an mmap
+    /// alias does: it holds the allocation, so the address cannot have
+    /// been reissued, and nothing can write through an `Arc` this entry
+    /// also holds (`Arc::make_mut` copies first), so the bytes behind
+    /// the address are still the ones uploaded. The compare would cost
+    /// 26 MB a token on gpt-oss, whose expert biases are 368 KB planes.
     fn still_holds(&self, host: &[u8]) -> bool {
         if self.nbytes != host.len() {
             return false;
+        }
+        if let Some(keep) = &self.keep {
+            return std::ptr::eq(keep.as_ptr() as *const u8, host.as_ptr());
         }
         // SAFETY: `buffer` is a `StorageModeShared` buffer this process
         // allocated with exactly `nbytes` bytes and only ever reads on
@@ -5391,18 +5789,59 @@ pub(crate) fn resident_f32_buffer(
     // `data` outlives the view.
     let host = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, nbytes) };
     get_or_build(&F32_CACHE, &TL_F32_CACHE, host, || {
-        let mut data_owned = data.to_vec();
-        // SAFETY: `data_owned` holds `nbytes` initialised bytes and is
-        // alive across the call, which copies them into the buffer.
-        let buffer = unsafe {
-            device.newBufferWithBytes_length_options(
-                NonNull::new(data_owned.as_mut_ptr() as *mut _).unwrap(),
-                nbytes,
-                MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferAllocFailed)?;
-        Ok(ResidentF32Buffer { buffer, nbytes })
+        resident_f32_buffer_uncached(device, data)
+    })
+}
+
+/// Shared planes, cached apart from [`F32_CACHE`] so an entry here is
+/// always one that holds its plane: a borrowed-slice entry for the same
+/// address would otherwise be served to this path and compared in full.
+static SHARED_F32_CACHE: Mutex<Option<F32CacheMap>> = Mutex::new(None);
+
+thread_local! {
+    static TL_SHARED_F32_CACHE: RefCell<F32CacheMap> = RefCell::new(HashMap::new());
+}
+
+/// [`resident_f32_buffer`] for a plane its owner shares: the entry
+/// holds a clone of `plane`, which makes a hit an address compare
+/// instead of a byte compare (see [`ResidentF32Buffer::still_holds`]).
+/// The price is that the plane outlives its owner while the entry is
+/// cached, as a mapped file outlives its model behind an mmap alias.
+pub(crate) fn resident_f32_shared(
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    plane: &Arc<[f32]>,
+) -> Result<Arc<ResidentF32Buffer>, MetalError> {
+    let nbytes = std::mem::size_of_val(&**plane);
+    // SAFETY: as in `resident_f32_buffer`.
+    let host = unsafe { std::slice::from_raw_parts(plane.as_ptr() as *const u8, nbytes) };
+    get_or_build(&SHARED_F32_CACHE, &TL_SHARED_F32_CACHE, host, || {
+        let built = resident_f32_buffer_uncached(device, plane)?;
+        Ok(ResidentF32Buffer {
+            keep: Some(plane.clone()),
+            ..built
+        })
+    })
+}
+
+fn resident_f32_buffer_uncached(
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    data: &[f32],
+) -> Result<ResidentF32Buffer, MetalError> {
+    let nbytes = std::mem::size_of_val(data);
+    // SAFETY: `data` holds `nbytes` initialised bytes and outlives the
+    // call, which copies them into the buffer.
+    let buffer = unsafe {
+        device.newBufferWithBytes_length_options(
+            NonNull::new(data.as_ptr() as *mut _).unwrap(),
+            nbytes,
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+    .ok_or(MetalError::BufferAllocFailed)?;
+    Ok(ResidentF32Buffer {
+        buffer,
+        nbytes,
+        keep: None,
     })
 }
 
@@ -5791,6 +6230,9 @@ pub struct PrefillMoeMetal<'a> {
     /// `norm_topk_prob`: renormalize the selected probabilities.
     pub renormalize: bool,
     pub packed: MoePackedQ4<'a>,
+    /// gpt-oss's router bias, expert biases and clamped SwiGLU; `None`
+    /// is the plain SwiGLU MoE.
+    pub oai: Option<crate::moe_oai::MoeOaiMetal<'a>>,
 }
 
 impl PrefillMoeMetal<'_> {
@@ -6087,7 +6529,7 @@ struct MoePrefillScratch {
     up: Retained<ProtocolObject<dyn MTLBuffer>>,
     expert_out: Retained<ProtocolObject<dyn MTLBuffer>>,
     out: Retained<ProtocolObject<dyn MTLBuffer>>,
-    /// GPU map0: tokens-per-expert `[n_experts]`.
+    /// GPU map0: the `mul_mm_id` tile descriptors ([`mm_id_tiles`]).
     mm_id_tpe: Retained<ProtocolObject<dyn MTLBuffer>>,
     /// GPU map0: slot ids `[n_experts, n_tokens]`.
     mm_id_ids: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -6197,7 +6639,7 @@ fn moe_prefill_scratch_ex(
                     .ok_or(MetalError::BufferAllocFailed)?,
                 mm_id_tpe: device
                     .newBufferWithLength_options(
-                        n_experts * 4,
+                        mm_id_tpe_words(n_slots, n_experts) * 4,
                         MTLResourceOptions::StorageModeShared,
                     )
                     .ok_or(MetalError::BufferAllocFailed)?,
@@ -6370,7 +6812,9 @@ pub(crate) fn encode_q4_0_moe_gate_up_id(
 /// `out += weighted` (decode residual fuse); otherwise `out = weighted`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_q4_0_moe_id(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     x_buf: &ProtocolObject<dyn MTLBuffer>,
     packed: &MoePackedQ4<'_>,
@@ -6385,6 +6829,7 @@ pub(crate) fn encode_q4_0_moe_id(
     n_tokens: u32,
     residual_into_out: bool,
     gate_up_done: bool,
+    oai: Option<&crate::moe_oai::MoeOaiResident>,
 ) -> Result<(), MetalError> {
     assert_eq!(packed.gate_stride, packed.up_stride);
     assert!(n_tokens >= 1);
@@ -6399,19 +6844,41 @@ pub(crate) fn encode_q4_0_moe_id(
         )?;
         memory_barrier_resources(encoder, &[gate_buf, up_buf]);
     }
-    crate::elem::encode_silu_mul(
-        encoder,
-        device,
-        gate_buf,
-        up_buf,
-        act_buf,
-        (n_slots * packed.ffn_rows) as u32,
-    )?;
+    let act_label = if oai.is_some() {
+        "swiglu_oai"
+    } else {
+        "silu_mul"
+    };
+    spans.span(cmd_buf, encoder, act_label)?;
+    match oai {
+        // gpt-oss: the expert gate/up biases and the clamped SwiGLU.
+        Some(oai) => crate::moe_oai::encode_swiglu_oai_id(
+            encoder,
+            device,
+            oai,
+            gate_buf,
+            up_buf,
+            ids,
+            act_buf,
+            packed.ffn_rows,
+            n_slots,
+            false,
+        )?,
+        None => crate::elem::encode_silu_mul(
+            encoder,
+            device,
+            gate_buf,
+            up_buf,
+            act_buf,
+            (n_slots * packed.ffn_rows) as u32,
+        )?,
+    }
     memory_barrier_resources(encoder, &[act_buf]);
 
     let weighted_sum = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, "moe_weighted_sum")?;
 
     let down_blocks = moe_row_blocks(packed.down_row_bytes, packed.down_kind)?;
+    spans.span(cmd_buf, encoder, "down_id")?;
     encode_moe_down_id(
         encoder,
         device,
@@ -6430,45 +6897,37 @@ pub(crate) fn encode_q4_0_moe_id(
         n_slots,
     )?;
     memory_barrier_resources(encoder, &[expert_out_buf]);
+    // One token's sum takes `down`'s expert bias itself; a batch adds it
+    // in its own pass first.
+    let fused_residual = residual_into_out && n_tokens == 1;
+    if let Some(oai) = oai.filter(|_| !fused_residual) {
+        // `down`'s expert bias, before the routing weights scale it.
+        spans.span(cmd_buf, encoder, "add_id")?;
+        crate::moe_oai::encode_add_id(
+            encoder,
+            device,
+            expert_out_buf,
+            ids,
+            &oai.down_bias.buffer,
+            packed.hidden_rows,
+            n_slots,
+        )?;
+        memory_barrier_resources(encoder, &[expert_out_buf]);
+    }
 
     const SUM_TG: usize = 256;
-    if residual_into_out && n_tokens == 1 {
-        let fuse = ensure_pipeline(
-            device,
-            Q4_0_MOE_TOPK_KERNEL_SRC,
-            "moe_weighted_sum_residual",
-        )?;
-        encoder.setComputePipelineState(&fuse.0);
-        unsafe {
-            encoder.setBuffer_offset_atIndex(Some(expert_out_buf), 0, 0);
-            encoder.setBuffer_offset_atIndex(Some(route), 0, 1);
-            encoder.setBuffer_offset_atIndex(Some(out_buf), 0, 2);
-            let mut hidden_rows = packed.hidden_rows as u32;
-            encoder.setBytes_length_atIndex(
-                NonNull::new(&mut hidden_rows as *mut u32 as *mut _).unwrap(),
-                4,
-                3,
-            );
-            let mut tk = top_k;
-            encoder.setBytes_length_atIndex(
-                NonNull::new(&mut tk as *mut u32 as *mut _).unwrap(),
-                4,
-                4,
-            );
-        }
-        dispatch_counted(
+    spans.span(cmd_buf, encoder, "weighted_sum")?;
+    if fused_residual {
+        encode_moe_weighted_sum_residual(
             encoder,
-            MTLSize {
-                width: packed.hidden_rows.div_ceil(SUM_TG),
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: SUM_TG,
-                height: 1,
-                depth: 1,
-            },
-        );
+            device,
+            expert_out_buf,
+            route,
+            out_buf,
+            packed.hidden_rows,
+            top_k,
+            oai.map(|o| (ids, &*o.down_bias.buffer)),
+        )?;
     } else {
         encoder.setComputePipelineState(&weighted_sum.0);
         unsafe {
@@ -6509,6 +6968,63 @@ pub(crate) fn encode_q4_0_moe_id(
             },
         );
     }
+    Ok(())
+}
+
+/// One token's routed combine with the residual fused: `h += Σ_k
+/// route[k] · expert_out[k]` over `top_k` slots of `hidden_rows`. With
+/// `add_id` (the slots' expert ids and gpt-oss's `down` bias plane,
+/// expert-major) each slot's bias is added before its weight scales it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_moe_weighted_sum_residual(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    expert_out: &ProtocolObject<dyn MTLBuffer>,
+    route: &ProtocolObject<dyn MTLBuffer>,
+    h: &ProtocolObject<dyn MTLBuffer>,
+    hidden_rows: usize,
+    top_k: u32,
+    add_id: Option<(IdsBinding<'_>, &ProtocolObject<dyn MTLBuffer>)>,
+) -> Result<(), MetalError> {
+    const SUM_TG: usize = 256;
+    let name = if add_id.is_some() {
+        "moe_weighted_sum_residual_add_id"
+    } else {
+        "moe_weighted_sum_residual"
+    };
+    let pipe = ensure_pipeline(device, Q4_0_MOE_TOPK_KERNEL_SRC, name)?;
+    encoder.setComputePipelineState(&pipe.0);
+    // SAFETY: every bound buffer outlives the command buffer (the
+    // callers hold them to its wait); `setBytes` copies the locals.
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(expert_out), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(route), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(h), 0, 2);
+        if let Some((ids, bias)) = add_id {
+            encoder.setBuffer_offset_atIndex(Some(ids.buf), ids.offset, 5);
+            encoder.setBuffer_offset_atIndex(Some(bias), 0, 6);
+        }
+        for (idx, mut v) in [(3usize, hidden_rows as u32), (4, top_k)] {
+            encoder.setBytes_length_atIndex(
+                NonNull::new(&mut v as *mut u32 as *mut _).unwrap(),
+                4,
+                idx,
+            );
+        }
+    }
+    dispatch_counted(
+        encoder,
+        MTLSize {
+            width: hidden_rows.div_ceil(SUM_TG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: SUM_TG,
+            height: 1,
+            depth: 1,
+        },
+    );
     Ok(())
 }
 
@@ -6671,10 +7187,10 @@ pub fn launch_moe_prefill_q4_0(
             let up_cols = ((up_row_bytes / up_bb) * up_be) as u32;
             let down_cols = ((packed.down_row_bytes / down_bb) * down_be) as u32;
 
-            let mut tpe_host = vec![0u32; packed.n_experts];
+            let counts: Vec<u32> = per_expert.iter().map(|l| l.len() as u32).collect();
+            let tpe_host = mm_id_tiles(&counts);
             let mut ids_host = vec![0i32; packed.n_experts * n_tokens];
             for (eid, list) in per_expert.iter().enumerate() {
-                tpe_host[eid] = list.len() as u32;
                 for (i, &(_token, slot)) in list.iter().enumerate() {
                     ids_host[eid * n_tokens + i] = slot;
                 }
@@ -6777,11 +7293,13 @@ pub fn launch_moe_prefill_q4_0(
             cmd_buf.commit();
             cmd_buf.waitUntilCompleted();
         } else {
-            let encoder = cmd_buf
+            let mut encoder = cmd_buf
                 .computeCommandEncoder()
                 .ok_or(MetalError::CommandFailed)?;
             let enc_result = encode_q4_0_moe_id(
-                &encoder,
+                &mut encoder,
+                &mut crate::kernel_timing::SpanClock::off(),
+                &cmd_buf,
                 device,
                 &x_buf,
                 packed,
@@ -6796,6 +7314,7 @@ pub fn launch_moe_prefill_q4_0(
                 n_tokens as u32,
                 false,
                 false,
+                None,
             );
             encoder.endEncoding();
             enc_result?;
@@ -8303,6 +8822,204 @@ mod tests {
     /// Covers what the host-routed `launch_moe_prefill_q4_0` test cannot:
     /// `moe_router_mm_f32`, `moe_topk_softmax_batch`, the GPU `map0`, and
     /// the f16-src1 `mul_mm_id` twins.
+    /// The `mul_mm_id` tile list covers every expert's entries once, in
+    /// 32-entry tiles, and never outgrows the grid `mm_id_max_tiles`
+    /// sizes, however unevenly the tokens route.
+    #[test]
+    fn mm_id_tiles_cover_each_expert_within_the_grid_bound() {
+        assert_eq!(
+            mm_id_tiles(&[0, 70, 32, 1, 0]),
+            vec![5, 1, 0, 32, 1, 32, 32, 1, 64, 6, 2, 0, 32, 3, 0, 1]
+        );
+        assert_eq!(mm_id_tiles(&[0, 0]), vec![0]);
+        let (n_tokens, top_k, n_experts) = (77usize, 4usize, 9usize);
+        let n_slots = n_tokens * top_k;
+        let mut seed = 12345u64;
+        for _ in 0..200 {
+            // Random routing, each token to `top_k` distinct experts.
+            let mut counts = vec![0u32; n_experts];
+            for _ in 0..n_tokens {
+                let mut picked = Vec::new();
+                while picked.len() < top_k {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let e = ((seed >> 33) as usize % n_experts).min((seed >> 60) as usize);
+                    if !picked.contains(&e) {
+                        picked.push(e);
+                    }
+                }
+                for e in picked {
+                    counts[e] += 1;
+                }
+            }
+            let tiles = mm_id_tiles(&counts);
+            let n = tiles[0] as usize;
+            assert!(n <= mm_id_max_tiles(n_slots, n_experts), "{counts:?}");
+            assert_eq!(tiles.len(), 1 + 3 * n);
+            for (e, &count) in counts.iter().enumerate() {
+                let covered: u32 = tiles[1..]
+                    .chunks(3)
+                    .filter(|d| d[0] as usize == e)
+                    .map(|d| d[2])
+                    .sum();
+                assert_eq!(covered, count);
+            }
+        }
+    }
+
+    /// `moe_mm_id_map0` writes the descriptors `mm_id_tiles` builds on
+    /// the host, and each expert's slice lists its entries in token order.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn gpu_map0_tiles_match_the_host_twin() {
+        let shared = shared_metal().expect("metal device");
+        let device = &shared.device;
+        let queue = &shared.queue;
+        let (n_tokens, top_k, n_experts) = (300usize, 8usize, 64usize);
+        // Skewed: expert 0 and 1 take every token, so their slices span
+        // ten tiles; the rest share six slots.
+        let mut ids = Vec::with_capacity(n_tokens * top_k);
+        for t in 0..n_tokens {
+            ids.extend_from_slice(&[0, 1]);
+            for j in 0..top_k - 2 {
+                ids.push((2 + (t * 7 + j * 13) % (n_experts - 2)) as i32);
+            }
+        }
+        let mut owned = ids.clone();
+        let ids_buf = unsafe {
+            device.newBufferWithBytes_length_options(
+                NonNull::new(owned.as_mut_ptr() as *mut _).unwrap(),
+                owned.len() * 4,
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .expect("ids");
+        let n_slots = n_tokens * top_k;
+        let words = mm_id_tpe_words(n_slots, n_experts);
+        let tpe_buf = device
+            .newBufferWithLength_options(words * 4, MTLResourceOptions::StorageModeShared)
+            .expect("tpe");
+        let hids_buf = device
+            .newBufferWithLength_options(
+                n_experts * n_tokens * 4,
+                MTLResourceOptions::StorageModeShared,
+            )
+            .expect("hids");
+        let cmd_buf = queue.commandBuffer().expect("command buffer");
+        let encoder = compute_encoder_concurrent(&cmd_buf).expect("encoder");
+        encode_moe_mm_id_map0(
+            &encoder,
+            device,
+            &ids_buf,
+            &tpe_buf,
+            &hids_buf,
+            n_experts as u32,
+            n_tokens as u32,
+            top_k,
+        )
+        .expect("map0");
+        encoder.endEncoding();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+
+        let mut counts = vec![0u32; n_experts];
+        let mut slices = vec![Vec::new(); n_experts];
+        for (slot, &e) in ids.iter().enumerate() {
+            counts[e as usize] += 1;
+            slices[e as usize].push(slot as i32);
+        }
+        let want = mm_id_tiles(&counts);
+        let got = unsafe {
+            std::slice::from_raw_parts(tpe_buf.contents().as_ptr() as *const u32, want.len())
+        };
+        assert_eq!(got, &want[..]);
+        let hids = unsafe {
+            std::slice::from_raw_parts(
+                hids_buf.contents().as_ptr() as *const i32,
+                n_experts * n_tokens,
+            )
+        };
+        for (e, slice) in slices.iter().enumerate() {
+            assert_eq!(
+                &hids[e * n_tokens..e * n_tokens + slice.len()],
+                &slice[..],
+                "{e}"
+            );
+        }
+    }
+
+    /// The tiled router kernel computes every logit as the same sum in
+    /// the same order as one simdgroup per (token, expert): bit for bit,
+    /// on ragged edges in all three dimensions, so tiling it cannot move
+    /// a near-tie in the top-k. Also within f32 rounding of a host dot.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn moe_router_tile_is_bit_exact() {
+        let shared = shared_metal().expect("metal device");
+        let device = &shared.device;
+        let queue = &shared.queue;
+        let new_buf = |v: &[f32]| {
+            let mut owned = v.to_vec();
+            unsafe {
+                device.newBufferWithBytes_length_options(
+                    NonNull::new(owned.as_mut_ptr() as *mut _).unwrap(),
+                    owned.len() * 4,
+                    MTLResourceOptions::StorageModeShared,
+                )
+            }
+            .expect("buffer")
+        };
+        for (hidden, n_experts, n_tokens) in [(2048usize, 64usize, 512usize), (1000, 70, 13)] {
+            let w: Vec<f32> = (0..n_experts * hidden)
+                .map(|i| ((i * 2654435761) % 2001) as f32 / 1000.0 - 1.0)
+                .collect();
+            let x: Vec<f32> = (0..n_tokens * hidden)
+                .map(|i| ((i * 40503 + 7) % 1999) as f32 / 999.0 - 1.0)
+                .collect();
+            let (w_buf, x_buf) = (new_buf(&w), new_buf(&x));
+            let run = |kernel: (&'static str, (usize, usize))| {
+                let out = new_buf(&vec![f32::NAN; n_tokens * n_experts]);
+                let cmd_buf = queue.commandBuffer().expect("command buffer");
+                let encoder = compute_encoder_concurrent(&cmd_buf).expect("encoder");
+                encode_moe_router_tiled(
+                    &encoder,
+                    device,
+                    kernel,
+                    &w_buf,
+                    &x_buf,
+                    &out,
+                    hidden as u32,
+                    n_experts as u32,
+                    n_tokens as u32,
+                )
+                .expect("router");
+                encoder.endEncoding();
+                cmd_buf.commit();
+                cmd_buf.waitUntilCompleted();
+                unsafe {
+                    std::slice::from_raw_parts(
+                        out.contents().as_ptr() as *const f32,
+                        n_tokens * n_experts,
+                    )
+                }
+                .to_vec()
+            };
+            let tiled = run(("moe_router_mm_f32", ROUTER_TILE));
+            let one = run(("moe_router_mm_f32_1x1", (1, 1)));
+            for (i, (a, b)) in tiled.iter().zip(&one).enumerate() {
+                assert_eq!(a.to_bits(), b.to_bits(), "logit {i}: tiled {a} vs 1x1 {b}");
+            }
+            for t in 0..n_tokens {
+                for e in 0..n_experts {
+                    let want: f64 = (0..hidden)
+                        .map(|i| w[e * hidden + i] as f64 * x[t * hidden + i] as f64)
+                        .sum();
+                    let got = tiled[t * n_experts + e] as f64;
+                    assert!((got - want).abs() <= 1e-3 * want.abs().max(1.0), "{t},{e}");
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
     fn encode_moe_prefill_ffn_matches_cpu_routed_reference() {
@@ -8379,6 +9096,7 @@ mod tests {
             top_k,
             renormalize: false,
             packed,
+            oai: None,
         };
         assert!(moe.is_supported());
 
@@ -8450,7 +9168,7 @@ mod tests {
         let router = resident_f32_buffer(device, &router_w).expect("router resident");
 
         let cmd_buf = queue.commandBuffer().expect("command buffer");
-        let encoder = compute_encoder_concurrent(&cmd_buf).expect("encoder");
+        let mut encoder = compute_encoder_concurrent(&cmd_buf).expect("encoder");
         crate::elem::encode_f32_to_f16(
             &encoder,
             device,
@@ -8461,12 +9179,15 @@ mod tests {
         .expect("f32->f16");
         memory_barrier_buffers(&encoder);
         encode_moe_prefill_ffn(
-            &encoder,
+            &mut encoder,
+            &mut crate::kernel_timing::SpanClock::begin(device, 0),
+            &cmd_buf,
             &mut crate::mem_ranges::MemRanges::new(),
             device,
             &moe,
             &bound,
             &router,
+            None,
             &x_buf,
             &xh_buf,
             &out_buf,
@@ -8791,16 +9512,16 @@ mod tests {
     #[test]
     fn mul_mm_sg_variant_picks_the_small_threadgroup_only_on_exact_tiles() {
         assert_eq!(
-            mul_mm_sg_variant("q4_k_mul_mm_sg", 2048, 512),
+            mul_mm_sg_variant_for(false, "q4_k_mul_mm_sg", 2048, 512),
             ("q4_k_mul_mm_sg_a", MUL_MM_SG_SMEM_ALIGNED)
         );
         assert_eq!(
-            mul_mm_sg_variant("q4_k_mul_mm_sg_f16", 8192, 64),
+            mul_mm_sg_variant_for(false, "q4_k_mul_mm_sg_f16", 8192, 64),
             ("q4_k_mul_mm_sg_f16_a", MUL_MM_SG_SMEM_ALIGNED)
         );
         // Ragged in exactly one dim is still ragged.
         for (rows, batch) in [(2048usize, 513usize), (2050, 512), (70, 33), (0, 0)] {
-            let (name, smem) = mul_mm_sg_variant("q4_k_mul_mm_sg", rows, batch);
+            let (name, smem) = mul_mm_sg_variant_for(false, "q4_k_mul_mm_sg", rows, batch);
             if rows.is_multiple_of(64) && batch.is_multiple_of(32) {
                 continue;
             }
@@ -8809,9 +9530,23 @@ mod tests {
         }
         // A kernel with no `_a` sibling must fall back, not be renamed.
         assert_eq!(
-            mul_mm_sg_variant("q4_k_mul_mm_id", 2048, 512),
+            mul_mm_sg_variant_for(false, "q4_k_mul_mm_id", 2048, 512),
             ("q4_k_mul_mm_id", MUL_MM_SG_SMEM_BC)
         );
+    }
+
+    /// The tensor arm has one body for both pipelines (its store clips
+    /// the edge tile), so it never picks `_a` and always asks for the
+    /// half A tile alone.
+    #[test]
+    fn the_tensor_arm_keeps_the_name_and_asks_for_the_a_tile_only() {
+        for (rows, batch) in [(2048usize, 512usize), (2050, 513), (70, 33)] {
+            assert_eq!(
+                mul_mm_sg_variant_for(true, "q4_k_mul_mm_sg", rows, batch),
+                ("q4_k_mul_mm_sg", crate::tensor_mm::SMEM),
+                "{rows}x{batch}"
+            );
+        }
     }
 
     #[test]
@@ -9146,7 +9881,7 @@ mod tests {
     /// the ONLY sound use of these numbers is comparing one variant of
     /// the kernel against another in the same run. Three kernel
     /// hypotheses were aimed at the raw figure before that was
-    /// understood (`docs/plans/gdn-resident-state.md`), which is the
+    /// understood (`1ebda4fc:docs/plans/gdn-resident-state.md`), which is the
     /// reason for this comment.
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]

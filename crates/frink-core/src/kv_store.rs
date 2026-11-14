@@ -6,7 +6,7 @@
 //! `GGML_TYPE_F16` (`llama-context.cpp:3672-3673`), and `-ctk f32` is the
 //! opt-out. This store was `Vec<f32>` for every host cache, so a CPU
 //! deployment held twice the reference's bytes per token and reached half
-//! its context on the same budget (`docs/plans/parity-audit-2026-09-19.md`
+//! its context on the same budget (`1ebda4fc:docs/plans/parity-audit-2026-09-19.md`
 //! §2.4). [`KvBuf`] is the storage and [`KvRows`] the borrowed view the
 //! attention kernels read; both carry their dtype, so a reader cannot
 //! take f16 bits for f32 ones.
@@ -120,6 +120,14 @@ impl KvBuf {
 
     pub fn allocated_bytes(&self) -> usize {
         self.capacity() * self.dtype().elem_bytes()
+    }
+
+    /// Appends `elems` zeros (zero is exact at either dtype).
+    pub fn extend_zeros(&mut self, elems: usize) {
+        match self {
+            KvBuf::F32(v) => v.resize(v.len() + elems, 0.0),
+            KvBuf::F16(v) => v.resize(v.len() + elems, f16::ZERO),
+        }
     }
 
     /// Appends `src`, rounding to this buffer's dtype.

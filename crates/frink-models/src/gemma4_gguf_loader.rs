@@ -117,6 +117,8 @@ pub fn read_gemma4_hparams(file: &impl TensorSource) -> Result<Gemma4Hparams, Lo
         .metadata_f32(&p("final_logit_softcapping"))
         .filter(|&v| v > 0.0);
     let rms_norm_eps = meta_f32(file, &p("attention.layer_norm_rms_epsilon"), 1e-6);
+    let (rot_dim_full, rot_dim_swa) =
+        read_rot_dims(file, &arch, &is_swa, head_dim_full, head_dim_swa)?;
     let rope_theta = meta_f32(file, &p("rope.freq_base"), 1_000_000.0);
     let rope_theta_swa = meta_f32(file, &p("rope.freq_base_swa"), 10_000.0);
     Ok(Gemma4Hparams {
@@ -128,6 +130,8 @@ pub fn read_gemma4_hparams(file: &impl TensorSource) -> Result<Gemma4Hparams, Lo
         n_kv_heads,
         head_dim_full,
         head_dim_swa,
+        rot_dim_full,
+        rot_dim_swa,
         sliding_window,
         is_swa,
         n_layer_kv_from_start,
@@ -138,6 +142,61 @@ pub fn read_gemma4_hparams(file: &impl TensorSource) -> Result<Gemma4Hparams, Lo
         final_logit_softcap,
         attention_scale: 1.0,
     })
+}
+
+/// The RoPE widths as `llama_model::load_hparams` reads them:
+/// `rope.dimension_count` defaults to the full head (`n_embd_head_k`),
+/// and `rope.dimension_count_swa` defaults to THAT width, not to the
+/// sliding head. Each layer then rotates `n_rot(il)` channels
+/// (`gemma4.cpp`, `n_rot_l`) and passes the rest through.
+///
+/// A width ggml cannot take is refused here by key: wider than the head
+/// it rotates, or odd, aborts in `ggml_compute_forward_rope_flt`
+/// (`n_dims <= ne0`, `n_dims % 2 == 0`). Zero rotates nothing in ggml;
+/// the Metal kernels read zero as "whole head", so it is refused rather
+/// than given a meaning one backend would not keep (ADR 0002). Only a
+/// layer kind the file has is checked, as ggml only ever sees those.
+fn read_rot_dims(
+    file: &impl TensorSource,
+    arch: &str,
+    is_swa: &[bool],
+    head_dim_full: usize,
+    head_dim_swa: usize,
+) -> Result<(usize, usize), LoadError> {
+    let key_full = format!("{arch}.rope.dimension_count");
+    let key_swa = format!("{arch}.rope.dimension_count_swa");
+    let full = file
+        .metadata_u64(&key_full)
+        .map_or(head_dim_full, |v| v as usize);
+    let swa = file.metadata_u64(&key_swa).map_or(full, |v| v as usize);
+    let check = |rot: usize, head: usize, kind: &str, key: &str| {
+        if rot == 0 || !rot.is_multiple_of(2) || rot > head {
+            Err(LoadError::ImplausibleHparam(
+                key.to_string(),
+                rot as u64,
+                format!(
+                    "a {kind} layer rotates an even, non-zero width no wider than its \
+                     {head}-wide head"
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    if is_swa.iter().any(|&s| !s) {
+        check(full, head_dim_full, "full-attention", &key_full)?;
+    }
+    if is_swa.iter().any(|&s| s) {
+        // Without `_swa` the sliding width is the full one, and the
+        // error names the key that set it.
+        let key = if file.metadata_u64(&key_swa).is_some() {
+            &key_swa
+        } else {
+            &key_full
+        };
+        check(swa, head_dim_swa, "sliding", key)?;
+    }
+    Ok((full, swa))
 }
 
 fn load_layer(
@@ -296,7 +355,20 @@ pub fn load_gemma4_engine(file: &impl TensorSource) -> Result<Gemma4Engine, Load
         (None, None, None)
     };
     let rope_freqs = if file.find_tensor("rope_freqs.weight").is_some() {
-        Some(load_f32_vec(file, "rope_freqs.weight")?)
+        let f = load_f32_vec(file, "rope_freqs.weight")?;
+        // `load_arch_tensors` creates it `{n_embd_head/2}` on the full
+        // layers; ggml reads its first `n_rot/2` bands.
+        if hp.is_swa.iter().any(|&s| !s) && f.len() != hp.head_dim_full / 2 {
+            return Err(LoadError::UnsupportedFeature(
+                hp.arch.clone(),
+                format!(
+                    "rope_freqs.weight has {} entries, llama.cpp requires head_dim_full/2 = {}",
+                    f.len(),
+                    hp.head_dim_full / 2
+                ),
+            ));
+        }
+        Some(f)
     } else {
         None
     };
@@ -316,6 +388,10 @@ pub fn load_gemma4_engine(file: &impl TensorSource) -> Result<Gemma4Engine, Load
             rope_freqs,
         },
         hp,
+        // llama.cpp's default; callers set the run's `--ctk` over it.
+        kv_dtype: frink_core::kv_store::KvDtype::F16,
+        #[cfg(feature = "metal")]
+        device_aux: Default::default(),
     };
     // Same contract as the generic loader: resolve every kernel now,
     // then seal. This engine has no batched prefill, which the probe
@@ -426,18 +502,25 @@ mod tests {
         buf
     }
 
-    #[test]
-    fn parse_hparams_routing_from_synthetic_gguf() {
-        let n_layer = 5usize;
+    const HP_SWA: [bool; 5] = [true, true, true, true, false];
+
+    /// `read_gemma4_hparams` on a tiny file with a 16-wide full head and
+    /// an 8-wide sliding one, plus `rope` keys (`dimension_count` and
+    /// its `_swa` twin, by suffix).
+    fn hparams_with_rope(rope: &[(&str, u64)]) -> Result<Gemma4Hparams, LoadError> {
+        let n_layer = HP_SWA.len();
         let h = 32usize;
-        let swa = [true, true, true, true, false];
         let tensors = vec![
             f32_tensor("token_embd.weight", vec![4u64, h as u64], vec![0.01; 4 * h]),
             f32_tensor("output_norm.weight", vec![h as u64], vec![1.0; h]),
         ];
         // Minimal tensors — only testing hparam parse via read_gemma4_hparams
         // through a tiny file that still opens.
-        let kv = [
+        let keys: Vec<String> = rope
+            .iter()
+            .map(|(k, _)| format!("gemma4.rope.{k}"))
+            .collect();
+        let mut kv = vec![
             ("gemma4.block_count", n_layer as u64),
             ("gemma4.embedding_length", h as u64),
             ("gemma4.feed_forward_length", 64u64),
@@ -449,6 +532,7 @@ mod tests {
             ("gemma4.attention.shared_kv_layers", 2u64),
             ("gemma4.embedding_length_per_layer_input", 4u64),
         ];
+        kv.extend(keys.iter().zip(rope).map(|(k, &(_, v))| (k.as_str(), v)));
         let fkv = [
             ("gemma4.attention.layer_norm_rms_epsilon", 1e-6f32),
             ("gemma4.rope.freq_base", 1e6f32),
@@ -459,25 +543,83 @@ mod tests {
             "gemma4",
             &kv,
             &fkv,
-            Some(("gemma4.attention.sliding_window_pattern", &swa)),
+            Some(("gemma4.attention.sliding_window_pattern", &HP_SWA)),
             &tensors,
         );
+        let tag: String = rope.iter().map(|(k, v)| format!("_{k}{v}")).collect();
         let path =
-            std::env::temp_dir().join(format!("frink_gemma4_hp_{}.gguf", std::process::id()));
+            std::env::temp_dir().join(format!("frink_gemma4_hp_{}{tag}.gguf", std::process::id()));
         std::fs::write(&path, &bytes).unwrap();
         let file = GgufFile::open(&path).unwrap();
-        let hp = read_gemma4_hparams(&file).expect("hparams");
+        let hp = read_gemma4_hparams(&file);
+        let _ = std::fs::remove_file(&path);
+        hp
+    }
+
+    #[test]
+    fn parse_hparams_routing_from_synthetic_gguf() {
+        let hp = hparams_with_rope(&[("dimension_count", 16), ("dimension_count_swa", 8)])
+            .expect("hparams");
         assert_eq!(hp.n_layer, 5);
         assert_eq!(hp.n_layer_kv_from_start, 3);
         assert_eq!(hp.head_dim_full, 16);
         assert_eq!(hp.head_dim_swa, 8);
-        assert_eq!(hp.is_swa, swa.to_vec());
+        assert_eq!((hp.rot_dim(4), hp.rot_dim(0)), (16, 8), "whole heads");
+        assert_eq!(hp.is_swa, HP_SWA.to_vec());
         assert!(hp.has_kv(2));
         assert!(!hp.has_kv(3));
         assert_eq!(hp.kv_reuse_layer(3), 1); // SWA → 3-2? n_kv=3, swa → 3-2=1
         assert_eq!(hp.kv_reuse_layer(4), 2); // full → 3-1=2
-        let _ = std::fs::remove_file(&path);
         let _ = Gemma4Hparams { ..hp };
+    }
+
+    /// #635: the RoPE widths as llama.cpp's `load_hparams` reads them.
+    /// `dimension_count` defaults to the full head and `_swa` to
+    /// `dimension_count`, NOT to the sliding head; a partial width is
+    /// honoured per layer kind.
+    #[test]
+    fn rope_widths_follow_llama_defaults() {
+        let hp = hparams_with_rope(&[("dimension_count", 4)]).expect("partial");
+        assert_eq!(
+            (hp.rot_dim(4), hp.rot_dim(0)),
+            (4, 4),
+            "_swa defaults to n_rot_full"
+        );
+        let hp = hparams_with_rope(&[("dimension_count", 8), ("dimension_count_swa", 4)])
+            .expect("two partial widths");
+        assert_eq!((hp.rot_dim(4), hp.rot_dim(0)), (8, 4));
+    }
+
+    /// A width ggml aborts on (`n_dims <= ne0`, even), or zero, is
+    /// refused at load, naming the key that set it. With no RoPE keys at
+    /// all the sliding width defaults to the 16-wide full head, wider
+    /// than the 8-wide sliding one: llama.cpp aborts in
+    /// `ggml_compute_forward_rope_flt` on that file, and frink refuses it.
+    #[test]
+    fn a_rope_width_ggml_cannot_take_is_refused_by_key() {
+        let refused = |rope: &[(&str, u64)], key: &str, val: u64| match hparams_with_rope(rope) {
+            Err(LoadError::ImplausibleHparam(k, v, _)) => {
+                assert_eq!((k.as_str(), v), (key, val), "{rope:?}")
+            }
+            other => panic!("{rope:?}: expected a refusal, got {other:?}"),
+        };
+        refused(&[], "gemma4.rope.dimension_count", 16);
+        refused(
+            &[("dimension_count", 32), ("dimension_count_swa", 8)],
+            "gemma4.rope.dimension_count",
+            32,
+        );
+        refused(
+            &[("dimension_count", 16), ("dimension_count_swa", 10)],
+            "gemma4.rope.dimension_count_swa",
+            10,
+        );
+        refused(
+            &[("dimension_count", 6), ("dimension_count_swa", 5)],
+            "gemma4.rope.dimension_count_swa",
+            5,
+        );
+        refused(&[("dimension_count", 0)], "gemma4.rope.dimension_count", 0);
     }
 
     #[test]
@@ -640,6 +782,18 @@ mod tests {
         let logits = engine.forward_token(0, 0, &mut state);
         assert_eq!(logits.len(), vocab);
         assert!(logits.iter().all(|x| x.is_finite()));
+        // The host caches store what `kv_dtype` says: llama.cpp's f16
+        // from the loader, and whatever a run's `--ctk` sets over it
+        // (#634: they were f32 whatever `--ctk` said).
+        use frink_core::kv_store::KvDtype;
+        let dtypes = |s: &crate::gemma4_engine::Gemma4DecodeState| -> Vec<KvDtype> {
+            s.kv.iter().flatten().map(|c| c.k.dtype()).collect()
+        };
+        assert_eq!(engine.kv_dtype, KvDtype::F16);
+        assert_eq!(dtypes(&state), vec![KvDtype::F16; 2]);
+        let mut engine = engine;
+        engine.kv_dtype = KvDtype::F32;
+        assert_eq!(dtypes(&engine.new_state()), vec![KvDtype::F32; 2]);
         let _ = std::fs::remove_file(&path);
     }
     /// A MoE Gemma-4 checkpoint is refused by NAME, not by a missing

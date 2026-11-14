@@ -67,7 +67,7 @@ impl Decoder {
         let head_dim = self.config.head_dim;
         let rows = cache.rows();
         let width = rows * n_kv_heads * head_dim;
-        Self::ensure_attn_mirror(cache, n_kv_heads, head_dim, rows, width)?;
+        Self::ensure_attn_mirror(cache, n_kv_heads, head_dim, rows, width, 1)?;
         let mirror = cache.metal_attn.as_mut()?;
         let out = frink_metal::gdn_branch::launch_attn_layer(
             mirror,
@@ -139,6 +139,7 @@ impl Decoder {
                 head_dim,
                 rows,
                 rows * n_kv_heads * head_dim,
+                1,
             )?;
             let mirror = cache.metal_attn.as_mut()?;
             // SAFETY: the mirror lives in this cache, which nothing
@@ -172,36 +173,50 @@ impl Decoder {
     }
 
     /// The facts this path needs of a layer beyond the tail's: one
-    /// window, no sinks, no ALiBi, one head width.
+    /// window, no sinks, no ALiBi, one head width, and nothing between
+    /// the attention and `wo` but the interleaved Q gate.
+    ///
+    /// The last is because the launch starts from Q/K/V and the
+    /// interleaved gate, so it skips everything else
+    /// [`Self::attn_branch_rows`] applies on the host: the head-wise
+    /// output gate (`crate::attn_gate`, Laguna and Step-3.5) and the
+    /// sub-norm (`crate::sub_norms`). The deferred TAIL has no such
+    /// limit, since it starts from that function's output. Without this
+    /// a gated layer answered ungated on the device from the first
+    /// decoded token (#630).
     #[cfg(feature = "metal")]
     pub(crate) fn device_attention_shape_ok(&self, l: usize, layer: &LayerWeights) -> bool {
         self.config.layer_sliding_window(l).is_none()
             && layer.attn.sinks.is_none()
             && self.alibi_slopes.is_none()
             && self.config.v_head_dim() == self.config.head_dim
+            && layer.attn.output_gate.is_none()
+            && layer.attn.attn_sub_norm.is_none()
     }
 
     /// The cache's device mirror, made on first use at the capacity the
-    /// cache was planned for.
+    /// cache was planned for, with room for `extra` more rows (one for a
+    /// decode step, the batch for a prefill run).
     ///
     /// `None` when there is no planned capacity to size it by: a cache
     /// that can grow without bound cannot have a fixed device buffer
     /// behind it, and guessing a size here would mean a refusal much
     /// later, in the middle of a generation.
     #[cfg(feature = "metal")]
-    fn ensure_attn_mirror(
+    pub(super) fn ensure_attn_mirror(
         cache: &mut KvCache,
         n_kv_heads: usize,
         head_dim: usize,
         rows: usize,
         width: usize,
+        extra: usize,
     ) -> Option<()> {
         // Sized to the cache's plan when it has one, and GROWN when it
         // does not: a mirror that refused an unbounded cache would
         // never fire, because the CLI's caches are unbounded. Doubling
         // from the current length costs one re-upload per doubling,
         // which the staleness check below performs anyway.
-        let want = rows + 1;
+        let want = rows + extra;
         let too_small = cache
             .metal_attn
             .as_ref()

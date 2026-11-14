@@ -38,6 +38,8 @@ kernel void gqa_decode_fa_vec_d64(
     constant uint& seq_len [[buffer(7)]],
     constant uint& kv_start [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
     uint h [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]],
     uint tg [[threads_per_threadgroup]],
@@ -169,7 +171,17 @@ kernel void gqa_decode_fa_vec_d64(
     if (sgitg == 0u && tiisg < D4) {
         threadgroup float* ss0 = shared + D;
         threadgroup float4* so0 = (threadgroup float4*)(ss0 + C);
-        float inv = (ss0[0] == 0.0f) ? 0.0f : (1.0f / ss0[0]);
+        // gpt-oss's attention sink: one more logit in the denominator
+        // with no value, so it only rescales (llama `fa_vec_common`).
+        float S_f = ss0[0];
+        float a_f = 1.0f;
+        if (has_sinks != 0u) {
+            const float s_k = sinks[h];
+            const float M_f = max(ss0[1], s_k);
+            a_f = (ss0[1] == -INFINITY) ? 0.0f : exp(ss0[1] - M_f);
+            S_f = S_f * a_f + exp(s_k - M_f);
+        }
+        float inv = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
         device float4* out4 = (device float4*)(out + h * D);
         out4[tiisg] = so0[tiisg] * inv;
     }
@@ -195,6 +207,8 @@ kernel void gqa_decode_fa_vec_d96(
     constant uint& seq_len [[buffer(7)]],
     constant uint& kv_start [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
     uint h [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]],
     uint tg [[threads_per_threadgroup]],
@@ -309,7 +323,17 @@ kernel void gqa_decode_fa_vec_d96(
     if (sgitg == 0u && tiisg < D4) {
         threadgroup float* ss0 = shared + D;
         threadgroup float4* so0 = (threadgroup float4*)(ss0 + C);
-        float inv = (ss0[0] == 0.0f) ? 0.0f : (1.0f / ss0[0]);
+        // gpt-oss's attention sink: one more logit in the denominator
+        // with no value, so it only rescales (llama `fa_vec_common`).
+        float S_f = ss0[0];
+        float a_f = 1.0f;
+        if (has_sinks != 0u) {
+            const float s_k = sinks[h];
+            const float M_f = max(ss0[1], s_k);
+            a_f = (ss0[1] == -INFINITY) ? 0.0f : exp(ss0[1] - M_f);
+            S_f = S_f * a_f + exp(s_k - M_f);
+        }
+        float inv = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
         device float4* out4 = (device float4*)(out + h * D);
         out4[tiisg] = so0[tiisg] * inv;
     }
@@ -355,6 +379,8 @@ kernel void gqa_decode_fa_vec_wide(
     constant uint& seq_len [[buffer(7)]],
     constant uint& kv_start [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
     uint h [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]],
     uint tg [[threads_per_threadgroup]],
@@ -496,7 +522,17 @@ kernel void gqa_decode_fa_vec_wide(
     if (sgitg == 0u) {
         threadgroup float* ss0 = shared + D;
         threadgroup float4* so0 = (threadgroup float4*)(ss0 + C);
-        float inv = (ss0[0] == 0.0f) ? 0.0f : (1.0f / ss0[0]);
+        // gpt-oss's attention sink: one more logit in the denominator
+        // with no value, so it only rescales (llama `fa_vec_common`).
+        float S_f = ss0[0];
+        float a_f = 1.0f;
+        if (has_sinks != 0u) {
+            const float s_k = sinks[h];
+            const float M_f = max(ss0[1], s_k);
+            a_f = (ss0[1] == -INFINITY) ? 0.0f : exp(ss0[1] - M_f);
+            S_f = S_f * a_f + exp(s_k - M_f);
+        }
+        float inv = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
         device float4* out4 = (device float4*)(out + h * D);
         FOR_UNROLL (uint sl = 0; sl < SL; sl++) {
             out4[tiisg + sl * NW] = so0[tiisg + sl * NW] * inv;
@@ -507,16 +543,21 @@ kernel void gqa_decode_fa_vec_wide(
 typedef decltype(gqa_decode_fa_vec_wide<128>) gqa_decode_fa_vec_wide_t;
 template [[host_name("gqa_decode_fa_vec_d128")]] kernel gqa_decode_fa_vec_wide_t gqa_decode_fa_vec_wide<128>;
 template [[host_name("gqa_decode_fa_vec_d256")]] kernel gqa_decode_fa_vec_wide_t gqa_decode_fa_vec_wide<256>;
+template [[host_name("gqa_decode_fa_vec_d512")]] kernel gqa_decode_fa_vec_wide_t gqa_decode_fa_vec_wide<512>;
 "#;
 
-/// TG size for FA-vec decode (d=64/96/128/256): NSG=8 × NW=32.
+/// TG size for FA-vec decode (d=64/96/128/256/512): NSG=8 × NW=32.
 pub(crate) fn gqa_fa_vec_threadgroup_size(_head_dim: u32) -> u32 {
     256
 }
 
 /// Head dims the FA-vec decode kernels cover (dedicated specializations).
+///
+/// 512 is Gemma-4's full-attention width. It is the wide kernel at
+/// `D = 512` (four float4 slices per lane), and its threadgroup memory,
+/// `(512 + 8 * (32 + 512)) * 4` = 19 KiB, is under the 32 KiB limit.
 pub(crate) fn gqa_fa_vec_supported(head_dim: u32) -> bool {
-    matches!(head_dim, 64 | 96 | 128 | 256)
+    matches!(head_dim, 64 | 96 | 128 | 256 | 512)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -533,8 +574,14 @@ pub(crate) fn encode_gqa_fa_vec(
     seq_len: u32,
     kv_start: u32,
     softcap: f32,
+    sinks: Option<&ProtocolObject<dyn MTLBuffer>>,
 ) -> Result<(), MetalError> {
     let pipe = match head_dim {
+        512 => ensure_pipeline(
+            device,
+            GQA_DECODE_FA_VEC_WIDE_KERNEL_SRC,
+            "gqa_decode_fa_vec_d512",
+        )?,
         256 => ensure_pipeline(
             device,
             GQA_DECODE_FA_VEC_WIDE_KERNEL_SRC,
@@ -583,6 +630,7 @@ pub(crate) fn encode_gqa_fa_vec(
         encoder.setBytes_length_atIndex(NonNull::new(&mut ks as *mut u32 as *mut _).unwrap(), 4, 8);
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        crate::attn::bind_sinks(encoder, sinks, q, 10, 11);
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(

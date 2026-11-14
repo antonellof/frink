@@ -4,7 +4,7 @@
 //! Why this exists: `frink verify` compares frink-CPU against
 //! frink-Metal, so it can prove the two frink backends agree with each
 //! other while both disagree with the reference implementation. The
-//! quality gate in `docs/plans/llama-cpp-parity-push.md` says a row is
+//! quality gate in `4dc195e5:docs/plans/llama-cpp-parity-push.md` says a row is
 //! only closed when "answers match llama", and nothing measured that.
 //!
 //! Why not greedy text: it was tried. With tokenization matched by hand

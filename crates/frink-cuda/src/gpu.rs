@@ -44,7 +44,7 @@
 //! test's own `#[ignore]` message).
 //!
 //! **`launch_q5_0_matvec` is the sixth, and NO GPU HAS RUN IT.** It
-//! landed 2026-09-05 (`docs/plans/cpu-cuda-parity.md` §6) and is a
+//! landed 2026-09-05 (`1ebda4fc:docs/plans/cpu-cuda-parity.md` §6) and is a
 //! transcription of `frink-metal`'s Q5_0 matvec, which is itself
 //! `ggml`'s `dequantize_row_q5_0`. Nothing above applies to it: the
 //! only checks it has are that the CUDA C names the entry point its

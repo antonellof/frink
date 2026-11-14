@@ -98,13 +98,10 @@ pub(super) fn load_gpt_oss_layer(
         n_experts * config.hidden_dim,
     )?;
 
-    let expert_bias = (0..n_experts)
-        .map(|e| frink_moe::ExpertBias {
-            gate: gate_b[e * ff..(e + 1) * ff].to_vec(),
-            up: up_b[e * ff..(e + 1) * ff].to_vec(),
-            down: down_b[e * config.hidden_dim..(e + 1) * config.hidden_dim].to_vec(),
-        })
-        .collect();
+    // The three lengths were each checked above.
+    let expert_bias =
+        frink_moe::ExpertBiasPlanes::new(gate_b, up_b, down_b, n_experts, ff, config.hidden_dim)
+            .expect("bias plane lengths checked above");
 
     Ok(crate::decoder::GptOssLayer {
         router_bias,

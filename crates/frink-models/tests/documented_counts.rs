@@ -527,3 +527,39 @@ fn no_plan_in_docs_plans_has_finished() {
         );
     }
 }
+
+/// No doc carries a merge-conflict marker. A stash pop that conflicted
+/// once committed `<<<<<<< Updated upstream` into FEATURES.md and the
+/// roadmap, and nothing that builds or tests code reads a doc's prose.
+#[test]
+fn no_doc_carries_a_merge_conflict_marker() {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                out.push(p);
+            }
+        }
+    }
+    let root = repo_root();
+    let mut docs = vec![
+        root.join("README.md"),
+        root.join("CONTRIBUTING.md"),
+        root.join("CLAUDE.md"),
+        root.join("CHANGELOG.md"),
+    ];
+    walk(&root.join("docs"), &mut docs);
+    walk(&root.join("benchmarks"), &mut docs);
+    let mut bad = Vec::new();
+    for d in docs.iter().filter(|d| d.exists()) {
+        let text = std::fs::read_to_string(d).unwrap();
+        for (i, line) in text.lines().enumerate() {
+            if line.starts_with("<<<<<<< ") || line.starts_with(">>>>>>> ") {
+                bad.push(format!("{}:{}", d.display(), i + 1));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "merge-conflict markers in docs: {bad:?}");
+}

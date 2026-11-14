@@ -2,6 +2,7 @@
 //! and the scale are applied) and the hidden-to-logits helpers.
 
 use crate::norm::NormOp;
+use rayon::prelude::*;
 
 use super::lm_head::Logits;
 use super::Decoder;
@@ -60,13 +61,17 @@ impl Decoder {
     pub(super) fn embed_tokens(
         &self,
         tokens: &[usize],
-        position: impl Fn(usize) -> usize,
+        position: impl Fn(usize) -> usize + Sync,
     ) -> Vec<f32> {
-        tokens
-            .iter()
+        // Row by row on the rayon pool: a 512-token prompt's dequant
+        // cost about 1.5 ms of a Metal prefill on one thread.
+        let hidden = self.config.hidden_dim;
+        let mut out = vec![0f32; tokens.len() * hidden];
+        out.par_chunks_mut(hidden)
+            .zip(tokens.par_iter())
             .enumerate()
-            .flat_map(|(b, &t)| self.embed_token(t, position(b)))
-            .collect()
+            .for_each(|(b, (dst, &t))| dst.copy_from_slice(&self.embed_token(t, position(b))));
+        out
     }
 
     /// The `output_head` half of a single-position forward: project the

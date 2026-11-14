@@ -188,7 +188,7 @@ mod tests {
     /// asserted: run with `--nocapture`.
     ///
     /// This is the number the three losses in
-    /// `docs/plans/gdn-resident-state.md` came down to, and it was
+    /// `1ebda4fc:docs/plans/gdn-resident-state.md` came down to, and it was
     /// never measured on its own -- only end to end, where it read as
     /// "the kernel is not better than six cores" without saying why.
     #[cfg(feature = "metal")]
@@ -352,7 +352,7 @@ mod tests {
     /// 512-byte row while it is hot in L1.
     ///
     /// What DOES move it is reading the state once per CHUNK of rows
-    /// instead of once per row (`docs/plans/gdn-resident-state.md`).
+    /// instead of once per row (`1ebda4fc:docs/plans/gdn-resident-state.md`).
     #[test]
     #[ignore = "a measurement, not an assertion; run with --nocapture"]
     fn delta_step_throughput_probe() {

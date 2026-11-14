@@ -141,7 +141,7 @@ kernel void gdn_delta_step(
 /// `gdn_delta_step` above gives a thread a whole row and walks it.
 ///
 /// That difference is the whole reason the device recurrence lost to
-/// six CPU cores (`docs/plans/gdn-resident-state.md`: 6.9 against 7.3
+/// six CPU cores (`1ebda4fc:docs/plans/gdn-resident-state.md`: 6.9 against 7.3
 /// tok/s with the state wrapped in place and the wrapper cached, so the
 /// plumbing was already free). The step is bandwidth-bound -- 3.1 MB of
 /// state per Bonsai layer, read and written once -- and in the kernel
@@ -551,7 +551,7 @@ pub unsafe fn buffer_no_copy(
 /// directly, so this submission copies no state at all.
 ///
 /// Measured against the host path it replaces and NOT adopted: see
-/// `docs/plans/gdn-resident-state.md`. It stays because it is the
+/// `1ebda4fc:docs/plans/gdn-resident-state.md`. It stays because it is the
 /// second half of that plan and the kernels under it are pinned against
 /// `frink_core::gdn::delta_step`.
 ///

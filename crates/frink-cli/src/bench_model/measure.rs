@@ -32,12 +32,13 @@ pub(super) fn measure_decoder(decoder: &Decoder, args: &BenchArgs) -> anyhow::Re
     Ok(rows)
 }
 
-/// `pp<N>` / `tg<N>` for [`Gemma4Engine`] (sequential tokens only).
+/// `pp<N>` / `tg<N>` for [`Gemma4Engine`]. The prompt goes through
+/// [`Engine::prefill`]: batched on Metal, one token at a time elsewhere.
 pub(super) fn measure_gemma4(engine: &Gemma4Engine, args: &BenchArgs) -> anyhow::Result<Vec<Row>> {
     if args.pg.is_some() {
         anyhow::bail!(
-            "-pg: the Gemma-4 engine has no batched prefill, so a combined prompt+generation \
-             row would time a different prompt path from llama-bench's; run -p and -n instead"
+            "-pg: no combined prompt+generation row for the Gemma-4 engine yet; \
+             run -p and -n instead"
         );
     }
     let mut rows: Vec<Row> = Vec::new();
@@ -174,9 +175,9 @@ fn bench_prefill(decoder: &Decoder, n_prompt: usize, plan: &Test) -> anyhow::Res
     })
 }
 
-/// Gemma-4 `pp<N>`: sequential `forward_token` over N synthetic ids.
-/// Keeps only the final logits (same work llama-bench reports), but
-/// without batched matmuls — honest for today's engine.
+/// Gemma-4 `pp<N>`: [`Engine::prefill`] over N synthetic ids, keeping
+/// only the final logits (the work llama-bench reports). Batched on
+/// Metal; one `forward_token` per id elsewhere.
 fn bench_prefill_gemma4(
     engine: &Gemma4Engine,
     n_prompt: usize,
@@ -194,18 +195,13 @@ fn bench_prefill_gemma4(
         bench_guard::check_caches_cold(&test, rep, &probe_gemma4(&state))?;
         let mut digest = WorkloadDigest::new();
         let context = plan.fill_depth(rep, vocab, |ctx| {
-            for (i, &tok) in ctx.iter().enumerate() {
-                let _ = Engine::forward_token(engine, tok, i, &mut state);
-            }
+            let _ = Engine::prefill(engine, ctx, 0, &mut state);
         });
         digest.feed_all(&context);
         plan.announce(rep);
+        digest.feed_all(&tokens);
         let t = Instant::now();
-        let mut logits = Vec::new();
-        for (i, &tok) in tokens.iter().enumerate() {
-            digest.feed(tok);
-            logits = Engine::forward_token(engine, tok, plan.depth + i, &mut state);
-        }
+        let logits = Engine::prefill(engine, &tokens, plan.depth, &mut state);
         let dt = t.elapsed().as_secs_f64();
         bench_guard::check_prefill_after(&test, plan.depth + n_prompt, &probe_gemma4(&state))?;
         let first = *first_digest.get_or_insert(digest);

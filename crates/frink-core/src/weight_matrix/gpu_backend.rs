@@ -315,7 +315,7 @@ pub struct Cuda;
 /// The Vulkan backend (`frink-vulkan`): decode matvecs only.
 ///
 /// Began as the `vulkan-beachhead` GO/NO-GO slice
-/// (`docs/plans/archive/vulkan-beachhead-verdict.md`); now one GLSL matvec per
+/// (`bc5074aa:docs/plans/archive/vulkan-beachhead-verdict.md`); now one GLSL matvec per
 /// kind in `frink_vulkan::shaders`, with resident weights and cached
 /// pipelines (`frink_vulkan::runtime`), each shader checked against its
 /// `frink_quant` scalar twin on a real device. Deliberately no more:

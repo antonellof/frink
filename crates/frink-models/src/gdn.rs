@@ -342,7 +342,7 @@ impl Gdn {
         // traffic is 2.1x on the step. A decode token still steps one
         // row at a time, where there is no traffic to amortise, and
         // running the row step on the GPU is a loss three ways
-        // (`docs/plans/gdn-resident-state.md`).
+        // (`1ebda4fc:docs/plans/gdn-resident-state.md`).
         //
         // Chunking is also what finally makes the GPU worth it, and
         // for the same reason it made the host faster: with the
@@ -352,7 +352,7 @@ impl Gdn {
         // A DECODE token takes the whole branch on the device when
         // the shapes allow, which is what removes the host step INSIDE
         // a recurrent layer -- the thing that, priced in
-        // `docs/plans/gdn-resident-state.md`, is two thirds of a token's
+        // `1ebda4fc:docs/plans/gdn-resident-state.md`, is two thirds of a token's
         // host time and the reason a layer cannot be one submission.
         // It rides in the submission `ssm_out` already cost, so the
         // count does not go up; the host body below is the fallback and
@@ -432,7 +432,7 @@ impl Gdn {
             // The kernels are real and pinned against this code
             // (`frink_metal::gdn`); what beats a host recurrence is a
             // CHUNKED delta rule, which is a different algorithm.
-            // `docs/plans/gdn-resident-state.md` carries all of it.
+            // `1ebda4fc:docs/plans/gdn-resident-state.md` carries all of it.
             delta_step(dims, &mut state.ssm, q, k, v, &g, &beta, &mut o);
             // :311-313 (`build_norm_gated`, :171-178): per head,
             // rms_norm(o, ssm_norm) * silu(z).
@@ -460,7 +460,7 @@ impl Gdn {
     /// shapes are not ones the kernels serve and the host bodies run.
     ///
     /// This is the step that changes the submission COUNT, which
-    /// `docs/plans/gdn-resident-state.md` prices as the whole of what
+    /// `1ebda4fc:docs/plans/gdn-resident-state.md` prices as the whole of what
     /// is left between this engine and the reference's decode rate.
     #[cfg(feature = "metal")]
     pub fn fused_layer(

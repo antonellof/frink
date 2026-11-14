@@ -377,7 +377,7 @@ mod tests {
     ///
     /// This is the number that decides whether the kernel gets a
     /// caller. The three earlier device attempts lost because the
-    /// state moved once per ROW (`docs/plans/gdn-resident-state.md`);
+    /// state moved once per ROW (`1ebda4fc:docs/plans/gdn-resident-state.md`);
     /// chunking cuts that traffic by the chunk width, which is the
     /// only thing that changed.
     #[cfg(feature = "metal")]
@@ -465,15 +465,14 @@ mod tests {
         }
     }
 
-    /// The device kernel IS this chunk: same decay products, same two
-    /// triangles, same forward substitution, same state left behind.
-    /// Run on the M2 Pro.
+    /// The device kernel answers what this chunk answers: the same
+    /// outputs and the same state left behind, both held to the
+    /// sequential rule. Run on the M2 Pro and the M5 Max.
     ///
-    /// The host side chunks by 32 and the device by 16, because what
-    /// bounds the device is threadgroup memory rather than cache, so
-    /// the two disagree about chunk width on purpose and must still
-    /// agree about the answer: a recurrence that is right only at one
-    /// chunk width is not the recurrence.
+    /// The host side chunks by 32 and the device steps token by token,
+    /// so the two associate the same sums differently on purpose and
+    /// must still agree about the answer: a recurrence that is right
+    /// only at one chunk width is not the recurrence.
     #[cfg(feature = "metal")]
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
@@ -562,12 +561,13 @@ mod tests {
             }
             .expect("the kernel launches");
 
-            // The sequential step is the DEFINITION, so both chunked
+            // The sequential step is the DEFINITION, so both
             // implementations are measured against it rather than
-            // against each other: they chunk by different widths (32
-            // and 16) and so associate the same sums differently, and
-            // a device that merely tracked the host's associations
-            // would be a weaker claim than either matching the rule.
+            // against each other: the host chunks by 32 and the device
+            // steps token by token, so they associate the same sums
+            // differently, and a device that merely tracked the host's
+            // associations would be a weaker claim than either
+            // matching the rule.
             let mut seq_state = state0.clone();
             let mut seq_out = vec![0.0f32; rows * n_v * s];
             for t in 0..rows {

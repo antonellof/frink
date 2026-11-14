@@ -53,6 +53,12 @@ struct Inner {
 }
 
 impl SpanClock {
+    /// A clock that never samples, for a caller that shares an encode
+    /// path with an instrumented stack but is not itself timed.
+    pub(crate) const fn off() -> Self {
+        Self(None)
+    }
+
     /// A clock for a command buffer that will open at most `max_spans`
     /// spans. Off (a no-op clock) unless `FRINK_METAL_KERNEL_TIMING` is
     /// set; also off, with one warning, on a device that cannot sample
@@ -109,6 +115,28 @@ impl SpanClock {
         encoder: &mut Encoder,
         label: &'static str,
     ) -> Result<(), MetalError> {
+        self.span_as(cmd_buf, encoder, label, MTLDispatchType::Concurrent)
+    }
+
+    /// [`Self::span`] for a caller whose dispatches rely on a SERIAL
+    /// encoder's ordering (`crate::gdn_prefill`), which a concurrent
+    /// replacement would silently let overlap.
+    pub(crate) fn span_serial(
+        &mut self,
+        cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
+        encoder: &mut Encoder,
+        label: &'static str,
+    ) -> Result<(), MetalError> {
+        self.span_as(cmd_buf, encoder, label, MTLDispatchType::Serial)
+    }
+
+    fn span_as(
+        &mut self,
+        cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
+        encoder: &mut Encoder,
+        label: &'static str,
+        dispatch: MTLDispatchType,
+    ) -> Result<(), MetalError> {
         let Some(inner) = self.0.as_mut() else {
             return Ok(());
         };
@@ -118,7 +146,7 @@ impl SpanClock {
         let i = inner.labels.len();
         encoder.endEncoding();
         let desc = MTLComputePassDescriptor::new();
-        desc.setDispatchType(MTLDispatchType::Concurrent);
+        desc.setDispatchType(dispatch);
         let attachments = desc.sampleBufferAttachments();
         // SAFETY: index 0 is always a valid attachment slot, and the two
         // sample indices are below the count the buffer was created with.
@@ -262,11 +290,19 @@ impl SpanLedger {
         };
         slot.n += 1;
         slot.gpu_ns += gpu_ns;
-        let first = spans.iter().map(|s| s.1).min().unwrap_or(0);
-        let last = spans.iter().map(|s| s.2).max().unwrap_or(0);
+        // An encoder that ran nothing samples 0 for both ends on an M5
+        // (and `MTLCounterErrorValue` where sampling failed). Such a span
+        // took no time, and must not stretch the extent back to tick 0,
+        // which scaled every row to zero.
+        let sampled = |s: &&(&'static str, u64, u64)| {
+            !(s.1 == 0 && s.2 == 0) && s.2 != u64::MAX && s.2 >= s.1
+        };
+        let first = spans.iter().filter(sampled).map(|s| s.1).min().unwrap_or(0);
+        let last = spans.iter().filter(sampled).map(|s| s.2).max().unwrap_or(0);
         slot.extent_ticks += last.saturating_sub(first);
-        for (label, start, end) in spans {
-            let d = end.saturating_sub(*start);
+        for span in spans {
+            let (label, start, end) = span;
+            let d = if sampled(&span) { end - start } else { 0 };
             slot.span_ticks += d;
             let e = slot.by_label.entry(label).or_insert((0, 0));
             e.0 += d;
@@ -354,6 +390,22 @@ mod tests {
         assert_eq!(r.rows[0], ("matvec", 3.0, 1.0));
         assert_eq!(r.rows[1], ("norm", 1.0, 1.0));
         assert!((r.gaps_ms - 1.0).abs() < 1e-9);
+    }
+
+    /// An M5 samples an encoder that ran nothing as 0..0. That span
+    /// costs nothing, and the extent starts at the first real sample:
+    /// counting it from tick 0 scaled every row of the table to zero.
+    #[test]
+    fn an_unsampled_empty_encoder_does_not_stretch_the_extent() {
+        let mut l = SpanLedger::new();
+        let spans = [
+            ("(empty encoder)", 0, 0),
+            ("matvec", 1000, 1300),
+            ("norm", 1400, 1500),
+        ];
+        let r = l.note("t", &spans, 5_000_000, 1).unwrap();
+        assert!((r.ns_per_tick - 10_000.0).abs() < 1e-6, "{}", r.ns_per_tick);
+        assert_eq!(r.rows.iter().find(|r| r.0 == "matvec").unwrap().1, 3.0);
     }
 
     /// Per-command-buffer means: the same label across two buffers

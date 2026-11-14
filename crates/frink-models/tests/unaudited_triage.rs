@@ -10,7 +10,7 @@
 //!
 //! That paragraph is useless for the decision a user actually has, which
 //! is whether their model is one fixture away or needs an attention
-//! implementation. `docs/plans/llama-cpp-gap-inventory.md` §1.3 shows
+//! implementation. `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` §1.3 shows
 //! the 47 split at least three ways, and this suite pins the split for
 //! the architectures that have been read on **both** sides:
 //!
@@ -295,7 +295,7 @@ fn batch_one_verdicts_are_pinned_to_what_was_read() {
 /// The "post-norm group" was never one group, and it is THREE norm
 /// topologies, not two.
 ///
-/// `docs/plans/llama-cpp-gap-inventory.md` §1.3 grouped `olmo2`,
+/// `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` §1.3 grouped `olmo2`,
 /// `seed_oss` and `exaone4` together as "likely a fixture away, if the
 /// loader wires the post-norm slots for non-Gemma families". The wiring
 /// question had a yes answer, and it was the wrong question: the three

@@ -1012,7 +1012,7 @@ pub fn causal_gqa_attention_row<'a>(
     // what a decode token still does on the host -- 6.8 ms of a 94 ms
     // Bonsai token across sixteen attention layers of twenty-four heads
     // each, while six cores sat idle
-    // (`docs/plans/gdn-resident-state.md`).
+    // (`1ebda4fc:docs/plans/gdn-resident-state.md`).
     //
     // `min_len` is 1 because a head is already a real unit of work
     // (`seq_len` keys against `head_dim`), and the scheduler's own

@@ -2,7 +2,7 @@
 //!
 //! # What was actually wrong, since the plan got this one wrong
 //!
-//! The plan (`docs/plans/serving-and-tiered-kv.md`, `sched-output-mailbox`)
+//! The plan (`4dc195e5:docs/plans/serving-and-tiered-kv.md`, `sched-output-mailbox`)
 //! asked for a single-slot coalescing mailbox to replace "an unbounded
 //! channel", on the reasoning that a slow or disconnected SSE consumer
 //! would otherwise grow memory without bound. **That premise is false

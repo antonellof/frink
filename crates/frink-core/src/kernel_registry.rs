@@ -11,8 +11,9 @@
 //!   [`crate::weight_matrix::WeightMatrix`]'s `metal_kind_supported`
 //!   predicate and `apply_gpu_batch`'s per-kind dispatch table disagreed
 //!   about one kind. The only symptom was a benchmark row 13.7x behind.
-//! - Gemma-4-E2B is slower on Metal than on CPU. Output is correct, so
-//!   nothing fails; the model simply never reaches a batched path.
+//! - Gemma-4-E2B was slower on Metal than on CPU. Output was correct,
+//!   so nothing failed; the model simply never reached a batched path
+//!   (#626, since moved onto the fused Metal stacks).
 //!
 //! Both are *lookups that missed*. Neither produced a diagnostic.
 //!

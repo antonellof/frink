@@ -59,7 +59,7 @@ flag of its tool.
 | bench | `-d` | One value per run, as `-p` | Same |
 | bench | `-b` | One value per run. Leaving both `-b` and `-ub` out means the whole prompt in one pass, not llama-bench's 2048 / 512 | Keeps the rows every published receipt measured |
 | bench | `-ub` | One value per run; see `-b` | Same |
-| bench | `-pg` | One pair per run; refused on the Gemma-4 engine, which has no batched prefill to time | Same |
+| bench | `-pg` | One pair per run; refused on the Gemma-4 engine, which has no combined row yet | Same |
 | bench | `-m` | One model per run | `frink bench --suite` runs several, each in its own process |
 | bench | `-fa` | One value per run: `on` / `auto` accepted, `off` and comma-separated sweeps refused | One run measures one configuration |
 | bench | `-ctk` | `f16` (the default) or `f32` on CPU and Metal; a type the KV store would fall back from (`q8_0`, `q4_0`, ...) is refused, as is a sweep | A row labelled with a type it did not measure is not a measurement |
@@ -470,6 +470,15 @@ PYTHONPATH=$LLAMA/gguf-py python3 scripts/dequantize_gguf.py model-Q8_0.gguf /tm
 # KL(f32.llama || q8.llama) is the reference's own quantization loss;
 # KL(f32.llama || q8.frink) is frink's; KL(f32.llama || f32.frink) is the graph.
 ```
+
+Two dumpers do not settle it either when both libllama builds run the
+same 8-bit activation quantizers: their spread then misses what a
+flipped quant step does. Gemma-4-E2B Q4_K_M on a 1343-token prose
+prompt (#634) read `WRONG` at KL 1.2e-1 against two references 1.1e-3
+apart, and its decode steps up to 1.3e-1. On the dequantized file the
+same prompt is KL 2.8e-6, and 8.2e-5 over 16 decode steps; llama.cpp's
+own quantization loss there is 3.7e-2 and frink's 2.8e-2. The graph
+was right; `attention_scale = 1` amplifies each engine's flips.
 
 `LLAMA_LOGITS_FLASH_ATTN=0` keeps the reference off its flash-attention
 path. `FRINK_CTK=f32` runs an f32 K/V cache on BOTH sides; the dumper

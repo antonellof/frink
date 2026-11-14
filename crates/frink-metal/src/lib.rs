@@ -41,6 +41,16 @@ pub mod gdn_head;
 #[cfg(feature = "metal")]
 pub mod gdn_branch;
 
+/// A run of recurrent PREFILL layers in one command buffer: the batch
+/// twin of `gdn_branch`, GEMMs and the chunked recurrence.
+#[cfg(feature = "metal")]
+pub mod gdn_prefill;
+
+/// An attention layer whole inside that run, against the sequence's
+/// device KV mirror (#540).
+#[cfg(feature = "metal")]
+pub mod gdn_prefill_attn;
+
 /// Shared-storage buffers reused across launches, because allocating
 /// them per launch is host time the GPU ledger cannot see.
 #[cfg(feature = "metal")]
@@ -108,6 +118,10 @@ mod fa_vec_decode;
 #[cfg(feature = "metal")]
 pub mod decode_dense;
 
+/// Gemma-4's per-layer embeddings, encoded into the dense stacks.
+#[cfg(feature = "metal")]
+pub mod ple;
+
 #[cfg(feature = "metal")]
 pub mod resident_act;
 
@@ -126,6 +140,16 @@ pub mod greedy_fold;
 mod dispatch;
 
 #[cfg(feature = "metal")]
+mod tensor_mm;
+
+/// Prefill flash attention through the Metal 4 tensor API (M5).
+#[cfg(feature = "metal")]
+mod fa_tensor;
+
+#[cfg(all(test, feature = "metal"))]
+mod attn_mask_tests;
+
+#[cfg(feature = "metal")]
 mod mem_ranges;
 
 #[cfg(feature = "metal")]
@@ -139,6 +163,11 @@ mod kernel_bench;
 
 #[cfg(feature = "metal")]
 mod moe_ids;
+
+/// gpt-oss's routed FFN additions (router and expert biases, the
+/// clamped SwiGLU), encoded by the MoE decode and prefill stacks.
+#[cfg(feature = "metal")]
+pub mod moe_oai;
 
 #[cfg(feature = "metal")]
 pub use dispatch::{metal_encode_stats, metal_encode_stats_reset, EncodeStats};

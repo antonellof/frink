@@ -24,7 +24,9 @@
 //!
 //! Scope:
 //! - `LLAMA_ROPE_TYPE_NORM` (interleaved) or `NEOX` ± Llama-3 freq factors
-//! - Full-causal GQA (no sliding window); online-softmax kernels
+//! - Causal GQA, with or without a sliding window (llama.cpp's
+//!   `LLAMA_SWA_TYPE_STANDARD`; a chunked window is not one); online-softmax
+//!   kernels
 //! - Prefill dense stack supports QKV bias + QK-norm via [`AttnExtras`]
 //!   (same order as CPU: bias → norm → RoPE)
 //!
@@ -41,20 +43,22 @@
 //! stack needs no host `dequant_row` upload.
 //!
 //! `FRINK_METAL_FA_VEC=0` disables llama-style FA-vec decode **and** prefill
-//! (default **on** for `head_dim` in {64,96,128,256}). Other head dims keep
+//! (default **on** for `head_dim` in {64,96,128,256,512}). Other head dims keep
 //! legacy online-softmax GQA. Prefill at `head_dim` 64/128/256 with `n_q >= 8`
-//! goes further and takes the simdgroup-MMA `flash_attn_ext` kernel; the
+//! goes further and takes the simdgroup-MMA `flash_attn_ext` kernel, or on
+//! an M5 (64/128/256/512) the tensor-API one (`crate::fa_tensor`) where llama
+//! picks it; the
 //! parity tests reach a specific one through [`PrefillAttnKernel`], not an
 //! environment variable.
 //!
 //! `FRINK_CTK` selects KV dtype ([`MetalKvDtype`]); see [`is_implemented`].
 pub use crate::decode_dense::{
-    launch_decode_dense_stack, AttnExtras, DenseLayerMetal, EmbdGatherMetal,
+    launch_decode_dense_stack, AttnExtras, DenseLayerMetal, EmbdGatherMetal, LayerKv,
 };
 pub(crate) use crate::dispatch::dispatch_counted;
 use crate::elem::{
     encode_act_mul_f32_to_f16, encode_argmax, encode_f32_to_f16, encode_silu_mul, encode_vec_add,
-    encode_vec_add_at, warm_prefill_elem_pipelines,
+    encode_vec_add_rows, warm_prefill_elem_pipelines,
 };
 use crate::embd::encode_get_rows;
 use crate::fa_vec_decode::{encode_gqa_fa_vec, gqa_fa_vec_supported};
@@ -69,9 +73,10 @@ use crate::mem_ranges::MemRanges;
 use crate::moe_ids::MoeIdsLog;
 use crate::norm::{
     encode_add_rms_norm, encode_add_rms_norm_batch, encode_add_rms_norm_f32_to_f16_batch,
-    encode_rms_norm, encode_rms_norm_at, encode_rms_norm_batch, encode_rms_norm_f32_to_f16_batch,
+    encode_rms_norm, encode_rms_norm_batch, encode_rms_norm_f32_to_f16_batch,
     encode_rms_norm_per_head_batch,
 };
+pub use crate::ple::{PerLayerGateMetal, PleInputMetal, PrefillMatMetal};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
@@ -167,6 +172,8 @@ kernel void gqa_decode(
     constant uint& seq_len [[buffer(7)]],
     constant uint& kv_start [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
     uint h [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]],
     uint tg [[threads_per_threadgroup]],
@@ -290,7 +297,16 @@ kernel void gqa_decode(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    float inv_s = 1.0f / s_sh[0];
+    // Attention sink: see the FA-vec kernels.
+    float S_f = s_sh[0];
+    float a_f = 1.0f;
+    if (has_sinks != 0u) {
+        const float s_k = sinks[h];
+        const float M_f = max(m_sh[0], s_k);
+        a_f = (m_sh[0] == -INFINITY) ? 0.0f : exp(m_sh[0] - M_f);
+        S_f = S_f * a_f + exp(s_k - M_f);
+    }
+    float inv_s = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
     threadgroup float* acc0 = acc_base;
     for (uint d = tid; d < head_dim; d += tg) {
         out[h * head_dim + d] = acc0[d] * inv_s;
@@ -336,6 +352,9 @@ kernel void "#,
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
+    constant uint& window [[buffer(12)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     uint2 tid_tg [[thread_position_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]],
@@ -355,6 +374,11 @@ kernel void "#,
 
     uint causal_len = kv_prefix_len + qi + 1u;
     if (causal_len == 0u) return;
+    // Sliding window (`window > 0`): llama `is_masked_swa`, STANDARD, masks
+    // key p when (kv_prefix_len + qi) - p >= window, so the first visible
+    // key is causal_len - window. Chunks start on a C boundary below it.
+    const uint kv_lo = (window > 0u && causal_len > window) ? causal_len - window : 0u;
+    const uint kv_lo_c = (kv_lo / C) * C;
 
     uint tid = tid_tg.x;
     uint tg = tg_size.x;
@@ -385,7 +409,7 @@ kernel void "#,
     float M = -INFINITY;
 
     for (uint ic0 = sgitg; ; ic0 += nsg) {
-        uint ic = ic0 * C;
+        uint ic = kv_lo_c + ic0 * C;
         if (ic >= causal_len) break;
         uint chunk = min(C, causal_len - ic);
 
@@ -393,7 +417,8 @@ kernel void "#,
         for (uint cc = 0; cc < C; cc++) {
             scores[cc] = -INFINITY;
         }
-        for (uint cc = 0; cc < chunk; cc++) {
+        // Keys below the window keep -INFINITY: P = 0, no P·V share.
+        for (uint cc = (ic < kv_lo) ? kv_lo - ic : 0u; cc < chunk; cc++) {
             device const half4* k4 =
                 (device const half4*)(k_cache + ((ic + cc) * n_kv_heads + kv_h) * D);
             float partial = own ? dot(sq4[tiisg], float4(k4[tiisg])) : 0.0f;
@@ -460,7 +485,17 @@ kernel void "#,
     if (sgitg == 0u && own) {
         threadgroup float* ss0 = shared + D;
         threadgroup float4* so0 = (threadgroup float4*)(ss0 + C);
-        float inv = (ss0[0] == 0.0f) ? 0.0f : (1.0f / ss0[0]);
+        // gpt-oss's attention sink: one more logit in the denominator
+        // with no value, so it only rescales (llama `fa_vec_common`).
+        float S_f = ss0[0];
+        float a_f = 1.0f;
+        if (has_sinks != 0u) {
+            const float s_k = sinks[h];
+            const float M_f = max(ss0[1], s_k);
+            a_f = (ss0[1] == -INFINITY) ? 0.0f : exp(ss0[1] - M_f);
+            S_f = S_f * a_f + exp(s_k - M_f);
+        }
+        float inv = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
         device float4* out4 = (device float4*)(out + (qi * n_heads + h) * D);
         out4[tiisg] = so0[tiisg] * inv;
     }
@@ -551,6 +586,9 @@ kernel void "#,
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
+    constant uint& window [[buffer(12)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     ushort tiisg [[thread_index_in_simdgroup]],
     ushort sgitg [[simdgroup_index_in_threadgroup]],
@@ -640,9 +678,15 @@ kernel void "#,
         max_causal = max(max_causal, kv_prefix_len + qi0 + j + 1u);
     }
     if (max_causal == 0u) return;
+    // Sliding window (`window > 0`, llama `is_masked_swa` STANDARD): row j
+    // sees keys [clen - window, clen). The tile's first query has the
+    // lowest bound, so chunks start on the C boundary below it.
+    const uint clen0 = kv_prefix_len + qi0 + 1u;
+    const uint ic_start =
+        (window > 0u && clen0 > window) ? ((clen0 - window) / C) * C : 0u;
 
     for (uint ic0 = 0u; ; ic0++) {
-        const uint ic = ic0 * C;
+        const uint ic = ic_start + ic0 * C;
         if (ic >= max_causal) break;
 
         // Q·Kᵀ — 8x8 MMA. Simdgroup `sgitg` owns key blocks
@@ -695,10 +739,11 @@ kernel void "#,
             float2 s2 = ss2[tiisg] * scale;
             if (softcap > 0.0f) s2 = softcap * tanh(s2 / softcap);
             const uint clen = kv_prefix_len + qi0 + j + 1u;
+            const uint lo = (window > 0u && clen > window) ? clen - window : 0u;
             const uint c0 = ic + 2u * uint(tiisg);
             // `cc >= chunk` is subsumed: it implies ic+cc >= max_causal >= clen.
-            if (c0 >= clen) s2[0] = -INFINITY;
-            if (c0 + 1u >= clen) s2[1] = -INFINITY;
+            if (c0 >= clen || c0 < lo) s2[0] = -INFINITY;
+            if (c0 + 1u >= clen || c0 + 1u < lo) s2[1] = -INFINITY;
 
             const float m = M[jj];
             M[jj] = simd_max(max(m, max(s2[0], s2[1])));
@@ -758,7 +803,16 @@ kernel void "#,
     for (uint jj = 0u; jj < NQ; jj++) {
         const uint j = jj * NSG + sgitg;
         if (j >= n_local) continue;
-        const float inv = (S[jj] == 0.0f) ? 0.0f : (1.0f / S[jj]);
+        // Attention sink: see the FA-vec kernels.
+        float S_f = S[jj];
+        float a_f = 1.0f;
+        if (has_sinks != 0u) {
+            const float s_k = sinks[h];
+            const float M_f = max(M[jj], s_k);
+            a_f = (M[jj] == -INFINITY) ? 0.0f : exp(M[jj] - M_f);
+            S_f = S_f * a_f + exp(s_k - M_f);
+        }
+        const float inv = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
         device float4* out4 =
             (device float4*)(out + ((qi0 + j) * n_heads + h) * D);
         threadgroup float4* so4 = (threadgroup float4*)(so + j * D);
@@ -785,11 +839,23 @@ const GQA_PREFILL_FA_EXT_MMA_D128_KERNEL_SRC: &str =
 const GQA_PREFILL_FA_EXT_MMA_D256_KERNEL_SRC: &str =
     gqa_prefill_fa_ext_mma_src!("gqa_prefill_fa_ext_mma_d256", "256");
 
-const GQA_PREFILL_FA_VEC_D256_KERNEL_SRC: &str = r#"
+/// FA-vec prefill for the wide heads: `D4 = D/4` float4 columns over 32
+/// lanes, so each lane owns `NL = D4/32` of them, two at d=256
+/// (Gemma-2/3) and four at d=512 (Gemma-4's full-attention layers).
+/// Every lane-owned column is walked with the same `l < NL` loop, so no
+/// width can drop part of a head (this kernel was once cloned from the
+/// d=128 one, where one float4 per lane is right, and at d=256 kept only
+/// the first 128 dims).
+macro_rules! gqa_prefill_fa_vec_wide_src {
+    ($name:literal, $d:literal) => {
+        concat!(
+            r#"
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void gqa_prefill_fa_vec_d256(
+kernel void "#,
+            $name,
+            r#"(
     device const float* q [[buffer(0)]],
     device const half* k_cache [[buffer(1)]],
     device const half* v_cache [[buffer(2)]],
@@ -800,15 +866,21 @@ kernel void gqa_prefill_fa_vec_d256(
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
+    constant uint& window [[buffer(12)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     uint2 tid_tg [[thread_position_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]],
     threadgroup float* shared [[threadgroup(0)]]
 ) {
-    constexpr uint D = 256u;
-    constexpr uint D4 = 64u;
+    constexpr uint D = "#,
+            $d,
+            r#"u;
+    constexpr uint D4 = D / 4u;
     constexpr uint C = 32u;
     constexpr uint NW = 32u;
+    constexpr uint NL = D4 / NW;
     constexpr uint SG_F = C + D;
 
     uint h = tgpig.x;
@@ -817,6 +889,9 @@ kernel void gqa_prefill_fa_vec_d256(
 
     uint causal_len = kv_prefix_len + qi + 1u;
     if (causal_len == 0u) return;
+    // Sliding window: see `gqa_prefill_fa_vec`.
+    const uint kv_lo = (window > 0u && causal_len > window) ? causal_len - window : 0u;
+    const uint kv_lo_c = (kv_lo / C) * C;
 
     uint tid = tid_tg.x;
     uint tg = tg_size.x;
@@ -836,13 +911,9 @@ kernel void gqa_prefill_fa_vec_d256(
     for (uint i = tid; i < D4; i += tg) {
         sq4[i] = q4[i];
     }
-    // D=256 is 64 float4 spread over 32 lanes, so each lane owns *two*
-    // of them: tiisg and tiisg+NW. Touching only the first truncated both
-    // the Q.K dot and the output to the first 128 of 256 head dims. This
-    // kernel was cloned from the d=128 one, where one float4 per lane is
-    // exactly right; at d=256 it silently dropped half of every head.
-    so4[tiisg] = float4(0.0f);
-    so4[tiisg + NW] = float4(0.0f);
+    for (uint l = 0u; l < NL; l++) {
+        so4[tiisg + l * NW] = float4(0.0f);
+    }
     ss[tiisg] = 0.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -850,7 +921,7 @@ kernel void gqa_prefill_fa_vec_d256(
     float M = -INFINITY;
 
     for (uint ic0 = sgitg; ; ic0 += nsg) {
-        uint ic = ic0 * C;
+        uint ic = kv_lo_c + ic0 * C;
         if (ic >= causal_len) break;
         uint chunk = min(C, causal_len - ic);
 
@@ -858,11 +929,14 @@ kernel void gqa_prefill_fa_vec_d256(
         for (uint cc = 0; cc < C; cc++) {
             scores[cc] = -INFINITY;
         }
-        for (uint cc = 0; cc < chunk; cc++) {
+        // Keys below the window keep -INFINITY: P = 0, no P·V share.
+        for (uint cc = (ic < kv_lo) ? kv_lo - ic : 0u; cc < chunk; cc++) {
             device const half4* k4 =
                 (device const half4*)(k_cache + ((ic + cc) * n_kv_heads + kv_h) * D);
-            float partial = dot(sq4[tiisg], float4(k4[tiisg]))
-                          + dot(sq4[tiisg + NW], float4(k4[tiisg + NW]));
+            float partial = 0.0f;
+            for (uint l = 0u; l < NL; l++) {
+                partial += dot(sq4[tiisg + l * NW], float4(k4[tiisg + l * NW]));
+            }
             float sc = simd_sum(partial) * scale;
             if (softcap > 0.0f) {
                 sc = softcap * tanh(sc / softcap);
@@ -876,21 +950,26 @@ kernel void gqa_prefill_fa_vec_d256(
         float vs = (s_lane == -INFINITY) ? 0.0f : exp(s_lane - M2);
         S = S * ms + simd_sum(vs);
         ss[tiisg] = vs;
-        so4[tiisg] *= ms;
-        so4[tiisg + NW] *= ms;
+        for (uint l = 0u; l < NL; l++) {
+            so4[tiisg + l * NW] *= ms;
+        }
         M = M2;
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
-        float4 lo0 = float4(0.0f);
-        float4 lo1 = float4(0.0f);
+        float4 lo[NL];
+        for (uint l = 0u; l < NL; l++) {
+            lo[l] = float4(0.0f);
+        }
         for (uint cc = 0; cc < chunk; cc++) {
             device const half4* v4 =
                 (device const half4*)(v_cache + ((ic + cc) * n_kv_heads + kv_h) * D);
-            lo0 += float4(v4[tiisg]) * ss[cc];
-            lo1 += float4(v4[tiisg + NW]) * ss[cc];
+            for (uint l = 0u; l < NL; l++) {
+                lo[l] += float4(v4[tiisg + l * NW]) * ss[cc];
+            }
         }
-        so4[tiisg] += lo0;
-        so4[tiisg + NW] += lo1;
+        for (uint l = 0u; l < NL; l++) {
+            so4[tiisg + l * NW] += lo[l];
+        }
     }
 
     if (tiisg == 0u) {
@@ -916,8 +995,9 @@ kernel void gqa_prefill_fa_vec_d256(
                 ss0[0] = S0 * a0 + S1 * a1;
                 ss0[1] = Mn;
             }
-            so0[tiisg] = so0[tiisg] * a0 + so1[tiisg] * a1;
-            so0[tiisg + NW] = so0[tiisg + NW] * a0 + so1[tiisg + NW] * a1;
+            for (uint l = 0u; l < NL; l++) {
+                so0[tiisg + l * NW] = so0[tiisg + l * NW] * a0 + so1[tiisg + l * NW] * a1;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -925,13 +1005,33 @@ kernel void gqa_prefill_fa_vec_d256(
     if (sgitg == 0u) {
         threadgroup float* ss0 = shared + D;
         threadgroup float4* so0 = (threadgroup float4*)(ss0 + C);
-        float inv = (ss0[0] == 0.0f) ? 0.0f : (1.0f / ss0[0]);
+        // gpt-oss's attention sink: one more logit in the denominator
+        // with no value, so it only rescales (llama `fa_vec_common`).
+        float S_f = ss0[0];
+        float a_f = 1.0f;
+        if (has_sinks != 0u) {
+            const float s_k = sinks[h];
+            const float M_f = max(ss0[1], s_k);
+            a_f = (ss0[1] == -INFINITY) ? 0.0f : exp(ss0[1] - M_f);
+            S_f = S_f * a_f + exp(s_k - M_f);
+        }
+        float inv = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
         device float4* out4 = (device float4*)(out + (qi * n_heads + h) * D);
-        out4[tiisg] = so0[tiisg] * inv;
-        out4[tiisg + NW] = so0[tiisg + NW] * inv;
+        for (uint l = 0u; l < NL; l++) {
+            out4[tiisg + l * NW] = so0[tiisg + l * NW] * inv;
+        }
     }
 }
-"#;
+"#
+        )
+    };
+}
+
+const GQA_PREFILL_FA_VEC_D256_KERNEL_SRC: &str =
+    gqa_prefill_fa_vec_wide_src!("gqa_prefill_fa_vec_d256", "256");
+/// Gemma-4's full-attention layers.
+const GQA_PREFILL_FA_VEC_D512_KERNEL_SRC: &str =
+    gqa_prefill_fa_vec_wide_src!("gqa_prefill_fa_vec_d512", "512");
 
 // Multi-token causal GQA prefill: one threadgroup per (query token, head).
 // Query `qi` at absolute cache index `kv_prefix_len + qi` attends over
@@ -957,6 +1057,9 @@ kernel void gqa_prefill(
     constant uint& n_q [[buffer(7)]],
     constant uint& kv_prefix_len [[buffer(8)]],
     constant float& softcap [[buffer(9)]],
+    device const float* sinks [[buffer(10)]],
+    constant uint& has_sinks [[buffer(11)]],
+    constant uint& window [[buffer(12)]],
     uint2 tgpig [[threadgroup_position_in_grid]],
     uint2 tid_tg [[thread_position_in_threadgroup]],
     uint2 tg_size [[threads_per_threadgroup]],
@@ -971,6 +1074,8 @@ kernel void gqa_prefill(
     uint tg = tg_size.x;
     uint causal_len = kv_prefix_len + qi + 1u;
     if (causal_len == 0u) return;
+    // Sliding window: the first key this query sees.
+    uint kv_lo = (window > 0u && causal_len > window) ? causal_len - window : 0u;
 
     threadgroup float* m_sh = shared;
     threadgroup float* s_sh = shared + tg;
@@ -988,7 +1093,7 @@ kernel void gqa_prefill(
         my_acc[d] = 0.0f;
     }
 
-    for (uint t = tid; t < causal_len; t += tg) {
+    for (uint t = kv_lo + tid; t < causal_len; t += tg) {
         device const half* k_t =
             k_cache + (t * n_kv_heads + kv_h) * head_dim;
         float dot = 0.0f;
@@ -1036,7 +1141,16 @@ kernel void gqa_prefill(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    float inv_s = 1.0f / s_sh[0];
+    // Attention sink: see the FA-vec kernels.
+    float S_f = s_sh[0];
+    float a_f = 1.0f;
+    if (has_sinks != 0u) {
+        const float s_k = sinks[h];
+        const float M_f = max(m_sh[0], s_k);
+        a_f = (m_sh[0] == -INFINITY) ? 0.0f : exp(m_sh[0] - M_f);
+        S_f = S_f * a_f + exp(s_k - M_f);
+    }
+    float inv_s = (S_f == 0.0f) ? 0.0f : (a_f / S_f);
     threadgroup float* acc0 = acc_base;
     device float* out_h = out + (qi * n_heads + h) * head_dim;
     for (uint d = tid; d < head_dim; d += tg) {
@@ -1066,6 +1180,16 @@ pub struct MetalKvBuffers {
     pub n_kv_heads: usize,
     pub head_dim: usize,
     pub seq_len: usize,
+    /// How many leading rows of the host `KvCache` paired with this
+    /// buffer hold the values this buffer holds.
+    ///
+    /// Host bookkeeping that no kernel reads. A Metal prefill that keeps
+    /// the device authoritative advances the host cache with
+    /// placeholder rows, so the host's row count alone cannot tell a
+    /// reader whether its rows are real; this can (#630). Zero at
+    /// construction, set by [`Self::upload_from_host`], and advanced by
+    /// whoever downloads rows to the host.
+    pub host_rows_real: usize,
     pub(crate) capacity: usize,
 }
 
@@ -1141,6 +1265,7 @@ impl MetalKvBuffers {
             n_kv_heads,
             head_dim,
             seq_len: 0,
+            host_rows_real: 0,
             capacity,
         })
     }
@@ -1245,6 +1370,7 @@ impl MetalKvBuffers {
             }
         }
         self.seq_len = seq_len;
+        self.host_rows_real = seq_len;
         Ok(())
     }
 
@@ -1377,7 +1503,7 @@ fn borrow_q8_attn_scratch(
     Ok(guard)
 }
 
-fn alloc_f32_buffer(
+pub(crate) fn alloc_f32_buffer(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     n: usize,
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
@@ -1420,7 +1546,7 @@ pub(crate) fn upload_f32(
 }
 
 /// Upload host f32 as packed f16 (Metal KV / host-probe GQA).
-fn upload_f16_from_f32(
+pub(crate) fn upload_f16_from_f32(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     data: &[f32],
 ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
@@ -1634,12 +1760,10 @@ impl MetalGraph {
             "silu_mul_f32"
         });
 
-        let mut launches = vec![
-            &params.layer.q,
-            &params.layer.k,
-            &params.layer.v,
-            &params.layer.o,
-        ];
+        let mut launches = vec![&params.layer.q, &params.layer.o];
+        if let Some((k, v)) = params.layer.kv.own() {
+            launches.extend([k, v]);
+        }
         // MoE layers take `mul_mm_id`, which compiles on first encode.
         if let Some((gate, up, down)) = params.layer.ffn.dense() {
             launches.extend([gate, up, down]);
@@ -1693,10 +1817,17 @@ fn warm_gqa_prefill_pipeline(
                 GQA_PREFILL_FA_VEC_D256_KERNEL_SRC,
                 "gqa_prefill_fa_vec_d256",
             ),
+            512 => (
+                GQA_PREFILL_FA_VEC_D512_KERNEL_SRC,
+                "gqa_prefill_fa_vec_d512",
+            ),
             _ => return Err(MetalError::CommandFailed),
         };
         ensure_pipeline(device, src, name)?;
         mark(name);
+        if crate::tensor_mm::has_tensor() && crate::fa_tensor::supported(head_dim) {
+            mark(crate::fa_tensor::warm(device, head_dim)?);
+        }
     } else {
         ensure_pipeline(device, GQA_PREFILL_KERNEL_SRC, "gqa_prefill")?;
         mark("gqa_prefill");
@@ -1846,6 +1977,65 @@ fn borrow_prefill_scratch(
     Ok(guard)
 }
 
+/// Bind an attention kernel's sink inputs: the per-head logits at
+/// `buf_idx` and a `uint` flag at `flag_idx`. With no sinks the flag is
+/// 0 and `dummy` (any buffer the dispatch already reads) fills the slot
+/// the kernel never touches.
+pub(crate) fn bind_sinks(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    sinks: Option<&ProtocolObject<dyn MTLBuffer>>,
+    dummy: &ProtocolObject<dyn MTLBuffer>,
+    buf_idx: usize,
+    flag_idx: usize,
+) {
+    let mut flag = u32::from(sinks.is_some());
+    // SAFETY: `setBytes` copies the local before returning; the bound
+    // buffer outlives the command buffer (the caller holds it).
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(sinks.unwrap_or(dummy)), 0, buf_idx);
+        encoder.setBytes_length_atIndex(
+            NonNull::new(&mut flag as *mut u32 as *mut _).unwrap(),
+            4,
+            flag_idx,
+        );
+    }
+}
+
+/// What a prefill attention dispatch applies beyond the causal mask and
+/// the softcap: gpt-oss's per-head sink logits (one more logit in each
+/// head's softmax, with no value) and a sliding window. Every prefill
+/// kernel takes both, so a windowed or sinked layer is never served by
+/// one that would drop them.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AttnMask<'a> {
+    /// `[n_heads]` f32 logits, or `None`.
+    pub sinks: Option<&'a ProtocolObject<dyn MTLBuffer>>,
+    /// Keys a query sees, itself included; 0 is full causal. llama's
+    /// `LLAMA_SWA_TYPE_STANDARD`: query `p` sees keys `(p - window, p]`.
+    pub window: u32,
+}
+
+impl AttnMask<'_> {
+    /// Sinks at buffer 10, their flag at 11, the window at 12: the
+    /// slots every prefill kernel declares.
+    pub(crate) fn bind(
+        &self,
+        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        dummy: &ProtocolObject<dyn MTLBuffer>,
+    ) {
+        bind_sinks(encoder, self.sinks, dummy, 10, 11);
+        let mut w = self.window;
+        // SAFETY: as in `bind_sinks`.
+        unsafe {
+            encoder.setBytes_length_atIndex(
+                NonNull::new(&mut w as *mut u32 as *mut _).unwrap(),
+                4,
+                12,
+            );
+        }
+    }
+}
+
 /// Decode GQA against the layer's KV cache, hazard-tracked through `mrs`.
 /// Same shared-f16-scratch caveat as [`encode_gqa_prefill_with_kv`].
 #[allow(clippy::too_many_arguments)]
@@ -1862,6 +2052,7 @@ pub(crate) fn encode_gqa_with_kv(
     seq_len: u32,
     kv_start: u32,
     softcap: Option<f32>,
+    sinks: Option<&ProtocolObject<dyn MTLBuffer>>,
 ) -> Result<(), MetalError> {
     if kv.dtype.needs_f16_scratch() {
         let elems = (seq_len as usize) * kv.elems_per_token();
@@ -1891,7 +2082,7 @@ pub(crate) fn encode_gqa_with_kv(
         mrs.begin_op(encoder, &[q, sk, sv], &[out]);
         let res = encode_gqa(
             encoder, device, q, &scratch.k, &scratch.v, out, n_heads, n_kv_heads, head_dim,
-            seq_len, kv_start, softcap,
+            seq_len, kv_start, softcap, sinks,
         );
         mrs.end_op(&[q, sk, sv], &[out]);
         res
@@ -1900,7 +2091,7 @@ pub(crate) fn encode_gqa_with_kv(
         mrs.begin_op(encoder, &[q, kk, vv], &[out]);
         let res = encode_gqa(
             encoder, device, q, &kv.k, &kv.v, out, n_heads, n_kv_heads, head_dim, seq_len,
-            kv_start, softcap,
+            kv_start, softcap, sinks,
         );
         mrs.end_op(&[q, kk, vv], &[out]);
         res
@@ -1915,7 +2106,7 @@ pub(crate) fn encode_gqa_with_kv(
 /// the next layer's dequant writes it again (WAR against this layer's GQA
 /// read) and nothing outside would know to order those.
 #[allow(clippy::too_many_arguments)]
-fn encode_gqa_prefill_with_kv(
+pub(crate) fn encode_gqa_prefill_with_kv(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     mrs: &mut MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
@@ -1928,6 +2119,7 @@ fn encode_gqa_prefill_with_kv(
     n_q: u32,
     kv_prefix_len: u32,
     attn_softcap: Option<f32>,
+    mask: AttnMask<'_>,
 ) -> Result<(), MetalError> {
     let total_seq = kv_prefix_len + n_q;
     if kv.dtype.needs_f16_scratch() {
@@ -1968,7 +2160,9 @@ fn encode_gqa_prefill_with_kv(
             n_q,
             kv_prefix_len,
             attn_softcap,
+            mask,
             PrefillAttnKernel::Auto,
+            true,
         );
         mrs.end_op(&[q, sk, sv], &[out]);
         res
@@ -1988,7 +2182,9 @@ fn encode_gqa_prefill_with_kv(
             n_q,
             kv_prefix_len,
             attn_softcap,
+            mask,
             PrefillAttnKernel::Auto,
+            false,
         );
         mrs.end_op(&[q, kk, vv], &[out]);
         res
@@ -2045,10 +2241,11 @@ fn gqa_prefill_threadgroup_size(seq_len: u32, head_dim: u32) -> u32 {
 }
 
 /// FA-vec prefill head dims: 64 (SmolLM2 / TinyLlama / Llama-3.2-1B),
-/// 96, 128 (Llama-3), 256 (Gemma-2/3). Anything else falls back to the
-/// legacy per-thread-accumulator `gqa_prefill`.
+/// 96, 128 (Llama-3), 256 (Gemma-2/3), 512 (Gemma-4 full attention).
+/// Anything else falls back to the legacy per-thread-accumulator
+/// `gqa_prefill`.
 fn gqa_prefill_fa_vec_supported(head_dim: u32) -> bool {
-    matches!(head_dim, 64 | 96 | 128 | 256)
+    matches!(head_dim, 64 | 96 | 128 | 256 | 512)
 }
 
 /// llama `kernel_flash_attn_ext` dispatch: QN=8, C=64, NSG=4 (128 threads/TG).
@@ -2069,6 +2266,7 @@ fn encode_gqa_prefill_fa_ext(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
+    mask: AttnMask<'_>,
 ) -> Result<(), MetalError> {
     const QN: u32 = 8;
     const C: u32 = 64;
@@ -2124,6 +2322,7 @@ fn encode_gqa_prefill_fa_ext(
         );
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        mask.bind(encoder, q);
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -2142,6 +2341,19 @@ fn encode_gqa_prefill_fa_ext(
     Ok(())
 }
 
+/// A layer's sliding window as the prefill kernels take it: `0` = full
+/// causal. A window of zero keys would mask everything, so it is not a
+/// window anyone can ask for.
+fn window_u32(window: Option<usize>) -> u32 {
+    match window {
+        Some(w) => {
+            assert!(w > 0, "a sliding window of zero keys");
+            u32::try_from(w).unwrap_or(u32::MAX)
+        }
+        None => 0,
+    }
+}
+
 /// Which prefill attention kernel [`encode_gqa_prefill`] encodes.
 ///
 /// Production only ever asks for [`PrefillAttnKernel::Auto`]: there is one
@@ -2154,11 +2366,19 @@ fn encode_gqa_prefill_fa_ext(
 pub enum PrefillAttnKernel {
     /// Best kernel for the shape. The only thing production asks for.
     Auto,
+    /// llama `flash_attn_ext_tensor`, the Metal 4 tensor-API kernel
+    /// (`crate::fa_tensor`). `head_dim` 64, 128, 256 or 512 on a device
+    /// that runs the tensor API; anything else is an error, not a fallback.
+    Tensor,
     /// llama `flash_attn_ext`, simdgroup-MMA score + P·V. `head_dim` 64,
     /// 128 or 256 with `n_q >= 8`; other shapes fall through to FA-vec.
+    /// Never the tensor kernel, so tests can pin the half8x8 port on M5.
     FaExt,
     /// llama-style FA-vec, every `head_dim` with a specialized kernel.
     FaVec,
+    /// The per-thread-accumulator `gqa_prefill`, what a width FA-vec does
+    /// not cover (or `FRINK_METAL_FA_VEC=0`) runs.
+    Legacy,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2175,8 +2395,31 @@ fn encode_gqa_prefill_fa_vec(
     n_q: u32,
     kv_prefix_len: u32,
     softcap: f32,
+    mask: AttnMask<'_>,
     kernel: PrefillAttnKernel,
+    kv_dequantized: bool,
 ) -> Result<(), MetalError> {
+    // llama flash_attn_ext_tensor where llama picks it (M5, a non-vec
+    // batch, enough work; `fa_tensor::selected`).
+    if kernel == PrefillAttnKernel::Auto
+        && crate::fa_tensor::selected(head_dim, n_heads, n_q, kv_dequantized)
+    {
+        return crate::fa_tensor::encode(
+            encoder,
+            device,
+            q,
+            k,
+            v,
+            out,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_q,
+            kv_prefix_len,
+            softcap,
+            mask,
+        );
+    }
     // llama flash_attn_ext (MMA Q·Kᵀ + P·V, QN=8/C=64) for d=64, d=128 and
     // d=256 prefill; every other width, and every batch under QN=8, stays on
     // FA-vec.
@@ -2194,6 +2437,7 @@ fn encode_gqa_prefill_fa_vec(
             n_q,
             kv_prefix_len,
             softcap,
+            mask,
         );
     }
     let pipe = match head_dim {
@@ -2212,6 +2456,11 @@ fn encode_gqa_prefill_fa_vec(
             device,
             GQA_PREFILL_FA_VEC_D256_KERNEL_SRC,
             "gqa_prefill_fa_vec_d256",
+        )?,
+        512 => ensure_pipeline(
+            device,
+            GQA_PREFILL_FA_VEC_D512_KERNEL_SRC,
+            "gqa_prefill_fa_vec_d512",
         )?,
         _ => return Err(MetalError::CommandFailed),
     };
@@ -2245,6 +2494,7 @@ fn encode_gqa_prefill_fa_vec(
         );
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        mask.bind(encoder, q);
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -2294,6 +2544,7 @@ pub(crate) fn encode_gqa_for_bench(
         seq_len,
         kv_start,
         attn_softcap,
+        None,
     )
 }
 
@@ -2311,6 +2562,7 @@ fn encode_gqa(
     seq_len: u32,
     kv_start: u32,
     attn_softcap: Option<f32>,
+    sinks: Option<&ProtocolObject<dyn MTLBuffer>>,
 ) -> Result<(), MetalError> {
     let softcap = attn_softcap.filter(|&c| c > 0.0).unwrap_or(0.0);
     // FA-vec supports SWA (`kv_start`) and softcap; use it whenever
@@ -2318,7 +2570,7 @@ fn encode_gqa(
     if metal_fa_vec_enabled() && gqa_fa_vec_supported(head_dim) {
         return encode_gqa_fa_vec(
             encoder, device, q, k, v, out, n_heads, n_kv_heads, head_dim, seq_len, kv_start,
-            softcap,
+            softcap, sinks,
         );
     }
     if head_dim > 256 {
@@ -2351,6 +2603,7 @@ fn encode_gqa(
         encoder.setBytes_length_atIndex(NonNull::new(&mut ks as *mut u32 as *mut _).unwrap(), 4, 8);
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        bind_sinks(encoder, sinks, q, 10, 11);
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -2383,10 +2636,32 @@ fn encode_gqa_prefill(
     n_q: u32,
     kv_prefix_len: u32,
     attn_softcap: Option<f32>,
+    mask: AttnMask<'_>,
     kernel: PrefillAttnKernel,
+    kv_dequantized: bool,
 ) -> Result<(), MetalError> {
     let softcap = attn_softcap.filter(|&c| c > 0.0).unwrap_or(0.0);
-    if metal_fa_vec_enabled() && gqa_prefill_fa_vec_supported(head_dim) {
+    if kernel == PrefillAttnKernel::Tensor {
+        return crate::fa_tensor::encode(
+            encoder,
+            device,
+            q,
+            k,
+            v,
+            out,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            n_q,
+            kv_prefix_len,
+            softcap,
+            mask,
+        );
+    }
+    if kernel != PrefillAttnKernel::Legacy
+        && metal_fa_vec_enabled()
+        && gqa_prefill_fa_vec_supported(head_dim)
+    {
         return encode_gqa_prefill_fa_vec(
             encoder,
             device,
@@ -2400,7 +2675,9 @@ fn encode_gqa_prefill(
             n_q,
             kv_prefix_len,
             softcap,
+            mask,
             kernel,
+            kv_dequantized,
         );
     }
     let pipe = ensure_pipeline(device, GQA_PREFILL_KERNEL_SRC, "gqa_prefill")?;
@@ -2434,6 +2711,7 @@ fn encode_gqa_prefill(
         );
         let mut sc = softcap;
         encoder.setBytes_length_atIndex(NonNull::new(&mut sc as *mut f32 as *mut _).unwrap(), 4, 9);
+        mask.bind(encoder, q);
         encoder.setThreadgroupMemoryLength_atIndex(tg_mem, 0);
     }
     dispatch_counted(
@@ -2481,7 +2759,7 @@ pub(crate) fn encode_attn_extras(
 
 /// Prefill (`batch ≥ 1`) extras using already-resident bias/norm buffers.
 #[allow(clippy::too_many_arguments)]
-fn encode_attn_extras_batch(
+pub(crate) fn encode_attn_extras_batch(
     encoder: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>,
     device: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>,
     extras: &AttnExtras<'_>,
@@ -2503,42 +2781,36 @@ fn encode_attn_extras_batch(
     }
     if let Some(bb) = resident.q_bias.as_ref() {
         debug_assert_eq!(extras.q_bias.map(|b| b.len()), Some(q_rows));
-        for t in 0..batch {
-            encode_vec_add_at(
-                encoder,
-                device,
-                q_buf,
-                t * q_rows * 4,
-                &bb.buffer,
-                q_rows as u32,
-            )?;
-        }
+        encode_vec_add_rows(
+            encoder,
+            device,
+            q_buf,
+            &bb.buffer,
+            q_rows as u32,
+            batch as u32,
+        )?;
     }
     if let Some(bb) = resident.k_bias.as_ref() {
         debug_assert_eq!(extras.k_bias.map(|b| b.len()), Some(k_rows));
-        for t in 0..batch {
-            encode_vec_add_at(
-                encoder,
-                device,
-                k_buf,
-                t * k_rows * 4,
-                &bb.buffer,
-                k_rows as u32,
-            )?;
-        }
+        encode_vec_add_rows(
+            encoder,
+            device,
+            k_buf,
+            &bb.buffer,
+            k_rows as u32,
+            batch as u32,
+        )?;
     }
     if let Some(bb) = resident.v_bias.as_ref() {
         debug_assert_eq!(extras.v_bias.map(|b| b.len()), Some(v_rows));
-        for t in 0..batch {
-            encode_vec_add_at(
-                encoder,
-                device,
-                v_buf,
-                t * v_rows * 4,
-                &bb.buffer,
-                v_rows as u32,
-            )?;
-        }
+        encode_vec_add_rows(
+            encoder,
+            device,
+            v_buf,
+            &bb.buffer,
+            v_rows as u32,
+            batch as u32,
+        )?;
     }
     // Q/K norm style is inferred from the weight LENGTH, and that is
     // sound rather than a guess: `loader.rs`'s `refined_qk_norm` derives
@@ -2564,20 +2836,16 @@ fn encode_attn_extras_batch(
             )?;
         } else {
             debug_assert_eq!(w.len(), q_rows, "Q norm weight must be head_dim or q_rows");
-            for t in 0..batch {
-                let off = t * q_rows * 4;
-                encode_rms_norm_at(
-                    encoder,
-                    device,
-                    q_buf,
-                    off,
-                    &wb.buffer,
-                    q_buf,
-                    off,
-                    q_rows as u32,
-                    rms_eps,
-                )?;
-            }
+            encode_rms_norm_batch(
+                encoder,
+                device,
+                q_buf,
+                &wb.buffer,
+                q_buf,
+                q_rows as u32,
+                batch as u32,
+                rms_eps,
+            )?;
         }
     }
     if let (Some(w), Some(wb)) = (extras.k_norm, resident.k_norm.as_ref()) {
@@ -2594,34 +2862,76 @@ fn encode_attn_extras_batch(
             )?;
         } else {
             debug_assert_eq!(w.len(), k_rows, "K norm weight must be head_dim or k_rows");
-            for t in 0..batch {
-                let off = t * k_rows * 4;
-                encode_rms_norm_at(
-                    encoder,
-                    device,
-                    k_buf,
-                    off,
-                    &wb.buffer,
-                    k_buf,
-                    off,
-                    k_rows as u32,
-                    rms_eps,
-                )?;
-            }
+            encode_rms_norm_batch(
+                encoder,
+                device,
+                k_buf,
+                &wb.buffer,
+                k_buf,
+                k_rows as u32,
+                batch as u32,
+                rms_eps,
+            )?;
         }
+    }
+    // V is normed per head only: the one model that norms it (Gemma-4)
+    // does so on the `[head_dim, n_kv_heads]` view.
+    if let (Some(w), Some(wb)) = (extras.v_norm, resident.v_norm.as_ref()) {
+        assert_eq!(w.len(), head_dim, "V norm weight must be head_dim");
+        debug_assert_eq!(v_rows, n_kv_heads * head_dim);
+        encode_rms_norm_per_head_batch(
+            encoder,
+            device,
+            v_buf,
+            &wb.buffer,
+            n_kv_heads as u32,
+            head_dim as u32,
+            batch as u32,
+            rms_eps,
+        )?;
     }
     Ok(())
 }
 
-struct AttnExtrasResident {
+pub(crate) struct AttnExtrasResident {
     q_bias: Option<std::sync::Arc<ResidentF32Buffer>>,
     k_bias: Option<std::sync::Arc<ResidentF32Buffer>>,
     v_bias: Option<std::sync::Arc<ResidentF32Buffer>>,
     q_norm: Option<std::sync::Arc<ResidentF32Buffer>>,
     k_norm: Option<std::sync::Arc<ResidentF32Buffer>>,
+    v_norm: Option<std::sync::Arc<ResidentF32Buffer>>,
+    sinks: Option<std::sync::Arc<ResidentF32Buffer>>,
+    o_bias: Option<std::sync::Arc<ResidentF32Buffer>>,
 }
 
-fn resident_attn_extras(
+impl AttnExtrasResident {
+    /// The sink logits, for the attention dispatch.
+    pub(crate) fn sinks(&self) -> Option<&ProtocolObject<dyn MTLBuffer>> {
+        self.sinks.as_ref().map(|b| b.buffer.as_ref())
+    }
+
+    /// `o += wo_bias` on `batch` rows of `rows`, hazard-tracked. Nothing
+    /// is encoded (and no barrier taken) for a layer with no bias.
+    pub(crate) fn encode_o_bias(
+        &self,
+        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        mrs: &mut MemRanges,
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        o: &ProtocolObject<dyn MTLBuffer>,
+        rows: usize,
+        batch: usize,
+    ) -> Result<(), MetalError> {
+        let Some(b) = self.o_bias.as_ref() else {
+            return Ok(());
+        };
+        mrs.begin_op(encoder, &[o], &[o]);
+        let r = encode_vec_add_rows(encoder, device, o, &b.buffer, rows as u32, batch as u32);
+        mrs.end_op(&[o], &[o]);
+        r
+    }
+}
+
+pub(crate) fn resident_attn_extras(
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     extras: &AttnExtras<'_>,
 ) -> Result<AttnExtrasResident, MetalError> {
@@ -2644,6 +2954,18 @@ fn resident_attn_extras(
             .transpose()?,
         k_norm: extras
             .k_norm
+            .map(|b| resident_f32_buffer(device, b))
+            .transpose()?,
+        v_norm: extras
+            .v_norm
+            .map(|b| resident_f32_buffer(device, b))
+            .transpose()?,
+        sinks: extras
+            .sinks
+            .map(|b| resident_f32_buffer(device, b))
+            .transpose()?,
+        o_bias: extras
+            .o_bias
             .map(|b| resident_f32_buffer(device, b))
             .transpose()?,
     })
@@ -2669,6 +2991,8 @@ pub fn launch_decode_attn_block(
     extras: &AttnExtras<'_>,
     rms_eps: f32,
 ) -> Result<Vec<f32>, MetalError> {
+    // A per-layer launch: sinks and `wo`'s bias are the stacks' alone.
+    extras.refuse_stack_only()?;
     // Exhaustive destructure, no `..`: adding a third half to a
     // layer's rotation must break every launch that ropes.
     let LayerRope {
@@ -2680,7 +3004,15 @@ pub fn launch_decode_attn_block(
     assert_eq!(q_launch.rows, n_heads * head_dim);
     assert_eq!(k_launch.rows, n_kv_heads * head_dim);
     assert_eq!(v_launch.rows, n_kv_heads * head_dim);
-    assert_eq!(o_launch.rows, n_heads * head_dim);
+    // `wo` READS the attention width and WRITES the residual's; it
+    // used to assert its output was the attention width, which holds
+    // only where the two coincide, and panicked on every model whose
+    // `n_heads * head_dim` is not `n_embd` (GLM-4.5, ERNIE-4.5-MoE,
+    // Bailing, MiniMax-M2; #630).
+    assert_eq!(
+        o_launch.row_bytes / o_launch.block_bytes * o_launch.block_elems,
+        n_heads * head_dim
+    );
     assert_eq!(
         pos, kv.seq_len,
         "decode pos must equal current Metal KV length"
@@ -2770,6 +3102,7 @@ pub fn launch_decode_attn_block(
         new_seq,
         0,
         extras.attn_logit_softcap,
+        None,
     )?;
 
     // O matvec reads attn_buf as activation `x`.
@@ -2977,6 +3310,8 @@ pub fn launch_moe_decode_pre(
     rms_eps: f32,
     extras: &AttnExtras<'_>,
 ) -> Result<Vec<f32>, MetalError> {
+    // A per-layer launch: sinks and `wo`'s bias are the stacks' alone.
+    extras.refuse_stack_only()?;
     // Exhaustive destructure, no `..`: adding a third half to a
     // layer's rotation must break every launch that ropes.
     let LayerRope {
@@ -3124,6 +3459,7 @@ pub fn launch_moe_decode_pre(
             new_seq,
             0,
             extras.attn_logit_softcap,
+            None,
         )?;
         encode_matvec(&encoder, device, o_launch, &o_w, &scratch.attn, &scratch.o)?;
         encode_add_rms_norm(
@@ -3249,6 +3585,12 @@ pub fn launch_moe_decode_experts(experts: &[MoeExpertLaunch<'_>]) -> Result<(), 
 }
 
 /// One MoE layer's launches for [`launch_moe_decode_stack`].
+///
+/// The attention half carries what [`DenseLayerMetal`]'s does for the
+/// features an MoE checkpoint has shipped with (per-layer RoPE, a
+/// sliding window, and through `extras` the sinks and `wo`'s bias);
+/// what it does not carry (the sandwich norms, a non-SwiGLU FFN) the
+/// decoder keeps off this stack.
 pub struct MoeLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
     pub ffn_norm_w: &'a [f32],
@@ -3259,6 +3601,14 @@ pub struct MoeLayerMetal<'a> {
     pub router: MatvecLaunch<'a>,
     pub packed: MoePackedQ4<'a>,
     pub extras: AttnExtras<'a>,
+    /// This layer's RoPE base AND divisors, `None` where the layer does
+    /// not rotate; see [`DenseLayerMetal::rope`].
+    pub rope: Option<LayerRope<'a>>,
+    /// Sliding-window size for this layer (`None` = full causal).
+    pub window: Option<usize>,
+    /// gpt-oss's router bias, expert biases and clamped SwiGLU; `None`
+    /// is the plain SwiGLU MoE.
+    pub oai: Option<crate::moe_oai::MoeOaiMetal<'a>>,
 }
 
 /// Pre-bound MTLBuffers for one MoE layer (llama: bind weights once).
@@ -3305,7 +3655,9 @@ fn moe_layer_resident(
 /// Fused Concurrent groups (fewer barriers): Q∥K∥V, extras+RoPE, KV stores.
 #[allow(clippy::too_many_arguments)]
 fn encode_moe_layer_fused(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     mrs: &mut MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     scratch: &MoeDecodeScratch,
@@ -3319,12 +3671,25 @@ fn encode_moe_layer_fused(
     head_dim: usize,
     hidden_dim: usize,
     rope_layout: MetalRope,
-    rope_theta: f32,
     ff_buf: Option<&ProtocolObject<dyn MTLBuffer>>,
     pos: usize,
     rms_eps: f32,
 ) -> Result<(), MetalError> {
     let bound = moe_layer_resident(device, layer)?;
+    // The sinks and `wo`'s bias, resident; nothing for a layer with neither.
+    let tail = resident_attn_extras(device, &layer.extras)?;
+    let oai = layer
+        .oai
+        .as_ref()
+        .map(|o| {
+            o.check(
+                layer.packed.n_experts,
+                layer.packed.ffn_rows,
+                layer.packed.hidden_rows,
+            );
+            crate::moe_oai::MoeOaiResident::new(device, o)
+        })
+        .transpose()?;
     let attn_nw = &bound.attn_nw;
     let ffn_nw = &bound.ffn_nw;
     let q_w = &bound.q_w;
@@ -3334,6 +3699,7 @@ fn encode_moe_layer_fused(
     let r_w = &bound.r_w;
 
     // attn_norm: h → x_attn
+    spans.span(cmd_buf, encoder, "attn_norm")?;
     {
         let srcs = [scratch.h.as_ref()];
         let dsts = [scratch.x_attn.as_ref()];
@@ -3350,6 +3716,7 @@ fn encode_moe_layer_fused(
         mrs.end_op(&srcs, &dsts);
     }
     // Q∥K∥V — one Concurrent set (shared src, disjoint dsts).
+    spans.span(cmd_buf, encoder, "qkv")?;
     {
         let srcs = [scratch.x_attn.as_ref()];
         let dsts = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
@@ -3360,7 +3727,9 @@ fn encode_moe_layer_fused(
         mrs.end_op(&srcs, &dsts);
     }
     // extras + RoPE on q/k — fused group (one barrier before in-place chain).
-    {
+    // A layer that does not rotate encodes no RoPE (see the dense stack).
+    if let Some(layer_rope) = layer.rope {
+        spans.span(cmd_buf, encoder, "extras_rope")?;
         let srcs = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
         let dsts = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
         mrs.begin_op(encoder, &srcs, &dsts);
@@ -3397,14 +3766,35 @@ fn encode_moe_layer_fused(
                 n_heads: n_kv_heads as u32,
             }),
             head_dim as u32,
-            rope_theta,
+            layer_rope.theta,
             pos as u32,
             ff_buf,
         )?;
         mrs.end_op(&srcs, &dsts);
+    } else if layer.extras.encodes_anything() {
+        spans.span(cmd_buf, encoder, "attn_extras")?;
+        let srcs = [scratch.q.as_ref(), scratch.k.as_ref(), scratch.v.as_ref()];
+        mrs.begin_op(encoder, &srcs, &srcs);
+        encode_attn_extras(
+            encoder,
+            device,
+            &layer.extras,
+            &scratch.q,
+            &scratch.k,
+            &scratch.v,
+            layer.q.rows,
+            layer.k.rows,
+            layer.v.rows,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            rms_eps,
+        )?;
+        mrs.end_op(&srcs, &srcs);
     }
     let token_elems = (n_kv_heads * head_dim) as u32;
     let offset = (pos * n_kv_heads * head_dim) as u32;
+    spans.span(cmd_buf, encoder, "kv_append")?;
     {
         let srcs = [scratch.k.as_ref(), scratch.v.as_ref()];
         let dsts = [kv.k.as_ref(), kv.v.as_ref()];
@@ -3421,6 +3811,8 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    // Attention, the sinks and the sliding window included.
+    spans.span(cmd_buf, encoder, "gqa")?;
     {
         // `encode_gqa_with_kv` tracks itself: with a quantized KV cache it
         // also writes a shared f16 dequant scratch no caller can name.
@@ -3435,10 +3827,14 @@ fn encode_moe_layer_fused(
             n_kv_heads as u32,
             head_dim as u32,
             (pos + 1) as u32,
-            0,
+            // Sliding window: the last `window` positions, this one
+            // included (`causal_gqa_attention_windowed`).
+            layer.window.map_or(0, |w| (pos + 1).saturating_sub(w)) as u32,
             layer.extras.attn_logit_softcap,
+            tail.sinks(),
         )?;
     }
+    spans.span(cmd_buf, encoder, "o_proj")?;
     {
         let srcs = [scratch.attn.as_ref()];
         let dsts = [scratch.o.as_ref()];
@@ -3446,6 +3842,11 @@ fn encode_moe_layer_fused(
         encode_matvec(encoder, device, &layer.o, o_w, &scratch.attn, &scratch.o)?;
         mrs.end_op(&srcs, &dsts);
     }
+    if layer.extras.o_bias.is_some() {
+        spans.span(cmd_buf, encoder, "o_bias")?;
+    }
+    tail.encode_o_bias(encoder, mrs, device, &scratch.o, hidden_dim, 1)?;
+    spans.span(cmd_buf, encoder, "add_ffn_norm")?;
     {
         let srcs = [scratch.h.as_ref(), scratch.o.as_ref()];
         let dsts = [scratch.h.as_ref(), scratch.x2.as_ref()];
@@ -3462,6 +3863,7 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    spans.span(cmd_buf, encoder, "router")?;
     {
         let srcs = [scratch.x2.as_ref()];
         let dsts = [scratch.router.as_ref()];
@@ -3476,6 +3878,7 @@ fn encode_moe_layer_fused(
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    spans.span(cmd_buf, encoder, "topk")?;
     {
         let srcs = [scratch.router.as_ref()];
         let dsts = [scratch.ids.buffer(), scratch.route.as_ref()];
@@ -3493,11 +3896,17 @@ fn encode_moe_layer_fused(
             &scratch.route,
             layer.router.rows as u32,
             top_k as u32,
-            norm_topk_prob,
+            // gpt-oss's `SOFTMAX_WEIGHT` gating is a softmax over the
+            // winners alone, whatever the file's renormalize flag says
+            // (`gpt_oss_route` on the host).
+            norm_topk_prob || oai.is_some(),
             1,
+            // gpt-oss: `ffn_gate_inp.bias` on the logits before selection.
+            oai.as_ref().map(|o| &*o.router_bias.buffer),
         )?;
         mrs.end_op(&srcs, &dsts);
     }
+    spans.span(cmd_buf, encoder, "gate_up_id")?;
     {
         let srcs = [scratch.x2.as_ref(), scratch.ids.buffer()];
         let dsts = [scratch.gate.as_ref(), scratch.up.as_ref()];
@@ -3531,6 +3940,8 @@ fn encode_moe_layer_fused(
     mrs.begin_op(encoder, &srcs, &dsts);
     encode_q4_0_moe_id(
         encoder,
+        spans,
+        cmd_buf,
         device,
         &scratch.x2,
         &layer.packed,
@@ -3545,6 +3956,7 @@ fn encode_moe_layer_fused(
         1,
         true,
         true,
+        oai.as_ref(),
     )?;
     mrs.end_op(&srcs, &dsts);
     Ok(())
@@ -3653,8 +4065,14 @@ pub fn launch_moe_decode_layer_fused(
             v_bias: extras.v_bias,
             q_norm: extras.q_norm,
             k_norm: extras.k_norm,
+            v_norm: extras.v_norm,
             attn_logit_softcap: extras.attn_logit_softcap,
+            sinks: extras.sinks,
+            o_bias: extras.o_bias,
         },
+        rope: Some(rope),
+        window: None,
+        oai: None,
     };
     let out = launch_moe_decode_stack(
         &[], // seeded externally
@@ -3664,7 +4082,6 @@ pub fn launch_moe_decode_layer_fused(
         norm_topk_prob,
         n_heads,
         rope_layout,
-        rope,
         pos,
         rms_eps,
         None,
@@ -3693,10 +4110,6 @@ pub fn launch_moe_decode_stack(
     norm_topk_prob: bool,
     n_heads: usize,
     rope_layout: MetalRope,
-    // This layer's rotation, BOTH halves in one value. Two loose
-    // parameters here is how a per-layer base ended up beside a
-    // stack-wide divisor set at four call sites; see `LayerRope`.
-    rope: LayerRope<'_>,
     pos: usize,
     rms_eps: f32,
     final_norm_w: Option<&[f32]>,
@@ -3705,12 +4118,6 @@ pub fn launch_moe_decode_stack(
     reuse_scratch_h: bool,
     embd: Option<&EmbdGatherMetal<'_>>,
 ) -> Result<(Vec<f32>, Vec<Vec<usize>>), MetalError> {
-    // Exhaustive destructure, no `..`: adding a third half to a
-    // layer's rotation must break every launch that ropes.
-    let LayerRope {
-        theta: rope_theta,
-        freq_factors,
-    } = rope;
     assert!(!layers.is_empty());
     assert_eq!(layers.len(), kvs.len());
     assert!(top_k > 0 && top_k <= 8);
@@ -3747,13 +4154,27 @@ pub fn launch_moe_decode_stack(
         moe_decode_ensure(hidden_dim)?;
     }
 
+    for layer in layers {
+        assert_freq_factors_len(
+            layer.rope.and_then(|r| r.freq_factors),
+            rope_layout,
+            head_dim,
+        );
+    }
+
     let shared = shared_metal()?;
     let device = &shared.device;
     let queue = &shared.queue;
-    let ff_resident = match freq_factors {
-        Some(ff) => Some(resident_f32_buffer(device, ff)?),
-        None => None,
-    };
+    // One resident buffer per layer, as the dense stack does: the cache
+    // keys on (pointer, len), so a model's one or two divisor sets are
+    // uploaded once and every other layer is a hit.
+    let ff_resident = layers
+        .iter()
+        .map(|l| match l.rope.and_then(|r| r.freq_factors) {
+            Some(ff) => resident_f32_buffer(device, ff).map(Some),
+            None => Ok(None),
+        })
+        .collect::<Result<Vec<_>, MetalError>>()?;
 
     MOE_SCRATCH.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -3775,16 +4196,24 @@ pub fn launch_moe_decode_stack(
         }
 
         let clock = crate::timing::SubmitClock::start();
-        let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+        let mut cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
         // llama.cpp / dense-stack: one Concurrent encoder for the full graph,
         // barriers only via MemRanges (ggml_mem_ranges).
-        let encoder = compute_encoder_concurrent(&cmd_buf)?;
+        let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
+        let early = crate::timing::early_commit_layer(crate::timing::Stack::Moe, layers.len());
         let mut mrs = MemRanges::new();
+        // `FRINK_METAL_KERNEL_TIMING=1`: one sampled encoder per op
+        // group, as the dense stack does; a no-op otherwise, and never
+        // beside the early split (`early_commit_layer` is `None` under
+        // it). No layer opens more than 18 groups; gpt-oss opens 14.
+        let mut spans = crate::kernel_timing::SpanClock::begin(device, 18 * layers.len() + 8);
+        spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
         let _embd_w = if let Some(e) = embd {
             let w = resident_weight_buffer(device, e.weights)?;
             let srcs: [&ProtocolObject<dyn MTLBuffer>; 0] = [];
             let dsts = [scratch.h.as_ref()];
+            spans.span(&cmd_buf, &mut encoder, "embd_gather")?;
             mrs.begin_op(&encoder, &srcs, &dsts);
             encode_get_rows(
                 &encoder,
@@ -3803,8 +4232,17 @@ pub fn launch_moe_decode_stack(
         };
 
         for (layer_idx, (layer, kv)) in layers.iter().zip(kvs.iter()).enumerate() {
+            if early == Some(layer_idx) {
+                encoder.endEncoding();
+                cmd_buf.commit();
+                cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
+                encoder = compute_encoder_concurrent(&cmd_buf)?;
+                mrs = MemRanges::new();
+            }
             encode_moe_layer_fused(
-                &encoder,
+                &mut encoder,
+                &mut spans,
+                &cmd_buf,
                 &mut mrs,
                 device,
                 scratch,
@@ -3818,8 +4256,7 @@ pub fn launch_moe_decode_stack(
                 head_dim,
                 hidden_dim,
                 rope_layout,
-                rope_theta,
-                ff_resident.as_ref().map(|b| b.buffer.as_ref()),
+                ff_resident[layer_idx].as_ref().map(|b| b.buffer.as_ref()),
                 pos,
                 rms_eps,
             )?;
@@ -3829,6 +4266,7 @@ pub fn launch_moe_decode_stack(
         let (download_n, download_logits, download_argmax) = if let Some(fnw) = final_norm_w {
             assert_eq!(fnw.len(), hidden_dim);
             let fn_buf = resident_f32_buffer(device, fnw)?;
+            spans.span(&cmd_buf, &mut encoder, "final_norm")?;
             {
                 let srcs = [scratch.h.as_ref()];
                 let dsts = [scratch.x_attn.as_ref()];
@@ -3848,6 +4286,7 @@ pub fn launch_moe_decode_stack(
                 let logits = scratch.logits.as_ref().ok_or(MetalError::CommandFailed)?;
                 assert_eq!(out_l.rows, scratch.logits_cap);
                 let out_w = resident_weight_buffer(device, out_l.weights)?;
+                spans.span(&cmd_buf, &mut encoder, "lm_head")?;
                 {
                     let srcs = [scratch.x_attn.as_ref()];
                     let dsts = [logits.as_ref()];
@@ -3856,6 +4295,7 @@ pub fn launch_moe_decode_stack(
                     mrs.end_op(&srcs, &dsts);
                 }
                 if argmax_only {
+                    spans.span(&cmd_buf, &mut encoder, "argmax")?;
                     {
                         let srcs = [logits.as_ref()];
                         let dsts = [scratch.argmax_idx.as_ref()];
@@ -3883,6 +4323,7 @@ pub fn launch_moe_decode_stack(
 
         encoder.endEncoding();
         crate::timing::commit_wait_note(&cmd_buf, "moe-decode/tok", 32, clock);
+        spans.finish(&cmd_buf, "moe-decode/tok", 32);
 
         for kv in kvs.iter_mut() {
             kv.seq_len = pos + 1;
@@ -3950,6 +4391,8 @@ pub fn launch_decode_dense_layer(
     rms_eps: f32,
     extras: &AttnExtras<'_>,
 ) -> Result<Vec<f32>, MetalError> {
+    // A per-layer launch: sinks and `wo`'s bias are the stacks' alone.
+    extras.refuse_stack_only()?;
     // Exhaustive destructure, no `..`: adding a third half to a
     // layer's rotation must break every launch that ropes.
     let LayerRope {
@@ -4077,6 +4520,7 @@ pub fn launch_decode_dense_layer(
         new_seq,
         0,
         extras.attn_logit_softcap,
+        None,
     )?;
     encode_matvec(&encoder, device, o_launch, &o_w, &attn_buf, &o_buf)?;
     encode_add_rms_norm(
@@ -4118,8 +4562,9 @@ pub struct PrefillDenseLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
     pub ffn_norm_w: &'a [f32],
     pub q: MulMmSgLaunch<'a>,
-    pub k: MulMmSgLaunch<'a>,
-    pub v: MulMmSgLaunch<'a>,
+    /// This layer's own K/V projections and cache slot, or the slot of
+    /// an earlier layer it attends over; see [`LayerKv`].
+    pub kv: LayerKv<MulMmSgLaunch<'a>>,
     pub o: MulMmSgLaunch<'a>,
     /// Dense SwiGLU/GeGLU FFN, or a routed-expert MoE FFN. The attention
     /// half of the layer is identical either way.
@@ -4134,6 +4579,17 @@ pub struct PrefillDenseLayerMetal<'a> {
     pub rope: Option<LayerRope<'a>>,
     /// Layer index for [`PrefillCbCache`] keying only.
     pub layer_idx: u32,
+    /// Sliding-window size for this layer (`None` = full causal), applied
+    /// per query inside the attention kernel ([`AttnMask`]): query at
+    /// position `p` reads keys `(p - window, p]`, llama.cpp's
+    /// `LLAMA_SWA_TYPE_STANDARD`. A chunked window is not this; see
+    /// [`DenseLayerMetal::window`].
+    pub window: Option<usize>,
+    /// Gemma-4's per-layer embedding gate; see
+    /// [`DenseLayerMetal::per_layer`].
+    pub per_layer: Option<PerLayerGateMetal<'a, PrefillMatMetal<'a>>>,
+    /// Gemma-4's `layer_output_scale`.
+    pub out_scale: Option<f32>,
 }
 
 /// FFN half of a fused-prefill-stack layer.
@@ -4191,8 +4647,11 @@ struct PrefillDenseLayerResident {
     attn_nw: std::sync::Arc<ResidentF32Buffer>,
     ffn_nw: std::sync::Arc<ResidentF32Buffer>,
     q_w: std::sync::Arc<ResidentWeightBuffer>,
-    k_w: std::sync::Arc<ResidentWeightBuffer>,
-    v_w: std::sync::Arc<ResidentWeightBuffer>,
+    /// `None` on a layer that reads another layer's KV.
+    kv_w: Option<(
+        std::sync::Arc<ResidentWeightBuffer>,
+        std::sync::Arc<ResidentWeightBuffer>,
+    )>,
     o_w: std::sync::Arc<ResidentWeightBuffer>,
     ffn_w: PrefillFfnResident,
     post_attn_w: Option<std::sync::Arc<ResidentF32Buffer>>,
@@ -4209,6 +4668,7 @@ enum PrefillFfnResident {
     Moe {
         packed: crate::gpu::MoePackedResident,
         router_w: std::sync::Arc<ResidentF32Buffer>,
+        oai: Option<crate::moe_oai::MoeOaiResident>,
     },
 }
 
@@ -4238,14 +4698,31 @@ fn resident_prefill_dense_layer(
         PrefillFfnMetal::Moe(moe) => PrefillFfnResident::Moe {
             packed: crate::gpu::moe_packed_resident(device, &moe.packed)?,
             router_w: resident_f32_buffer(device, moe.router_w)?,
+            oai: moe
+                .oai
+                .as_ref()
+                .map(|o| {
+                    o.check(
+                        moe.packed.n_experts,
+                        moe.packed.ffn_rows,
+                        moe.packed.hidden_rows,
+                    );
+                    crate::moe_oai::MoeOaiResident::new(device, o)
+                })
+                .transpose()?,
         },
     };
     Ok(PrefillDenseLayerResident {
         attn_nw: resident_f32_buffer(device, layer.attn_norm_w)?,
         ffn_nw: resident_f32_buffer(device, layer.ffn_norm_w)?,
         q_w: resident_weight_buffer(device, layer.q.weights)?,
-        k_w: resident_weight_buffer(device, layer.k.weights)?,
-        v_w: resident_weight_buffer(device, layer.v.weights)?,
+        kv_w: match layer.kv.own() {
+            Some((k, v)) => Some((
+                resident_weight_buffer(device, k.weights)?,
+                resident_weight_buffer(device, v.weights)?,
+            )),
+            None => None,
+        },
         o_w: resident_weight_buffer(device, layer.o.weights)?,
         ffn_w,
         post_attn_w,
@@ -4256,7 +4733,9 @@ fn resident_prefill_dense_layer(
 
 #[allow(clippy::too_many_arguments)]
 fn encode_prefill_dense_layer(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    encoder: &mut Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    spans: &mut crate::kernel_timing::SpanClock,
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     mrs: &mut MemRanges,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     layer: &PrefillDenseLayerMetal<'_>,
@@ -4272,9 +4751,14 @@ fn encode_prefill_dense_layer(
     rms_eps: f32,
     gelu_ffn: bool,
     attn_softcap: Option<f32>,
+    ple: Option<(
+        &PleInputMetal<'_, PrefillMatMetal<'_>>,
+        &crate::ple::PleScratch,
+    )>,
 ) -> Result<(), MetalError> {
     let n_kv_heads = kv.n_kv_heads;
     let head_dim = kv.head_dim;
+    let own_kv = layer.kv.own().zip(resident.kv_w.as_ref());
     let h_buf = scratch.h;
     let _x_buf = scratch.x;
     let x2_buf = scratch.x2;
@@ -4291,6 +4775,7 @@ fn encode_prefill_dense_layer(
     let kv_v = kv.v.as_ref();
 
     // attn_norm: h → half_act (f32→f16 already folded into the norm).
+    spans.span(cmd_buf, encoder, "pf_attn_norm")?;
     mrs.begin_op(encoder, &[h_buf], &[half_act]);
     encode_rms_norm_f32_to_f16_batch(
         encoder,
@@ -4304,8 +4789,15 @@ fn encode_prefill_dense_layer(
     )?;
     mrs.end_op(&[h_buf], &[half_act]);
 
-    // Q ∥ K ∥ V — one Concurrent set (shared src, disjoint dsts).
-    mrs.begin_op(encoder, &[half_act], &[q_buf, k_buf, v_buf]);
+    // Q ∥ K ∥ V — one Concurrent set (shared src, disjoint dsts). Q alone
+    // on a layer that reads another layer's KV.
+    spans.span(cmd_buf, encoder, "pf_qkv")?;
+    let qkv: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
+        &[q_buf, k_buf, v_buf]
+    } else {
+        &[q_buf]
+    };
+    mrs.begin_op(encoder, &[half_act], qkv);
     encode_mul_mm_sg_f16(
         encoder,
         device,
@@ -4315,28 +4807,15 @@ fn encode_prefill_dense_layer(
         q_buf,
         batch,
     )?;
-    encode_mul_mm_sg_f16(
-        encoder,
-        device,
-        &layer.k,
-        &resident.k_w,
-        half_act,
-        k_buf,
-        batch,
-    )?;
-    encode_mul_mm_sg_f16(
-        encoder,
-        device,
-        &layer.v,
-        &resident.v_w,
-        half_act,
-        v_buf,
-        batch,
-    )?;
-    mrs.end_op(&[half_act], &[q_buf, k_buf, v_buf]);
+    if let Some(((k, v), (k_w, v_w))) = own_kv {
+        encode_mul_mm_sg_f16(encoder, device, k, k_w, half_act, k_buf, batch)?;
+        encode_mul_mm_sg_f16(encoder, device, v, v_w, half_act, v_buf, batch)?;
+    }
+    mrs.end_op(&[half_act], qkv);
 
     // QKV bias / QK-norm, in place on q/k/v.
-    mrs.begin_op(encoder, &[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
+    spans.span(cmd_buf, encoder, "pf_attn_extras")?;
+    mrs.begin_op(encoder, qkv, qkv);
     encode_attn_extras_batch(
         encoder,
         device,
@@ -4345,8 +4824,8 @@ fn encode_prefill_dense_layer(
         k_buf,
         v_buf,
         layer.q.rows,
-        layer.k.rows,
-        layer.v.rows,
+        own_kv.map_or(0, |((k, _), _)| k.rows),
+        own_kv.map_or(0, |((_, v), _)| v.rows),
         n_heads,
         n_kv_heads,
         head_dim,
@@ -4354,7 +4833,7 @@ fn encode_prefill_dense_layer(
         rms_eps,
         &resident.extras,
     )?;
-    mrs.end_op(&[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
+    mrs.end_op(qkv, qkv);
 
     // RoPE q ∥ RoPE k, in place (disjoint buffers, so they overlap).
     //
@@ -4364,7 +4843,13 @@ fn encode_prefill_dense_layer(
     // them, which is what `ggml` does when the graph never builds the
     // `ggml_rope_ext` node.
     if let Some((rope_theta, ff_buf)) = rope {
-        mrs.begin_op(encoder, &[q_buf, k_buf], &[q_buf, k_buf]);
+        spans.span(cmd_buf, encoder, "pf_rope")?;
+        let qk: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
+            &[q_buf, k_buf]
+        } else {
+            &[q_buf]
+        };
+        mrs.begin_op(encoder, qk, qk);
         encode_rope_batch(
             encoder,
             device,
@@ -4377,28 +4862,38 @@ fn encode_prefill_dense_layer(
             batch as u32,
             ff_buf,
         )?;
-        encode_rope_batch(
-            encoder,
-            device,
-            rope_layout,
-            k_buf,
-            n_kv_heads as u32,
-            head_dim as u32,
-            rope_theta,
-            start_pos as u32,
-            batch as u32,
-            ff_buf,
-        )?;
-        mrs.end_op(&[q_buf, k_buf], &[q_buf, k_buf]);
+        if own_kv.is_some() {
+            encode_rope_batch(
+                encoder,
+                device,
+                rope_layout,
+                k_buf,
+                n_kv_heads as u32,
+                head_dim as u32,
+                rope_theta,
+                start_pos as u32,
+                batch as u32,
+                ff_buf,
+            )?;
+        }
+        mrs.end_op(qk, qk);
     }
 
-    let kv_width = n_kv_heads * head_dim;
-    let token_elems = (batch * kv_width) as u32;
-    let offset = (kv.seq_len * kv_width) as u32;
-    mrs.begin_op(encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
-    encode_kv_store_append(encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
-    mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+    // `kv.seq_len` is the slot's length BEFORE this batch for every layer
+    // of the stack: the counters advance once, after the wait. So the
+    // owner appends at `start_pos` and a layer sharing its slot attends
+    // over the same `start_pos + batch` rows the owner just wrote.
+    if own_kv.is_some() {
+        let kv_width = n_kv_heads * head_dim;
+        let token_elems = (batch * kv_width) as u32;
+        let offset = (kv.seq_len * kv_width) as u32;
+        spans.span(cmd_buf, encoder, "pf_kv_append")?;
+        mrs.begin_op(encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
+        encode_kv_store_append(encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
+        mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+    }
 
+    spans.span(cmd_buf, encoder, "pf_attention")?;
     encode_gqa_prefill_with_kv(
         encoder,
         mrs,
@@ -4412,8 +4907,13 @@ fn encode_prefill_dense_layer(
         batch as u32,
         start_pos as u32,
         attn_softcap,
+        AttnMask {
+            sinks: resident.extras.sinks(),
+            window: window_u32(layer.window),
+        },
     )?;
 
+    spans.span(cmd_buf, encoder, "pf_attn_to_f16")?;
     mrs.begin_op(encoder, &[attn_buf], &[half_act]);
     encode_f32_to_f16(
         encoder,
@@ -4424,6 +4924,7 @@ fn encode_prefill_dense_layer(
     )?;
     mrs.end_op(&[attn_buf], &[half_act]);
 
+    spans.span(cmd_buf, encoder, "pf_o_proj")?;
     mrs.begin_op(encoder, &[half_act], &[o_buf]);
     encode_mul_mm_sg_f16(
         encoder,
@@ -4435,6 +4936,9 @@ fn encode_prefill_dense_layer(
         batch,
     )?;
     mrs.end_op(&[half_act], &[o_buf]);
+    resident
+        .extras
+        .encode_o_bias(encoder, mrs, device, o_buf, hidden_dim, batch)?;
 
     if let Some(pw) = resident.post_attn_w.as_ref() {
         mrs.begin_op(encoder, &[o_buf], &[o_buf]);
@@ -4456,6 +4960,7 @@ fn encode_prefill_dense_layer(
     // also routes on the f32 activations, so it keeps the f32 `x2` write and
     // converts separately.
     let ffn_is_moe = matches!(layer.ffn, PrefillFfnMetal::Moe(_));
+    spans.span(cmd_buf, encoder, "pf_ffn_norm")?;
     if resident.post_attn_w.is_none() && !ffn_is_moe {
         mrs.begin_op(encoder, &[h_buf, o_buf], &[h_buf, half_act]);
         encode_add_rms_norm_f32_to_f16_batch(
@@ -4540,6 +5045,7 @@ fn encode_prefill_dense_layer(
             },
         ) => {
             // gate ∥ up
+            spans.span(cmd_buf, encoder, "pf_gate_up")?;
             mrs.begin_op(encoder, &[half_act], &[gate_buf, up_buf]);
             encode_mul_mm_sg_f16(encoder, device, gate, gate_w, half_act, gate_buf, batch)?;
             encode_mul_mm_sg_f16(encoder, device, up, up_w, half_act, up_buf, batch)?;
@@ -4547,19 +5053,41 @@ fn encode_prefill_dense_layer(
 
             // SwiGLU/GeGLU straight to f16 — the staging convert is folded in.
             let ffn_elems = (batch * gate.rows) as u32;
+            spans.span(cmd_buf, encoder, "pf_glu")?;
             mrs.begin_op(encoder, &[gate_buf, up_buf], &[half_act]);
             encode_act_mul_f32_to_f16(
                 encoder, device, gate_buf, up_buf, half_act, ffn_elems, gelu_ffn,
             )?;
             mrs.end_op(&[gate_buf, up_buf], &[half_act]);
 
+            spans.span(cmd_buf, encoder, "pf_down")?;
             mrs.begin_op(encoder, &[half_act], &[down_buf]);
             encode_mul_mm_sg_f16(encoder, device, down, down_w, half_act, down_buf, batch)?;
             mrs.end_op(&[half_act], &[down_buf]);
         }
-        (PrefillFfnMetal::Moe(moe), PrefillFfnResident::Moe { packed, router_w }) => {
+        (
+            PrefillFfnMetal::Moe(moe),
+            PrefillFfnResident::Moe {
+                packed,
+                router_w,
+                oai,
+            },
+        ) => {
+            // Opens its own spans, one per part (`moe_router`, ...).
             crate::gpu::encode_moe_prefill_ffn(
-                encoder, mrs, device, moe, packed, router_w, x2_buf, half_act, down_buf, batch,
+                encoder,
+                spans,
+                cmd_buf,
+                mrs,
+                device,
+                moe,
+                packed,
+                router_w,
+                oai.as_ref(),
+                x2_buf,
+                half_act,
+                down_buf,
+                batch,
             )?;
         }
         // resident_prefill_dense_layer builds the resident half from the
@@ -4581,6 +5109,7 @@ fn encode_prefill_dense_layer(
         mrs.end_op(&[down_buf], &[down_buf]);
     }
 
+    spans.span(cmd_buf, encoder, "pf_residual")?;
     mrs.begin_op(encoder, &[h_buf, down_buf], &[h_buf]);
     encode_vec_add(
         encoder,
@@ -4590,6 +5119,32 @@ fn encode_prefill_dense_layer(
         (batch * hidden_dim) as u32,
     )?;
     mrs.end_op(&[h_buf, down_buf], &[h_buf]);
+
+    if let Some(gate) = layer.per_layer.as_ref() {
+        let (p, sc) = ple.expect("a per-layer gate with no PLE plane");
+        spans.span(cmd_buf, encoder, "pf_per_layer_gate")?;
+        gate.encode_prefill(
+            encoder,
+            mrs,
+            device,
+            sc,
+            p.n_layer,
+            &crate::ple::GateScratch {
+                h: h_buf,
+                gate: gate_buf,
+                act: up_buf,
+                out: down_buf,
+                half: Some(half_act),
+            },
+            hidden_dim,
+            batch,
+            rms_eps,
+        )?;
+    }
+    if let Some(scale) = layer.out_scale {
+        spans.span(cmd_buf, encoder, "pf_out_scale")?;
+        crate::ple::encode_out_scale(encoder, mrs, device, h_buf, scale, batch * hidden_dim)?;
+    }
     Ok(())
 }
 
@@ -4614,23 +5169,39 @@ pub fn launch_prefill_dense_stack(
     rms_eps: f32,
     gelu_ffn: bool,
     attn_softcap: Option<f32>,
+    ple: Option<&PleInputMetal<'_, PrefillMatMetal<'_>>>,
 ) -> Result<Vec<f32>, MetalError> {
     if batch < 4 {
         return Err(MetalError::CommandFailed);
     }
-    assert_eq!(layers.len(), kvs.len());
     assert!(!layers.is_empty());
 
     let hidden_dim = layers[0].attn_norm_w.len();
     assert_eq!(hidden.len(), batch * hidden_dim);
-    let head_dim = kvs[0].head_dim;
-    let n_kv_heads = kvs[0].n_kv_heads;
-    for (layer, kv) in layers.iter().zip(kvs.iter()) {
+    let owned = crate::decode_dense::check_layer_kv(
+        layers.iter().map(|l| (l.kv, l.extras.touches_kv())),
+        kvs.len(),
+    );
+    assert!(
+        owned.iter().all(|o| *o),
+        "a KV slot no layer of this stack writes"
+    );
+    if let Some(p) = ple {
+        p.check(batch, p.model_proj.rows());
+    }
+    for layer in layers.iter() {
+        let kv = &kvs[layer.kv.slot()];
+        let (head_dim, n_kv_heads) = (kv.head_dim, kv.n_kv_heads);
         assert_eq!(layer.attn_norm_w.len(), hidden_dim);
         assert_eq!(layer.ffn_norm_w.len(), hidden_dim);
         assert_eq!(layer.q.rows, n_heads * head_dim);
-        assert_eq!(layer.k.rows, n_kv_heads * head_dim);
-        assert_eq!(layer.v.rows, n_kv_heads * head_dim);
+        if let Some((k, v)) = layer.kv.own() {
+            assert_eq!(k.rows, n_kv_heads * head_dim);
+            assert_eq!(v.rows, n_kv_heads * head_dim);
+        }
+        if layer.per_layer.is_some() {
+            assert!(ple.is_some(), "a per-layer gate with no PLE plane");
+        }
         assert_eq!(layer.o.rows, hidden_dim);
         assert_eq!(layer.ffn.hidden_out_rows(), hidden_dim);
         if let PrefillFfnMetal::Dense { gate, up, .. } = &layer.ffn {
@@ -4645,8 +5216,6 @@ pub fn launch_prefill_dense_stack(
         if kv.seq_len + batch > kv.capacity {
             return Err(MetalError::CommandFailed);
         }
-        assert_eq!(kv.head_dim, head_dim);
-        assert_eq!(kv.n_kv_heads, n_kv_heads);
         assert_freq_factors_len(
             layer.rope.and_then(|r| r.freq_factors),
             rope_layout,
@@ -4655,8 +5224,21 @@ pub fn launch_prefill_dense_stack(
     }
 
     let max_q = layers.iter().map(|l| l.q.rows).max().unwrap();
-    let max_kv = layers.iter().map(|l| l.k.rows.max(l.v.rows)).max().unwrap();
-    let max_gate = layers.iter().map(|l| l.ffn.ffn_rows()).max().unwrap();
+    let max_kv = layers
+        .iter()
+        .filter_map(|l| l.kv.own().map(|(k, v)| k.rows.max(v.rows)))
+        .max()
+        .unwrap_or(1);
+    let max_gate = layers
+        .iter()
+        .map(|l| {
+            l.ffn
+                .ffn_rows()
+                .max(l.per_layer.as_ref().map_or(0, |p| p.gate.rows()))
+        })
+        .max()
+        .unwrap();
+    let head_dim = kvs[layers[0].kv.slot()].head_dim;
 
     let timing = std::env::var_os("FRINK_METAL_MM_TIMING").is_some();
     let t_setup = std::time::Instant::now();
@@ -4677,6 +5259,18 @@ pub fn launch_prefill_dense_stack(
     )?;
     let scratch = scratch_guard.as_ref().expect("prefill scratch ensured");
     copy_f32_into(&scratch.h, hidden);
+    // Held to the end of the call: the plane is read by every layer.
+    let ple_guard = match ple {
+        Some(p) => Some(crate::ple::borrow_ple_scratch(
+            device,
+            p.plane_elems(batch),
+        )?),
+        None => None,
+    };
+    let ple_scratch = ple_guard.as_ref().map(|g| g.as_ref().expect("ple scratch"));
+    if let (Some(p), Some(sc)) = (ple, ple_scratch) {
+        p.upload_tok(sc);
+    }
 
     let scratch_view = PrefillScratchView {
         h: &scratch.h,
@@ -4713,7 +5307,7 @@ pub fn launch_prefill_dense_stack(
                     rope_layout,
                     head_dim: head_dim as u32,
                     gelu_ffn,
-                    kv_dtype: kvs[0].dtype,
+                    kv_dtype: kvs[layers[0].kv.slot()].dtype,
                 },
             )?;
         }
@@ -4737,15 +5331,35 @@ pub fn launch_prefill_dense_stack(
     let setup_us = t_setup.elapsed().as_micros();
     let clock = crate::timing::SubmitClock::start();
     let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
-    let encoder = compute_encoder_concurrent(&cmd_buf)?;
+    let mut encoder = compute_encoder_concurrent(&cmd_buf)?;
     // One tracker for the whole stack: layer N+1's first dispatch only
     // barriers when it actually touches something layer N left dirty.
     let mut mrs = MemRanges::new();
+    let mut spans = crate::kernel_timing::SpanClock::begin(device, 24 * layers.len() + 2);
+    spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
 
-    for (layer_idx, (layer, kv)) in layers.iter().zip(kvs.iter()).enumerate() {
+    if let (Some(p), Some(sc)) = (ple, ple_scratch) {
+        spans.span(&cmd_buf, &mut encoder, "pf_ple_inputs")?;
+        p.encode_prefill(
+            &encoder,
+            &mut mrs,
+            device,
+            sc,
+            &scratch.h,
+            &scratch.half_act,
+            hidden_dim,
+            batch,
+            rms_eps,
+        )?;
+    }
+
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        let kv = &kvs[layer.kv.slot()];
         let resident = resident_prefill_dense_layer(device, layer, hidden_dim)?;
         encode_prefill_dense_layer(
-            &encoder,
+            &mut encoder,
+            &mut spans,
+            &cmd_buf,
             &mut mrs,
             device,
             layer,
@@ -4766,16 +5380,19 @@ pub fn launch_prefill_dense_stack(
             rms_eps,
             gelu_ffn,
             attn_softcap,
+            ple.zip(ple_scratch),
         )?;
     }
 
     encoder.endEncoding();
     let gpu_us =
         crate::timing::commit_wait_note(&cmd_buf, "prefill-dense-stack", 1, clock).as_micros();
+    spans.finish(&cmd_buf, "prefill-dense-stack", 1);
 
     for kv in kvs.iter_mut() {
         kv.seq_len += batch;
     }
+    drop(ple_guard);
 
     let t_read = std::time::Instant::now();
     let out_ptr = scratch.h.contents();
@@ -4825,6 +5442,7 @@ pub fn launch_prefill_dense_layer(
         rms_eps,
         gelu_ffn,
         attn_softcap,
+        None,
     )
 }
 
@@ -4857,6 +5475,34 @@ pub fn launch_gqa_decode_host_ex(
     kv_start: usize,
     attn_softcap: Option<f32>,
 ) -> Result<Vec<f32>, MetalError> {
+    launch_gqa_decode_host_sinks(
+        q,
+        k_cache,
+        v_cache,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        seq_len,
+        kv_start,
+        attn_softcap,
+        None,
+    )
+}
+
+/// [`launch_gqa_decode_host_ex`] with per-head attention sinks.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_gqa_decode_host_sinks(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+    kv_start: usize,
+    attn_softcap: Option<f32>,
+    sinks: Option<&[f32]>,
+) -> Result<Vec<f32>, MetalError> {
     assert_eq!(q.len(), n_heads * head_dim);
     assert_eq!(k_cache.len(), seq_len * n_kv_heads * head_dim);
     assert_eq!(v_cache.len(), seq_len * n_kv_heads * head_dim);
@@ -4868,6 +5514,12 @@ pub fn launch_gqa_decode_host_ex(
     let k_buf = upload_f16_from_f32(device, k_cache)?;
     let v_buf = upload_f16_from_f32(device, v_cache)?;
     let out_buf = alloc_f32_buffer(device, n_heads * head_dim)?;
+    let sinks_buf = sinks
+        .map(|s| {
+            assert_eq!(s.len(), n_heads);
+            upload_f32(device, s)
+        })
+        .transpose()?;
 
     let cmd_buf = shared
         .queue
@@ -4889,6 +5541,7 @@ pub fn launch_gqa_decode_host_ex(
         seq_len as u32,
         kv_start as u32,
         attn_softcap,
+        sinks_buf.as_deref(),
     )?;
     encoder.endEncoding();
     cmd_buf.commit();
@@ -4921,6 +5574,9 @@ pub fn launch_prefill_attn_block(
     rope: LayerRope<'_>,
     start_pos: usize,
     attn_softcap: Option<f32>,
+    // Sliding window (`None` = full causal); see
+    // [`PrefillDenseLayerMetal::window`].
+    window: Option<usize>,
     return_kv: bool,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), MetalError> {
     // Exhaustive destructure, no `..`: adding a third half to a
@@ -5008,6 +5664,10 @@ pub fn launch_prefill_attn_block(
         n_q as u32,
         start_pos as u32,
         attn_softcap,
+        AttnMask {
+            sinks: None,
+            window: window_u32(window),
+        },
     );
     encoder.endEncoding();
     prefill_result?;
@@ -5058,11 +5718,13 @@ pub fn launch_gqa_prefill_host(
         n_q,
         kv_prefix_len,
         None,
+        None,
     )
 }
 
-/// [`launch_gqa_prefill_host`] with an attention-logit softcap, so the
-/// Gemma prefill path can be checked against the CPU reference.
+/// [`launch_gqa_prefill_host`] with an attention-logit softcap and a
+/// sliding window, so the Gemma prefill path can be checked against the
+/// CPU reference. Query `i` sits at cache index `kv_prefix_len + i`.
 #[allow(clippy::too_many_arguments)]
 pub fn launch_gqa_prefill_host_ex(
     q: &[f32],
@@ -5074,6 +5736,7 @@ pub fn launch_gqa_prefill_host_ex(
     n_q: usize,
     kv_prefix_len: usize,
     attn_softcap: Option<f32>,
+    window: Option<usize>,
 ) -> Result<Vec<f32>, MetalError> {
     launch_gqa_prefill_host_kernel(
         q,
@@ -5085,6 +5748,7 @@ pub fn launch_gqa_prefill_host_ex(
         n_q,
         kv_prefix_len,
         attn_softcap,
+        window,
         PrefillAttnKernel::Auto,
     )
 }
@@ -5108,7 +5772,41 @@ pub fn launch_gqa_prefill_host_kernel(
     n_q: usize,
     kv_prefix_len: usize,
     attn_softcap: Option<f32>,
+    window: Option<usize>,
     kernel: PrefillAttnKernel,
+) -> Result<Vec<f32>, MetalError> {
+    launch_gqa_prefill_host_masked(
+        q,
+        k_cache,
+        v_cache,
+        n_heads,
+        n_kv_heads,
+        head_dim,
+        n_q,
+        kv_prefix_len,
+        attn_softcap,
+        kernel,
+        None,
+        window,
+    )
+}
+
+/// [`launch_gqa_prefill_host_kernel`] with per-head attention sinks; see
+/// [`AttnMask`].
+#[allow(clippy::too_many_arguments)]
+pub fn launch_gqa_prefill_host_masked(
+    q: &[f32],
+    k_cache: &[f32],
+    v_cache: &[f32],
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    n_q: usize,
+    kv_prefix_len: usize,
+    attn_softcap: Option<f32>,
+    kernel: PrefillAttnKernel,
+    sinks: Option<&[f32]>,
+    window: Option<usize>,
 ) -> Result<Vec<f32>, MetalError> {
     let total_seq = kv_prefix_len + n_q;
     assert_eq!(q.len(), n_q * n_heads * head_dim);
@@ -5124,6 +5822,16 @@ pub fn launch_gqa_prefill_host_kernel(
     let k_buf = upload_f16_from_f32(device, k_cache)?;
     let v_buf = upload_f16_from_f32(device, v_cache)?;
     let out_buf = alloc_f32_buffer(device, n_q * n_heads * head_dim)?;
+    let sinks_buf = sinks
+        .map(|s| {
+            assert_eq!(s.len(), n_heads);
+            upload_f32(device, s)
+        })
+        .transpose()?;
+    let mask = AttnMask {
+        sinks: sinks_buf.as_deref(),
+        window: window_u32(window),
+    };
 
     let cmd_buf = shared
         .queue
@@ -5145,7 +5853,9 @@ pub fn launch_gqa_prefill_host_kernel(
         n_q as u32,
         kv_prefix_len as u32,
         attn_softcap,
+        mask,
         kernel,
+        false,
     );
     encoder.endEncoding();
     enc_result?;
@@ -5345,7 +6055,8 @@ mod tests {
     #[ignore = "needs a real Metal GPU"]
     fn gqa_fa_vec_matches_cpu() {
         // FA-vec dedicated kernels: d=128 (Llama-3.x), d=64 (TinyLlama /
-        // Llama-3.2-1B), d=96 (Phi-3), d=256 (Gemma-3).
+        // Llama-3.2-1B), d=96 (Phi-3), d=256 (Gemma-3), d=512 (Gemma-4's
+        // full-attention layers).
         let test_cases = vec![
             (4, 2, 128, 17),
             (8, 2, 128, 33),
@@ -5362,6 +6073,8 @@ mod tests {
             (4, 1, 256, 17),
             (8, 4, 256, 33),
             (4, 1, 256, 65),
+            (8, 1, 512, 17),
+            (4, 2, 512, 70),
         ];
         for (n_heads, n_kv_heads, head_dim, seq_len) in test_cases {
             let q: Vec<f32> = (0..n_heads * head_dim)
@@ -5407,6 +6120,7 @@ mod tests {
             (8, 4, 64, 48, 8, Some(30.0)),
             (4, 4, 96, 40, 8, Some(50.0)),
             (4, 1, 256, 40, 12, Some(50.0)),
+            (8, 1, 512, 45, 13, None),
             (8, 4, 128, 33, 0, Some(50.0)), // softcap only
         ];
         std::env::set_var("FRINK_METAL_FA_VEC", "1");
@@ -5644,6 +6358,7 @@ mod tests {
                 n_q,
                 kv_prefix_len,
                 softcap,
+                None,
                 PrefillAttnKernel::FaVec,
             )
             .expect("metal gqa prefill fa-vec d256");
@@ -5717,6 +6432,7 @@ mod tests {
                 n_q,
                 kv_prefix_len,
                 softcap,
+                None,
             )
             .expect("fa_ext prefill");
             let mut max_diff = 0f32;
@@ -5763,6 +6479,7 @@ mod tests {
                 n_q,
                 kv_prefix_len,
                 softcap,
+                None,
                 kernel,
             )
             .expect("prefill")
@@ -5836,6 +6553,7 @@ mod tests {
                     n_q,
                     kv_prefix_len,
                     softcap,
+                    None,
                     kernel,
                 )
                 .expect("fa_ext")
@@ -5925,6 +6643,7 @@ mod tests {
                     n_q,
                     kv_prefix_len,
                     softcap,
+                    None,
                     kernel,
                 )
                 .expect("d128 prefill")
@@ -6028,6 +6747,7 @@ mod tests {
                     n_q,
                     kv_prefix_len,
                     softcap,
+                    None,
                     kernel,
                 )
                 .expect("d256 prefill")
@@ -6143,6 +6863,7 @@ mod tests {
             },
             start_pos,
             None,
+            None,
             true,
         )
         .expect("prefill attn");
@@ -6229,6 +6950,7 @@ mod tests {
             },
             0,
             None,
+            None,
             false,
         )
         .expect("f16 prefill");
@@ -6245,6 +6967,7 @@ mod tests {
                 freq_factors: None,
             },
             0,
+            None,
             None,
             false,
         )
@@ -6310,11 +7033,12 @@ mod tests {
             layer_rope,
             0,
             None,
+            None,
             false,
         )
         .expect("f16 prefill");
         let (attn_t4, _, _) = launch_prefill_attn_block(
-            &q, &k, &v, &mut kv_t4, n_heads, n_q, rope, layer_rope, 0, None, false,
+            &q, &k, &v, &mut kv_t4, n_heads, n_q, rope, layer_rope, 0, None, None, false,
         )
         .expect("q4 prefill");
         assert_eq!(attn_f16.len(), attn_t4.len());
@@ -6457,6 +7181,7 @@ mod tests {
 
     fn dense_layer_metal<'a>(
         w: &'a DenseLayerBytes,
+        slot: usize,
         rope: Option<LayerRope<'a>>,
         hidden: usize,
         n_q: usize,
@@ -6467,8 +7192,11 @@ mod tests {
             attn_norm_w: &w.attn_norm,
             ffn_norm_w: &w.ffn_norm,
             q: f32_matvec(&w.q, n_q, hidden),
-            k: f32_matvec(&w.k, n_kv, hidden),
-            v: f32_matvec(&w.v, n_kv, hidden),
+            kv: LayerKv::Own {
+                k: f32_matvec(&w.k, n_kv, hidden),
+                v: f32_matvec(&w.v, n_kv, hidden),
+                slot,
+            },
             o: f32_matvec(&w.o, hidden, n_q),
             gate: f32_matvec(&w.gate, ffn, hidden),
             up: f32_matvec(&w.up, ffn, hidden),
@@ -6478,6 +7206,8 @@ mod tests {
             window: None,
             post_attn_norm: None,
             post_ffn_norm: None,
+            per_layer: None,
+            out_scale: None,
         }
     }
 
@@ -6547,7 +7277,7 @@ mod tests {
 
         for pos in 0..steps {
             let layers: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], Some(ropes[i]), hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, Some(ropes[i]), hidden, n_q, n_kv, ffn))
                 .collect();
             h_stack = launch_decode_dense_stack(
                 &h_stack,
@@ -6562,6 +7292,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack");
 
@@ -6591,7 +7322,7 @@ mod tests {
 
             // The bug, run deliberately: layer 0's rope for both layers.
             let one_set: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], Some(ropes[0]), hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, Some(ropes[0]), hidden, n_q, n_kv, ffn))
                 .collect();
             h_one = launch_decode_dense_stack(
                 &h_one,
@@ -6606,6 +7337,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack, one set");
         }
@@ -6698,7 +7430,7 @@ mod tests {
 
         for pos in 0..steps {
             let layers: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], stack_ropes[i], hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, stack_ropes[i], hidden, n_q, n_kv, ffn))
                 .collect();
             h_stack = launch_decode_dense_stack(
                 &h_stack,
@@ -6713,6 +7445,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack");
 
@@ -6741,7 +7474,7 @@ mod tests {
 
             // The bug, run deliberately: rotate layer 1 too.
             let rotated: Vec<DenseLayerMetal<'_>> = (0..2)
-                .map(|i| dense_layer_metal(&w[i], all_rotate[i], hidden, n_q, n_kv, ffn))
+                .map(|i| dense_layer_metal(&w[i], i, all_rotate[i], hidden, n_q, n_kv, ffn))
                 .collect();
             h_all = launch_decode_dense_stack(
                 &h_all,
@@ -6756,6 +7489,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
             )
             .expect("decode stack, everything rotated");
         }
@@ -6842,8 +7576,10 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prefill_layer_metal<'a>(
         w: &'a PrefillLayerBytes,
+        slot: usize,
         rope: Option<LayerRope<'a>>,
         layer_idx: u32,
         hidden: usize,
@@ -6855,8 +7591,11 @@ mod tests {
             attn_norm_w: &w.attn_norm,
             ffn_norm_w: &w.ffn_norm,
             q: q8_0_mul_mm_sg(&w.q, n_q, hidden),
-            k: q8_0_mul_mm_sg(&w.k, n_kv, hidden),
-            v: q8_0_mul_mm_sg(&w.v, n_kv, hidden),
+            kv: LayerKv::Own {
+                k: q8_0_mul_mm_sg(&w.k, n_kv, hidden),
+                v: q8_0_mul_mm_sg(&w.v, n_kv, hidden),
+                slot,
+            },
             o: q8_0_mul_mm_sg(&w.o, hidden, n_q),
             ffn: PrefillFfnMetal::Dense {
                 gate: q8_0_mul_mm_sg(&w.gate, ffn, hidden),
@@ -6868,6 +7607,9 @@ mod tests {
             extras: AttnExtras::default(),
             rope,
             layer_idx,
+            window: None,
+            per_layer: None,
+            out_scale: None,
         }
     }
 
@@ -6913,7 +7655,9 @@ mod tests {
             .map(|_| MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv"))
             .collect();
         let layers: Vec<PrefillDenseLayerMetal<'_>> = (0..2)
-            .map(|i| prefill_layer_metal(&w[i], Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn))
+            .map(|i| {
+                prefill_layer_metal(&w[i], i, Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn)
+            })
             .collect();
         let h_stack = launch_prefill_dense_stack(
             &hidden0,
@@ -6926,6 +7670,7 @@ mod tests {
             eps,
             false,
             None,
+            None,
         )
         .expect("prefill stack");
 
@@ -6933,7 +7678,7 @@ mod tests {
         for i in 0..2 {
             let mut kv = MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv");
             let layer =
-                prefill_layer_metal(&w[i], Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn);
+                prefill_layer_metal(&w[i], 0, Some(ropes[i]), i as u32, hidden, n_q, n_kv, ffn);
             let input = std::mem::take(&mut h_ref);
             h_ref = launch_prefill_dense_layer(
                 &input, &layer, &mut kv, n_heads, batch, rope, 0, eps, false, None,
@@ -6946,7 +7691,9 @@ mod tests {
             .map(|_| MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv"))
             .collect();
         let one_set: Vec<PrefillDenseLayerMetal<'_>> = (0..2)
-            .map(|i| prefill_layer_metal(&w[i], Some(ropes[0]), i as u32, hidden, n_q, n_kv, ffn))
+            .map(|i| {
+                prefill_layer_metal(&w[i], i, Some(ropes[0]), i as u32, hidden, n_q, n_kv, ffn)
+            })
             .collect();
         let h_one = launch_prefill_dense_stack(
             &hidden0,
@@ -6958,6 +7705,7 @@ mod tests {
             0,
             eps,
             false,
+            None,
             None,
         )
         .expect("prefill stack, one set");
@@ -7024,10 +7772,10 @@ mod tests {
                 .map(|_| MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 32).expect("kv"))
                 .collect();
             let layers: Vec<PrefillDenseLayerMetal<'_>> = (0..2)
-                .map(|i| prefill_layer_metal(&w[i], ropes[i], i as u32, hidden, n_q, n_kv, ffn))
+                .map(|i| prefill_layer_metal(&w[i], i, ropes[i], i as u32, hidden, n_q, n_kv, ffn))
                 .collect();
             launch_prefill_dense_stack(
-                &hidden0, &layers, &mut kvs, n_heads, batch, rope, 0, eps, false, None,
+                &hidden0, &layers, &mut kvs, n_heads, batch, rope, 0, eps, false, None, None,
             )
             .expect("prefill stack")
         };
@@ -7056,5 +7804,67 @@ mod tests {
             "rotating the no-rope layer answered the same as leaving it: \
              this test proves nothing (max drift {drift})"
         );
+    }
+
+    /// `wo` reads the attention width and writes the residual's, and
+    /// the per-layer decode attention block must take a layer where the
+    /// two differ, as GLM-4.5, ERNIE-4.5-MoE, Bailing and MiniMax-M2
+    /// all have. It asserted `wo`'s OUTPUT was the attention width and
+    /// panicked on every one of them (#630).
+    ///
+    /// The oracle is the host, at position 0: attention over one key is
+    /// that key's V, so every query head of a group reads its KV head's
+    /// V and the block's output is `wo` over those V rows. The only
+    /// rounding is the f16 KV store.
+    #[test]
+    #[ignore = "needs a real Metal GPU"]
+    fn the_decode_attn_block_takes_an_attention_width_unlike_the_hidden() {
+        let (hidden, n_heads, n_kv_heads, head_dim) = (48usize, 2usize, 1usize, 16usize);
+        let (n_q, n_kv) = (n_heads * head_dim, n_kv_heads * head_dim);
+        assert_ne!(n_q, hidden, "the shape under test");
+        let w = DenseLayerBytes::new(hidden, n_q, n_kv, 8, 3.0);
+        let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.21).cos()).collect();
+        let mut kv = MetalKvBuffers::with_capacity(n_kv_heads, head_dim, 8).expect("kv");
+        let rope = LayerRope {
+            theta: 10_000.0,
+            freq_factors: None,
+        };
+        let got = launch_decode_attn_block(
+            &x,
+            &f32_matvec(&w.q, n_q, hidden),
+            &f32_matvec(&w.k, n_kv, hidden),
+            &f32_matvec(&w.v, n_kv, hidden),
+            &f32_matvec(&w.o, hidden, n_q),
+            &mut kv,
+            n_heads,
+            MetalRope::new(MetalRopeLayout::Norm),
+            rope,
+            0,
+            &AttnExtras::default(),
+            1e-5,
+        )
+        .expect("decode attn block");
+
+        let f = |b: &[u8]| -> Vec<f32> {
+            b.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
+                .collect()
+        };
+        let (wv, wo) = (f(&w.v), f(&w.o));
+        let v: Vec<f32> = (0..n_kv)
+            .map(|r| (0..hidden).map(|c| wv[r * hidden + c] * x[c]).sum())
+            .collect();
+        // Both query heads share the one KV head.
+        let attn: Vec<f32> = (0..n_q).map(|i| v[i % head_dim]).collect();
+        let want: Vec<f32> = (0..hidden)
+            .map(|r| (0..n_q).map(|c| wo[r * n_q + c] * attn[c]).sum())
+            .collect();
+        assert_eq!(got.len(), hidden, "`wo` writes the residual's width");
+        for (i, (g, h)) in got.iter().zip(&want).enumerate() {
+            let tol = 2e-3 * h.abs().max(1.0);
+            assert!((g - h).abs() <= tol, "out[{i}]: metal={g} host={h}");
+        }
     }
 }

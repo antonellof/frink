@@ -15,6 +15,7 @@ pub mod selection;
 pub use selection::SelectionRule;
 
 use frink_core::weight_matrix::WeightMatrix;
+use std::sync::Arc;
 
 /// Where a given expert's weights currently live. `GpuDevice`-placed
 /// experts only actually execute on a GPU under `--features cuda` and/or
@@ -857,7 +858,8 @@ pub struct ExpertWeights {
     pub down: WeightMatrix,
 }
 
-/// One expert's gate/up/down bias vectors.
+/// One expert's gate/up/down bias vectors, borrowed from the layer's
+/// [`ExpertBiasPlanes`].
 ///
 /// Kept separate from [`ExpertWeights`] because only the gpt-oss family
 /// ships them: every other MoE checkpoint frink loads has bias-free
@@ -868,11 +870,97 @@ pub struct ExpertWeights {
 /// Lengths are `expert_ffn_dim` for `gate`/`up` and `hidden_dim` for
 /// `down`, matching llama.cpp's `ffn_{gate,up}_exps_b` `{n_ff_exp,
 /// n_expert}` and `ffn_down_exps_b` `{n_embd, n_expert}`.
-#[derive(Debug, Clone, Default)]
-pub struct ExpertBias {
-    pub gate: Vec<f32>,
-    pub up: Vec<f32>,
-    pub down: Vec<f32>,
+#[derive(Debug, Clone, Copy)]
+pub struct ExpertBias<'a> {
+    pub gate: &'a [f32],
+    pub up: &'a [f32],
+    pub down: &'a [f32],
+}
+
+/// One expert-major bias plane of [`ExpertBiasPlanes`], shared.
+pub type BiasPlane = Arc<[f32]>;
+
+/// One layer's per-expert biases as the file stores them: three
+/// expert-major planes, expert `e`'s gate bias at
+/// `gate[e * ffn_rows .. (e + 1) * ffn_rows]`.
+///
+/// One allocation per plane rather than three per expert, because the
+/// planes ARE what the device stacks index by expert id (`ggml_add_id`):
+/// the host reads one expert's rows through [`Self::expert`] and a GPU
+/// binds the plane whole, so the two read the same bytes and there is no
+/// second copy to fall out of step with the first.
+///
+/// Shared (`Arc<[f32]>`) rather than owned, so a device cache can hold
+/// the plane it uploaded: a held allocation cannot be freed and its
+/// address reissued, and an `Arc` nobody else can write through cannot
+/// change under the upload, so "same `Arc`" proves "same bytes" without
+/// re-reading 368 KB per plane per layer per token (#627).
+#[derive(Debug, Clone)]
+pub struct ExpertBiasPlanes {
+    gate: BiasPlane,
+    up: BiasPlane,
+    down: BiasPlane,
+    ffn_rows: usize,
+    hidden_rows: usize,
+}
+
+impl ExpertBiasPlanes {
+    /// `None` unless `gate` and `up` are `n_experts * ffn_rows` long and
+    /// `down` is `n_experts * hidden_rows`.
+    pub fn new(
+        gate: Vec<f32>,
+        up: Vec<f32>,
+        down: Vec<f32>,
+        n_experts: usize,
+        ffn_rows: usize,
+        hidden_rows: usize,
+    ) -> Option<Self> {
+        (gate.len() == n_experts * ffn_rows
+            && up.len() == n_experts * ffn_rows
+            && down.len() == n_experts * hidden_rows)
+            .then(|| Self {
+                gate: gate.into(),
+                up: up.into(),
+                down: down.into(),
+                ffn_rows,
+                hidden_rows,
+            })
+    }
+
+    pub fn n_experts(&self) -> usize {
+        self.gate.len().checked_div(self.ffn_rows).unwrap_or(0)
+    }
+
+    /// Expert `e`'s three bias vectors, or `None` past the last expert.
+    pub fn expert(&self, e: usize) -> Option<ExpertBias<'_>> {
+        (e < self.n_experts()).then(|| ExpertBias {
+            gate: &self.gate[e * self.ffn_rows..(e + 1) * self.ffn_rows],
+            up: &self.up[e * self.ffn_rows..(e + 1) * self.ffn_rows],
+            down: &self.down[e * self.hidden_rows..(e + 1) * self.hidden_rows],
+        })
+    }
+
+    /// The whole `(gate, up, down)` planes, for a device that binds them.
+    pub fn planes(&self) -> (&[f32], &[f32], &[f32]) {
+        (&self.gate, &self.up, &self.down)
+    }
+
+    /// The planes as the shared allocations they are, for a device
+    /// cache that keeps what it uploaded alive (see the type's docs).
+    pub fn shared_planes(&self) -> (&BiasPlane, &BiasPlane, &BiasPlane) {
+        (&self.gate, &self.up, &self.down)
+    }
+
+    /// The planes, writable in place (their lengths cannot change). A
+    /// plane some device cache still holds is copied first, so the
+    /// write lands in a new allocation the cache has never seen.
+    pub fn planes_mut(&mut self) -> (&mut [f32], &mut [f32], &mut [f32]) {
+        (
+            Arc::make_mut(&mut self.gate),
+            Arc::make_mut(&mut self.up),
+            Arc::make_mut(&mut self.down),
+        )
+    }
 }
 
 /// gpt-oss's SwiGLU sigmoid steepness (`llama-graph.cpp`,
@@ -951,7 +1039,7 @@ pub fn route_top_k_softmax_weight(logits: &[f32], k: usize) -> RoutingDecision {
 pub fn run_expert_oai(
     hidden: &[f32],
     expert: &ExpertWeights,
-    bias: &ExpertBias,
+    bias: ExpertBias<'_>,
     alpha: f32,
     limit: f32,
 ) -> Vec<f32> {

@@ -1,6 +1,72 @@
 use super::*;
 use crate::kv_store::KvDtype;
 
+/// `advance_len(n)` is `n` pushes of a zero row, done in bulk: the
+/// same rows, positions, pool blocks and, when the pool runs dry part
+/// way, the same partial advance and the same refusal.
+#[test]
+fn advance_len_matches_pushing_zero_rows_one_at_a_time() {
+    // (block_size, total_blocks, rows already pushed, n)
+    let cases = [
+        (3, 10, 0, 7),
+        (3, 10, 2, 1),
+        (3, 10, 3, 9),
+        (4, 3, 1, 20), // runs out of blocks after 12 rows
+        (2, 1, 0, 5),  // only the constructor's block
+    ];
+    for dtype in [KvDtype::F32, KvDtype::F16] {
+        for (block_size, total, pre, n) in cases {
+            let pool_a = Arc::new(Mutex::new(KvBlockPool::new(block_size, total)));
+            let pool_b = Arc::new(Mutex::new(KvBlockPool::new(block_size, total)));
+            let mut a = KvCache::with_pool_split(2, 3, 2, pool_a.clone(), 0)
+                .unwrap()
+                .with_dtype(dtype);
+            let mut b = KvCache::with_pool_split(2, 3, 2, pool_b.clone(), 0)
+                .unwrap()
+                .with_dtype(dtype);
+            for p in 0..pre {
+                let k: Vec<f32> = (0..6).map(|i| (p * 6 + i) as f32).collect();
+                let v: Vec<f32> = (0..4).map(|i| -((p * 4 + i) as f32)).collect();
+                a.push(&k, &v).unwrap();
+                b.push(&k, &v).unwrap();
+            }
+            let mut want = Ok(());
+            for _ in 0..n {
+                want = a.push(&[0.0; 6], &[0.0; 4]);
+                if want.is_err() {
+                    break;
+                }
+            }
+            let got = b.advance_len(n);
+            let case = format!("{dtype:?} block {block_size} total {total} pre {pre} n {n}");
+            assert_eq!(got.is_err(), want.is_err(), "{case}");
+            assert_eq!(b.k, a.k, "{case}");
+            assert_eq!(b.v, a.v, "{case}");
+            assert_eq!(b.positions(), a.positions(), "{case}");
+            assert_eq!(
+                pool_b.lock().unwrap().free_blocks(),
+                pool_a.lock().unwrap().free_blocks(),
+                "{case}"
+            );
+        }
+    }
+    // Unpooled: no budget, every row lands.
+    let mut a = KvCache::new(2, 3);
+    let mut b = KvCache::new(2, 3);
+    for _ in 0..5 {
+        a.push(&[0.0; 6], &[0.0; 6]).unwrap();
+    }
+    b.advance_len(5).unwrap();
+    assert_eq!(b.k, a.k);
+    assert_eq!(b.v, a.v);
+    assert_eq!(b.positions(), a.positions());
+    // No K/V width (a recurrent-only layer): positions still advance.
+    let mut z = KvCache::new(0, 0);
+    z.advance_len(3).unwrap();
+    assert_eq!(z.positions(), 3);
+    assert!(z.k.is_empty());
+}
+
 /// The f16 store holds half the bytes of the f32 one for the same
 /// rows, and every edit a cache makes (push, truncate, evict, clone)
 /// keeps its dtype and its rounded values.

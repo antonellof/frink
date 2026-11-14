@@ -274,7 +274,7 @@ impl<F: FnMut(usize, usize) -> Vec<f32>> DecodeEngine for F {
 /// UNWIRED, deliberately, and this says where it is going rather than
 /// leaving a reader to guess: the rule is one row and the wiring is
 /// the next. What still has to land for a request to reach it is
-/// listed in `docs/plans/server-speculative-decoding.md` -- a drafter
+/// listed in `1ebda4fc:docs/plans/server-speculative-decoding.md` -- a drafter
 /// chosen per request, the KV truncated to `accepted` rows when a
 /// draft is rejected, and `stats::requests::with_speculation` finally
 /// given the producer it has never had. Landing the rule first is what
@@ -305,7 +305,7 @@ pub(crate) struct VerifiedBlock {
 
 /// Verify a block of drafted tokens by AGREEMENT with the sampler.
 ///
-/// The rule, decided in `docs/plans/server-speculative-decoding.md`:
+/// The rule, decided in `1ebda4fc:docs/plans/server-speculative-decoding.md`:
 /// draw with [`crate::sample_step::sample_next`] at every position --
 /// the same sampler, state, penalty window and grammar machine the
 /// non-speculative loop uses -- and accept a drafted token if and only

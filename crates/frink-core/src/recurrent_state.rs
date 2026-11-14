@@ -79,7 +79,7 @@ impl RecurrentState {
 /// Bonsai-2-27B's is 3.1 MB per layer, so a kernel that reads it by
 /// UPLOADING it and writes it back by downloading costs 300 MB of copies
 /// per token, which measured slower than leaving the recurrence on the
-/// host (`docs/plans/gdn-resident-state.md`). Aligned, the same kernel
+/// host (`1ebda4fc:docs/plans/gdn-resident-state.md`). Aligned, the same kernel
 /// reads and writes the host's own bytes.
 ///
 /// It derefs to `[f32]`, so every existing reader keeps working.

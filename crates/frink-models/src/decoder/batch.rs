@@ -124,7 +124,7 @@ impl Decoder {
             && self
                 .layers
                 .iter()
-                .all(|l| self.layer_supports_metal_attn(l));
+                .all(|l| self.layer_supports_metal_stack_attn(l));
 
         #[cfg(not(feature = "metal"))]
         let use_metal_attn = false;
@@ -147,16 +147,19 @@ impl Decoder {
                 .saturating_add(batch_size)
                 .saturating_add(256)
                 .max(512);
-            let reset = match guard.as_ref() {
+            let reset = match guard.as_mut() {
                 None => true,
                 Some(v) => {
                     v.len() != need
                         || v.iter().any(|m| m.capacity() < need_cap)
-                        || v.iter()
-                            .zip(kv_caches.iter())
-                            // ROWS: Metal holds rows, and this asks whether the
-                            // host buffer matches them.
-                            .any(|(m, c)| m.seq_len != c.rows())
+                        // Per layer, not all-or-nothing: see
+                        // `resync_stale_metal_layers`.
+                        || Self::resync_stale_metal_layers(v, kv_caches, |m, c| {
+                            // ROWS: Metal holds rows, and this asks
+                            // whether the host buffer matches them.
+                            m.seq_len != c.rows()
+                        })
+                        .is_err()
                 }
             };
             if reset {
@@ -293,6 +296,26 @@ impl Decoder {
                 continue;
             }
 
+            // A hybrid's run of recurrent layers, and the attention
+            // layers between them, whole on the device with the batch
+            // resident across it (#540). Not under a tensor dump, which
+            // wants every layer's intermediates on the host, nor with
+            // HRM streams, which re-enter the stack between layers.
+            #[cfg(feature = "metal")]
+            if dump.is_none() && hrm.is_none() {
+                if let Some(end) = self.metal_prefill_run_from(
+                    l,
+                    run_end,
+                    start_pos,
+                    &mut hidden_batch,
+                    batch_size,
+                    kv_caches,
+                ) {
+                    l = end;
+                    continue;
+                }
+            }
+
             let cache = &mut kv_caches[l];
 
             // One-CB dense prefill (RMSNorm→QKV GEMM→attn→O→FFN) when every
@@ -306,8 +329,7 @@ impl Decoder {
                     self.lora_attached(),
                 )
             {
-                let swa_fits = self.metal_prefill_dense_swa_fits(l, start_pos, batch_size);
-                if swa_fits {
+                if let Some(window) = self.metal_prefill_window(l, start_pos, batch_size) {
                     if let Some(guard) = metal_kv_guard.as_mut() {
                         if let Some(metal_kvs) = guard.as_mut() {
                             // POSITIONS: compared against `start_pos`.
@@ -337,8 +359,8 @@ impl Decoder {
                                         attn_norm_w: layer.attn.norm_weight.rms_weights()?,
                                         ffn_norm_w: layer.moe.norm_weight.rms_weights()?,
                                         q,
-                                        k,
-                                        v,
+                                        // One layer, one cache: slot 0.
+                                        kv: frink_metal::attn::LayerKv::Own { k, v, slot: 0 },
                                         o,
                                         ffn,
                                         post_attn_norm: layer.attn.post_attn_norm.as_deref(),
@@ -346,6 +368,9 @@ impl Decoder {
                                         extras: self.metal_attn_extras(layer),
                                         rope: self.metal_layer_rope(l),
                                         layer_idx: l as u32,
+                                        window,
+                                        per_layer: None,
+                                        out_scale: None,
                                     };
                                     frink_metal::attn::launch_prefill_dense_layer(
                                         &hidden_batch,
@@ -363,7 +388,7 @@ impl Decoder {
                                 });
                                 if let Some(h_out) = fused {
                                     Self::advance_host_kv_after_metal_prefill(
-                                        &metal_kvs[l],
+                                        &mut metal_kvs[l],
                                         cache,
                                         batch_size,
                                         host_kv_authoritative,
@@ -510,13 +535,10 @@ impl Decoder {
                 #[cfg(feature = "metal")]
                 {
                     let mut did_metal_prefill = false;
-                    // The Metal prefill kernel is full-causal: only safe on a
-                    // SWA layer while every causal position is still inside
-                    // the window. Longer prompts fall back to CPU attention.
-                    let swa_fits = match self.config.layer_sliding_window(l) {
-                        Some(window) => start_pos + batch_size <= window,
-                        None => true,
-                    };
+                    // The Metal prefill kernels take one window per batch;
+                    // a chunked layer straddling a chunk boundary falls
+                    // back to CPU attention.
+                    let window = self.metal_prefill_window(l, start_pos, batch_size);
                     // Metal prefill applies attn softcap in FA-vec / legacy GQA.
                     if let Some(guard) = metal_kv_guard.as_mut() {
                         if let Some(metal_kvs) = guard.as_mut() {
@@ -527,10 +549,16 @@ impl Decoder {
                             // block always ropes, so such a layer takes the
                             // CPU body below rather than a rotation the
                             // checkpoint never trained.
-                            if let (true, Some(layer_rope)) = (
+                            // A per-layer launch: it attends without
+                            // sinks and projects `wo` on the host without
+                            // its bias, so a layer carrying either (or
+                            // gpt-oss's FFN after it) is the host body's
+                            // when no stack took it.
+                            if let (true, Some(window), Some(layer_rope)) = (
                                 metal_kvs[l].seq_len == cache.positions()
                                     && start_pos == cache.positions()
-                                    && swa_fits,
+                                    && self.layer_supports_metal_attn(layer),
+                                window,
                                 self.metal_layer_rope(l),
                             ) {
                                 let prefill_res = {
@@ -545,12 +573,13 @@ impl Decoder {
                                         layer_rope,
                                         start_pos,
                                         self.config.attn_logit_softcap,
+                                        window,
                                         false,
                                     )
                                     .map(
                                         |(attn_out_batch, _, _)| {
                                             Self::advance_host_kv_after_metal_prefill(
-                                                &metal_kvs[l],
+                                                &mut metal_kvs[l],
                                                 cache,
                                                 batch_size,
                                                 host_kv_authoritative,
@@ -675,6 +704,15 @@ impl Decoder {
                 // RoPE loop above used for it.
                 self.apply_attn_temperature(l, &mut q_batch, q_width, |b| start_pos + b);
 
+                // The host body reads this layer's earlier rows, which an
+                // earlier Metal chunk may have left as placeholders. The
+                // device rows it pushes below are re-uploaded at the next
+                // entry (`resync_stale_metal_layers`).
+                #[cfg(feature = "metal")]
+                if let Some(Some(metal_kvs)) = metal_kv_guard.as_mut().map(|g| g.as_mut()) {
+                    Self::catch_up_host_kv_from_metal(&mut metal_kvs[l], cache);
+                }
+
                 // ROWS, not positions: it is added to `b + 1` below to give
                 // each query in the batch the length of the KV it attends
                 // over, which is a count of resident rows.
@@ -782,13 +820,33 @@ impl Decoder {
                     d.write("kqv_out", Some(l), 1, out_width, &attn_out_batch);
                 }
 
-                let mut projected_batch = self.attn_out_to_residual_rows(
+                let branch = self.attn_branch_rows(
                     layer,
                     &normed_batch,
                     &mut attn_out_batch,
                     batch_size,
                     q_gate.as_deref(),
                 );
+                // `wo`, the residual and the FFN on the device, with the
+                // recurrent layers after it in the same submission
+                // (#540), under the same fences as the recurrent run.
+                #[cfg(feature = "metal")]
+                if dump.is_none() && hrm.is_none() && parallel_ssm.is_none() {
+                    if let Some(end) = self.metal_attn_tail_prefill_run(
+                        l,
+                        layer,
+                        &branch,
+                        run_end,
+                        start_pos,
+                        &mut hidden_batch,
+                        batch_size,
+                        kv_caches,
+                    ) {
+                        l = end;
+                        continue 'layers;
+                    }
+                }
+                let mut projected_batch = self.project_attn_rows(layer, &branch, batch_size);
                 Self::add_parallel_ssm(&mut projected_batch, parallel_ssm);
                 if let Some(d) = dump {
                     d.write("attn_out", Some(l), 1, hidden_dim, &projected_batch);
@@ -829,7 +887,7 @@ impl Decoder {
         taps.capture(n_layers, &hidden_batch);
 
         let normed: Vec<Vec<f32>> = hidden_batch
-            .chunks(hidden_dim)
+            .par_chunks(hidden_dim)
             .map(|h| self.final_norm.apply(h, self.config.rms_norm_eps))
             .collect();
         if let Some(d) = dump {

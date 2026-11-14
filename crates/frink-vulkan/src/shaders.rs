@@ -3,7 +3,7 @@
 //!
 //! The beachhead emitted SPIR-V words from Rust, which needed no tool
 //! at all and did not scale: ~560 lines for the simplest kernel
-//! (`docs/plans/archive/vulkan-beachhead-verdict.md`, §2), and it was deleted
+//! (`bc5074aa:docs/plans/archive/vulkan-beachhead-verdict.md`, §2), and it was deleted
 //! once its Q8_0 had a GLSL twin here. These are GLSL,
 //! compiled by `glslangValidator` (`shaders/build.sh`) into `shaders/spv/`,
 //! and the `.spv` files are committed, so a frink build needs no shader

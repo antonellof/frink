@@ -17,7 +17,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Qwen-1 (`qwen`), Qwen2.5 (`qwen2`), Qwen3 (`qwen3`), Qwen1.5-MoE / Qwen2-MoE (`qwen2moe`), Qwen3-MoE (`qwen3moe`) | |
 | Qwen3.5 dense and MoE (`qwen35`, `qwen35moe`), Qwen3-Next (`qwen3next`) | Recurrent: no prefix-cache reuse; speculates on the private loop only |
 | Gemma-1, Gemma-2, Gemma-3 (`gemma`, `gemma2`, `gemma3`) | |
-| Gemma-4-E2B | Dedicated engine, `gemma4` BPE tokenizer |
+| Gemma-4-E2B | Dedicated engine, `gemma4` BPE tokenizer. Three fixtures hold it to libllama past its sliding window, one with a layer that reads K as V and one rotating a RoPE width narrower than its heads (`rope.dimension_count`) |
 | Phi-2 / Phi-1.5 (`phi2`), Phi-3 / Phi-4-mini (`phi3`), Phi-3.5-MoE (`phimoe`) | |
 | OLMo (`olmo`), OLMo-2 / Olmo-3 (`olmo2`), OLMoE (`olmoe`), SmolLM3 (`smollm3`) | |
 | ChatGLM (`chatglm`), GLM-4-0414 / Z1 / OCR (`glm4`), GLM-4.5 / 4.5-Air / 4.6 (`glm4moe`) | A vision tower's `rope.dimension_sections` is refused by name on `glm4`, served on `glm4moe` |
@@ -32,7 +32,7 @@ can do is [`FEATURES.md`](FEATURES.md).
 | Jamba (`jamba`), Mamba and FalconMamba (`mamba`), Mamba-2 (`mamba2`), Falcon-H1 (`falcon-h1`), PLaMo-2 (`plamo2`) | Recurrent |
 | PLaMo (`plamo`), PLaMo-3 (`plamo3`) | |
 | LFM2 (`lfm2`), LFM2-MoE (`lfm2moe`) | A file declaring `attention.sliding_window` is refused by name, and so is an LFM2-d1 decision head (`decision.block_count`) |
-| gpt-oss (`gpt-oss`) | Runs in CUDA's resident stack (sinks, biases and its clamped SwiGLU on the device). Metal runs it on the host path: no Metal kernel implements attention sinks |
+| gpt-oss (`gpt-oss`) | Runs in CUDA's resident stack and in Metal's MoE decode stack and prefill stack, with its sinks, biases, sliding window and clamped SwiGLU on the device (#627) |
 | GPT-2 (`gpt2`), GPT-NeoX / Pythia (`gptneox`), StarCoder (`starcoder`), StarCoder2 (`starcoder2`), CodeShell (`codeshell`), Jais-2 (`jais2`), Falcon (`falcon`), StableLM (`stablelm`) | StableLM-2-12B is refused: it needs a per-head QK LayerNorm |
 | BLOOM (`bloom`), MPT (`mpt`), Refact (`refact`), Jais (`jais`) | ALiBi in place of RoPE |
 | BitNet (`bitnet`), Apertus (`apertus`), Mellum (`mellum`), Nanbeige (`nanbeige`), Talkie (`talkie`), Arcee (`arcee`), Deci (`deci`), OpenELM (`openelm`), Maincoder (`maincoder`) | |

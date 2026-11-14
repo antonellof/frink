@@ -165,8 +165,21 @@ pub fn softcap_inplace(x: &mut [f32], softcap: f32) {
         return;
     }
     let inv = 1.0 / softcap;
-    for v in x.iter_mut() {
-        *v = softcap * (*v * inv).tanh();
+    let cap = |chunk: &mut [f32]| {
+        for v in chunk.iter_mut() {
+            *v = softcap * (*v * inv).tanh();
+        }
+    };
+    // A final-logit cap runs over the whole vocabulary every decode
+    // token (Gemma-2/3/4: 256k), and a scalar `tanh` loop over that is
+    // a millisecond or more on one core. Each element is capped by the
+    // same expression either way, so the split changes no value.
+    const PAR_MIN: usize = 1 << 15;
+    if x.len() >= PAR_MIN {
+        use rayon::prelude::*;
+        x.par_chunks_mut(PAR_MIN / 4).for_each(cap);
+    } else {
+        cap(x);
     }
 }
 
@@ -686,6 +699,21 @@ pub fn situ_and_mul(gate: &[f32], up: &[f32], beta: f32, linear_beta: f32) -> Ve
 
 #[cfg(test)]
 mod tests {
+    /// The vocabulary-sized cap is split across threads; every element
+    /// must still be exactly `sc * tanh(x / sc)`, the scalar expression.
+    #[test]
+    fn a_vocabulary_sized_softcap_equals_the_scalar_expression() {
+        let sc = 30.0f32;
+        let raw: Vec<f32> = (0..262_144)
+            .map(|i| ((i as f32) * 0.37).sin() * 80.0)
+            .collect();
+        let mut got = raw.clone();
+        softcap_inplace(&mut got, sc);
+        for (g, r) in got.iter().zip(&raw) {
+            assert_eq!(g.to_bits(), (sc * (r * (1.0 / sc)).tanh()).to_bits());
+        }
+    }
+
     use super::*;
 
     /// Decode and prefill must compute the same bits from the same

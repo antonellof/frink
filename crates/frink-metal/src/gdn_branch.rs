@@ -5,7 +5,7 @@
 //!
 //! # Why this shape and not another
 //!
-//! `docs/plans/gdn-resident-state.md` prices a Bonsai decode token: 192
+//! `1ebda4fc:docs/plans/gdn-resident-state.md` prices a Bonsai decode token: 192
 //! command buffers, 71.6 ms of GPU, 29.9 ms of latency beyond it, and
 //! about 35 ms of host of which two thirds is the recurrence. The GPU
 //! work is already faster than the reference's whole token, the 0.15 ms
@@ -70,7 +70,7 @@ pub struct BranchWeights<'a> {
     /// without the hidden state coming back to the host in between,
     /// which is the only thing left between this engine and the
     /// reference's decode rate
-    /// (`docs/plans/gdn-resident-state.md`). `None` stops at
+    /// (`1ebda4fc:docs/plans/gdn-resident-state.md`). `None` stops at
     /// `ssm_out` and the caller finishes the layer itself.
     pub ffn: Option<LayerFfn<'a>>,
 }
@@ -218,7 +218,7 @@ fn encode_ffn_tail<'b>(
     // same one the dense decode stack uses. Two dispatches here
     // cost about 8 microseconds of fixed overhead each, which
     // across 48 layers is where a measurable part of this
-    // token's GPU time goes (`docs/plans/gdn-resident-state.md`
+    // token's GPU time goes (`1ebda4fc:docs/plans/gdn-resident-state.md`
     // prices the branch's twelve dispatches at ~4.8 ms).
     crate::norm::encode_add_rms_norm(
         encoder,
@@ -1343,6 +1343,7 @@ fn encode_attn_layer(
         seq_len as u32,
         0,
         softcap,
+        None,
     )?;
     if let Some(g) = gate_buf {
         crate::elem::encode_sigmoid_mul(encoder, device, attn_buf, g, q.len() as u32)?;

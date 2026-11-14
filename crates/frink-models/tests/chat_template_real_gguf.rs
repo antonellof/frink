@@ -28,7 +28,7 @@
 //!   (or `$FRINK_TEST_MODELS_DIR`), pulls each one's real template, and
 //!   renders a fixed three-turn conversation through it. That is how
 //!   the compile/render coverage claim in
-//!   `docs/plans/llama-cpp-parity-push.md` was measured; re-run it with
+//!   `4dc195e5:docs/plans/llama-cpp-parity-push.md` was measured; re-run it with
 //!   `cargo test -p frink-models --test chat_template_real_gguf -- --ignored --nocapture`.
 
 mod common;

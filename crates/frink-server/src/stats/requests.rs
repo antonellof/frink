@@ -3,7 +3,7 @@
 //! Keyed by the `request_id` the server already assigns and already
 //! states on the wire, so a UI joins a log row to the message that
 //! produced it by equality rather than by the claiming heuristic
-//! `docs/plans/frink-ui.md` describes one reference product resorting
+//! `bc5074aa:docs/plans/on-hold/frink-ui.md` describes one reference product resorting
 //! to when concurrent chats stole each other's numbers.
 //!
 //! `duration_ms` and `decode_ms` stay separate here and all the way out

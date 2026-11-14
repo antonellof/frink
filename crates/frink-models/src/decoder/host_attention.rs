@@ -25,10 +25,12 @@ impl Decoder {
     /// (`dot_f32`, `pv_tile` and `qk_tile` are 11178 of a sampled
     /// prefill's top-of-stack against 1504 for the next thing).
     ///
-    /// The refusals are the kernel's, not a guess: it takes no sliding
-    /// window, no ALiBi slopes, no attention sink and one head width
-    /// for K and V, and a shape it does not serve falls through to the
-    /// host body below rather than being approximated.
+    /// The refusals are the kernel's, not a guess: it takes no ALiBi
+    /// slopes, no attention sink and one head width for K and V, and a
+    /// shape it does not serve falls through to the host body below
+    /// rather than being approximated. A sliding window it takes, with
+    /// the host body's meaning: query `b` sits at cache row
+    /// `base_seq_len + b` and reads the `window` rows ending there.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prefill_attention_blocked(
         &self,
@@ -45,8 +47,7 @@ impl Decoder {
         window: Option<usize>,
     ) -> Vec<f32> {
         #[cfg(feature = "metal")]
-        if window.is_none()
-            && self.alibi_slopes.is_none()
+        if self.alibi_slopes.is_none()
             && v_head_dim == head_dim
             && frink_core::weight_matrix::metal_dense_enabled()
         {
@@ -60,6 +61,7 @@ impl Decoder {
                 batch_size,
                 base_seq_len,
                 softcap,
+                window,
             ) {
                 return out;
             }

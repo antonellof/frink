@@ -146,7 +146,7 @@ pub fn prepend_bos<T: Copy + PartialEq>(tokens: &mut Vec<T>, bos: Option<T>) {
 /// derivable: it is a hand-maintained list of what real checkpoints ship.
 ///
 /// Note `<|end|>` *is* here. The Unsloth study recorded in
-/// `docs/plans/llama-cpp-parity-push.md` claimed gpt-oss's `<|end|>` must
+/// `4dc195e5:docs/plans/llama-cpp-parity-push.md` claimed gpt-oss's `<|end|>` must
 /// not be EOG or every reply truncates; llama.cpp's own source says
 /// otherwise, and llama.cpp serves gpt-oss. Following the reference
 /// implementation, and flagging the claim as contradicted.

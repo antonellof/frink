@@ -30,7 +30,7 @@
 //! # Status
 //!
 //! Steps 1 and 2 of the three-step spine in
-//! `docs/plans/llama-cpp-gap-inventory.md` §8 item 8: the parser and the
+//! `1ebda4fc:docs/plans/llama-cpp-gap-inventory.md` §8 item 8: the parser and the
 //! stack machine, with the candidate-rejection core the sampler hook would
 //! sit on. **Not wired into sampling or the server.** The seam a caller
 //! needs is [`machine::Grammar::accept_token`] after each accepted token

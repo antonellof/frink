@@ -24,7 +24,7 @@ CPU is behind on prefill, and CUDA is behind on both.
 |---|---|
 | Dense GQA, MoE | Llama 3.x, Qwen2.5/3, Gemma-2/3, Mistral, Phi-4-mini, SmolLM2, OLMoE, Mixtral |
 | MLA, with and without the absorption optimization | DeepSeek-V2/V3, Mistral-Large-3, PLM |
-| Dedicated engines | Gemma-4 (per-layer embeddings, shared KV) |
+| Dedicated engines | Gemma-4 (per-layer embeddings, shared KV; on Metal, the fused dense decode and prefill stacks, the whole prompt batched) |
 | Speculative drafts | An autoregressive draft GGUF, prompt lookup, and DFlash / DFlash2 block drafts (llama.cpp's `dflash` architecture) |
 | Sliding-window attention: per layer, per-layer arrays, chunked | Gemma-2/3, gpt-oss, Llama 4, Mistral, Cohere2 |
 | Recurrent blocks at the attention site | Mamba-1 and Mamba-2 (Jamba, FalconMamba, Granite 4.0, Nemotron-H, Falcon-H1), short convolutions (LFM2), gated delta nets (Qwen3.5, Qwen3-Next), lightning attention (MiniMax-01), PLaMo-2 |
@@ -42,9 +42,18 @@ run end to end on a real checkpoint, so they are not in the table.
 
 Limits that affect model choice:
 
-- On Metal, gpt-oss and Llama 4 run on the host path (no Metal kernel
-  for attention sinks; Llama 4's chunked window does not fit the fused
-  launches). CUDA's resident stack runs gpt-oss.
+- On Metal, Llama 4 runs on the host path: its chunked window does not
+  fit the fused launches. gpt-oss runs on the fused stacks (#627): two
+  command buffers per decode token (the GPU starts on the first layers
+  while the rest encode) and one per prefill chunk, with its sinks,
+  biases, sliding window and clamped SwiGLU on the device. CUDA's
+  resident stack runs it too.
+- Gemma-4 on Metal runs the fused dense stacks, level with llama.cpp
+  on prefill and decode.
+- The Metal decode agrees with the CPU within rounding on every graph
+  fixture (`tests/decode_step_graphs.rs`, run by CI). `hrm_text` is
+  listed in `KNOWN_METAL_DIVERGENCES`: it amplifies the half-staged
+  GEMM's rounding as much as an f16 KV does on the CPU alone.
 - A recurrent model gets no prefix-cache reuse, since its state cannot
   be truncated mid-sequence. It can be a speculation target (state
   checkpointed before each verify, replayed after a rejection) on the
@@ -56,7 +65,7 @@ Limits that affect model choice:
 | Backend | Capabilities |
 |---|---|
 | **CPU** | Dense and MoE. An integer dot against quantized activations for every weight kind (ggml's `vec_dot_type`, ADR 0009), with AVX2 and NEON bodies; on by default where it measured faster (aarch64), `FRINK_CPU_INT_DOT` overrides. Interleaved Q4_Kx8 / Q8_0x4 GEMV, a Q8_0x4 batch GEMM for prefill, and a thread pool sized to the performance cores |
-| **Metal** | FA-vec attention (decode d=64/96/128/256, prefill d=128/256), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill, quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
+| **Metal** | FA-vec attention (decode and prefill d=64/96/128/256/512), concurrent FFN/QKV encode, fused MoE groups, `mul_mm_id` prefill. Every decode and prefill attention kernel (the tensor one included) takes attention sinks and a sliding window, so a windowed layer's prefill chunk may be any length; the MoE decode stack and the prefill stack carry gpt-oss's `wo` bias, router bias, expert biases and clamped SwiGLU. On an M5 the prefill GEMMs (dense and MoE) and prefill flash attention run on the GPU's matrix units through the Metal 4 tensor API, as llama.cpp's tensor kernels do (`FRINK_METAL_TENSOR`); quantized KV (`q8_0` / `fp8` / `q4_0`, the last with a Hadamard rotation on K). A gated delta-net model (Qwen3.5, Bonsai) prefills a prompt batch as one command buffer, the batch resident across the stack: the recurrent layers, and the attention layers between them with their QK norms, RoPE and gated attention against the sequence's f16 KV mirror. A server decodes on the private loop, with attention on the device, unless continuous batching is turned on |
 | **CUDA** | Resident weights and a resident stack for prefill and decode (`--features cuda`): norms, QKV bias, QK norm, RoPE, attention, SwiGLU or GeGLU and residuals on the device, K/V rows back to the host cache through page-locked memory. Prefill multiplies `Q8_0` and `Q4_K` on the int8 tensor cores and the other kinds on the f16 ones, and a prefill batch's attention runs on the tensor cores at head widths 64, 128 and 256 (`sm_80` and up). Decode matvecs for `Q4_K`, `Q6_K`, `Q8_0` and `MXFP4` dot a q8_1 activation with `dp4a`, as llama.cpp does. Routed MoE layers route on the device for plain softmax and gpt-oss routing, and a prefill batch's experts run as one grouped GEMM per projection. gpt-oss runs with its sinks, biases and clamped SwiGLU on the device. `FRINK_CUDA_GRAPH=1` replays a decode token from a CUDA graph; it is off by default and has not run on a GPU |
 | **Vulkan** | Matvec, prefill GEMM and embedding gather for every weight kind, resident weights, and a decode and prefill stack (`--features vulkan`, opt-in with `--device vulkan` or `FRINK_VULKAN=1`). Correct, not yet faster than the CPU: see below |
 
@@ -154,12 +163,13 @@ llama.cpp (`common/common.h:239`), so an all-defaults run is not
 token-identical. `-e`/`--escape` is on by default, and a partial
 `-ngl N` is refused rather than offloading every layer.
 
-That penalty costs Metal decode: at `--temp 0` the stack can fold
-`final_norm + lm_head + argmax` on the device and return one token id,
-but not while any of `--repeat-penalty`, `--presence-penalty` or
-`--frequency-penalty` is live. `--repeat-penalty 1.0` or
-`--repeat-last-n 0` restores the fold and token identity with
-llama.cpp's defaults.
+That penalty costs Metal decode: the decode stack always runs
+`final_norm + lm_head` on the device, but at `--temp 0` it can also
+run the argmax there and return one token id instead of the
+vocabulary, and not while any of `--repeat-penalty`,
+`--presence-penalty` or `--frequency-penalty` is live.
+`--repeat-penalty 1.0` or `--repeat-last-n 0` restores the argmax
+fold and token identity with llama.cpp's defaults.
 
 ## Server
 

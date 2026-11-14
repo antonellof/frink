@@ -30,7 +30,7 @@
 //! [`kv_signature`](crate::kv_signature) exists to prevent -- so it is
 //! prevented the same way: refuse, naming both numbers.
 //!
-//! > Wording note, for anyone holding `docs/plans/serving-and-tiered-kv.md`
+//! > Wording note, for anyone holding `4dc195e5:docs/plans/serving-and-tiered-kv.md`
 //! > open: the plan states this as "block size must be a multiple of the
 //! > sliding-window size". That is the same constraint with the operands
 //! > the other way round, and this direction is the one that is

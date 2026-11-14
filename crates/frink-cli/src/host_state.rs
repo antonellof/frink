@@ -20,7 +20,7 @@
 //! invites exactly the false confidence this module exists to prevent.
 
 /// Default 1-minute load average above which a timed run refuses to
-/// start. Matches the bar in `docs/plans/llama-cpp-parity-push.md`.
+/// start. Matches the bar in `4dc195e5:docs/plans/llama-cpp-parity-push.md`.
 pub const DEFAULT_MAX_LOAD: f64 = 2.0;
 
 /// Free physical memory in GiB, or `None` if this platform will not

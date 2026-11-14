@@ -4,7 +4,7 @@ What this is: the llama.cpp pin moved from `5b59b83` (2026-09-19) to
 `604cc430` (2026-10-28), and every census frink's capability tables are
 derived from was re-run against the new tree in the same PR, before any
 new model row. It follows
-[`parity-audit-2026-09-19.md`](https://github.com/antonellof/frink/blob/75d2769d/docs/plans/archive/parity-audit-2026-09-19.md), whose
+[`parity-audit-2026-09-19.md`](https://github.com/antonellof/frink/blob/75d2769d/bc5074aa:docs/plans/archive/parity-audit-2026-09-19.md), whose
 section 1.3 said why the two belong together: a census over a stale
 tree is wrong in the direction that matters, a graph that STARTED
 reading a key.

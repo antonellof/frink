@@ -46,7 +46,7 @@ pub(crate) fn mm_timing_add(setup: u128, gpu: u128, read: u128) {
 /// which on a loaded host is mostly scheduler noise. `MTLCommandBuffer`'s
 /// `GPUStartTime`/`GPUEndTime` measure the command buffer's own occupancy
 /// and stay usable while the machine is busy, so A/B evidence in
-/// `docs/plans/llama-cpp-parity-push.md` is taken from these.
+/// `4dc195e5:docs/plans/llama-cpp-parity-push.md` is taken from these.
 ///
 /// GPU time alone was how GitHub issue #149 mis-read its own numbers:
 /// "host = wall minus GPU" charged to the host everything that was not
@@ -323,6 +323,60 @@ pub(crate) fn note_wait(
     waited
 }
 
+/// The layer before which a decode stack commits what it has encoded
+/// and opens a second command buffer, so the GPU runs the first layers
+/// while the CPU encodes the rest. llama.cpp does the same
+/// (`ggml_metal_graph_compute`: the first `max(64, n_nodes / 10)` nodes
+/// are committed before the rest are encoded). Without it a token waits
+/// for the whole stack's encoding (482 dispatches, ~0.45 ms on
+/// gpt-oss) before the GPU starts.
+///
+/// `None` = one command buffer: under `FRINK_METAL_KERNEL_TIMING` (its
+/// spans belong to one command buffer), with `FRINK_METAL_EARLY_COMMIT=0`,
+/// or for a one-layer stack. `FRINK_METAL_EARLY_COMMIT=N` splits before
+/// layer `N` in either stack. Unset: the dense stack splits after the
+/// first third of its layers, the MoE stack after the first sixth (at
+/// least one layer either way).
+///
+/// Measured on an M5 Max (tg128, best of interleaved runs): Llama-3.2-1B
+/// gains 4-10% anywhere from an eighth to a half. The MoE stack lost
+/// with a split while its host encode was 1.8 ms a token (gpt-oss-20b
+/// 124 tok/s unsplit, 82 at a sixth), most of it a byte compare of the
+/// expert-bias planes; with that gone (0.45 ms, #627) it gains at a
+/// sixth: gpt-oss-20b 158 -> 167, Qwen3-30B-A3B 148 -> 172, OLMoE
+/// 427 -> 468, each better than at a third or at the first layer.
+pub(crate) fn early_commit_layer(stack: Stack, n_layers: usize) -> Option<usize> {
+    if crate::kernel_timing::kernel_timing_enabled() {
+        return None;
+    }
+    static SET: std::sync::OnceLock<Option<Option<usize>>> = std::sync::OnceLock::new();
+    let set = *SET.get_or_init(|| {
+        std::env::var("FRINK_METAL_EARLY_COMMIT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.trim().parse::<usize>().ok().filter(|&n| n > 0))
+    });
+    split_layer(set, stack, n_layers)
+}
+
+/// Which decode stack asks [`early_commit_layer`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Stack {
+    Dense,
+    Moe,
+}
+
+/// [`early_commit_layer`] without the environment: `set` is `None`
+/// when the variable is unset, `Some(None)` for `0` or garbage.
+fn split_layer(set: Option<Option<usize>>, stack: Stack, n_layers: usize) -> Option<usize> {
+    let at = match (set, stack) {
+        (Some(explicit), _) => explicit?,
+        (None, Stack::Dense) => n_layers.div_ceil(3).max(1),
+        (None, Stack::Moe) => n_layers.div_ceil(6).max(1),
+    };
+    (at < n_layers).then_some(at)
+}
+
 pub(crate) fn commit_wait_note(
     cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     tag: &'static str,
@@ -355,6 +409,33 @@ pub(crate) fn commit_wait_note(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dense_stack_splits_a_third_of_the_way_in_and_the_moe_stack_a_sixth() {
+        use Stack::{Dense, Moe};
+        assert_eq!(split_layer(None, Dense, 16), Some(6)); // Llama-3.2-1B
+        assert_eq!(split_layer(None, Dense, 2), Some(1));
+        assert_eq!(
+            split_layer(None, Dense, 1),
+            None,
+            "one layer has nothing to overlap"
+        );
+        assert_eq!(split_layer(None, Moe, 24), Some(4)); // gpt-oss-20b
+        assert_eq!(split_layer(None, Moe, 48), Some(8)); // Qwen3-30B-A3B
+        assert_eq!(split_layer(None, Moe, 16), Some(3)); // OLMoE
+        assert_eq!(split_layer(None, Moe, 1), None);
+        assert_eq!(split_layer(Some(None), Dense, 24), None, "0 turns it off");
+        assert_eq!(
+            split_layer(Some(Some(4)), Moe, 24),
+            Some(4),
+            "an explicit N splits either"
+        );
+        assert_eq!(
+            split_layer(Some(Some(24)), Dense, 24),
+            None,
+            "past the last layer"
+        );
+    }
     use crate::dispatch::EncodeStats;
 
     fn stats(dispatches: u64, barriers: u64) -> EncodeStats {

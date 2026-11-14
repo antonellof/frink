@@ -12,7 +12,8 @@ use super::{Decoder, ExpertBacking, LayerWeights};
 impl Decoder {
     /// Dense layer eligible for the one-CB `mul_mm_sg` prefill stack.
     /// QKV bias / QK-norm are applied on-GPU via [`AttnExtras`] (same as
-    /// decode); SWA fit is checked separately.
+    /// decode), and a sliding window inside the attention kernel
+    /// ([`Self::metal_prefill_window`]).
     #[cfg(feature = "metal")]
     pub(super) fn metal_prefill_dense_layer_eligible(
         layer: &LayerWeights,
@@ -22,16 +23,21 @@ impl Decoder {
         Self::fused_prefill_dense_layer_eligible(layer, config, lora_attached)
     }
 
+    /// The window the Metal prefill kernels take for this batch on layer
+    /// `layer_idx`: `Some(None)` full causal, `Some(Some(w))` a sliding
+    /// window, `None` when the batch needs one window per query (a
+    /// chunked layer whose queries straddle a chunk boundary,
+    /// `crate::chunked_swa`), which the kernels do not take.
     #[cfg(feature = "metal")]
-    pub(super) fn metal_prefill_dense_swa_fits(
+    pub(super) fn metal_prefill_window(
         &self,
         layer_idx: usize,
         start_pos: usize,
         batch_size: usize,
-    ) -> bool {
-        match self.config.layer_sliding_window(layer_idx) {
-            Some(window) => start_pos + batch_size <= window,
-            None => true,
+    ) -> Option<Option<usize>> {
+        match self.config.batch_window(layer_idx, start_pos, batch_size) {
+            crate::config::BatchWindow::Uniform(window) => Some(window),
+            crate::config::BatchWindow::PerQuery => None,
         }
     }
 
@@ -43,6 +49,8 @@ impl Decoder {
     /// decode, which still routes on the host.
     #[cfg(feature = "metal")]
     pub(super) fn metal_prefill_moe<'a>(
+        &'a self,
+        l: usize,
         layer: &'a LayerWeights,
         config: &ModelConfig,
         lora_attached: bool,
@@ -61,11 +69,18 @@ impl Decoder {
             return None;
         };
         let packed = Self::moe_packed_q4(&layer.moe)?;
+        // gpt-oss's router bias, expert biases and clamped SwiGLU, or no
+        // stack for a gpt-oss layer that has no side-table row.
+        let oai = self.metal_moe_oai(l);
+        if self.gpt_oss.is_some() && oai.is_none() {
+            return None;
+        }
         let moe = frink_metal::gpu::PrefillMoeMetal {
             router_w: &router.data,
             top_k: config.moe.n_experts_active,
             renormalize: config.moe.norm_topk_prob,
             packed,
+            oai,
         };
         moe.is_supported().then_some(moe)
     }
@@ -74,11 +89,13 @@ impl Decoder {
     /// or (MoE) the routed-expert description.
     #[cfg(feature = "metal")]
     pub(super) fn metal_prefill_ffn<'a>(
+        &'a self,
+        l: usize,
         layer: &'a LayerWeights,
         config: &ModelConfig,
         lora_attached: bool,
     ) -> Option<frink_metal::attn::PrefillFfnMetal<'a>> {
-        if let Some(moe) = Self::metal_prefill_moe(layer, config, lora_attached) {
+        if let Some(moe) = self.metal_prefill_moe(l, layer, config, lora_attached) {
             return Some(frink_metal::attn::PrefillFfnMetal::Moe(moe));
         }
         if !Self::is_dense_layer(layer) {
@@ -106,16 +123,15 @@ impl Decoder {
         kv_caches: &[KvCache],
         metal_kvs: Option<&[frink_metal::attn::MetalKvBuffers]>,
     ) -> Option<usize> {
-        // See `layer_supports_metal_attn`: gpt-oss stays on CPU.
-        if self.gpt_oss.is_some() {
-            return None;
-        }
         let metal_kvs = metal_kvs?;
         let mut run = 0usize;
         for li in start..self.layers.len() {
             let layer = &self.layers[li];
             let cache = &kv_caches[li];
-            if !self.metal_prefill_dense_swa_fits(li, start_pos, batch_size) {
+            if self
+                .metal_prefill_window(li, start_pos, batch_size)
+                .is_none()
+            {
                 break;
             }
             // POSITIONS: compared against `start_pos`, and against
@@ -127,7 +143,9 @@ impl Decoder {
                 && layer.attn.k_proj.mul_mm_sg_launch().is_some()
                 && layer.attn.v_proj.mul_mm_sg_launch().is_some()
                 && layer.attn.o_proj.mul_mm_sg_launch().is_some()
-                && Self::metal_prefill_ffn(layer, &self.config, self.lora_attached()).is_some();
+                && self
+                    .metal_prefill_ffn(li, layer, &self.config, self.lora_attached())
+                    .is_some();
             if !ok {
                 break;
             }
@@ -162,7 +180,7 @@ impl Decoder {
         let mut prefill_layers = Vec::with_capacity(run_len);
         for li in start..start + run_len {
             let layer = &self.layers[li];
-            let ffn = Self::metal_prefill_ffn(layer, &self.config, self.lora_attached())?;
+            let ffn = self.metal_prefill_ffn(li, layer, &self.config, self.lora_attached())?;
             if matches!(ffn, frink_metal::attn::PrefillFfnMetal::Dense { .. }) {
                 layer.moe.record_activations(&[0]);
             }
@@ -180,15 +198,25 @@ impl Decoder {
                 attn_norm_w: layer.attn.norm_weight.rms_weights()?,
                 ffn_norm_w: layer.moe.norm_weight.rms_weights()?,
                 q,
-                k,
-                v,
+                // `kvs` below is the run's own slice of the caches.
+                kv: frink_metal::attn::LayerKv::Own {
+                    k,
+                    v,
+                    slot: li - start,
+                },
                 o,
                 ffn,
                 post_attn_norm: layer.attn.post_attn_norm.as_deref(),
                 post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
                 extras: self.metal_attn_extras(layer),
                 rope: self.metal_layer_rope(li),
+                // The run-length check above saw a uniform window.
+                window: self
+                    .metal_prefill_window(li, start_pos, batch_size)
+                    .flatten(),
                 layer_idx: li as u32,
+                per_layer: None,
+                out_scale: None,
             });
         }
         let kvs = &mut metal_kvs[start..start + run_len];
@@ -203,9 +231,10 @@ impl Decoder {
             self.config.rms_norm_eps,
             gelu,
             self.config.attn_logit_softcap,
+            None,
         )
         .ok()?;
-        for (mkv, cache) in kvs.iter().zip(&mut kv_caches[start..start + run_len]) {
+        for (mkv, cache) in kvs.iter_mut().zip(&mut kv_caches[start..start + run_len]) {
             Self::advance_host_kv_after_metal_prefill(
                 mkv,
                 cache,

@@ -1,0 +1,2 @@
+fixture: crates/frink-models/tests/fixtures/gemma4_kv_as_v_tiny.gguf
+config: REFUSED: architecture 'gemma4' cannot use the generic Decoder: use load_gemma4_engine_from_path / ServedEngine::Gemma4

@@ -166,6 +166,10 @@ jobs:
       # the `--ignored` set is the one that has never run here.
       - run: cargo test -p frink-metal --features metal --verbose
       - run: cargo test -p frink-metal --features metal -- --ignored --test-threads=1
+      # The model-level Metal suites: a Metal decode that parts from the
+      # CPU (KNOWN_METAL_DIVERGENCES) and the dispatch-path checks. These
+      # were never run here, which is how #630 grew to 25 rows.
+      - run: cargo test --release -p frink-models --features metal --test decode_step_graphs --test clamped_swiglu_graphs --test metal_embd_gather --test metal_low_k_quant_decode --test metal_moe_id_kinds --test gptoss_metal_stack -- --ignored
       # frink-core's own unit tests on a device build, where a projection
       # that a test assumes is on the host goes to the GPU instead (#501).
       - run: cargo test -p frink-core --features metal --lib --verbose

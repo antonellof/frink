@@ -1333,7 +1333,8 @@ impl Kv {
     /// `prefix_cache` stores `Vec<KvCache>` snapshots, so a paged
     /// request has nothing to hand it. That is why the two are refused
     /// together at startup rather than silently producing a cache that
-    /// never hits -- and it is what `wire-radix-prefix-cache` removes.
+    /// never hits. A paged request shares prefixes through the radix
+    /// tree instead (`publish_to_radix`).
     pub(crate) fn contiguous_mut(&mut self) -> Option<&mut Vec<KvCache>> {
         match self {
             Kv::Contiguous(caches) => Some(caches),
@@ -1583,7 +1584,7 @@ pub struct GenerationParams {
     /// and the KV cache forked per choice, which is the only reason
     /// the field exists -- a caller who wanted `k` independent
     /// generations could already send `k` requests
-    /// (`docs/plans/done/several-completions-per-request.md`).
+    /// (`bc5074aa:docs/plans/done/several-completions-per-request.md`).
     ///
     /// Choice `i` samples from `seed + i`, derived rather than drawn,
     /// so a seeded request is reproducible and choice 0 of `n = 4` is
@@ -2558,7 +2559,7 @@ pub fn generate<'p>(
     };
     // `n` completions of ONE prompt, which is the whole reason the
     // field exists: the prefill above ran once and the forks below
-    // start from it (`docs/plans/done/several-completions-per-request.md`).
+    // start from it (`bc5074aa:docs/plans/done/several-completions-per-request.md`).
     let n = params.n.max(1);
     // The forks are taken from the POST-PREFILL state, before choice 0
     // decodes into `kv` and mutates it. Cloning after would give
@@ -2771,7 +2772,7 @@ pub fn generate<'p>(
     // `crate::request_tail`. It is lifted out unchanged, and the seam
     // is not arbitrary: it is exactly the part that runs ONCE per
     // request rather than once per completion, which is what
-    // `docs/plans/done/several-completions-per-request.md` needs next.
+    // `bc5074aa:docs/plans/done/several-completions-per-request.md` needs next.
     let usage = crate::request_tail::RequestTail {
         decoder,
         tokenizer,
@@ -2875,11 +2876,10 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
         pos += 1;
         l
     } else {
-        let mut l = Vec::new();
-        for &tok in tokens.iter() {
-            l = engine.forward_token(tok, pos, &mut state);
-            pos += 1;
-        }
+        // Batched where the engine has a batched prompt path (Gemma-4 on
+        // Metal), one token at a time otherwise; see `Engine::prefill`.
+        let l = engine.prefill(&tokens, pos, &mut state);
+        pos += tokens.len();
         l
     };
     let prefill_secs = prefill_start.elapsed().as_secs_f64();
@@ -3041,7 +3041,7 @@ mod tests {
     /// prompt must be billed for ONE prompt, because that is the only
     /// thing the field buys. If this reads four times the `n = 1`
     /// figure, the fork did not happen and the feature is a loop
-    /// (`docs/plans/done/several-completions-per-request.md`).
+    /// (`bc5074aa:docs/plans/done/several-completions-per-request.md`).
     #[test]
     fn several_choices_prefill_the_prompt_once() {
         let decoder = small_decoder();

@@ -143,7 +143,10 @@ fn moe_experts_of_each_kind_run_the_id_kernels_and_match_cpu() {
     #[cfg(not(feature = "metal"))]
     eprintln!("skip: built without --features metal");
     #[cfg(feature = "metal")]
-    metal::run_all();
+    {
+        let _serial = metal::COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        metal::run_all();
+    }
 }
 
 /// A layer packed in a kind with no id kernel (#448). No loader builds
@@ -158,11 +161,19 @@ fn a_pack_with_no_id_kernel_falls_back_on_decode() {
     #[cfg(not(feature = "metal"))]
     eprintln!("skip: built without --features metal");
     #[cfg(feature = "metal")]
-    metal::run_fallback();
+    {
+        let _serial = metal::COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        metal::run_fallback();
+    }
 }
 
 #[cfg(feature = "metal")]
 mod metal {
+    /// Both tests read `metal_encode_stats`, a process-wide counter, and
+    /// compare dispatch counts. Run side by side (cargo's default) each
+    /// counted the other's dispatches and the comparison failed, on main
+    /// as much as anywhere. One at a time.
+    pub static COUNTER: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
 
     /// |Metal - CPU| on any logit at any step. The prefill GEMMs and

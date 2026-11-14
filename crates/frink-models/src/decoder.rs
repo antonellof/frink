@@ -30,12 +30,16 @@ mod fused_attention;
 mod fused_recurrent;
 #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
 mod fused_view;
+#[cfg(feature = "metal")]
+mod gdn_prefill;
 mod host_attention;
 mod hrm_streams;
 pub mod kv_window;
 mod layer_taps;
 mod lm_head;
 mod metal_eligibility;
+#[cfg(feature = "metal")]
+pub(crate) use metal_eligibility::metal_attn_switched_on;
 #[cfg(feature = "metal")]
 mod metal_kv;
 #[cfg(feature = "metal")]

@@ -103,6 +103,16 @@ Rust specifics:
 5. Add the row, update the triage, and keep `cargo test --workspace`
    green.
 
+## Docs match the code
+
+The docs (README, `docs/`, plans, ADRs, the roadmap, this file) describe
+the code as it is, one to one. A change to behaviour, a flag, an env
+var, a kernel selection rule, a known gap or an issue's state updates
+every doc that states it in the same PR. What was learned while doing
+the work (a cause found, a limit measured) goes into the doc that owns
+the topic, not only into the commit message. A doc that disagrees with
+the code is a bug in the doc.
+
 ## Before opening a PR
 
 - It closes or advances a named issue, and says which.
