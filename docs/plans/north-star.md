@@ -102,11 +102,15 @@ without a rental.
    serves a stored expert; the packed `mul_mv_id` path and the Metal
    prefill MoE paths are still resident-only, then asynchronous reads
    and a run that really exceeds memory.
-9. **Bonsai PTQ1_0 prefill** (#540): a prompt batch is one device
-   command buffer, attention layers included, and pp512 is 1.07x the
-   fork's on a quiet M5 Max. The GEMMs are 80% of it and run at the
-   fork's rate (PTQ1_0 at Q8_0's, so not its dequant); decode (tg32
-   0.86x of the fork) is what is left.
+9. **Gated delta-net hybrids on Metal** (#540): a prompt batch is
+   one command buffer and a decode token one wait, attention layers,
+   routed MoE layers with their shared expert, and the output head
+   included. On an M5 Max Qwen3.5-9B and Qwen3-Next-80B-A3B decode at
+   or above llama.cpp and prefill at 0.93x of it; Bonsai PTQ1_0
+   prefills at 1.07x the fork and decodes at 0.94x to 0.98x, all of it
+   GPU time in the PTQ1_0 matvecs (22 ms a token, no gaps between
+   command buffers). What is left: Bonsai's matvec rate, and the
+   overlap a concurrent encoder would give independent dispatches.
 
 ### D. Architectures
 
