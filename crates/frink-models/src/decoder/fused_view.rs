@@ -115,11 +115,26 @@ impl Decoder {
         layer: &'a LayerWeights,
         caps: FusedAttnCaps,
     ) -> Option<FusedAttnExtras<'a>> {
-        Self::attn_extras(&layer.attn, caps)
+        Self::attn_extras(&layer.attn, caps, false)
+    }
+
+    /// [`Self::fused_attn_extras`] for a launch that runs the layer's
+    /// parallel Mamba-2 block itself (`decoder::metal_hybrid`), so the
+    /// block is not a reason to refuse the attention beside it.
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
+    pub(crate) fn fused_attn_extras_beside_ssm<'a>(
+        layer: &'a LayerWeights,
+        caps: FusedAttnCaps,
+    ) -> Option<FusedAttnExtras<'a>> {
+        Self::attn_extras(&layer.attn, caps, true)
     }
 
     /// [`Self::fused_attn_extras`] over the attention weights alone.
-    fn attn_extras(attn: &AttnWeights, caps: FusedAttnCaps) -> Option<FusedAttnExtras<'_>> {
+    fn attn_extras(
+        attn: &AttnWeights,
+        caps: FusedAttnCaps,
+        ssm_beside: bool,
+    ) -> Option<FusedAttnExtras<'_>> {
         let AttnWeights {
             q_proj: _,
             k_proj: _,
@@ -153,7 +168,7 @@ impl Decoder {
             || o_scale.is_some()
             || (o_bias.is_some() && !caps.o_bias)
             || shortconv.is_some()
-            || ssm.is_some()
+            || (ssm.is_some() && !ssm_beside)
             || (*q_gate_interleaved && !caps.q_gate)
         {
             return None;
@@ -189,6 +204,26 @@ impl Decoder {
     /// launch that serves per-layer shapes (the Metal prefill run), on
     /// top of [`Self::metal_can_serve_layers`].
     pub(crate) fn fused_attn_layer_ok(&self, layer: &LayerWeights, caps: FusedAttnCaps) -> bool {
+        self.fused_attn_layer_ok_with(layer, caps, false)
+    }
+
+    /// [`Self::fused_attn_layer_ok`] for the launch that runs a parallel
+    /// Mamba-2 block beside the attention (`decoder::metal_hybrid`).
+    #[cfg_attr(not(feature = "metal"), allow(dead_code))]
+    pub(crate) fn fused_attn_layer_ok_beside_ssm(
+        &self,
+        layer: &LayerWeights,
+        caps: FusedAttnCaps,
+    ) -> bool {
+        self.fused_attn_layer_ok_with(layer, caps, true)
+    }
+
+    fn fused_attn_layer_ok_with(
+        &self,
+        layer: &LayerWeights,
+        caps: FusedAttnCaps,
+        ssm_beside: bool,
+    ) -> bool {
         use crate::config::RopeLayout;
         // gpt-oss: a backend without the sinks and `wo`'s bias would
         // compute a *different* attention than the CPU path for the same
@@ -201,7 +236,7 @@ impl Decoder {
         if self.gpt_oss.is_some() && !(caps.sinks && caps.o_bias) {
             return false;
         }
-        if Self::fused_attn_extras(layer, caps).is_none() {
+        if Self::attn_extras(&layer.attn, caps, ssm_beside).is_none() {
             return false;
         }
         if !matches!(self.config.rope_layout, RopeLayout::Norm | RopeLayout::Neox) {
@@ -327,20 +362,20 @@ mod tests {
     #[test]
     fn sinks_and_the_o_bias_reach_only_a_backend_that_applies_them() {
         let gpt_oss = attn(true, true);
-        assert!(Decoder::attn_extras(&gpt_oss, FusedAttnCaps::METAL).is_none());
+        assert!(Decoder::attn_extras(&gpt_oss, FusedAttnCaps::METAL, false).is_none());
         for caps in [FusedAttnCaps::CUDA, FusedAttnCaps::METAL_STACK] {
-            let both = Decoder::attn_extras(&gpt_oss, caps).expect("these caps apply both");
+            let both = Decoder::attn_extras(&gpt_oss, caps, false).expect("these caps apply both");
             assert_eq!(both.sinks, Some(&[0.5f32; 2][..]));
             assert_eq!(both.o_bias, Some(&[0.25f32; 8][..]));
         }
         for (sinks, o_bias) in [(true, false), (false, true)] {
             let one = attn(sinks, o_bias);
-            assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL).is_none());
-            assert!(Decoder::attn_extras(&one, FusedAttnCaps::CUDA).is_some());
-            assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL_STACK).is_some());
+            assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL, false).is_none());
+            assert!(Decoder::attn_extras(&one, FusedAttnCaps::CUDA, false).is_some());
+            assert!(Decoder::attn_extras(&one, FusedAttnCaps::METAL_STACK, false).is_some());
         }
         let plain = attn(false, false);
-        let extras = Decoder::attn_extras(&plain, FusedAttnCaps::METAL).unwrap();
+        let extras = Decoder::attn_extras(&plain, FusedAttnCaps::METAL, false).unwrap();
         assert!(extras.sinks.is_none() && extras.o_bias.is_none());
     }
 }

@@ -227,14 +227,19 @@ pub enum TokenMixer<'a> {
     ShortConv(ShortConvMixer<'a>),
     /// A Mamba-1 block (`crate::ssm_decode`).
     Mamba1(crate::ssm_decode::Mamba1Mixer<'a>),
+    /// A Mamba-2 block (`crate::ssm_decode`).
+    Mamba2(crate::ssm_decode::Mamba2Mixer<'a>),
+    /// Attention AND a Mamba-2 block over the same normed input, their
+    /// outputs summed before the residual (`falcon-h1.cpp:137-161`).
+    Parallel(AttnMixer<'a>, crate::ssm_decode::Mamba2Mixer<'a>),
 }
 
 impl<'a> TokenMixer<'a> {
     /// The attention half, on an attention layer.
     pub fn attn(&self) -> Option<&AttnMixer<'a>> {
         match self {
-            Self::Attention(a) => Some(a),
-            Self::ShortConv(_) | Self::Mamba1(_) => None,
+            Self::Attention(a) | Self::Parallel(a, _) => Some(a),
+            Self::ShortConv(_) | Self::Mamba1(_) | Self::Mamba2(_) => None,
         }
     }
 }
@@ -349,7 +354,10 @@ pub fn launch_decode_dense_stack(
     }
     for layer in layers.iter() {
         match &layer.mixer {
-            TokenMixer::Attention(a) => {
+            TokenMixer::Attention(a) | TokenMixer::Parallel(a, _) => {
+                if let TokenMixer::Parallel(_, m) = &layer.mixer {
+                    assert_eq!(m.out_rows(), hidden_dim);
+                }
                 let kv = &kvs[a.kv.slot()];
                 assert_eq!(a.q.rows, n_heads * kv.head_dim);
                 assert_freq_factors_len(
@@ -366,6 +374,7 @@ pub fn launch_decode_dense_stack(
                 assert_eq!(c.taps.len(), n * l);
             }
             TokenMixer::Mamba1(m) => assert_eq!(m.out_rows(), hidden_dim),
+            TokenMixer::Mamba2(m) => assert_eq!(m.out_rows(), hidden_dim),
         }
         if layer.per_layer.is_some() {
             assert!(ple.is_some(), "a per-layer gate with no PLE plane");
@@ -390,20 +399,21 @@ pub fn launch_decode_dense_stack(
         .iter()
         .filter_map(|l| match &l.mixer {
             TokenMixer::ShortConv(c) => Some(c.windows.n()),
-            TokenMixer::Attention(_) | TokenMixer::Mamba1(_) => None,
+            _ => None,
         })
         .max()
         .unwrap_or(0);
-    // A Mamba block's `xz`, `x_db` / `dt` and `xc` / `y` widths
-    // (`ssm_decode::Mamba1Mixer::widths`).
-    let (ssm_q, ssm_kv, ssm_inner) = layers
+    // What the Mamba blocks keep in the Q, K/V, attention and gate
+    // buffers (`ssm_decode::ScratchNeed`).
+    let ssm = layers
         .iter()
         .filter_map(|l| match &l.mixer {
             TokenMixer::Mamba1(m) => Some(m.widths()),
+            TokenMixer::Mamba2(m) | TokenMixer::Parallel(_, m) => Some(m.widths()),
             _ => None,
         })
-        .fold((0, 0, 0), |acc, w| {
-            (acc.0.max(w.0), acc.1.max(w.1), acc.2.max(w.2))
+        .fold(crate::ssm_decode::ScratchNeed::default(), |acc, w| {
+            acc.max(w)
         });
     let max_q = layers
         .iter()
@@ -411,14 +421,14 @@ pub fn launch_decode_dense_stack(
         .max()
         .unwrap_or(0)
         .max(3 * conv_width)
-        .max(ssm_q);
+        .max(ssm.q);
     let max_kv = layers
         .iter()
         .filter_map(|l| l.mixer.attn())
         .filter_map(|a| a.kv.own().map(|(k, v)| k.rows.max(v.rows)))
         .max()
         .unwrap_or(1)
-        .max(ssm_kv);
+        .max(ssm.kv);
     let max_gate = layers
         .iter()
         .map(|l| {
@@ -429,11 +439,11 @@ pub fn launch_decode_dense_stack(
         })
         .max()
         .unwrap()
-        .max(ssm_inner)
+        .max(ssm.gate)
         .max(1);
     let attn_elems = (n_heads * kvs.iter().map(|kv| kv.head_dim).max().unwrap_or(0))
         .max(conv_width)
-        .max(ssm_inner);
+        .max(ssm.attn);
     let logits_rows = output.map(|o| o.rows);
 
     let shared = shared_metal()?;
@@ -642,6 +652,22 @@ pub fn launch_decode_dense_stack(
                     },
                 )?;
             }
+            TokenMixer::Mamba2(m) => {
+                spans.span(&cmd_buf, &mut encoder, "mamba2")?;
+                crate::ssm_decode::encode_mamba2(
+                    &encoder,
+                    &mut mrs,
+                    device,
+                    m,
+                    &crate::ssm_decode::Mamba2Bufs {
+                        x: x_buf,
+                        zxbcdt: q_buf,
+                        xbc: attn_buf,
+                        y: gate_buf,
+                        out: o_buf,
+                    },
+                )?;
+            }
             TokenMixer::ShortConv(c) => {
                 // `lfm-base.cpp:26-110`: `bcx = in_proj(x)` into the Q
                 // buffer (sized for it above), the conv and its gate into
@@ -675,7 +701,7 @@ pub fn launch_decode_dense_stack(
                 // and FFN, which is the whole of the conv layer's
                 // difference from an attention layer.
             }
-            TokenMixer::Attention(attn) => {
+            TokenMixer::Attention(attn) | TokenMixer::Parallel(attn, _) => {
                 assert_eq!(attn.o.rows, hidden_dim);
                 let kv = &kvs[attn.kv.slot()];
                 let (head_dim, n_kv_heads) = (kv.head_dim, kv.n_kv_heads);
@@ -823,6 +849,29 @@ pub fn launch_decode_dense_stack(
                 mrs.end_op(&[attn_buf], &[o_buf]);
                 tail.encode_o_bias(&encoder, &mut mrs, device, o_buf, hidden_dim, 1)?;
             }
+        }
+        // `falcon-h1.cpp:156-160`: the Mamba-2 block over the same normed
+        // input, into `down` (free here: the previous layer's FFN output
+        // was folded into this layer's `attn_norm` above), then summed
+        // into the attention branch.
+        if let TokenMixer::Parallel(_, m) = &layer.mixer {
+            spans.span(&cmd_buf, &mut encoder, "mamba2")?;
+            crate::ssm_decode::encode_mamba2(
+                &encoder,
+                &mut mrs,
+                device,
+                m,
+                &crate::ssm_decode::Mamba2Bufs {
+                    x: x_buf,
+                    zxbcdt: q_buf,
+                    xbc: attn_buf,
+                    y: gate_buf,
+                    out: down_buf,
+                },
+            )?;
+            mrs.begin_op(&encoder, &[o_buf, down_buf], &[o_buf]);
+            encode_vec_add(&encoder, device, o_buf, down_buf, hidden_dim as u32)?;
+            mrs.end_op(&[o_buf, down_buf], &[o_buf]);
         }
 
         // Gemma sandwich norm: normalize the attn block output *before*

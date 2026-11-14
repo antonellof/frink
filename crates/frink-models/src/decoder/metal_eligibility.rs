@@ -98,6 +98,17 @@ impl Decoder {
     /// asks this; everything else asks the whole predicate.
     #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
     pub(super) fn metal_can_serve_layers(config: &ModelConfig, lora_attached: bool) -> bool {
+        // Every fused launch runs attention alone on its layer but the
+        // recurrent decode stack (`decoder::metal_hybrid`); a parallel
+        // Mamba-2 block (`crate::mamba2`) has no kernel in the others.
+        Self::metal_can_serve_mixed_layers(config, lora_attached) && !config.parallel_ssm
+    }
+
+    /// [`Self::metal_can_serve_layers`] without the parallel Mamba-2
+    /// fence, for the one launch that runs that block beside attention
+    /// (`frink_metal::attn::TokenMixer::Parallel`).
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
+    pub(super) fn metal_can_serve_mixed_layers(config: &ModelConfig, lora_attached: bool) -> bool {
         !lora_attached
             && config.residual_scale.is_none()
             // `minimax-01.cpp:249,428`: the residual a fused kernel
@@ -118,9 +129,6 @@ impl Decoder {
             // The GPU embedding gather has no add and no stack sees
             // `pos` for it (`crate::position_embd`).
             && !config.learned_positions
-            // Every fused launch runs attention alone on its layer; a
-            // parallel Mamba-2 block (`crate::mamba2`) has no kernel.
-            && !config.parallel_ssm
             // Every fused launch takes ONE sliding window per layer; a
             // chunked layer's window is per query
             // (`crate::chunked_swa`), and no fused kernel norms Q and K
@@ -287,6 +295,16 @@ impl Decoder {
         layer: &'a LayerWeights,
         caps: fused_view::FusedAttnCaps,
     ) -> Option<frink_metal::attn::AttnExtras<'a>> {
+        Some(self.metal_attn_view_from(Self::fused_attn_extras(layer, caps)?))
+    }
+
+    /// The one conversion of [`fused_view::FusedAttnExtras`] into
+    /// Metal's spelling, whichever question produced them.
+    #[cfg(feature = "metal")]
+    pub(super) fn metal_attn_view_from<'a>(
+        &self,
+        extras: fused_view::FusedAttnExtras<'a>,
+    ) -> frink_metal::attn::AttnExtras<'a> {
         let fused_view::FusedAttnExtras {
             q_bias,
             k_bias,
@@ -295,8 +313,8 @@ impl Decoder {
             k_norm,
             sinks,
             o_bias,
-        } = Self::fused_attn_extras(layer, caps)?;
-        Some(frink_metal::attn::AttnExtras {
+        } = extras;
+        frink_metal::attn::AttnExtras {
             q_bias,
             k_bias,
             v_bias,
@@ -306,7 +324,7 @@ impl Decoder {
             attn_logit_softcap: self.config.attn_logit_softcap,
             sinks,
             o_bias,
-        })
+        }
     }
 
     /// gpt-oss's FFN additions to layer `l` for the Metal MoE stacks, or

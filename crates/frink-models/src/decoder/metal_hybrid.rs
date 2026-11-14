@@ -32,7 +32,7 @@ use frink_metal::attn::{
     AttnMixer, DenseFfnMetal, DenseLayerMetal, LayerKv, MetalKvBuffers, ShortConvMixer, TokenMixer,
 };
 use frink_metal::shortconv::ConvWindows;
-use frink_metal::ssm_decode::{Mamba1Mixer, Mamba1Weights};
+use frink_metal::ssm_decode::{Mamba1Mixer, Mamba1Weights, Mamba2Mixer, Mamba2Weights};
 use frink_moe::GluAct;
 
 use super::lm_head::FoldedLmHead;
@@ -60,6 +60,30 @@ enum LayerKind {
     Conv(usize),
     /// A Mamba-1 block.
     Mamba1,
+    /// A Mamba-2 block where attention would be.
+    Mamba2,
+    /// GQA with this KV slot AND a Mamba-2 block beside it
+    /// (`crate::mamba2::PARALLEL_WITH_ATTENTION`).
+    Parallel(usize),
+}
+
+impl LayerKind {
+    /// The KV slot, on a layer that attends.
+    fn slot(self) -> Option<usize> {
+        match self {
+            LayerKind::Attn(s) | LayerKind::Parallel(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Whether the layer's cache carries a `RecurrentState` the stack
+    /// advances in place.
+    fn recurrent(self) -> bool {
+        matches!(
+            self,
+            LayerKind::Mamba1 | LayerKind::Mamba2 | LayerKind::Parallel(_)
+        )
+    }
 }
 
 /// Which layer is which, for a model the stack serves whole.
@@ -147,12 +171,24 @@ impl Decoder {
         }))
     }
 
+    /// `Some(())` when the layer's Mamba-2 block is one the stack runs:
+    /// a Metal matvec for both projections, and no norm on the branch.
+    fn hybrid_mamba2_ok(&self, layer: &LayerWeights) -> Option<()> {
+        let Some(SsmBlock::Mamba2(m)) = layer.attn.ssm.as_ref() else {
+            return None;
+        };
+        (layer.attn.post_attn_norm.is_none()
+            && Self::metal_matvec_launch(&m.in_proj).is_some()
+            && Self::metal_matvec_launch(&m.out_proj).is_some())
+        .then_some(())
+    }
+
     /// The plan, or `None` when any layer is something the stack does
     /// not serve. A model whose every layer attends is the plain dense
     /// stack's.
     fn metal_hybrid_plan(&self) -> Option<HybridPlan> {
         if !super::metal_eligibility::metal_attn_switched_on()
-            || !Self::metal_can_serve_layers(&self.config, self.lora_attached())
+            || !Self::metal_can_serve_mixed_layers(&self.config, self.lora_attached())
             || self.gpt_oss.is_some()
         {
             return None;
@@ -197,6 +233,10 @@ impl Decoder {
                     }
                     kinds.push(LayerKind::Mamba1);
                 }
+                AttnShape::Mamba2 => {
+                    self.hybrid_mamba2_ok(layer)?;
+                    kinds.push(LayerKind::Mamba2);
+                }
                 AttnShape::Gqa {
                     n_heads,
                     n_kv_heads: kv_heads,
@@ -205,7 +245,7 @@ impl Decoder {
                     // geometry: `n_heads` is a launch argument.
                     if *n_kv_heads.get_or_insert(kv_heads) != kv_heads
                         || n_heads != self.config.n_heads
-                        || !self.fused_attn_layer_ok(
+                        || !self.fused_attn_layer_ok_beside_ssm(
                             layer,
                             super::fused_view::FusedAttnCaps::METAL_STACK,
                         )
@@ -216,13 +256,21 @@ impl Decoder {
                     {
                         return None;
                     }
-                    kinds.push(LayerKind::Attn(n_attn));
+                    // `falcon-h1.cpp:156-160`: the block beside attention.
+                    kinds.push(match layer.attn.ssm {
+                        None => LayerKind::Attn(n_attn),
+                        Some(_) => {
+                            self.hybrid_mamba2_ok(layer)?;
+                            LayerKind::Parallel(n_attn)
+                        }
+                    });
                     n_attn += 1;
                 }
                 _ => return None,
             }
         }
-        if n_attn == self.layers.len() {
+        // Every layer plain attention is the plain dense stack's model.
+        if kinds.iter().all(|k| matches!(k, LayerKind::Attn(_))) {
             return None;
         }
         Some(HybridPlan {
@@ -249,7 +297,8 @@ impl Decoder {
         // Every cache at this position with every row it ever pushed:
         // an evicting window is the host body's to serve.
         if kv_caches.iter().zip(&plan.kinds).any(|(c, k)| {
-            c.positions() != pos || (!matches!(k, LayerKind::Mamba1) && c.rows() != pos)
+            c.positions() != pos
+                || (!matches!(k, LayerKind::Mamba1 | LayerKind::Mamba2) && c.rows() != pos)
         }) {
             return None;
         }
@@ -281,7 +330,7 @@ impl Decoder {
                 .kinds
                 .iter()
                 .enumerate()
-                .filter_map(|(l, k)| matches!(k, LayerKind::Attn(_)).then_some(l))
+                .filter_map(|(l, k)| k.slot().map(|_| l))
                 .collect();
             *guard = Some(HybridDeviceState {
                 kvs,
@@ -297,47 +346,41 @@ impl Decoder {
         let mut mamba_states = Vec::new();
         for (l, kind) in plan.kinds.iter().enumerate() {
             let cache = &mut kv_caches[l];
-            match *kind {
-                LayerKind::Attn(s) => {
-                    let m = &mut state.kvs[s];
-                    if m.seq_len != cache.rows() {
-                        m.upload_from_host(
-                            &cache.k.to_f32_vec(),
-                            &cache.v.to_f32_vec(),
-                            cache.rows(),
-                        )
+            if kind.recurrent() {
+                let block = self.layers[l].attn.ssm.as_ref()?;
+                let rs = cache.recurrent.get_or_insert_with(|| block.zero_state());
+                mamba_states.push((
+                    (rs.conv.as_ptr(), rs.conv.alloc_bytes()),
+                    (rs.ssm.as_ptr(), rs.ssm.alloc_bytes()),
+                ));
+            }
+            if let Some(s) = kind.slot() {
+                let m = &mut state.kvs[s];
+                if m.seq_len != cache.rows() {
+                    m.upload_from_host(&cache.k.to_f32_vec(), &cache.v.to_f32_vec(), cache.rows())
                         .ok()?;
-                    }
                 }
-                LayerKind::Conv(i) => {
-                    let history = cache
-                        .k
-                        .as_f32()
-                        .expect(super::recurrent_block::SHORT_CONV_HISTORY_IS_F32);
-                    let rows = cache.rows();
-                    let window = window_from_history(plan.l_cache - 1, n, rows, |r| {
-                        &history[r * n..(r + 1) * n]
-                    });
-                    let windows = state.windows.as_mut().expect("a conv layer has windows");
-                    windows.history_mut(i).copy_from_slice(&window);
-                }
-                LayerKind::Mamba1 => {
-                    let block = self.layers[l].attn.ssm.as_ref()?;
-                    let rs = cache.recurrent.get_or_insert_with(|| block.zero_state());
-                    mamba_states.push((
-                        (rs.conv.as_ptr(), rs.conv.alloc_bytes()),
-                        (rs.ssm.as_ptr(), rs.ssm.alloc_bytes()),
-                    ));
-                }
+            }
+            if let LayerKind::Conv(i) = *kind {
+                let history = cache
+                    .k
+                    .as_f32()
+                    .expect(super::recurrent_block::SHORT_CONV_HISTORY_IS_F32);
+                let rows = cache.rows();
+                let window = window_from_history(plan.l_cache - 1, n, rows, |r| {
+                    &history[r * n..(r + 1) * n]
+                });
+                let windows = state.windows.as_mut().expect("a conv layer has windows");
+                windows.history_mut(i).copy_from_slice(&window);
             }
         }
 
         let mut layers = Vec::with_capacity(self.layers.len());
-        let mut mamba_i = 0usize;
+        let mut states = mamba_states.into_iter();
         for (l, kind) in plan.kinds.iter().enumerate() {
             let layer = &self.layers[l];
-            let mixer = match *kind {
-                LayerKind::Attn(s) => TokenMixer::Attention(AttnMixer {
+            let attn = |s: usize| -> Option<AttnMixer<'_>> {
+                Some(AttnMixer {
                     q: Self::metal_matvec_launch(&layer.attn.q_proj)?,
                     kv: LayerKv::Own {
                         k: Self::metal_matvec_launch(&layer.attn.k_proj)?,
@@ -345,10 +388,18 @@ impl Decoder {
                         slot: s,
                     },
                     o: Self::metal_matvec_launch(&layer.attn.o_proj)?,
-                    extras: self.metal_attn_extras(layer),
+                    // `beside_ssm`: a parallel layer's block is the
+                    // stack's own (`TokenMixer::Parallel`).
+                    extras: self.metal_attn_view_from(Self::fused_attn_extras_beside_ssm(
+                        layer,
+                        super::fused_view::FusedAttnCaps::METAL_STACK,
+                    )?),
                     rope: self.metal_layer_rope(l),
                     window: self.config.layer_sliding_window(l),
-                }),
+                })
+            };
+            let mixer = match *kind {
+                LayerKind::Attn(s) => TokenMixer::Attention(attn(s)?),
                 LayerKind::Conv(i) => {
                     let conv = layer.attn.shortconv.as_ref()?;
                     TokenMixer::ShortConv(ShortConvMixer {
@@ -363,8 +414,7 @@ impl Decoder {
                     let Some(SsmBlock::Mamba1(m)) = layer.attn.ssm.as_ref() else {
                         return None;
                     };
-                    let (conv_state, ssm_state) = mamba_states[mamba_i];
-                    mamba_i += 1;
+                    let (conv_state, ssm_state) = states.next()?;
                     let w = Mamba1Weights {
                         in_proj: Self::metal_matvec_launch(&m.in_proj)?,
                         conv1d: &m.conv1d,
@@ -387,6 +437,34 @@ impl Decoder {
                     // and nothing else reads or writes them until the
                     // launch below, which waits for the GPU, returns.
                     TokenMixer::Mamba1(unsafe { Mamba1Mixer::new(w, conv_state, ssm_state) }?)
+                }
+                LayerKind::Mamba2 | LayerKind::Parallel(_) => {
+                    let Some(SsmBlock::Mamba2(m)) = layer.attn.ssm.as_ref() else {
+                        return None;
+                    };
+                    let (conv_state, ssm_state) = states.next()?;
+                    let w = Mamba2Weights {
+                        in_proj: Self::metal_matvec_launch(&m.in_proj)?,
+                        conv1d: &m.conv1d,
+                        conv_bias: &m.conv1d_bias,
+                        d_conv: m.h.d_conv,
+                        dt_bias: &m.dt_bias,
+                        a: &m.a,
+                        d: &m.d,
+                        norm: m.norm.as_deref(),
+                        norm_eps: self.config.rms_norm_eps,
+                        out_proj: Self::metal_matvec_launch(&m.out_proj)?,
+                        d_inner: m.h.d_inner,
+                        d_state: m.h.d_state,
+                        n_head: m.h.n_head,
+                        n_group: m.h.n_group,
+                    };
+                    // SAFETY: as the Mamba-1 arm's (`Mamba2::zero_state`).
+                    let block = unsafe { Mamba2Mixer::new(w, conv_state, ssm_state) }?;
+                    match *kind {
+                        LayerKind::Parallel(s) => TokenMixer::Parallel(attn(s)?, block),
+                        _ => TokenMixer::Mamba2(block),
+                    }
                 }
             };
             layers.push(DenseLayerMetal {
@@ -445,7 +523,7 @@ impl Decoder {
         // position as `ssm_block` counts it.
         for (l, kind) in plan.kinds.iter().enumerate() {
             match *kind {
-                LayerKind::Attn(s) => {
+                LayerKind::Attn(s) | LayerKind::Parallel(s) => {
                     Self::catch_up_host_kv_from_metal(&mut state.kvs[s], &mut kv_caches[l])
                 }
                 LayerKind::Conv(i) => {
@@ -454,7 +532,7 @@ impl Decoder {
                         .push(windows.newest(i), &[])
                         .expect("unbounded/planned KvCache growth is infallible");
                 }
-                LayerKind::Mamba1 => kv_caches[l]
+                LayerKind::Mamba1 | LayerKind::Mamba2 => kv_caches[l]
                     .advance_len(1)
                     .expect("unbounded/planned KvCache growth is infallible"),
             }

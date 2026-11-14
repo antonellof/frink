@@ -304,6 +304,8 @@ fn metal_decode_runs_the_mamba1_blocks_in_the_dense_stack() {
     for (name, golden, on_stack) in [
         (MAMBA, &MAMBA_GOLDEN, true),
         (MAMBA_DTBCRMS, &MAMBA_DTBCRMS_GOLDEN, false),
+        // Pure Mamba-2: `TokenMixer::Mamba2` on every layer.
+        (MAMBA2, &MAMBA2_GOLDEN, true),
     ] {
         let d = load_graph_fixture(name);
         let got = decode(&d);

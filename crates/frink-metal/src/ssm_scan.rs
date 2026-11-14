@@ -205,7 +205,7 @@ pub unsafe fn launch_scan_rows(
             bc: (xbc_b, n_x * 4),
             x_stride: stride,
             bc_stride: stride,
-            dt: dt_b,
+            dt: (dt_b, 0),
             dt_bias: None,
             a: a_b,
             per_state,
@@ -236,7 +236,7 @@ pub(crate) struct ScanOperands<'b> {
     pub bc: (&'b ProtocolObject<dyn MTLBuffer>, usize),
     pub x_stride: usize,
     pub bc_stride: usize,
-    pub dt: &'b ProtocolObject<dyn MTLBuffer>,
+    pub dt: (&'b ProtocolObject<dyn MTLBuffer>, usize),
     /// Added to `dt` before the softplus, when the caller has not.
     pub dt_bias: Option<&'b ProtocolObject<dyn MTLBuffer>>,
     pub a: &'b ProtocolObject<dyn MTLBuffer>,
@@ -268,7 +268,7 @@ pub(crate) fn encode_scan(
         enc.setBuffer_offset_atIndex(Some(o.state), 0, 0);
         enc.setBuffer_offset_atIndex(Some(o.x.0), o.x.1, 1);
         enc.setBuffer_offset_atIndex(Some(o.bc.0), o.bc.1, 2);
-        enc.setBuffer_offset_atIndex(Some(o.dt), 0, 3);
+        enc.setBuffer_offset_atIndex(Some(o.dt.0), o.dt.1, 3);
         enc.setBuffer_offset_atIndex(Some(o.a), 0, 4);
         enc.setBuffer_offset_atIndex(Some(o.y), 0, 5);
         let mut dims: [u32; 4] = [
@@ -282,7 +282,7 @@ pub(crate) fn encode_scan(
         enc.setBytes_length_atIndex(NonNull::new(batch.as_mut_ptr() as *mut _).unwrap(), 16, 7);
         // A buffer must be bound at every index the kernel names; with no
         // bias the flag keeps it unread.
-        enc.setBuffer_offset_atIndex(Some(o.dt_bias.unwrap_or(o.dt)), 0, 8);
+        enc.setBuffer_offset_atIndex(Some(o.dt_bias.unwrap_or(o.dt.0)), 0, 8);
         enc.setThreadgroupMemoryLength_atIndex(n_sg.max(1) * 4, 0);
     }
     crate::dispatch::dispatch_counted(
