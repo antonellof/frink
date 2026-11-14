@@ -40,7 +40,7 @@ own. Checked 2026-11-13, at 0.63.0.
 | 1. Loads | `frink archs`, `tests/arch_coverage.rs`, the triage in [`MODELS.md`](../MODELS.md) | Every text-generation architecture llama.cpp names runs or refuses by name. A few refuse as unaudited and need new code (#538). |
 | 2. Same tokens | `frink parity` and CI's oracle job (`scripts/oracle.sh`); the render census for prompts | Every served architecture matches on its fixtures on the CPU. A pure Q2_K checkpoint is WRONG on the CPU (#584). The Metal decode agrees with the CPU within rounding on every graph fixture; `hrm_text` amplifies that rounding past the line and is listed (`KNOWN_METAL_DIVERGENCES`). Some pre-tokenizer arms still fall back to GPT-2's (#629). The chat-prompt differences left are listed deviations |
 | 3. Backend | [`KERNELS.md`](../KERNELS.md), generated and drift-tested | Every kind has a kernel on CPU, Metal and CUDA. Some CUDA kinds have never run on a GPU (#405). Vulkan serves a decode and prefill stack for its kinds, opt-in (#409) |
-| 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead on dense and MoE models once an M5 runs the prefill on its matrix units (tensor API, #631); Gemma-4 is level since it runs the fused stacks; gpt-oss is ahead on prefill and behind on decode, where each token waits ~2 ms beyond its GPU time (#627); Qwen3-0.6B and SmolLM2 are behind on prefill. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Many published rows predate the current code (#542) |
+| 4. Not slower | `frink bench --render`, [`RESULTS.md`](../../benchmarks/RESULTS.md) | Metal is level or ahead on dense and MoE models once an M5 runs the prefill on its matrix units (tensor API, #631); Gemma-4 is level since it runs the fused stacks; gpt-oss is ahead on prefill and level or ahead on decode in best-of runs on a shared host, not yet re-measured on a quiet one (#627); Qwen3-0.6B and SmolLM2 are behind on prefill. CPU is close on decode and behind on some prefill. CUDA is behind on both (#133, #259). Many published rows predate the current code (#542) |
 | 5. Same command | `crates/frink-cli/src/llama_flags.rs`, which pins the gap | The common flags work. A tail of `llama-cli` / `llama-server` flags and `LLAMA_ARG_*` variables is still unaccepted (#404) |
 
 ## Priorities
@@ -95,12 +95,15 @@ without a rental.
    the private loop and once with `--cont-batching`: several
    temperature-0 requests return the same text as without the draft,
    and `usage` reports accepted draft tokens (#600, #533).
-7. **gpt-oss decode on Metal** (#627): it runs the fused MoE stacks
-   with every one of its additions on the device and its prefill is
-   ahead of llama.cpp, but a decode token spends ~6 ms on the GPU and
-   ~2 ms more waiting on the command buffer. llama.cpp keeps its
-   buffers in Metal residency sets and frink does not; that is the
-   first suspect.
+7. **gpt-oss decode on Metal** (#627): the gap was host time, not
+   the GPU (residency sets measured no change). Every token
+   byte-compared its expert-bias planes against their uploads (1.8 ms
+   of encode); with that gone the MoE stack splits its command buffer
+   at a sixth, and the router and `down` biases fold into top-k and
+   the weighted sum. `FRINK_METAL_KERNEL_TIMING` now covers the MoE
+   decode stack; the expert `mul_mv_id` and `lm_head` run near memory
+   bandwidth. What is left is a quiet-host measurement (ADR 0006)
+   before the issue closes.
 8. **Re-measure the stale Metal rows** (#542), on a quiet host, by a
    person (ADR 0006).
 9. **MoE larger than memory** (#406,
