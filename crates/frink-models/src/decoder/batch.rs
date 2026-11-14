@@ -296,6 +296,24 @@ impl Decoder {
                 continue;
             }
 
+            // A run of recurrent layers whole on the device, the batch
+            // resident across it (#540). Not under a tensor dump, which
+            // wants every layer's intermediates on the host, nor with
+            // HRM streams, which re-enter the stack between layers.
+            #[cfg(feature = "metal")]
+            if dump.is_none() && hrm.is_none() && shape.attention.is_recurrent() {
+                if let Some(end) = self.metal_recurrent_prefill_run(
+                    l,
+                    run_end,
+                    &mut hidden_batch,
+                    batch_size,
+                    kv_caches,
+                ) {
+                    l = end;
+                    continue;
+                }
+            }
+
             let cache = &mut kv_caches[l];
 
             // One-CB dense prefill (RMSNorm→QKV GEMM→attn→O→FFN) when every
@@ -800,13 +818,32 @@ impl Decoder {
                     d.write("kqv_out", Some(l), 1, out_width, &attn_out_batch);
                 }
 
-                let mut projected_batch = self.attn_out_to_residual_rows(
+                let branch = self.attn_branch_rows(
                     layer,
                     &normed_batch,
                     &mut attn_out_batch,
                     batch_size,
                     q_gate.as_deref(),
                 );
+                // `wo`, the residual and the FFN on the device, with the
+                // recurrent layers after it in the same submission
+                // (#540), under the same fences as the recurrent run.
+                #[cfg(feature = "metal")]
+                if dump.is_none() && hrm.is_none() && parallel_ssm.is_none() {
+                    if let Some(end) = self.metal_attn_tail_prefill_run(
+                        l,
+                        layer,
+                        &branch,
+                        run_end,
+                        &mut hidden_batch,
+                        batch_size,
+                        kv_caches,
+                    ) {
+                        l = end;
+                        continue 'layers;
+                    }
+                }
+                let mut projected_batch = self.project_attn_rows(layer, &branch, batch_size);
                 Self::add_parallel_ssm(&mut projected_batch, parallel_ssm);
                 if let Some(d) = dump {
                     d.write("attn_out", Some(l), 1, hidden_dim, &projected_batch);

@@ -41,6 +41,11 @@ pub mod gdn_head;
 #[cfg(feature = "metal")]
 pub mod gdn_branch;
 
+/// A run of recurrent PREFILL layers in one command buffer: the batch
+/// twin of `gdn_branch`, GEMMs and the chunked recurrence.
+#[cfg(feature = "metal")]
+pub mod gdn_prefill;
+
 /// Shared-storage buffers reused across launches, because allocating
 /// them per launch is host time the GPU ledger cannot see.
 #[cfg(feature = "metal")]

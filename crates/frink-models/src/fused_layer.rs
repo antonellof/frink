@@ -289,19 +289,65 @@ impl<'a> LayerFfnParts<'a> {
     /// three has no kernel for its storage.
     #[cfg(feature = "metal")]
     pub fn launches(&self) -> Option<LayerFfnLaunches<'a>> {
+        let (gate, up, down, fold_x, fold_act) =
+            self.launches_with(crate::metal_launch::matvec, |l| l.rows)?;
+        Some(LayerFfnLaunches {
+            norm: self.norm,
+            norm_eps: self.norm_eps,
+            gate,
+            up,
+            down,
+            fold_x,
+            fold_act,
+        })
+    }
+
+    /// The same three as GEMMs, for a prefill batch
+    /// (`frink_metal::gdn_prefill`). The norm epsilon is the layer's,
+    /// which the prefill run takes from the layer it belongs to.
+    #[cfg(feature = "metal")]
+    pub fn prefill_launches(&self) -> Option<frink_metal::gdn_prefill::PrefillFfn<'a>> {
+        let (gate, up, down, fold_x, fold_act) =
+            self.launches_with(WeightMatrix::mul_mm_sg_launch, |l| l.rows)?;
+        Some(frink_metal::gdn_prefill::PrefillFfn {
+            norm: self.norm,
+            gate,
+            up,
+            down,
+            fold_x,
+            fold_act,
+        })
+    }
+
+    /// Gate, up and down as `launch` builds them, with the rotations
+    /// their inputs need. ONE body for the matvec and the GEMM forms,
+    /// so the two cannot disagree about which folds a layer may have.
+    #[cfg(feature = "metal")]
+    #[allow(clippy::type_complexity)]
+    fn launches_with<L>(
+        &self,
+        launch: impl Fn(&'a WeightMatrix) -> Option<L>,
+        rows: impl Fn(&L) -> usize,
+    ) -> Option<(
+        L,
+        L,
+        L,
+        Option<frink_metal::hadamard::FoldPlan<'a>>,
+        Option<frink_metal::hadamard::FoldPlan<'a>>,
+    )> {
         let hidden = self.norm.len();
         let one = |m: &'a WeightMatrix, width: usize| {
             let (base, fold) = m.launch_parts();
-            let launch = crate::metal_launch::matvec(base)?;
+            let launched = launch(base)?;
             let plan = match fold {
                 None => None,
                 Some(f) => Some(f.metal_plan(width)?),
             };
-            Some((launch, plan))
+            Some((launched, plan))
         };
         let (gate, fold_x) = one(self.gate, hidden)?;
         let (up, up_fold) = one(self.up, hidden)?;
-        let (down, fold_act) = one(self.down, gate.rows)?;
+        let (down, fold_act) = one(self.down, rows(&gate))?;
         // Gate and up read the SAME vector, so one rotation serves both
         // and two different ones cannot be expressed: a checkpoint
         // whose gate and up disagree about their input basis is not
@@ -314,14 +360,6 @@ impl<'a> LayerFfnParts<'a> {
         if !same {
             return None;
         }
-        Some(LayerFfnLaunches {
-            norm: self.norm,
-            norm_eps: self.norm_eps,
-            gate,
-            up,
-            down,
-            fold_x,
-            fold_act,
-        })
+        Some((gate, up, down, fold_x, fold_act))
     }
 }

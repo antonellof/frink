@@ -68,52 +68,63 @@ pub const GDN_HEAD_KERNEL_SRC: &str = r#"
 using namespace metal;
 
 // `frink_core::mamba2::conv_step` followed by SiLU, one thread per
-// convolution channel.
+// convolution channel, over `rows` consecutive tokens of `width` each
+// (one for a decode token).
 //
 // The shift that follows the read is safe inside the thread because a
 // channel's history column is touched by NOBODY else: thread `c` reads
 // `state[i * width + c]` for every `i` and writes the same column back.
 // The whole window is held in registers between the two, so the write
-// cannot race the read.
+// cannot race the read, and the rows of a batch step that window in
+// order exactly as `rows` calls would.
 kernel void gdn_conv_silu(
     device float* state [[buffer(0)]],
     device const float* taps [[buffer(1)]],
     device const float* x [[buffer(2)]],
     device float* out [[buffer(3)]],
-    constant uint2& dims [[buffer(4)]],
+    constant uint4& dims [[buffer(4)]],
     uint c [[thread_position_in_grid]]
 ) {
     const uint width = dims.x;
     const uint d_conv = dims.y;
+    const uint rows = dims.z;
     if (c >= width) {
         return;
     }
-    // ops.cpp:9598-9603: a float accumulator over the window in order,
-    // the newest input last, which is the order the host keeps too.
     float window[8];
     for (uint i = 0; i + 1 < d_conv; ++i) {
         window[i] = state[i * width + c];
     }
-    const float xc = x[c];
     device const float* t = taps + (size_t)c * d_conv;
-    float acc = 0.0f;
+    for (uint r = 0; r < rows; ++r) {
+        const float xc = x[(size_t)r * width + c];
+        // ops.cpp:9598-9603: a float accumulator over the window in
+        // order, the newest input last, which is the order the host
+        // keeps too.
+        float acc = 0.0f;
+        for (uint i = 0; i + 1 < d_conv; ++i) {
+            acc += window[i] * t[i];
+        }
+        acc += xc * t[d_conv - 1];
+        out[(size_t)r * width + c] = acc / (1.0f + exp(-acc));
+        // Drop the oldest row, append `x`.
+        for (uint i = 0; i + 2 < d_conv; ++i) {
+            window[i] = window[i + 1];
+        }
+        if (d_conv > 1) {
+            window[d_conv - 2] = xc;
+        }
+    }
     for (uint i = 0; i + 1 < d_conv; ++i) {
-        acc += window[i] * t[i];
-    }
-    acc += xc * t[d_conv - 1];
-    out[c] = acc / (1.0f + exp(-acc));
-
-    // Drop the oldest row, append `x`.
-    for (uint i = 0; i + 2 < d_conv; ++i) {
-        state[i * width + c] = window[i + 1];
-    }
-    if (d_conv > 1) {
-        state[(d_conv - 2) * width + c] = xc;
+        state[i * width + c] = window[i];
     }
 }
 
 // `frink_core::gdn::l2_normalize` over one head of Q or K: one
-// threadgroup per head, one thread per element.
+// threadgroup per head, one thread per element. A head is
+// `heads_per_row` heads into a row of `row_stride` floats, so a batch
+// of `[q | k | v]` rows normalises its Q and K heads in one dispatch
+// and leaves V where it is.
 //
 // The host sums in f64 and this cannot, so the reduction is done in
 // pairs down the threadgroup, which is the arrangement whose error
@@ -121,17 +132,20 @@ kernel void gdn_conv_silu(
 // better than the f32 the result is stored in.
 kernel void gdn_l2_norm_heads(
     device float* x [[buffer(0)]],
-    constant uint2& dims [[buffer(1)]],
+    constant uint4& dims [[buffer(1)]],
     constant float& eps [[buffer(2)]],
     uint tgid [[threadgroup_position_in_grid]],
     uint tid [[thread_position_in_threadgroup]]
 ) {
     const uint s = dims.x;
     const uint n_heads = dims.y;
+    const uint per_row = dims.z;
+    const uint row_stride = dims.w;
     if (tgid >= n_heads || tid >= s) {
         return;
     }
-    device float* head = x + (size_t)tgid * s;
+    device float* head =
+        x + (size_t)(tgid / per_row) * row_stride + (size_t)(tgid % per_row) * s;
     threadgroup float partial[1024];
     const float v = head[tid];
     partial[tid] = v * v;
@@ -147,7 +161,8 @@ kernel void gdn_l2_norm_heads(
 }
 
 // The two per-head scalars: `sigmoid(beta)` and
-// `softplus(alpha + dt_bias) * a`, one thread per value head.
+// `softplus(alpha + dt_bias) * a`, one thread per value head of every
+// row (`n_v` heads a row, `rows` rows, contiguous).
 kernel void gdn_gates(
     device const float* beta_in [[buffer(0)]],
     device const float* alpha_in [[buffer(1)]],
@@ -155,23 +170,25 @@ kernel void gdn_gates(
     device const float* a [[buffer(3)]],
     device float* beta_out [[buffer(4)]],
     device float* g_out [[buffer(5)]],
-    constant uint& n_v [[buffer(6)]],
+    constant uint2& dims [[buffer(6)]],
     uint h [[thread_position_in_grid]]
 ) {
-    if (h >= n_v) {
+    const uint n_v = dims.x;
+    if (h >= n_v * dims.y) {
         return;
     }
+    const uint hd = h % n_v;
     beta_out[h] = 1.0f / (1.0f + exp(-beta_in[h]));
     // `frink_core::mamba2::softplus`, threshold and all: above 20 the
     // host returns the argument, and a kernel that took the log anyway
     // would differ exactly where the argument is large.
-    const float z = alpha_in[h] + dt_bias[h];
+    const float z = alpha_in[h] + dt_bias[hd];
     const float sp = (z > 20.0f) ? z : log(1.0f + exp(z));
-    g_out[h] = sp * a[h];
+    g_out[h] = sp * a[hd];
 }
 "#;
 
-/// The causal convolution and its SiLU, in `encoder`.
+/// The causal convolution and its SiLU for one token, in `encoder`.
 pub fn encode_conv_silu(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
@@ -181,9 +198,25 @@ pub fn encode_conv_silu(
     x: &ProtocolObject<dyn MTLBuffer>,
     out: &ProtocolObject<dyn MTLBuffer>,
 ) -> Result<(), MetalError> {
+    encode_conv_silu_rows(encoder, device, shape, state, taps, x, out, 1)
+}
+
+/// [`encode_conv_silu`] over `rows` consecutive tokens, `[rows][conv_dim]`
+/// in and out: the same kernel, stepping its window once per row.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_conv_silu_rows(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    shape: HeadShape,
+    state: &ProtocolObject<dyn MTLBuffer>,
+    taps: &ProtocolObject<dyn MTLBuffer>,
+    x: &ProtocolObject<dyn MTLBuffer>,
+    out: &ProtocolObject<dyn MTLBuffer>,
+    rows: usize,
+) -> Result<(), MetalError> {
     // The window is held in registers, so the tap count is bounded by
     // the array the kernel declares; every real export is 4.
-    if shape.d_conv == 0 || shape.d_conv > 8 {
+    if shape.d_conv == 0 || shape.d_conv > 8 || rows == 0 {
         return Err(MetalError::CommandFailed);
     }
     let pipe = ensure_pipeline(device, GDN_HEAD_KERNEL_SRC, "gdn_conv_silu")?;
@@ -193,8 +226,8 @@ pub fn encode_conv_silu(
         for (idx, buf) in [state, taps, x, out].into_iter().enumerate() {
             encoder.setBuffer_offset_atIndex(Some(buf), 0, idx);
         }
-        let mut dims: [u32; 2] = [width as u32, shape.d_conv as u32];
-        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 8, 4);
+        let mut dims: [u32; 4] = [width as u32, shape.d_conv as u32, rows as u32, 0];
+        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 16, 4);
     }
     dispatch_1d(encoder, &pipe.0, width);
     Ok(())
@@ -210,24 +243,62 @@ pub fn encode_l2_norm_heads(
     n_heads: usize,
     eps: f32,
 ) -> Result<(), MetalError> {
+    encode_l2_norm_heads_rows(
+        encoder,
+        device,
+        x,
+        offset_floats,
+        head_dim,
+        n_heads,
+        1,
+        n_heads * head_dim,
+        eps,
+    )
+}
+
+/// [`encode_l2_norm_heads`] over the first `n_heads` heads of each of
+/// `rows` rows that sit `row_stride` floats apart.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_l2_norm_heads_rows(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    x: &ProtocolObject<dyn MTLBuffer>,
+    offset_floats: usize,
+    head_dim: usize,
+    n_heads: usize,
+    rows: usize,
+    row_stride: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
     // The reduction halves its stride from `head_dim`, so a width that
     // is not a power of two would drop the odd tail silently.
-    if head_dim == 0 || !head_dim.is_power_of_two() || head_dim > 1024 {
+    if head_dim == 0
+        || !head_dim.is_power_of_two()
+        || head_dim > 1024
+        || n_heads == 0
+        || rows == 0
+        || row_stride < n_heads * head_dim
+    {
         return Err(MetalError::CommandFailed);
     }
     let pipe = ensure_pipeline(device, GDN_HEAD_KERNEL_SRC, "gdn_l2_norm_heads")?;
     encoder.setComputePipelineState(&pipe.0);
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(x), offset_floats * 4, 0);
-        let mut dims: [u32; 2] = [head_dim as u32, n_heads as u32];
-        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 8, 1);
+        let mut dims: [u32; 4] = [
+            head_dim as u32,
+            (n_heads * rows) as u32,
+            n_heads as u32,
+            row_stride as u32,
+        ];
+        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 16, 1);
         let mut e = eps;
         encoder.setBytes_length_atIndex(NonNull::new(&mut e as *mut f32 as *mut _).unwrap(), 4, 2);
     }
     crate::dispatch::dispatch_counted(
         encoder,
         MTLSize {
-            width: n_heads,
+            width: n_heads * rows,
             height: 1,
             depth: 1,
         },
@@ -240,7 +311,7 @@ pub fn encode_l2_norm_heads(
     Ok(())
 }
 
-/// The two per-head gates, in `encoder`.
+/// The two per-head gates of one token, in `encoder`.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_gates(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
@@ -253,6 +324,28 @@ pub fn encode_gates(
     beta_out: &ProtocolObject<dyn MTLBuffer>,
     g_out: &ProtocolObject<dyn MTLBuffer>,
 ) -> Result<(), MetalError> {
+    encode_gates_rows(
+        encoder, device, n_v_heads, 1, beta_in, alpha_in, dt_bias, a, beta_out, g_out,
+    )
+}
+
+/// [`encode_gates`] over `rows` tokens, `[rows][n_v_heads]` in and out.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_gates_rows(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    n_v_heads: usize,
+    rows: usize,
+    beta_in: &ProtocolObject<dyn MTLBuffer>,
+    alpha_in: &ProtocolObject<dyn MTLBuffer>,
+    dt_bias: &ProtocolObject<dyn MTLBuffer>,
+    a: &ProtocolObject<dyn MTLBuffer>,
+    beta_out: &ProtocolObject<dyn MTLBuffer>,
+    g_out: &ProtocolObject<dyn MTLBuffer>,
+) -> Result<(), MetalError> {
+    if n_v_heads == 0 || rows == 0 {
+        return Err(MetalError::CommandFailed);
+    }
     let pipe = ensure_pipeline(device, GDN_HEAD_KERNEL_SRC, "gdn_gates")?;
     encoder.setComputePipelineState(&pipe.0);
     unsafe {
@@ -262,10 +355,10 @@ pub fn encode_gates(
         {
             encoder.setBuffer_offset_atIndex(Some(buf), 0, idx);
         }
-        let mut n = n_v_heads as u32;
-        encoder.setBytes_length_atIndex(NonNull::new(&mut n as *mut u32 as *mut _).unwrap(), 4, 6);
+        let mut dims: [u32; 2] = [n_v_heads as u32, rows as u32];
+        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 8, 6);
     }
-    dispatch_1d(encoder, &pipe.0, n_v_heads);
+    dispatch_1d(encoder, &pipe.0, n_v_heads * rows);
     Ok(())
 }
 

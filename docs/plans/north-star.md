@@ -102,8 +102,11 @@ without a rental.
    serves a stored expert; the packed `mul_mv_id` path and the Metal
    prefill MoE paths are still resident-only, then asynchronous reads
    and a run that really exceeds memory.
-9. **Bonsai PTQ1_0 prefill** (#540): decode is at parity, the prefill
-   GEMM is not.
+9. **Bonsai PTQ1_0 prefill** (#540): the recurrent layers prefill as
+   one device run each (2.4x to 3.3x on an M5 Max, level with the
+   fork on a throttled GPU and at 0.6x of it on a quiet one); what is
+   left is the attention layers' head on the host and the chunked
+   recurrence kernel.
 
 ### D. Architectures
 

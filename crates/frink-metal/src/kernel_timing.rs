@@ -115,6 +115,28 @@ impl SpanClock {
         encoder: &mut Encoder,
         label: &'static str,
     ) -> Result<(), MetalError> {
+        self.span_as(cmd_buf, encoder, label, MTLDispatchType::Concurrent)
+    }
+
+    /// [`Self::span`] for a caller whose dispatches rely on a SERIAL
+    /// encoder's ordering (`crate::gdn_prefill`), which a concurrent
+    /// replacement would silently let overlap.
+    pub(crate) fn span_serial(
+        &mut self,
+        cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
+        encoder: &mut Encoder,
+        label: &'static str,
+    ) -> Result<(), MetalError> {
+        self.span_as(cmd_buf, encoder, label, MTLDispatchType::Serial)
+    }
+
+    fn span_as(
+        &mut self,
+        cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
+        encoder: &mut Encoder,
+        label: &'static str,
+        dispatch: MTLDispatchType,
+    ) -> Result<(), MetalError> {
         let Some(inner) = self.0.as_mut() else {
             return Ok(());
         };
@@ -124,7 +146,7 @@ impl SpanClock {
         let i = inner.labels.len();
         encoder.endEncoding();
         let desc = MTLComputePassDescriptor::new();
-        desc.setDispatchType(MTLDispatchType::Concurrent);
+        desc.setDispatchType(dispatch);
         let attachments = desc.sampleBufferAttachments();
         // SAFETY: index 0 is always a valid attachment slot, and the two
         // sample indices are below the count the buffer was created with.

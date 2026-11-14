@@ -35,6 +35,9 @@ pub mod engine;
 pub mod engine_factory;
 pub mod execution_plan;
 pub mod gdn;
+/// A gated delta-net layer as the Metal prefill run takes it.
+#[cfg(feature = "metal")]
+mod gdn_prefill;
 
 /// When a whole decoder layer can run in ONE Metal submission, and the
 /// weights it takes. The refusals are exhaustive by construction.
