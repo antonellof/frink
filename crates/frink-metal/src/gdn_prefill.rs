@@ -146,8 +146,7 @@ pub struct PrefillGdnLayer<'a> {
     /// projections are stored unfolded and read `attn_norm(x)` before it.
     pub fold_x: Option<FoldPlan<'a>>,
     /// `blk.N.ssm_beta.weight` / `ssm_alpha.weight`, `[n_v_heads][hidden]`.
-    pub beta: &'a [f32],
-    pub alpha: &'a [f32],
+    pub gates: GateProj<'a>,
     pub conv1d: &'a [f32],
     pub dt_bias: &'a [f32],
     pub a: &'a [f32],
@@ -155,6 +154,31 @@ pub struct PrefillGdnLayer<'a> {
     pub out_proj: MulMmSgLaunch<'a>,
     pub fold_y: Option<FoldPlan<'a>>,
     pub ffn: PrefillFfn<'a>,
+}
+
+/// The two gate projections, as the checkpoint stores them.
+pub enum GateProj<'a> {
+    /// Unquantized (Bonsai): both in one dispatch, [`GATE_PROJ_SRC`].
+    F32 { beta: &'a [f32], alpha: &'a [f32] },
+    /// Quantized (a Q4_K_M Qwen3.5 stores them Q8_0): the run's own
+    /// GEMM, once each, as `qkv` and `z` are.
+    Gemm {
+        beta: MulMmSgLaunch<'a>,
+        alpha: MulMmSgLaunch<'a>,
+    },
+}
+
+impl GateProj<'_> {
+    fn fits(&self, n_v_heads: usize, hidden: usize) -> bool {
+        match self {
+            GateProj::F32 { beta, alpha } => {
+                beta.len() == n_v_heads * hidden && alpha.len() == n_v_heads * hidden
+            }
+            GateProj::Gemm { beta, alpha } => [beta, alpha]
+                .iter()
+                .all(|m| m.rows == n_v_heads && cols_of(m) == hidden),
+        }
+    }
 }
 
 /// The dense half of the layer: `h += down(silu(gate(n)) * up(n))`
@@ -166,6 +190,43 @@ pub struct PrefillFfn<'a> {
     pub down: MulMmSgLaunch<'a>,
     pub fold_x: Option<FoldPlan<'a>>,
     pub fold_act: Option<FoldPlan<'a>>,
+    /// A routed layer's experts, when `gate`, `up` and `down` are its
+    /// one SHARED expert (`crate::gdn_moe` is the decode twin).
+    pub routed: Option<PrefillRouted<'a>>,
+}
+
+/// The routed half of a prefill FFN: the experts through `mul_mm_id`
+/// as the dense prefill stack runs them
+/// (`crate::gpu::encode_moe_prefill_ffn`), and the shared expert's
+/// sigmoid gate.
+pub struct PrefillRouted<'a> {
+    pub moe: crate::gpu::PrefillMoeMetal<'a>,
+    /// `blk.N.ffn_gate_inp_shexp.weight`, `[hidden]`.
+    pub shared_gate: Option<&'a [f32]>,
+}
+
+impl PrefillFfn<'_> {
+    /// Whether the widths agree with each other and with `hidden`. A
+    /// routed FFN takes no rotation: the router and the shared gate read
+    /// the normed input in the basis the experts do.
+    pub(crate) fn fits(&self, hidden: usize) -> bool {
+        self.norm.len() == hidden
+            && self.gate.rows == self.up.rows
+            && cols_of(&self.gate) == hidden
+            && cols_of(&self.up) == hidden
+            && self.down.rows == hidden
+            && cols_of(&self.down) == self.gate.rows
+            && fold_ok(self.fold_x.as_ref(), hidden)
+            && fold_ok(self.fold_act.as_ref(), self.gate.rows)
+            && self.routed.as_ref().is_none_or(|r| {
+                r.moe.oai.is_none()
+                    && r.moe.is_supported()
+                    && r.moe.packed.hidden_rows == hidden
+                    && r.shared_gate.is_none_or(|g| g.len() == hidden)
+                    && self.fold_x.is_none()
+                    && self.fold_act.is_none()
+            })
+    }
 }
 
 /// One layer's recurrent state as the host owns it: two page-aligned
@@ -211,8 +272,7 @@ impl PrefillGdnLayer<'_> {
             && cols_of(&self.qkv) == hidden
             && self.z.rows == value_dim
             && cols_of(&self.z) == hidden
-            && self.beta.len() == h.n_v_heads * hidden
-            && self.alpha.len() == h.n_v_heads * hidden
+            && self.gates.fits(h.n_v_heads, hidden)
             && self.conv1d.len() == conv_dim * h.d_conv
             && self.dt_bias.len() == h.n_v_heads
             && self.a.len() == h.n_v_heads
@@ -221,14 +281,7 @@ impl PrefillGdnLayer<'_> {
             && cols_of(&self.out_proj) == value_dim
             && fold_ok(self.fold_x.as_ref(), hidden)
             && fold_ok(self.fold_y.as_ref(), value_dim)
-            && f.norm.len() == hidden
-            && f.gate.rows == f.up.rows
-            && cols_of(&f.gate) == hidden
-            && cols_of(&f.up) == hidden
-            && f.down.rows == hidden
-            && cols_of(&f.down) == f.gate.rows
-            && fold_ok(f.fold_x.as_ref(), hidden)
-            && fold_ok(f.fold_act.as_ref(), f.gate.rows)
+            && f.fits(hidden)
     }
 }
 
@@ -259,7 +312,11 @@ pub(crate) mod slot {
     pub const AK: usize = 18;
     pub const AV: usize = 19;
     pub const AATT: usize = 20;
-    pub const COUNT: usize = 21;
+    // A routed FFN's input in f16 (the experts' GEMM input) and its
+    // weighted sum.
+    pub const XN16: usize = 21;
+    pub const MOE_OUT: usize = 22;
+    pub const COUNT: usize = 23;
 }
 
 fn signs_buffer(
@@ -400,8 +457,6 @@ unsafe fn encode_layer(
     let conv_state = unsafe { buffer_no_copy(device, state.conv_ptr, state.conv_bytes) }
         .ok_or(MetalError::BufferAllocFailed)?;
     let attn_norm = resident_f32_buffer(device, w.attn_norm)?;
-    let w_beta = resident_f32_buffer(device, w.beta)?;
-    let w_alpha = resident_f32_buffer(device, w.alpha)?;
     let taps = resident_f32_buffer(device, w.conv1d)?;
     let dt = resident_f32_buffer(device, w.dt_bias)?;
     let a = resident_f32_buffer(device, w.a)?;
@@ -424,18 +479,28 @@ unsafe fn encode_layer(
     // BEFORE the rotation: the gate projections are stored unfolded
     // and read `attn_norm(x)` in the primal basis; the fold below
     // rewrites that buffer in place.
-    encode_gate_proj(
-        encoder,
-        device,
-        b(slot::XN),
-        &w_beta.buffer,
-        &w_alpha.buffer,
-        b(slot::BETA_IN),
-        b(slot::ALPHA_IN),
-        hidden,
-        h.n_v_heads,
-        rows,
-    )?;
+    match &w.gates {
+        GateProj::F32 { beta, alpha } => {
+            let w_beta = resident_f32_buffer(device, beta)?;
+            let w_alpha = resident_f32_buffer(device, alpha)?;
+            encode_gate_proj(
+                encoder,
+                device,
+                b(slot::XN),
+                &w_beta.buffer,
+                &w_alpha.buffer,
+                b(slot::BETA_IN),
+                b(slot::ALPHA_IN),
+                hidden,
+                h.n_v_heads,
+                rows,
+            )?;
+        }
+        GateProj::Gemm { beta, alpha } => {
+            encode_gemm(encoder, device, beta, b(slot::XN), b(slot::BETA_IN), rows)?;
+            encode_gemm(encoder, device, alpha, b(slot::XN), b(slot::ALPHA_IN), rows)?;
+        }
+    }
     let encoder = enc.span("pf_fold_x")?;
     encode_fold(
         encoder,
@@ -591,12 +656,55 @@ pub(crate) fn encode_ffn_tail(
     )?;
     let encoder = enc.span("pf_down")?;
     encode_gemm(encoder, device, &f.down, b(slot::GATE), b(slot::OUT), rows)?;
+    if let Some(g) = f.routed.as_ref().and_then(|r| r.shared_gate) {
+        let encoder = enc.span("pf_shared_gate")?;
+        crate::gdn_moe::encode_shared_gate(encoder, device, g, b(slot::XN), b(slot::OUT), rows)?;
+    }
     let encoder = enc.span("pf_residual")?;
     crate::elem::encode_vec_add(
         encoder,
         device,
         b(slot::H),
         b(slot::OUT),
+        (rows * hidden) as u32,
+    )?;
+    let Some(r) = &f.routed else {
+        return Ok(());
+    };
+    let encoder = enc.span("pf_moe_in_f16")?;
+    crate::elem::encode_f32_to_f16(
+        encoder,
+        device,
+        b(slot::XN),
+        b(slot::XN16),
+        (rows * hidden) as u32,
+    )?;
+    let bound = crate::gpu::moe_packed_resident(device, &r.moe.packed)?;
+    let router_w = resident_f32_buffer(device, r.moe.router_w)?;
+    // Opens its own spans, one per part (`moe_router`, ...); the run's
+    // encoder is serial, so the hazard tracker only adds barriers it
+    // would not need.
+    crate::gpu::encode_moe_prefill_ffn(
+        &mut enc.encoder,
+        &mut enc.spans,
+        enc.cmd,
+        &mut crate::mem_ranges::MemRanges::new(),
+        device,
+        &r.moe,
+        &bound,
+        &router_w,
+        None,
+        b(slot::XN),
+        b(slot::XN16),
+        b(slot::MOE_OUT),
+        rows,
+    )?;
+    let encoder = enc.span("pf_moe_residual")?;
+    crate::elem::encode_vec_add(
+        encoder,
+        device,
+        b(slot::H),
+        b(slot::MOE_OUT),
         (rows * hidden) as u32,
     )
 }
@@ -633,16 +741,7 @@ pub(crate) fn wo_tail_supported(
     f: &PrefillFfn<'_>,
     hidden: usize,
 ) -> bool {
-    o_proj.rows == hidden
-        && fold_ok(fold, cols_of(o_proj))
-        && f.norm.len() == hidden
-        && f.gate.rows == f.up.rows
-        && cols_of(&f.gate) == hidden
-        && cols_of(&f.up) == hidden
-        && f.down.rows == hidden
-        && cols_of(&f.down) == f.gate.rows
-        && fold_ok(f.fold_x.as_ref(), hidden)
-        && fold_ok(f.fold_act.as_ref(), f.gate.rows)
+    o_proj.rows == hidden && fold_ok(fold, cols_of(o_proj)) && f.fits(hidden)
 }
 
 /// An ATTENTION layer's tail at the head of a run: `wo` over the
@@ -779,6 +878,18 @@ pub unsafe fn launch_gdn_prefill_run(
     lens[slot::AATT] = lens[slot::AQR];
     lens[slot::AK] = attn(&|_, kv| kv.elems_per_token());
     lens[slot::AV] = lens[slot::AK];
+    let routed = layers
+        .iter()
+        .map(|l| match l {
+            PrefillRunLayer::Gdn(g, _) => &g.ffn,
+            PrefillRunLayer::Attn(a, _) => &a.ffn,
+        })
+        .chain(head.map(|t| &t.ffn))
+        .any(|f| f.routed.is_some());
+    // Half the floats would hold the f16 copy; a whole width keeps the
+    // pool's sizes few.
+    lens[slot::XN16] = if routed { rows * hidden } else { 1 };
+    lens[slot::MOE_OUT] = lens[slot::XN16];
 
     let shared = shared_metal()?;
     let device = &shared.device;

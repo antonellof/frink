@@ -291,10 +291,12 @@ impl SubmitClock {
 /// [`commit_wait_note`] commits and waits together, which is right when
 /// one buffer is one unit of work. A RUN of buffers committed back to
 /// back is one unit of work spread over several, and waiting for the
-/// last one waits for all of them: the GPU time noted is that last
-/// buffer's, and `count` says how many submissions shared the single
+/// last one waits for all of them: the GPU time noted runs from
+/// `first`'s start (the last buffer's own when `None`) to the last
+/// one's end, and `count` says how many submissions shared the single
 /// wake-up, which is the number the run exists to reduce.
 pub(crate) fn note_wait(
+    first: Option<&ProtocolObject<dyn MTLCommandBuffer>>,
     cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
     tag: &'static str,
     count: usize,
@@ -307,8 +309,11 @@ pub(crate) fn note_wait(
     if !gpu_timing_enabled() || count == 0 {
         return waited;
     }
+    // From the first buffer's start when the caller has one: the GPU
+    // time of the whole run, the gaps between its buffers included.
+    let start = first.unwrap_or(cmd_buf).GPUStartTime();
     let sample = Sample {
-        gpu_ns: ((cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e9).max(0.0) as u64,
+        gpu_ns: ((cmd_buf.GPUEndTime() - start) * 1e9).max(0.0) as u64,
         encode_ns: committed.duration_since(clock.encode_start).as_nanos() as u64,
         wait_ns: waited.as_nanos() as u64,
         encode_stats: crate::dispatch::metal_encode_stats(),

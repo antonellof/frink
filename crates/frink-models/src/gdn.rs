@@ -43,7 +43,8 @@
 //! `qwen3next.cpp:521-539`, `llama-model.cpp:525`;
 //! [`GROUPED_HEAD_ARCHITECTURES`]), and beta and alpha come from ONE
 //! `ssm_ba` projection laid out `[k_group][beta * ratio, alpha * ratio]`
-//! (`:96,422-436`; [`BetaAlpha::Fused`]). Its legacy fused `ssm_in`
+//! (`:96,422-436`), which the loader splits into the two
+//! [`BetaAlpha`] matrices by row. Its legacy fused `ssm_in`
 //! (q/k/v/z in one, `:88-90,336-360`) is refused by name: every
 //! current export splits it (`conversion/qwen.py:389-416`).
 
@@ -151,18 +152,72 @@ impl GdnHparams {
     }
 }
 
-/// Where beta and alpha come from.
-pub enum BetaAlpha {
-    /// `blk.N.ssm_beta.weight` and `blk.N.ssm_alpha.weight`, each
-    /// `[n_v_heads, n_embd]` (`qwen35.cpp:71-72`).
-    Split {
-        beta: WeightMatrix,
-        alpha: WeightMatrix,
-    },
-    /// `blk.N.ssm_ba.weight`, `[2 n_v_heads, n_embd]`, its rows laid out
-    /// per K group as `ratio` betas then `ratio` alphas
-    /// (`qwen3next.cpp:96,422-436`).
-    Fused { ba: WeightMatrix },
+/// The two gate projections: `blk.N.ssm_beta.weight` and
+/// `blk.N.ssm_alpha.weight`, each `[n_v_heads, n_embd]`
+/// (`qwen35.cpp:71-72`).
+///
+/// `qwen3next` stores them as ONE `blk.N.ssm_ba.weight`, `[2 n_v_heads,
+/// n_embd]`, its rows laid out per K group as `ratio` betas then `ratio`
+/// alphas (`qwen3next.cpp:96,422-436`). The loader takes those rows
+/// apart into these two ([`split_ba_rows`]). A row of a projection is
+/// its own dot product, so the logits are the ones the fused projection
+/// and the per-group view give, bit for bit, and every body here --
+/// host, decode run, prefill run -- serves both spellings through one
+/// shape instead of refusing the second on the device (#540).
+pub struct BetaAlpha {
+    pub beta: WeightMatrix,
+    pub alpha: WeightMatrix,
+}
+
+/// The rows of `ssm_ba` that are beta, and those that are alpha, for
+/// `n_v` value heads over `n_k` key heads (`qwen3next.cpp:422-436`):
+/// group `hd / ratio`, its `ratio` betas then its `ratio` alphas.
+pub fn split_ba_rows(n_k: usize, n_v: usize) -> (Vec<usize>, Vec<usize>) {
+    let ratio = n_v / n_k;
+    let base = |hd: usize| (hd / ratio) * 2 * ratio + hd % ratio;
+    (
+        (0..n_v).map(base).collect(),
+        (0..n_v).map(|hd| base(hd) + ratio).collect(),
+    )
+}
+
+/// `m`'s rows `rows`, in that order, as a matrix of their own: the
+/// bytes copied, the storage kind kept. A loaded matrix is f32 or
+/// quantized; anything else is refused rather than re-encoded.
+fn take_rows(m: &WeightMatrix, rows: &[usize]) -> Option<WeightMatrix> {
+    match m {
+        WeightMatrix::F32(t) => {
+            let cols = t.shape[1];
+            let data = rows
+                .iter()
+                .flat_map(|&r| t.data[r * cols..(r + 1) * cols].iter().copied())
+                .collect();
+            Some(WeightMatrix::F32(frink_core::Tensor::new(
+                data,
+                vec![rows.len(), cols],
+            )))
+        }
+        WeightMatrix::Quantized {
+            data,
+            rows: n,
+            cols,
+            kind,
+        } => {
+            let bytes = data.as_slice();
+            let row_bytes = bytes.len().checked_div(*n)?;
+            let mut out = Vec::with_capacity(rows.len() * row_bytes);
+            for &r in rows {
+                out.extend_from_slice(bytes.get(r * row_bytes..(r + 1) * row_bytes)?);
+            }
+            Some(WeightMatrix::Quantized {
+                data: frink_core::weight_matrix::WeightBytes::Owned(out),
+                rows: rows.len(),
+                cols: *cols,
+                kind: *kind,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// One GDN layer's weights (`qwen35.cpp:66-74`).
@@ -231,11 +286,20 @@ impl Gdn {
             ));
         }
         let beta_alpha = if file.find_tensor(&name("ssm_ba.weight")).is_some() {
-            BetaAlpha::Fused {
-                ba: matrix("ssm_ba.weight", 2 * h.n_v_heads, hidden_dim)?,
+            let ba = matrix("ssm_ba.weight", 2 * h.n_v_heads, hidden_dim)?;
+            let (beta_rows, alpha_rows) = split_ba_rows(h.n_k_heads, h.n_v_heads);
+            let refuse = || {
+                LoadError::UnsupportedFeature(
+                    name("ssm_ba.weight"),
+                    "neither f32 nor a quantized kind: its rows cannot be split".to_string(),
+                )
+            };
+            BetaAlpha {
+                beta: take_rows(&ba, &beta_rows).ok_or_else(refuse)?,
+                alpha: take_rows(&ba, &alpha_rows).ok_or_else(refuse)?,
             }
         } else {
-            BetaAlpha::Split {
+            BetaAlpha {
                 beta: matrix("ssm_beta.weight", h.n_v_heads, hidden_dim)?,
                 alpha: matrix("ssm_alpha.weight", h.n_v_heads, hidden_dim)?,
             }
@@ -306,28 +370,9 @@ impl Gdn {
             // A batch rotates the shared input ONCE for the pair.
             WeightMatrix::apply_batch_pair_with_acts(&self.qkv, &self.z_proj, normed, rows, None)
         };
-        // The two per-head gate logits, whichever projection spells
-        // them: `[rows][n_v]` each.
-        let (beta_all, alpha_all) = match &self.beta_alpha {
-            BetaAlpha::Split { beta, alpha } => (project(beta), project(alpha)),
-            BetaAlpha::Fused { ba } => {
-                let mixed = project(ba);
-                let ratio = n_v / n_k;
-                let mut beta_all = vec![0.0f32; rows * n_v];
-                let mut alpha_all = vec![0.0f32; rows * n_v];
-                for r in 0..rows {
-                    let row = &mixed[r * 2 * n_v..(r + 1) * 2 * n_v];
-                    for hd in 0..n_v {
-                        // qwen3next.cpp:422-436: group `hd / ratio`, its
-                        // `ratio` betas then its `ratio` alphas.
-                        let base = (hd / ratio) * 2 * ratio + hd % ratio;
-                        beta_all[r * n_v + hd] = row[base];
-                        alpha_all[r * n_v + hd] = row[base + ratio];
-                    }
-                }
-                (beta_all, alpha_all)
-            }
-        };
+        // The two per-head gate logits: `[rows][n_v]` each.
+        let BetaAlpha { beta, alpha } = &self.beta_alpha;
+        let (beta_all, alpha_all) = (project(beta), project(alpha));
         let mut ys = vec![0.0f32; rows * value_dim];
         let mut conv_out = vec![0.0f32; conv_dim];
         let mut o = vec![0.0f32; value_dim];
@@ -472,11 +517,7 @@ impl Gdn {
         ffn: &crate::fused_layer::LayerFfnParts<'_>,
         residual: &[f32],
     ) -> Option<Vec<f32>> {
-        let BetaAlpha::Split { beta, alpha } = &self.beta_alpha else {
-            // The fused spelling's per-group interleave is host
-            // arithmetic with no kernel here.
-            return None;
-        };
+        let BetaAlpha { beta, alpha } = &self.beta_alpha;
         // The HEAD on the device too, when its four matrices have
         // kernels and agree about their input basis: then the layer is
         // ONE submission and `normed` never leaves the GPU.
@@ -513,10 +554,8 @@ impl Gdn {
     /// The refusals are shapes the kernels state, not guesses: a head
     /// width that is not a power of two (the two reductions halve their
     /// stride from it), a tap count past the window the convolution
-    /// holds in registers, an output projection with no Metal launch,
-    /// and the FUSED beta/alpha spelling, whose per-group interleave
-    /// (`qwen3next.cpp:422-436`) is host arithmetic this has no kernel
-    /// for. Each one falls through rather than being approximated.
+    /// holds in registers, and an output projection with no Metal
+    /// launch. Each one falls through rather than being approximated.
     #[cfg(feature = "metal")]
     /// Builds this layer's [`frink_metal::gdn_branch::BranchWeights`]
     /// and hands it to `f`.
@@ -524,8 +563,7 @@ impl Gdn {
     /// A closure rather than a return value because the weights borrow
     /// launches and fold plans that are locals here, and ONE
     /// construction site because a second would be a second place that
-    /// has to remember the head map, the fold widths and which
-    /// `beta_alpha` spelling has a kernel.
+    /// has to remember the head map and the fold widths.
     #[cfg(feature = "metal")]
     fn with_branch_weights<R>(
         &self,
@@ -535,9 +573,6 @@ impl Gdn {
         f: impl FnOnce(&frink_metal::gdn_branch::BranchWeights<'_>) -> R,
     ) -> Option<R> {
         if !frink_core::weight_matrix::metal_dense_enabled() {
-            return None;
-        }
-        if matches!(self.beta_alpha, BetaAlpha::Fused { .. }) {
             return None;
         }
         let h = self.h;
@@ -604,9 +639,7 @@ impl Gdn {
         ffn: &crate::fused_layer::LayerFfnParts<'_>,
         state: &mut RecurrentState,
     ) -> Option<()> {
-        let BetaAlpha::Split { beta, alpha } = &self.beta_alpha else {
-            return None;
-        };
+        let BetaAlpha { beta, alpha } = &self.beta_alpha;
         let head = crate::fused_layer::LayerHeadParts::for_block(
             attn_norm,
             rms_eps,
@@ -636,13 +669,6 @@ impl Gdn {
         host_proj: Option<(&[f32], &[f32], &[f32], &[f32])>,
     ) -> Option<Vec<f32>> {
         if !frink_core::weight_matrix::metal_dense_enabled() {
-            return None;
-        }
-        // The fused spelling's interleave happens on the host before
-        // this is reached, so `beta_in` / `alpha_in` are already split
-        // either way; what this refuses is a layer whose gates ARE
-        // fused, because that path has not been measured here.
-        if matches!(self.beta_alpha, BetaAlpha::Fused { .. }) {
             return None;
         }
         let h = self.h;
@@ -963,7 +989,7 @@ mod tests {
                 conv1d: rnd(h.d_conv * conv_dim, 1.0),
                 dt_bias: rnd(h.n_v_heads, 1.0),
                 a: rnd(h.n_v_heads, 1.0),
-                beta_alpha: BetaAlpha::Split {
+                beta_alpha: BetaAlpha {
                     beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                     alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                 },
@@ -1087,7 +1113,7 @@ mod tests {
                 conv1d: rnd(h.d_conv * conv_dim, 1.0),
                 dt_bias: rnd(h.n_v_heads, 1.0),
                 a: rnd(h.n_v_heads, 1.0),
-                beta_alpha: BetaAlpha::Split {
+                beta_alpha: BetaAlpha {
                     beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                     alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                 },
@@ -1117,10 +1143,10 @@ mod tests {
             let mut host_state = state0();
             let qkv_all = m.qkv.apply(&normed);
             let z_all = m.z_proj.apply(&normed);
-            let (beta_all, alpha_all) = match &m.beta_alpha {
-                BetaAlpha::Split { beta, alpha } => (beta.apply(&normed), alpha.apply(&normed)),
-                BetaAlpha::Fused { .. } => unreachable!("split above"),
-            };
+            let (beta_all, alpha_all) = (
+                m.beta_alpha.beta.apply(&normed),
+                m.beta_alpha.alpha.apply(&normed),
+            );
             let (q, k, v, g, beta) =
                 m.conv_and_gates_for_rows(1, &qkv_all, &beta_all, &alpha_all, &mut host_state, eps);
             let mut o = vec![0.0f32; value_dim];
@@ -1235,7 +1261,7 @@ mod tests {
             conv1d: rnd(h.d_conv * conv_dim, 1.0),
             dt_bias: rnd(h.n_v_heads, 1.0),
             a: rnd(h.n_v_heads, 1.0),
-            beta_alpha: BetaAlpha::Split {
+            beta_alpha: BetaAlpha {
                 beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
                 alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 1.0)),
             },
@@ -1321,14 +1347,8 @@ mod tests {
             eps,
             &m.qkv,
             &m.z_proj,
-            match &m.beta_alpha {
-                BetaAlpha::Split { beta, .. } => beta,
-                BetaAlpha::Fused { .. } => unreachable!("split above"),
-            },
-            match &m.beta_alpha {
-                BetaAlpha::Split { alpha, .. } => alpha,
-                BetaAlpha::Fused { .. } => unreachable!("split above"),
-            },
+            &m.beta_alpha.beta,
+            &m.beta_alpha.alpha,
         )
         .expect("every field is required");
         // Both arms: the head on the device, and the head on the host
@@ -1404,7 +1424,7 @@ mod tests {
             conv1d: rnd(h.d_conv * h.conv_dim()),
             dt_bias: rnd(h.n_v_heads),
             a: vec![-0.7, -1.2],
-            beta_alpha: BetaAlpha::Split {
+            beta_alpha: BetaAlpha {
                 beta: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd)),
                 alpha: mat(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd)),
             },

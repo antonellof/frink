@@ -100,6 +100,7 @@ impl Decoder {
     pub(crate) fn device_attention_layer_then_run(
         &self,
         l: usize,
+        pos: usize,
         layer: &LayerWeights,
         q: &[f32],
         k: &[f32],
@@ -107,7 +108,7 @@ impl Decoder {
         gate: Option<&[f32]>,
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
-        pending: &mut crate::decoder::fused_recurrent::PendingQkv,
+        carry: &mut crate::decoder::fused_recurrent::RunCarry,
     ) -> Option<usize> {
         let mut end = l + 1;
         while end < kv_caches.len() && self.fused_layer_parts(end).is_some() {
@@ -163,13 +164,9 @@ impl Decoder {
                 .push(k, v)
                 .expect("unbounded/planned KvCache growth is infallible");
         }
-        layer.moe.record_activations_dense();
+        Self::record_fused_ffn(layer);
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
-        let head = self.encode_next_attn_head(&mut run, end, kv_caches.len());
-        let (out, qkv) = run.finish_with_head().ok()?;
-        *hidden = out;
-        *pending = head.then_some(qkv).flatten().map(|q| (end, q));
-        Some(end)
+        self.close_run(run, end, pos, hidden, kv_caches, carry)
     }
 
     /// The facts this path needs of a layer beyond the tail's: one

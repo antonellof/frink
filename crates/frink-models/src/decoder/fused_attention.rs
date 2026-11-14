@@ -69,7 +69,7 @@ impl Decoder {
         {
             return None;
         }
-        LayerFfnParts::for_layer(layer, self.config.rms_norm_eps, true).map(|_| ())
+        self.run_ffn_parts(l, layer).map(|_| ())
     }
 
     /// The Q/K/V launches for an attention layer, when all three have
@@ -164,7 +164,7 @@ impl Decoder {
             None => None,
             Some(f) => Some(f.metal_plan(branch.len())?),
         };
-        let ffn = LayerFfnParts::for_layer(layer, self.config.rms_norm_eps, true)?;
+        let ffn = self.run_ffn_parts(l, layer)?;
         let launches = ffn.launches()?;
         Some((out_proj, fold_branch, ffn, launches))
     }

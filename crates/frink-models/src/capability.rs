@@ -1275,7 +1275,8 @@ pub const AUDITED_GENERIC_GQA: &[&str] = &[
     // tests/qwen35_graphs.rs: `qwen3next` (Qwen3-Next-80B-A3B), the
     // same layers with the V heads GROUPED over the K heads
     // (`qwen3next.cpp:521-539`, `HeadMap::Grouped`), beta and alpha in
-    // one `ssm_ba` projection (`:96,422-436`, `BetaAlpha::Fused`) and
+    // one `ssm_ba` projection (`:96,422-436`, split by row into
+    // `gdn::BetaAlpha` at load) and
     // plain NEOX RoPE (`:282-291`). The legacy fused `ssm_in` is refused
     // by name.
     "qwen3next",
@@ -2953,7 +2954,7 @@ pub fn architecture_catalog() -> &'static [ArchProfile] {
         // `qwen3next` (Qwen3-Next-80B-A3B) is `qwen35moe`'s layers with
         // the V heads GROUPED over the K heads and beta / alpha in one
         // `ssm_ba` projection (`gdn::GROUPED_HEAD_ARCHITECTURES`,
-        // `gdn::BetaAlpha::Fused`), plain NEOX RoPE with no sections
+        // `gdn::split_ba_rows`), plain NEOX RoPE with no sections
         // (llama-model.cpp:2678).
         for n in ["qwen35", "qwen35moe", "qwen3next"] {
             v.push(prof(

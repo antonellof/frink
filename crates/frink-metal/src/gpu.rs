@@ -1238,6 +1238,18 @@ kernel void moe_mm_id_map0_ne20_8(
     threadgroup uint* cnt [[threadgroup(1)]]
 ) { moe_mm_id_map0_impl<8>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem, cnt); }
 
+// Qwen3-Next's ten of 512.
+kernel void moe_mm_id_map0_ne20_10(
+    device const int* src2 [[buffer(0)]],
+    device uint* htpe [[buffer(1)]],
+    device int* hids [[buffer(2)]],
+    constant uint& n_tokens [[buffer(3)]],
+    ushort tpitg [[thread_position_in_threadgroup]],
+    ushort ntg [[threads_per_threadgroup]],
+    threadgroup ushort* shmem [[threadgroup(0)]],
+    threadgroup uint* cnt [[threadgroup(1)]]
+) { moe_mm_id_map0_impl<10>(src2, htpe, hids, n_tokens, tpitg, ntg, shmem, cnt); }
+
 /// Gather rows for `mul_mm_id` host map0: `dst[i*dst_stride+j] =
 /// src[ids[i]*src_stride+j]`. One threadgroup per batch row.
 kernel void moe_gather_rows(
@@ -3966,6 +3978,7 @@ fn moe_mm_id_map0_fn(top_k: usize) -> Option<&'static str> {
         4 => Some("moe_mm_id_map0_ne20_4"),
         6 => Some("moe_mm_id_map0_ne20_6"),
         8 => Some("moe_mm_id_map0_ne20_8"),
+        10 => Some("moe_mm_id_map0_ne20_10"),
         _ => None,
     }
 }
@@ -6241,7 +6254,9 @@ impl PrefillMoeMetal<'_> {
     pub fn is_supported(&self) -> bool {
         self.top_k > 0
             && moe_mm_id_map0_fn(self.top_k).is_some()
-            && self.packed.n_experts <= 256
+            // One map0 thread an expert, in one threadgroup
+            // (llama.cpp asserts the same: `ne02 <= max threads`).
+            && self.packed.n_experts <= 1024
             && self.router_w.len() == self.packed.n_experts * self.packed.hidden_rows
             && mul_mm_id_f16_meta(self.packed.gate_kind).is_some()
             && mul_mm_id_f16_meta(self.packed.up_kind).is_some()
@@ -6801,6 +6816,39 @@ pub(crate) fn encode_q4_0_moe_gate_up_id(
         n_slots,
     )?;
     Ok(())
+}
+
+/// The packed `down` plane through `mul_mv_id`: `expert_out[k] =
+/// down_k(act[k])` for one token's `top_k` slots. The same dispatch
+/// [`encode_q4_0_moe_id`] makes, for a caller with a serial encoder of
+/// its own (`crate::gdn_moe`).
+pub(crate) fn encode_moe_down_id_planes(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    packed: &MoePackedQ4<'_>,
+    act_buf: &ProtocolObject<dyn MTLBuffer>,
+    expert_out_buf: &ProtocolObject<dyn MTLBuffer>,
+    ids: IdsBinding<'_>,
+    top_k: u32,
+) -> Result<(), MetalError> {
+    let bound = moe_packed_resident(device, packed)?;
+    encode_moe_down_id(
+        encoder,
+        device,
+        packed.down_kind,
+        &bound.down,
+        act_buf,
+        expert_out_buf,
+        ids,
+        packed.down_row_bytes as u32,
+        moe_row_blocks(packed.down_row_bytes, packed.down_kind)?,
+        packed.hidden_rows as u32,
+        packed.ffn_rows as u32,
+        top_k,
+        packed.down_stride as u32,
+        1,
+        top_k as usize,
+    )
 }
 
 /// Encode packed-id Q4_0 MoE: optional gate∥up → silu_mul → down_id → sum.
