@@ -1,13 +1,16 @@
 //! A run of PREFILL layers in one Metal submission, or nothing
-//! (issue #540): recurrent layers, and the attention layers between
-//! them whole, so a hybrid's prompt batch is one command buffer.
+//! (issue #540): recurrent layers of every kind the device serves (the
+//! gated delta-net, Mamba-1, Mamba-2, LFM2's short convolution), and
+//! the attention layers between them whole, so a hybrid's prompt batch
+//! is one command buffer.
 //!
-//! The decode path's [`Decoder::fused_layer_parts`] says which
-//! recurrent layers qualify, and [`Decoder::fused_attention_tail_eligible`]
+//! The decode path's [`Decoder::fused_layer_parts`] says which gated
+//! delta-net layers qualify, and [`Decoder::fused_attention_tail_eligible`]
 //! which attention tails may lead a run, so prefill and decode cannot
 //! disagree about what a fusable layer is; an attention layer rides
-//! whole when [`Decoder::prefill_attn_layer`] admits it as well.
-//! `frink_metal::gdn_prefill` runs them with the hidden batch resident
+//! whole when [`Decoder::prefill_attn_layer`] admits it as well, and a
+//! Mamba or conv layer when `decoder::ssm_prefill` does.
+//! `frink_metal::prefill_run` runs them with the hidden batch resident
 //! across the run.
 
 use super::fused_view::FusedAttnCaps;
@@ -15,8 +18,8 @@ use super::{Decoder, LayerWeights};
 use crate::fused_layer::LayerFfnParts;
 use crate::layer_shapes::AttnShape;
 use frink_core::KvCache;
-use frink_metal::gdn_prefill::PrefillRunLayer;
 use frink_metal::gdn_prefill_attn::PrefillAttnLayer;
+use frink_metal::prefill_run::PrefillRunLayer;
 
 /// An attention layer a device run serves whole, before its kernels
 /// are chosen ([`Decoder::resident_attn_parts`]).
@@ -33,15 +36,29 @@ pub(super) struct ResidentAttnParts<'a> {
     pub(super) extras: frink_metal::attn::AttnExtras<'a>,
     pub(super) rope: frink_metal::attn::MetalRope,
     pub(super) layer_rope: Option<frink_metal::attn::LayerRope<'a>>,
+    pub(super) q_scale: Option<f32>,
     pub(super) o: &'a frink_core::WeightMatrix,
     pub(super) fold_branch: Option<frink_metal::hadamard::FoldPlan<'a>>,
     pub(super) ffn: LayerFfnParts<'a>,
 }
 
+/// Which run asks [`Decoder::resident_attn_parts`]: the decode run
+/// applies neither Granite's scales nor a parallel block; the prefill
+/// run applies all three.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunKind {
+    Decode,
+    Prefill,
+}
+
 /// One layer of a run as planned, before any cache is touched.
-enum Planned<'a> {
+pub(super) enum Planned<'a> {
     Gdn(&'a crate::gdn::Gdn, &'a [f32], Box<LayerFfnParts<'a>>),
     Attn(Box<PrefillAttnLayer<'a>>),
+    /// An attention layer and its parallel Mamba-2 block.
+    Parallel(Box<PrefillAttnLayer<'a>>, &'a crate::mamba2::Mamba2),
+    /// A Mamba or short-conv layer (`decoder::ssm_prefill`).
+    Ssm(Box<super::ssm_prefill::SsmPlan<'a>>),
 }
 
 impl Decoder {
@@ -111,12 +128,17 @@ impl Decoder {
         Some(end)
     }
 
-    /// Below the chunked recurrence's own device crossover the host
-    /// body is the faster one, and it is where `delta_chunk_rows` would
-    /// have sent these rows anyway.
+    /// Below its device crossover the host body is the faster one: the
+    /// chunked recurrence's for a gated delta-net model, where
+    /// `delta_chunk_rows` would have sent these rows anyway, and the
+    /// device scan's for the Mamba and conv models.
     fn prefill_rows_take_device(&self, rows: usize) -> bool {
-        rows >= frink_core::gdn_chunk::DEVICE_ROWS
-            && frink_core::weight_matrix::metal_dense_enabled()
+        let min = if self.has_gdn_layers() {
+            frink_core::gdn_chunk::DEVICE_ROWS
+        } else {
+            frink_core::mamba2::DEVICE_SCAN_MIN_ROWS
+        };
+        rows >= min && frink_core::weight_matrix::metal_dense_enabled()
     }
 
     /// Attention layer `l` whole on the device, with its KV head count,
@@ -129,7 +151,7 @@ impl Decoder {
         start_pos: usize,
         cache: &KvCache,
     ) -> Option<(PrefillAttnLayer<'_>, usize)> {
-        let p = self.resident_attn_parts(l, start_pos, cache)?;
+        let p = self.resident_attn_parts(l, start_pos, cache, RunKind::Prefill)?;
         let attn = PrefillAttnLayer {
             attn_norm: p.attn_norm,
             eps: p.eps,
@@ -142,6 +164,7 @@ impl Decoder {
             extras: p.extras,
             rope: p.rope,
             layer_rope: p.layer_rope,
+            q_scale: p.q_scale,
             o_proj: p.o.mul_mm_sg_launch()?,
             fold_branch: p.fold_branch,
             ffn: p.ffn.prefill_launches()?,
@@ -159,15 +182,19 @@ impl Decoder {
     /// is either here or a refusal: the attention facts every fused
     /// launch shares ([`Self::fused_attn_layer_ok`], under caps that
     /// admit the interleaved Q gate), the tail's
-    /// ([`Self::fused_attention_tail_eligible`]) and the device
-    /// attention's ([`Self::device_attention_shape_ok`]). The host KV
-    /// must be f16 with no row evicted, so the mirror the run appends to
-    /// and the host rows written back from it are the same rows.
+    /// ([`Self::fused_attention_tail_eligible`], or for the prefill run
+    /// [`Self::prefill_run_tail_eligible`], which applies Granite's
+    /// residual multiplier and runs Falcon-H1's parallel block) and the
+    /// device attention's ([`Self::device_attention_shape_ok`]). The
+    /// host KV must be f16 with no row evicted, so the mirror the run
+    /// appends to and the host rows written back from it are the same
+    /// rows.
     pub(super) fn resident_attn_parts(
         &self,
         l: usize,
         start_pos: usize,
         cache: &KvCache,
+        kind: RunKind,
     ) -> Option<ResidentAttnParts<'_>> {
         let layer = self.layer_for(l);
         let AttnShape::Gqa {
@@ -177,11 +204,32 @@ impl Decoder {
         else {
             return None;
         };
-        let caps = FusedAttnCaps::METAL_PREFILL_RUN;
-        if !self.has_gdn_layers()
-            || !Self::metal_can_serve_layers(&self.config, self.lora_attached())
-            || !self.fused_attn_layer_ok(layer, caps)
-            || !self.fused_attention_tail_eligible(l, layer)
+        let prefill = kind == RunKind::Prefill;
+        let caps = FusedAttnCaps {
+            attention_scale: prefill,
+            ..FusedAttnCaps::METAL_PREFILL_RUN
+        };
+        let beside = layer.attn.ssm.is_some();
+        let model_ok = if prefill {
+            self.has_run_layers()
+                && Self::metal_can_serve_scaled_layers(&self.config, self.lora_attached())
+        } else {
+            self.has_gdn_layers()
+                && Self::metal_can_serve_layers(&self.config, self.lora_attached())
+        };
+        let tail_ok = if prefill {
+            self.prefill_run_tail_eligible(l, layer)
+        } else {
+            self.fused_attention_tail_eligible(l, layer)
+        };
+        let layer_ok = if beside {
+            self.fused_attn_layer_ok_beside_ssm(layer, caps)
+        } else {
+            self.fused_attn_layer_ok(layer, caps)
+        };
+        if !model_ok
+            || !layer_ok
+            || !tail_ok
             || !self.device_attention_shape_ok(l, layer)
             || cache.dtype() != frink_core::kv_store::KvDtype::F16
             || cache.rows() != start_pos
@@ -213,6 +261,11 @@ impl Decoder {
             None => None,
             Some(f) => Some(f.metal_plan(n_heads * self.config.head_dim)?),
         };
+        let extras = if beside {
+            self.metal_attn_view_from(Self::fused_attn_extras_beside_ssm(layer, caps)?)
+        } else {
+            self.metal_attn_view_under(layer, caps)?
+        };
         Some(ResidentAttnParts {
             n_heads,
             n_kv_heads,
@@ -223,9 +276,10 @@ impl Decoder {
             k,
             v,
             q_gate: layer.attn.q_gate_interleaved,
-            extras: self.metal_attn_view_under(layer, caps)?,
+            extras,
             rope: self.metal_rope(),
             layer_rope: self.metal_layer_rope(l),
+            q_scale: if prefill { self.metal_q_scale() } else { None },
             o,
             fold_branch,
             ffn: self.run_ffn_parts(l, layer)?,
@@ -246,7 +300,7 @@ impl Decoder {
         rows: usize,
         kv_caches: &mut [KvCache],
     ) -> Option<usize> {
-        if !self.prefill_rows_take_device(rows) || !self.has_gdn_layers() {
+        if !self.prefill_rows_take_device(rows) || !self.has_run_layers() {
             return None;
         }
         let eps = self.config.rms_norm_eps;
@@ -256,6 +310,8 @@ impl Decoder {
         while end < run_end.min(kv_caches.len()) {
             if let Some((gdn, attn_norm, ffn)) = self.fused_layer_parts(end) {
                 plan.push(Planned::Gdn(gdn, attn_norm, Box::new(ffn)));
+            } else if let Some(p) = self.ssm_prefill_plan(end) {
+                plan.push(Planned::Ssm(Box::new(p)));
             } else if let Some((a, n_kv)) = self.prefill_attn_layer(end, start_pos, &kv_caches[end])
             {
                 // The mirror, made or caught up to the host rows with
@@ -276,7 +332,14 @@ impl Decoder {
                 if !fits {
                     break;
                 }
-                plan.push(Planned::Attn(Box::new(a)));
+                let layer = self.layer_for(end);
+                plan.push(match layer.attn.ssm.as_ref() {
+                    None => Planned::Attn(Box::new(a)),
+                    Some(crate::ssm_block::SsmBlock::Mamba2(m)) => {
+                        Planned::Parallel(Box::new(a), m)
+                    }
+                    Some(_) => break,
+                });
             } else {
                 break;
             }
@@ -285,7 +348,11 @@ impl Decoder {
         if plan.is_empty() && head.is_none() {
             return None;
         }
+        // Each conv layer's window in, and its new rows out, owned here
+        // so the run can borrow them.
+        let mut conv_io = self.ssm_prefill_conv_io(&plan, &kv_caches[start..end], rows);
         let mut entries = Vec::with_capacity(plan.len());
+        let mut io = conv_io.iter_mut();
         for (p, cache) in plan.into_iter().zip(kv_caches[start..end].iter_mut()) {
             entries.push(match p {
                 Planned::Gdn(gdn, attn_norm, ffn) => {
@@ -303,6 +370,14 @@ impl Decoder {
                     )
                 }
                 Planned::Attn(a) => PrefillRunLayer::Attn(*a, cache.metal_attn.as_mut()?),
+                Planned::Parallel(a, m) => {
+                    let state = cache.recurrent.get_or_insert_with(|| m.zero_state());
+                    // SAFETY: as `ssm_prefill_layer`'s: this cache's own
+                    // page-aligned state, borrowed `&mut` for the call.
+                    let block = unsafe { self.prefill_mamba2_block(m, state) }?;
+                    PrefillRunLayer::Parallel(*a, Box::new(block), cache.metal_attn.as_mut()?)
+                }
+                Planned::Ssm(s) => self.ssm_prefill_layer(*s, cache, &mut io)?,
             });
         }
         // SAFETY: each state is page-aligned (`AlignedF32`) and lives in
@@ -310,36 +385,52 @@ impl Decoder {
         // for this whole call and touched by nothing else; the launch
         // waits for the GPU before returning.
         let out = unsafe {
-            frink_metal::gdn_prefill::launch_gdn_prefill_run(
+            frink_metal::prefill_run::launch_prefill_run(
                 hidden,
                 rows,
                 start_pos,
                 head,
                 &mut entries,
+                frink_metal::gdn_prefill::RunOptions {
+                    residual_scale: self.config.residual_scale,
+                },
             )
         }
         .ok()?;
         drop(entries);
+        let mut io = conv_io.into_iter();
         for (l, cache) in (start..end).zip(kv_caches[start..end].iter_mut()) {
-            if matches!(self.config.layer_shape(l).attention, AttnShape::Gdn) {
-                cache
+            match self.config.layer_shape(l).attention {
+                AttnShape::Gdn | AttnShape::Mamba1 | AttnShape::Mamba2 => cache
                     .advance_len(rows)
-                    .expect("unbounded/planned KvCache growth is infallible");
-            } else {
-                // The host rows, from the mirror the run appended to:
-                // the host cache stays the authority, and the mirror
-                // stays exactly its rows for the decode after this.
-                let prior = cache.rows();
-                let mirror = cache
-                    .metal_attn
-                    .as_ref()
-                    .expect("the run appended to this layer's mirror");
-                let (k, v) = mirror.tokens_host(prior, rows);
-                let width = k.len() / rows;
-                for (k, v) in k.chunks_exact(width).zip(v.chunks_exact(width)) {
-                    cache
-                        .push(k, v)
-                        .expect("unbounded/planned KvCache growth is infallible");
+                    .expect("unbounded/planned KvCache growth is infallible"),
+                AttnShape::ShortConv => {
+                    // The history the conv appended, one `b * x` row per
+                    // token, as `contiguous_step` pushes it on the host.
+                    let (_, bx) = io.next().expect("one io per conv layer");
+                    let n = bx.len() / rows;
+                    for row in bx.chunks_exact(n) {
+                        cache
+                            .push(row, &[])
+                            .expect("unbounded/planned KvCache growth is infallible");
+                    }
+                }
+                _ => {
+                    // The host rows, from the mirror the run appended to:
+                    // the host cache stays the authority, and the mirror
+                    // stays exactly its rows for the decode after this.
+                    let prior = cache.rows();
+                    let mirror = cache
+                        .metal_attn
+                        .as_ref()
+                        .expect("the run appended to this layer's mirror");
+                    let (k, v) = mirror.tokens_host(prior, rows);
+                    let width = k.len() / rows;
+                    for (k, v) in k.chunks_exact(width).zip(v.chunks_exact(width)) {
+                        cache
+                            .push(k, v)
+                            .expect("unbounded/planned KvCache growth is infallible");
+                    }
                 }
             }
             // A routed layer chose its experts on the device; like the
@@ -350,11 +441,22 @@ impl Decoder {
         Some(end)
     }
 
-    /// Whether any layer is a gated delta-net: the only models a
-    /// prefill run serves.
+    /// Whether any layer is a gated delta-net.
     fn has_gdn_layers(&self) -> bool {
         (0..self.config.n_layers)
             .any(|l| matches!(self.config.layer_shape(l).attention, AttnShape::Gdn))
+    }
+
+    /// Whether any layer is recurrent in a way a prefill run serves (or
+    /// carries a parallel Mamba-2 block): the only models it serves. A
+    /// dense model's attention layers are the dense stacks'.
+    fn has_run_layers(&self) -> bool {
+        (0..self.config.n_layers).any(|l| {
+            matches!(
+                self.config.layer_shape(l).attention,
+                AttnShape::Gdn | AttnShape::Mamba1 | AttnShape::Mamba2 | AttnShape::ShortConv
+            ) || self.layer_for(l).attn.ssm.is_some()
+        })
     }
 }
 
@@ -367,8 +469,8 @@ mod tests {
     use frink_core::weight_matrix::{QuantKind, WeightBytes};
     use frink_core::WeightMatrix;
     use frink_metal::attn::{LayerRope, MetalKvBuffers, MetalKvDtype, MetalRope, MetalRopeLayout};
-    use frink_metal::gdn_prefill::PrefillRunLayer;
     use frink_metal::gdn_prefill_attn::PrefillAttnLayer;
+    use frink_metal::prefill_run::PrefillRunLayer;
     use std::sync::Arc;
 
     /// One Qwen3.5 attention layer and what the host body makes of
@@ -653,6 +755,7 @@ mod tests {
                 theta,
                 freq_factors: None,
             }),
+            q_scale: None,
             o_proj: launch(&wo),
             fold_branch: fold_o.metal_plan(q_width),
             ffn: ffn.prefill_launches().expect("Q8_0 has a GEMM"),
@@ -664,12 +767,13 @@ mod tests {
         assert!(layer.is_supported(&kv, rows, prior));
         // SAFETY: no recurrent layer, so no state pointer is handed over.
         let got = unsafe {
-            frink_metal::gdn_prefill::launch_gdn_prefill_run(
+            frink_metal::prefill_run::launch_prefill_run(
                 &hidden,
                 rows,
                 prior,
                 None,
                 &mut [PrefillRunLayer::Attn(layer, &mut kv)],
+                frink_metal::gdn_prefill::RunOptions::default(),
             )
         }
         .expect("the run launches");

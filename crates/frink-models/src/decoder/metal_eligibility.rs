@@ -109,8 +109,17 @@ impl Decoder {
     /// (`frink_metal::attn::TokenMixer::Parallel`).
     #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
     pub(super) fn metal_can_serve_mixed_layers(config: &ModelConfig, lora_attached: bool) -> bool {
-        !lora_attached
+        Self::metal_can_serve_scaled_layers(config, lora_attached)
             && config.residual_scale.is_none()
+    }
+
+    /// [`Self::metal_can_serve_mixed_layers`] for a launch that applies
+    /// Granite's `residual_scale` itself: the hybrid decode stack
+    /// (`frink_metal::attn::DenseLayerMetal::residual_scale`) and the
+    /// Metal prefill run (`frink_metal::gdn_prefill::RunOptions`).
+    #[cfg(any(feature = "metal", feature = "cuda", feature = "vulkan"))]
+    pub(super) fn metal_can_serve_scaled_layers(config: &ModelConfig, lora_attached: bool) -> bool {
+        !lora_attached
             // `minimax-01.cpp:249,428`: the residual a fused kernel
             // adds its branch to is the PRE-NORM's output, which never
             // leaves the device in any of these stacks

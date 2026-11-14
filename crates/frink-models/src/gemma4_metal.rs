@@ -208,6 +208,8 @@ impl Gemma4Engine {
                     o: mv(&a.o_proj)?,
                     extras: self.layer_extras(il)?,
                     rope: Some(self.layer_rope(il)),
+                    // Gemma-4's scale rides its Q norm (`layer_extras`).
+                    q_scale: None,
                     window: self.hp.is_swa_layer(il).then_some(self.hp.sliding_window),
                 }),
                 ffn: Some(DenseFfnMetal {
@@ -232,6 +234,7 @@ impl Gemma4Engine {
                     _ => None,
                 },
                 out_scale: l.out_scale,
+                residual_scale: None,
             });
         }
         Some(out)

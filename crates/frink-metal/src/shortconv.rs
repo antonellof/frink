@@ -34,36 +34,55 @@ pub const SHORTCONV_KERNEL_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-// One token of the short convolution, one thread per channel.
+// `rows` tokens of the short convolution, one thread per (row, channel).
 //
-// `window` is `[l][n]`: rows 0 .. l-2 are the previous inputs, oldest
-// first, and row l-1 is where this token's `bx` is written. `bcx` is
-// `in_proj`'s output `[b | c | x]`, `taps` the kernel `[n][l]` with the
-// newest input on tap l-1 (ops.cpp:9601-9603), `y` the gated output.
-kernel void shortconv_step(
-    device float* window [[buffer(0)]],
+// `hist` is `[l-1][n]`, the inputs before the first row, oldest first.
+// `bcx` is `in_proj`'s output `[rows][b | c | x]`, `taps` the kernel
+// `[n][l]` with the newest input on tap l-1 (ops.cpp:9601-9603), `y` the
+// gated output `[rows][n]`, and `bx_out` gets each row's `b * x`, the
+// history the host keeps (`frink_models::shortconv`).
+//
+// A thread recomputes the `b * x` of the rows its window reaches back
+// over instead of reading another thread's, so one dispatch has no
+// ordering inside it; for one row with `bx_out` the window's last row
+// this is the decode step.
+kernel void shortconv_rows(
+    device const float* hist [[buffer(0)]],
     device const float* taps [[buffer(1)]],
     device const float* bcx [[buffer(2)]],
     device float* y [[buffer(3)]],
-    constant uint2& dims [[buffer(4)]],
-    uint ch [[thread_position_in_grid]]
+    constant uint4& dims [[buffer(4)]],
+    device float* bx_out [[buffer(5)]],
+    uint i [[thread_position_in_grid]]
 ) {
     const uint n = dims.x;
     const uint l = dims.y;
-    if (ch >= n) {
+    const uint rows = dims.z;
+    if (i >= n * rows) {
         return;
     }
-    const float bx = bcx[ch] * bcx[2u * n + ch];
-    window[(l - 1u) * n + ch] = bx;
+    const uint r = i / n;
+    const uint ch = i - r * n;
     device const float* t = taps + (size_t)ch * l;
     // A float accumulator over the window in order, the newest input
-    // last, as the host and ggml_ssm_conv sum it.
+    // last, as the host and ggml_ssm_conv sum it. Window slot `j` is
+    // input `r + j - (l - 1)`: a history row while that is negative.
     float acc = 0.0f;
-    for (uint i = 0; i + 1u < l; ++i) {
-        acc += window[i * n + ch] * t[i];
+    float bx = 0.0f;
+    for (uint j = 0; j < l; ++j) {
+        const int src = int(r + j) - int(l - 1u);
+        float v;
+        if (src < 0) {
+            v = hist[(size_t)(int(l - 1u) + src) * n + ch];
+        } else {
+            device const float* row = bcx + (size_t)src * 3u * n;
+            v = row[ch] * row[2u * n + ch];
+        }
+        acc += v * t[j];
+        bx = v;
     }
-    acc += bx * t[l - 1u];
-    y[ch] = bcx[n + ch] * acc;
+    bx_out[(size_t)r * n + ch] = bx;
+    y[(size_t)r * n + ch] = bcx[(size_t)r * 3u * n + n + ch] * acc;
 }
 "#;
 
@@ -182,25 +201,68 @@ pub(crate) fn encode_shortconv_step(
     bcx: &ProtocolObject<dyn MTLBuffer>,
     y: &ProtocolObject<dyn MTLBuffer>,
 ) -> Result<(), MetalError> {
-    let pipe = ensure_pipeline(device, SHORTCONV_KERNEL_SRC, "shortconv_step")?;
+    let (n, l) = (windows.n, windows.l_cache);
+    let at = windows.offset_bytes(i);
+    encode_shortconv_rows(
+        encoder,
+        device,
+        ConvRowsIo {
+            hist: (windows.buffer(), at),
+            bx_out: (windows.buffer(), at + (l - 1) * n * 4),
+            taps,
+            bcx,
+            y,
+            n,
+            l_cache: l,
+            rows: 1,
+        },
+    )
+}
+
+/// Where [`encode_shortconv_rows`] reads and writes: buffers with byte
+/// offsets for the history and the `b * x` rows it appends.
+pub(crate) struct ConvRowsIo<'b> {
+    pub hist: (&'b ProtocolObject<dyn MTLBuffer>, usize),
+    pub bx_out: (&'b ProtocolObject<dyn MTLBuffer>, usize),
+    pub taps: &'b ProtocolObject<dyn MTLBuffer>,
+    pub bcx: &'b ProtocolObject<dyn MTLBuffer>,
+    pub y: &'b ProtocolObject<dyn MTLBuffer>,
+    pub n: usize,
+    pub l_cache: usize,
+    pub rows: usize,
+}
+
+/// `rows` tokens of the conv in one dispatch: a decode token's window
+/// ([`encode_shortconv_step`]) and a prompt batch (`crate::ssm_prefill`)
+/// are this with different operands.
+pub(crate) fn encode_shortconv_rows(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    io: ConvRowsIo<'_>,
+) -> Result<(), MetalError> {
+    if io.l_cache < 2 || io.l_cache > MAX_L_CACHE || io.rows == 0 || io.n == 0 {
+        return Err(MetalError::Unsupported("short conv shape"));
+    }
+    let pipe = ensure_pipeline(device, SHORTCONV_KERNEL_SRC, "shortconv_rows")?;
     encoder.setComputePipelineState(&pipe.0);
-    let n = windows.n;
     // SAFETY: every buffer outlives the encoder's command buffer (the
     // caller waits on it before any of them is dropped), and `dims` is
     // copied into the command stream by `setBytes`.
     unsafe {
-        encoder.setBuffer_offset_atIndex(Some(windows.buffer()), windows.offset_bytes(i), 0);
-        encoder.setBuffer_offset_atIndex(Some(taps), 0, 1);
-        encoder.setBuffer_offset_atIndex(Some(bcx), 0, 2);
-        encoder.setBuffer_offset_atIndex(Some(y), 0, 3);
-        let mut dims: [u32; 2] = [n as u32, windows.l_cache as u32];
-        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 8, 4);
+        encoder.setBuffer_offset_atIndex(Some(io.hist.0), io.hist.1, 0);
+        encoder.setBuffer_offset_atIndex(Some(io.taps), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(io.bcx), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(io.y), 0, 3);
+        let mut dims: [u32; 4] = [io.n as u32, io.l_cache as u32, io.rows as u32, 0];
+        encoder.setBytes_length_atIndex(NonNull::new(dims.as_mut_ptr() as *mut _).unwrap(), 16, 4);
+        encoder.setBuffer_offset_atIndex(Some(io.bx_out.0), io.bx_out.1, 5);
     }
+    let total = io.n * io.rows;
     let tg = pipe.0.maxTotalThreadsPerThreadgroup().clamp(1, 256);
     crate::dispatch::dispatch_counted(
         encoder,
         MTLSize {
-            width: n.div_ceil(tg),
+            width: total.div_ceil(tg),
             height: 1,
             depth: 1,
         },

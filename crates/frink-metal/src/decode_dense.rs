@@ -12,7 +12,7 @@ use crate::attn::{
     encode_gqa_with_kv, encode_kv_store_append, encode_rope, resident_attn_extras, LayerRope,
     MetalKvBuffers, MetalRope, RopeTarget, ScratchCaps,
 };
-use crate::elem::{encode_argmax, encode_gelu_mul, encode_silu_mul, encode_vec_add};
+use crate::elem::{encode_argmax, encode_gelu_mul, encode_scale, encode_silu_mul, encode_vec_add};
 use crate::embd::{encode_get_rows, EmbdKind};
 use crate::gpu::{
     compute_encoder_concurrent, encode_matvec, resident_f32_buffer, resident_weight_buffer,
@@ -203,6 +203,10 @@ pub struct DenseLayerMetal<'a> {
     /// Gemma-4's `layer_output_scale`: the whole residual stream is
     /// multiplied by it at the end of the layer.
     pub out_scale: Option<f32>,
+    /// Granite's `residual_scale`: both branch outputs (the mixer's and
+    /// the FFN's) are multiplied by it before their residual add
+    /// (`granite-hybrid.cpp:236-238`, and again after the FFN).
+    pub residual_scale: Option<f32>,
 }
 
 /// A layer's gated FFN and the norm in front of it.
@@ -272,6 +276,11 @@ pub struct AttnMixer<'a> {
     /// `None` = this layer does not rotate at all (llama.cpp's
     /// per-layer `use_rope`, `frink_models::rope_layers`).
     pub rope: Option<LayerRope<'a>>,
+    /// Q's multiplier after RoPE, `attention.scale * sqrt(head_dim)`, so
+    /// the kernels' `1/sqrt(head_dim)` comes to the checkpoint's
+    /// `kq_scale` (`granite-hybrid.cpp:223-224`). The host bodies scale
+    /// Q the same way (`Decoder::apply_attention_scale`).
+    pub q_scale: Option<f32>,
     /// Sliding-window size for this layer (`None` = full causal).
     pub window: Option<usize>,
 }
@@ -543,8 +552,8 @@ pub fn launch_decode_dense_stack(
     let (mut encoder, mut mrs) = (compute_encoder_concurrent(&cmd_buf)?, MemRanges::new());
     // `FRINK_METAL_KERNEL_TIMING=1`: one sampled encoder per op group,
     // so the report says which KIND of dispatch the GPU time went to.
-    // A no-op otherwise. 18 groups per layer is the ceiling below.
-    let mut spans = SpanClock::begin(device, 18 * layers.len() + 8);
+    // A no-op otherwise. 21 groups per layer is the ceiling below.
+    let mut spans = SpanClock::begin(device, 21 * layers.len() + 8);
     // Calibration: an encoder with nothing in it measures the boundary
     // cost the instrument adds to every span below.
     spans.span(&cmd_buf, &mut encoder, "(empty encoder)")?;
@@ -647,9 +656,11 @@ pub fn launch_decode_dense_stack(
                         xc: attn_buf,
                         x_db: k_buf,
                         dt: v_buf,
+                        dt_low: None,
                         y: gate_buf,
                         out: o_buf,
                     },
+                    1,
                 )?;
             }
             TokenMixer::Mamba2(m) => {
@@ -666,6 +677,7 @@ pub fn launch_decode_dense_stack(
                         y: gate_buf,
                         out: o_buf,
                     },
+                    1,
                 )?;
             }
             TokenMixer::ShortConv(c) => {
@@ -798,6 +810,13 @@ pub fn launch_decode_dense_stack(
                     mrs.end_op(qk, qk);
                 }
 
+                if let Some(s) = attn.q_scale {
+                    spans.span(&cmd_buf, &mut encoder, "q_scale")?;
+                    mrs.begin_op(&encoder, &[q_buf], &[q_buf]);
+                    encode_scale(&encoder, device, q_buf, s, attn.q.rows as u32)?;
+                    mrs.end_op(&[q_buf], &[q_buf]);
+                }
+
                 if own_kv.is_some() {
                     let token_elems = (n_kv_heads * head_dim) as u32;
                     let offset = (pos * n_kv_heads * head_dim) as u32;
@@ -868,6 +887,7 @@ pub fn launch_decode_dense_stack(
                     y: gate_buf,
                     out: down_buf,
                 },
+                1,
             )?;
             mrs.begin_op(&encoder, &[o_buf, down_buf], &[o_buf]);
             encode_vec_add(&encoder, device, o_buf, down_buf, hidden_dim as u32)?;
@@ -891,6 +911,12 @@ pub fn launch_decode_dense_stack(
                 hidden_dim as u32,
                 rms_eps,
             )?;
+            mrs.end_op(&[o_buf], &[o_buf]);
+        }
+        if let Some(s) = layer.residual_scale {
+            spans.span(&cmd_buf, &mut encoder, "residual_scale")?;
+            mrs.begin_op(&encoder, &[o_buf], &[o_buf]);
+            encode_scale(&encoder, device, o_buf, s, hidden_dim as u32)?;
             mrs.end_op(&[o_buf], &[o_buf]);
         }
         // Attn residual + ffn_norm in one dispatch, for every model.
@@ -976,6 +1002,12 @@ pub fn launch_decode_dense_stack(
                 hidden_dim as u32,
                 rms_eps,
             )?;
+            mrs.end_op(&[down_buf], &[down_buf]);
+        }
+        if let Some(s) = layer.residual_scale {
+            spans.span(&cmd_buf, &mut encoder, "residual_scale")?;
+            mrs.begin_op(&encoder, &[down_buf], &[down_buf]);
+            encode_scale(&encoder, device, down_buf, s, hidden_dim as u32)?;
             mrs.end_op(&[down_buf], &[down_buf]);
         }
         if sandwich {

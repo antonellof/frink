@@ -287,8 +287,8 @@ fn mamba_matches_llama_cpp_on_all_three_paths() {
 /// (`decoder::metal_hybrid`, `frink_metal::ssm_decode`), and the answer
 /// is still llama.cpp's. The allocation check is what says the stack
 /// ran: the host bodies would match the golden too. FalconMamba's norms
-/// on dt, B and C have no kernel there, so that file must stay on the
-/// host and still match.
+/// on dt, B and C run in the stack's block too
+/// (`frink_metal::ssm_decode::DtBcNormMetal`), against their own golden.
 ///
 /// `cargo test -p frink-models --features metal --test mamba_graphs -- --ignored`
 #[cfg(feature = "metal")]
@@ -303,7 +303,7 @@ fn metal_decode_runs_the_mamba1_blocks_in_the_dense_stack() {
     frink_models::set_metal_greedy_argmax(false);
     for (name, golden, on_stack) in [
         (MAMBA, &MAMBA_GOLDEN, true),
-        (MAMBA_DTBCRMS, &MAMBA_DTBCRMS_GOLDEN, false),
+        (MAMBA_DTBCRMS, &MAMBA_DTBCRMS_GOLDEN, true),
         // Pure Mamba-2: `TokenMixer::Mamba2` on every layer.
         (MAMBA2, &MAMBA2_GOLDEN, true),
     ] {

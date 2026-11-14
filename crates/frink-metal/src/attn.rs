@@ -7201,6 +7201,7 @@ mod tests {
                 o: f32_matvec(&w.o, hidden, n_q),
                 extras: AttnExtras::default(),
                 rope,
+                q_scale: None,
                 window: None,
             }),
             ffn: Some(DenseFfnMetal {
@@ -7213,6 +7214,7 @@ mod tests {
             post_ffn_norm: None,
             per_layer: None,
             out_scale: None,
+            residual_scale: None,
         }
     }
 

@@ -783,12 +783,13 @@ mod tests {
         };
         // SAFETY: no recurrent layer, so no state pointer is handed over.
         let got = unsafe {
-            frink_metal::gdn_prefill::launch_gdn_prefill_run(
+            frink_metal::prefill_run::launch_prefill_run(
                 &c.residual,
                 rows,
                 0,
                 Some(&tail),
                 &mut [],
+                frink_metal::gdn_prefill::RunOptions::default(),
             )
         }
         .expect("the run launches");

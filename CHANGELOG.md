@@ -79,6 +79,24 @@ are the ones worth reading twice.
 
 ### Changed
 
+- **A Mamba, short-conv or Granite-4.0-H prompt is one Metal command
+  buffer, and Granite-4.0-H and FalconMamba decode on the device.** The
+  prefill run the gated delta-net models use now takes LFM2's short
+  convolution, Mamba-1 (FalconMamba's dt/B/C norms included), Mamba-2
+  and Falcon-H1's attention beside its Mamba-2 block, with the attention
+  layers between them whole; the blocks are the decode stack's own over
+  a GEMM instead of a matvec. Each prompt used to take two to five
+  submissions a layer. The Mamba conv runs over (row, channel) and the
+  Mamba-2 scan batches its rows as `kernel_ssm_scan_f32` does, four
+  channels a threadgroup. Granite's `residual_scale` and
+  `attention.scale` are uniforms of both launches, so Granite-4.0-H no
+  longer decodes on the host. M5 Max Q4_K_M, interleaved best-of on a
+  shared host, pp512 / tg128 before, after, llama.cpp: LFM2-1.2B
+  4996 / 509, 14565 / 508, 16160 / 394; granite-4.0-h-micro 1224 / 41,
+  4120 / 183, 3696 / 130; Falcon-H1-0.5B 2130 / 376, 12250 / 374,
+  7663 / 259; mamba-1.4b 1216 / 170, 7295 / 267, 4800 / 226;
+  FalconMamba-7B 441 / 19, 1936 / 79, 1411 / 84. Greedy text and
+  parity unchanged.
 - **A gated delta-net decode token waits once on Metal** (#540). The
   attention layers between the recurrent runs ride the run whole (the
   projections, the Q gate, QK norms, RoPE, the append to the f16 KV
