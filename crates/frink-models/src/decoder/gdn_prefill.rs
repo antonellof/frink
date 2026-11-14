@@ -799,4 +799,65 @@ mod tests {
         close("v", &dv, &v, 2e-3);
         close("out", &got, &want, 3e-3);
     }
+
+    /// The output head at the end of a decode run IS the host head:
+    /// `final_norm`, the rotation a folded `output` reads its input in,
+    /// and the projection. A fold skipped or applied to the unnormed
+    /// stream is visible here, since the input is not unit scale.
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn the_output_head_in_a_decode_run_matches_the_host_head() {
+        let (n_embd, vocab, eps) = (256usize, 1000usize, 1e-6f32);
+        let mut seed = 4_711u32;
+        let mut rnd = |n: usize, scale: f32| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (((seed >> 9) as f32 / (1u32 << 23) as f32) - 0.5) * scale
+                })
+                .collect()
+        };
+        let signs: Arc<[f32]> = rnd(n_embd, 2.0)
+            .iter()
+            .map(|x| if *x < 0.0 { -1.0f32 } else { 1.0 })
+            .collect::<Vec<f32>>()
+            .into();
+        let fold = Arc::new(HadamardFold {
+            block: 64,
+            signs: Some(signs),
+            perm: None,
+            site: FoldSite::Input,
+        });
+        let mut output = WeightMatrix::Quantized {
+            data: WeightBytes::Owned(frink_quant::quantize_q8_0(&rnd(vocab * n_embd, 0.2))),
+            rows: vocab,
+            cols: n_embd,
+            kind: QuantKind::Q8_0,
+        };
+        output.fold_hadamard(fold);
+        let norm: Vec<f32> = rnd(n_embd, 0.5).iter().map(|x| 1.0 + x).collect();
+        let hidden = rnd(n_embd, 8.0);
+        // The host head, as `Decoder::logits_from_normed` projects.
+        let want = output.apply(&rms_norm(&hidden, &norm, eps));
+
+        let (base, f) = output.launch_parts();
+        let launch = crate::metal_launch::matvec(base).expect("Q8_0 has a matvec");
+        let plan = f.expect("folded above").metal_plan(n_embd).expect("a plan");
+        let mut run = frink_metal::gdn_branch::GdnRun::start(&hidden).expect("a run");
+        run.output_head(&norm, eps, &launch, Some(&plan))
+            .expect("the head encodes");
+        let got = run
+            .finish_with_head()
+            .expect("the run completes")
+            .logits
+            .expect("the head's logits come back");
+        assert_eq!(got.len(), vocab);
+        let scale = want.iter().fold(0f32, |a, v| a.max(v.abs())).max(1.0);
+        for (i, (d, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (d - w).abs() <= 2e-3 * scale,
+                "logit[{i}]: device {d} host {w}"
+            );
+        }
+    }
 }

@@ -764,11 +764,14 @@ pub struct GdnRun {
     /// at the end of this run: the scratch holding `q`, `k` and `v`,
     /// and their lengths. `finish` reads them back with the hidden
     /// state, so the host gets all four for one wait.
-    head: Option<(crate::scratch_pool::Scratch, usize, usize)>,
+    pub(crate) head: Option<(crate::scratch_pool::Scratch, usize, usize)>,
     /// Each routed tail in the run: its caller's tag, the `keep` entry
     /// holding its scratch, and its `top_k`, so the experts it chose
     /// come back with the residual stream.
     routed: Vec<(usize, usize, usize)>,
+    /// The output head's logits, when [`GdnRun::output_head`] ended the
+    /// run: the scratch holding them and the vocabulary size.
+    pub(crate) logits: Option<(crate::scratch_pool::Scratch, usize)>,
 }
 
 /// What a finished run hands back: the residual stream, the next
@@ -778,6 +781,9 @@ pub struct RunOut {
     pub hidden: Vec<f32>,
     pub head: Option<(Vec<f32>, Vec<f32>, Vec<f32>)>,
     pub routed: Vec<(usize, Vec<usize>)>,
+    /// `output(final_norm(hidden))`, unscaled and uncapped, when
+    /// [`GdnRun::output_head`] ended the run.
+    pub logits: Option<Vec<f32>>,
 }
 
 impl GdnRun {
@@ -797,6 +803,7 @@ impl GdnRun {
             submissions: 0,
             head: None,
             routed: Vec::new(),
+            logits: None,
         })
     }
 
@@ -987,7 +994,7 @@ impl GdnRun {
         fold_x: Option<&FoldPlan<'_>>,
     ) -> Result<(), MetalError> {
         let hidden = self.rows;
-        if norm.len() != hidden || self.head.is_some() {
+        if norm.len() != hidden || self.head.is_some() || self.logits.is_some() {
             return Err(MetalError::CommandFailed);
         }
         let shared = shared_metal()?;
@@ -1103,6 +1110,7 @@ impl GdnRun {
                 hidden: read(self.hidden.buf(0), self.rows),
                 head: None,
                 routed: Vec::new(),
+                logits: None,
             });
         };
         // One queue is ordered, so waiting for the LAST buffer waits
@@ -1131,10 +1139,12 @@ impl GdnRun {
                 Some((tag, crate::gdn_moe::read_ids(tail, k)))
             })
             .collect();
+        let logits = self.logits.as_ref().map(|(sc, n)| read(sc.buf(1), *n));
         Ok(RunOut {
             hidden,
             head,
             routed,
+            logits,
         })
     }
 }

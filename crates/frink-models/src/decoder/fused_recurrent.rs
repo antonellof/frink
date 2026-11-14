@@ -26,6 +26,18 @@ use frink_core::recurrent_state::RecurrentState;
 /// (`frink_metal::gdn_branch::GdnRun::attn_head`).
 pub(crate) type PendingQkv = Option<(usize, (Vec<f32>, Vec<f32>, Vec<f32>))>;
 
+/// What a decode run hands the body after it: the next attention
+/// layer's Q/K/V when the run stopped before that layer, and the logits
+/// when it reached the end of the stack and took the output head too
+/// ([`Decoder::close_run`]).
+#[derive(Default)]
+pub(crate) struct RunCarry {
+    pub(crate) qkv: PendingQkv,
+    /// `output(final_norm(hidden))`, before the head's bias, multiplier
+    /// and softcap, which the body applies (`Logits::from_output_head`).
+    pub(crate) logits: Option<Vec<f32>>,
+}
+
 impl Decoder {
     /// Layer `l` end to end in one submission, or `None` when either
     /// half refuses and the host bodies run it.
@@ -112,7 +124,7 @@ impl Decoder {
         pos: usize,
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
-        pending: &mut PendingQkv,
+        carry: &mut RunCarry,
     ) -> Option<usize> {
         // How far the run reaches: consecutive layers this path serves
         // whole. Asked BEFORE anything is submitted, because a run that
@@ -129,7 +141,7 @@ impl Decoder {
         }
         let mut run = frink_metal::gdn_branch::GdnRun::start(hidden).ok()?;
         self.run_layers(&mut run, start, end, kv_caches)?;
-        self.close_run(run, end, pos, hidden, kv_caches, pending)
+        self.close_run(run, end, pos, hidden, kv_caches, carry)
     }
 
     /// The same run, begun with an ATTENTION layer's tail.
@@ -149,7 +161,7 @@ impl Decoder {
         branch: &[f32],
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
-        pending: &mut PendingQkv,
+        carry: &mut RunCarry,
     ) -> Option<usize> {
         let (out_proj, fold_branch, ffn, launches) = self.attn_tail_launch(l, layer, branch)?;
         let mut end = l + 1;
@@ -172,7 +184,7 @@ impl Decoder {
         let _ = ffn;
         Self::record_fused_ffn(layer);
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
-        self.close_run(run, end, pos, hidden, kv_caches, pending)
+        self.close_run(run, end, pos, hidden, kv_caches, carry)
     }
 
     /// Carries `run` on from layer `end` to the end of the stack where
@@ -184,7 +196,8 @@ impl Decoder {
     /// end is one wait instead of one per attention layer (#540). Where
     /// the run stops short of the stack, the next attention layer's
     /// Q/K/V are encoded at its end as before and come back in
-    /// `pending`. The rows each joined attention layer appended to its
+    /// `carry`; where it reaches the end of the stack, the output head
+    /// rides it as well and the logits come back there. The rows each joined attention layer appended to its
     /// mirror are copied to the host cache after the wait, so the host
     /// stays the authority.
     #[cfg(feature = "metal")]
@@ -195,7 +208,7 @@ impl Decoder {
         pos: usize,
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
-        pending: &mut PendingQkv,
+        carry: &mut RunCarry,
     ) -> Option<usize> {
         let n_layers = kv_caches.len();
         let mut joined = Vec::new();
@@ -209,10 +222,14 @@ impl Decoder {
             end = next;
         }
         let head = self.encode_next_attn_head(&mut run, end, n_layers);
+        if end == n_layers {
+            self.encode_output_head(&mut run);
+        }
         let frink_metal::gdn_branch::RunOut {
             hidden: out,
             head: qkv,
             routed,
+            logits,
         } = run.finish_with_head().ok()?;
         // The experts each routed layer chose, recorded as the host
         // body records them.
@@ -228,8 +245,36 @@ impl Decoder {
                 .expect("unbounded/planned KvCache growth is infallible");
         }
         *hidden = out;
-        *pending = head.then_some(qkv).flatten().map(|q| (end, q));
+        carry.qkv = head.then_some(qkv).flatten().map(|q| (end, q));
+        carry.logits = logits;
         Some(end)
+    }
+
+    /// `final_norm` and the output projection at the end of `run`, when
+    /// both have kernels; `false` and nothing encoded otherwise, and the
+    /// body projects as it always has. A model whose stack is not one
+    /// pass (`layer_loops`) ends somewhere else, so it never folds.
+    #[cfg(feature = "metal")]
+    fn encode_output_head(&self, run: &mut frink_metal::gdn_branch::GdnRun) -> bool {
+        let Some(norm) = self.final_norm.rms_weights() else {
+            return false;
+        };
+        if self.config.layer_loops.is_some() {
+            return false;
+        }
+        let (base, fold) = self.output_head.launch_parts();
+        let Some(launch) = crate::metal_launch::matvec(base) else {
+            return false;
+        };
+        let fold = match fold {
+            None => None,
+            Some(f) => match f.metal_plan(norm.len()) {
+                Some(plan) => Some(plan),
+                None => return false,
+            },
+        };
+        run.output_head(norm, self.config.rms_norm_eps, &launch, fold.as_ref())
+            .is_ok()
     }
 
     /// Attention layer `l` appended to `run` whole, at position `pos`,

@@ -601,6 +601,10 @@ impl Decoder {
 
         #[cfg(feature = "metal")]
         let run_cpu_layers = !metal_stack_done;
+        // The logits, when a gated delta-net run reached the end of the
+        // stack and took the output head with it.
+        #[cfg(feature = "metal")]
+        let mut device_logits: Option<Vec<f32>> = None;
         #[cfg(not(feature = "metal"))]
         let run_cpu_layers = true;
 
@@ -638,7 +642,7 @@ impl Decoder {
             // that follows it, carried one iteration so that layer does
             // not project them again in a submission of its own.
             #[cfg(feature = "metal")]
-            let mut pending_qkv: crate::decoder::fused_recurrent::PendingQkv = None;
+            let mut carry = crate::decoder::fused_recurrent::RunCarry::default();
             #[allow(clippy::needless_range_loop)]
             for l in 0..kv_caches.len() {
                 self.hrm_stack_input(hrm.as_ref(), l, &mut hidden);
@@ -651,7 +655,7 @@ impl Decoder {
                 // gap is made of (`1ebda4fc:docs/plans/gdn-resident-state.md`).
                 #[cfg(feature = "metal")]
                 if let Some(end) =
-                    self.fused_recurrent_run(l, pos, &mut hidden, kv_caches, &mut pending_qkv)
+                    self.fused_recurrent_run(l, pos, &mut hidden, kv_caches, &mut carry)
                 {
                     fused_through = end;
                     continue;
@@ -1157,7 +1161,7 @@ impl Decoder {
                 // The projections the preceding run encoded for THIS
                 // layer, if it did: then nothing here projects again.
                 #[cfg(feature = "metal")]
-                let precomputed = match pending_qkv.take() {
+                let precomputed = match carry.qkv.take() {
                     Some((at, qkv)) if at == l => Some(qkv),
                     // A run encoded a head for a different layer than
                     // the one we reached, which only a refusal in
@@ -1191,7 +1195,7 @@ impl Decoder {
                         gate,
                         &mut hidden,
                         kv_caches,
-                        &mut pending_qkv,
+                        &mut carry,
                     ) {
                         fused_through = end;
                         continue;
@@ -1254,7 +1258,7 @@ impl Decoder {
                         &branch,
                         &mut hidden,
                         kv_caches,
-                        &mut pending_qkv,
+                        &mut carry,
                     ) {
                         fused_through = end;
                         continue;
@@ -1285,6 +1289,10 @@ impl Decoder {
                 );
                 self.hrm_store(hrm.as_mut(), l, &hidden);
             }
+            #[cfg(feature = "metal")]
+            {
+                device_logits = carry.logits.take();
+            }
         } // run_cpu_layers
 
         #[cfg(feature = "metal")]
@@ -1292,6 +1300,20 @@ impl Decoder {
             if let Some(h) = frink_metal::attn::moe_decode_take_hidden() {
                 hidden = h;
             }
+        }
+
+        // The head rode the last run: the same projection the host would
+        // have launched, given the transforms every head path applies.
+        #[cfg(feature = "metal")]
+        if let Some(raw) = device_logits {
+            frink_metal::gpu::clear_resident_activation();
+            return crate::decoder::lm_head::Logits::from_output_head(
+                raw,
+                self.output_bias.as_deref(),
+                self.config.final_logit_softcap,
+                self.config.logit_multiplier,
+            )
+            .into_vec();
         }
 
         // If Metal stack already ran final_norm, hidden is normalized; else

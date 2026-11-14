@@ -17,6 +17,11 @@
 //!
 //! The decode twin of `crate::gdn_prefill_attn`: the same kernels after
 //! the projections, at one row, and matvecs instead of GEMMs.
+//!
+//! The run's last step is here too: the final norm and the output
+//! projection ([`GdnRun::output_head`]), so a token whose every layer
+//! rode the run downloads its logits from the same wait rather than
+//! paying a submission and a wake-up for the head.
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue};
@@ -134,13 +139,34 @@ pub(crate) fn encode_attn_head(
     normed: &ProtocolObject<dyn MTLBuffer>,
     out: [&ProtocolObject<dyn MTLBuffer>; 3],
 ) -> Result<(), MetalError> {
+    encode_normed_projections(
+        encoder,
+        device,
+        hidden_buf,
+        norm,
+        norm_eps,
+        fold_x,
+        normed,
+        &[(q, out[0]), (k, out[1]), (v, out[2])],
+    )
+}
+
+/// `rms_norm(hidden)`, its rotation when the projections are folded,
+/// and each projection of the result: the attention head's three and
+/// the output head's one.
+#[allow(clippy::too_many_arguments)]
+fn encode_normed_projections(
+    encoder: &ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>,
+    device: &objc2::rc::Retained<ProtocolObject<dyn objc2_metal::MTLDevice>>,
+    hidden_buf: &ProtocolObject<dyn MTLBuffer>,
+    norm: &[f32],
+    norm_eps: f32,
+    fold_x: Option<&FoldPlan<'_>>,
+    normed: &ProtocolObject<dyn MTLBuffer>,
+    projections: &[(&MatvecLaunch<'_>, &ProtocolObject<dyn MTLBuffer>)],
+) -> Result<(), MetalError> {
     let hidden = norm.len();
     let norm_w = resident_f32_buffer(device, norm)?;
-    let (q_w, k_w, v_w) = (
-        resident_weight_buffer(device, q.weights)?,
-        resident_weight_buffer(device, k.weights)?,
-        resident_weight_buffer(device, v.weights)?,
-    );
     let signs = match fold_x.and_then(|p| p.signs) {
         None => None,
         Some(sg) => {
@@ -171,9 +197,10 @@ pub(crate) fn encode_attn_head(
             signs.as_ref().map(|b| &*b.buffer),
         )?;
     }
-    encode_matvec(encoder, device, q, &q_w, normed, out[0])?;
-    encode_matvec(encoder, device, k, &k_w, normed, out[1])?;
-    encode_matvec(encoder, device, v, &v_w, normed, out[2])?;
+    for (m, out) in projections {
+        let w = resident_weight_buffer(device, m.weights)?;
+        encode_matvec(encoder, device, m, &w, normed, out)?;
+    }
     Ok(())
 }
 
@@ -291,6 +318,55 @@ pub(crate) fn encode_attn_core(
 }
 
 impl GdnRun {
+    /// The output head at the END of this run: `final_norm(hidden)`, its
+    /// rotation when `output` is folded, and `output` itself. The logits
+    /// come back from [`Self::finish_with_head`] with the residual
+    /// stream, unscaled and uncapped: the caller applies the head's
+    /// bias, multiplier and softcap as it does to a host projection.
+    pub fn output_head(
+        &mut self,
+        norm: &[f32],
+        norm_eps: f32,
+        output: &MatvecLaunch<'_>,
+        fold: Option<&FoldPlan<'_>>,
+    ) -> Result<(), MetalError> {
+        let hidden = self.rows;
+        if norm.len() != hidden
+            || cols(output) != hidden
+            || self.head.is_some()
+            || self.logits.is_some()
+        {
+            return Err(MetalError::CommandFailed);
+        }
+        let shared = shared_metal()?;
+        let device = &shared.device;
+        // normed, then the logits.
+        let sc = crate::scratch_pool::Scratch::take(device, &[hidden, output.rows])
+            .ok_or(MetalError::BufferAllocFailed)?;
+        let cmd_buf = shared
+            .queue
+            .commandBuffer()
+            .ok_or(MetalError::CommandFailed)?;
+        let encoder = cmd_buf
+            .computeCommandEncoder()
+            .ok_or(MetalError::CommandFailed)?;
+        encode_normed_projections(
+            &encoder,
+            device,
+            self.hidden.buf(0),
+            norm,
+            norm_eps,
+            fold,
+            sc.buf(0),
+            &[(output, sc.buf(1))],
+        )?;
+        encoder.endEncoding();
+        cmd_buf.commit();
+        self.committed(cmd_buf);
+        self.logits = Some((sc, output.rows));
+        Ok(())
+    }
+
     /// A whole ATTENTION layer in this run, from the residual stream the
     /// run holds to the one it leaves: nothing returns to the host.
     ///
