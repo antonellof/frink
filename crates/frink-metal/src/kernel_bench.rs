@@ -333,3 +333,65 @@ fn prefill_gemm_rates() {
         );
     }
 }
+
+/// The decode matvec's rate on Bonsai-2-27B's PTQ1_0 shapes (rows x
+/// cols: `attn_gate` 6144 x 5120, `attn_qkv` 10240 x 5120, `ffn_up`
+/// 17408 x 5120, `ffn_down` 5120 x 17408, `ssm_out` 5120 x 6144), the
+/// number to put beside the fork's `test-backend-ops perf -o MUL_MAT -b
+/// MTL0` rows at `n=1`.
+///
+/// Run: `cargo test -p frink-metal --features metal --release --
+/// --ignored --nocapture decode_matvec_rates`.
+#[test]
+#[ignore = "needs a real Metal GPU; prints a table"]
+fn decode_matvec_rates() {
+    use crate::gpu::{encode_matvec_with_offsets, matvec_launch_meta, resident_weight_buffer};
+    let shared = shared_metal().expect("Metal");
+    let device = &shared.device;
+    const N: usize = 32;
+    let mut seed = 7u32;
+    let mut total = 0.0;
+    for (rows, cols) in [
+        (4096usize, 14336usize),
+        (6144, 5120),
+        (10240, 5120),
+        (17408, 5120),
+        (5120, 17408),
+        (5120, 6144),
+    ] {
+        let (src, fn_name, block_bytes, block_elems, rows_per_tg) =
+            matvec_launch_meta("PTQ1_0").unwrap();
+        let row_bytes = cols / block_elems * block_bytes;
+        let mut w = vec![0u8; rows * row_bytes];
+        for (i, b) in w.iter_mut().enumerate() {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            *b = match i % block_bytes {
+                26 => 0,
+                27 => 0x20,
+                24 | 25 => ((seed >> 24) as u8) % 81,
+                _ => ((seed >> 24) as u8) % 243,
+            };
+        }
+        let x = f32_buf(device, cols).unwrap();
+        let out = f32_buf(device, rows).unwrap();
+        let wb = resident_weight_buffer(device, &w).unwrap();
+        let l = crate::gpu::MatvecLaunch {
+            kernel_src: src,
+            fn_name,
+            block_bytes,
+            block_elems,
+            weights: &w,
+            rows,
+            row_bytes,
+            rows_per_tg,
+        };
+        let us = serialized_us(&shared, N, |e| {
+            encode_matvec_with_offsets(e, device, &l, &wb, &x, 0, &out, 0)
+        })
+        .unwrap();
+        total += us;
+        let gbs = (rows * row_bytes) as f64 / us / 1e3;
+        eprintln!("  ptq1_0 {rows:>6} x {cols:>6}  {us:>8.1} us  {gbs:>6.1} GB/s");
+    }
+    eprintln!("  sum {total:.1} us");
+}
