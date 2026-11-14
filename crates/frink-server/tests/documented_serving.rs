@@ -52,7 +52,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ),
     // Paged KV.
     ("crates/frink-core/src/cache.rs", 58, "fn new"),
-    ("crates/frink-server/src/generate.rs", 415, "fn fork"),
+    ("crates/frink-server/src/generate.rs", 426, "fn fork"),
     (
         "crates/frink-server/src/serving/batch/prefill.rs",
         178,
@@ -72,35 +72,35 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     // Prefix caching.
     (
         "crates/frink-server/src/policy/radix/plain.rs",
-        176,
+        164,
         "fn peek_cached_len",
     ),
     (
         "crates/frink-server/src/policy/radix/plain.rs",
-        201,
+        189,
         "fn match_prefix",
     ),
     (
         "crates/frink-server/src/policy/radix/plain.rs",
-        211,
+        199,
         "fn insert_prefix",
     ),
     (
         "crates/frink-server/src/policy/radix/plain.rs",
-        245,
+        233,
         "fn lock",
     ),
     (
         "crates/frink-server/src/policy/radix/plain.rs",
-        259,
+        247,
         "fn unlock",
     ),
     (
         "crates/frink-server/src/policy/radix/plain.rs",
-        287,
+        275,
         "fn evict",
     ),
-    ("crates/frink-server/src/generate.rs", 876, "tree.evict("),
+    ("crates/frink-server/src/generate.rs", 887, "tree.evict("),
     // Preemption.
     (
         "crates/frink-server/src/serving/batch/preempt.rs",

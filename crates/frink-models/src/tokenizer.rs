@@ -31,7 +31,9 @@
 //! `none`.
 
 mod fim;
+mod kimi_k2_split;
 mod plamo2;
+mod pre_patterns;
 mod pretokenize;
 mod regex_split;
 mod scored_vocab;
@@ -392,6 +394,11 @@ pub struct GgufBpeTokenizer {
     /// Compiled pre-tokenizer: the checkpoint's `tokenizer.ggml.pre`
     /// regex or regex sequence, or newline-only for Gemma-4 SPM-BPE.
     pretokenize_pattern: regex_split::PreTokenizer,
+    /// `llama_vocab::get_ignore_merges`, set by the `pre` arm
+    /// (`llama-vocab.cpp:709-712`): a pre-split word that is itself a
+    /// vocabulary entry is that one token, whatever the merges would
+    /// have made of it.
+    ignore_merges: bool,
     style: BpeEncodingStyle,
 }
 
@@ -416,8 +423,8 @@ pub enum TokenizerLoadError {
     Plamo2ByteTokenMissing { byte: u8 },
     #[error(
         "tokenizer.ggml.pre = {pre:?} selects a pre-tokenizer frink does not implement: \
-         {reason}. Falling back to the GPT-2 pattern would tokenize this vocabulary fluently \
-         and wrongly"
+         {reason}. Serving it with another arm's pattern would tokenize this vocabulary \
+         fluently and wrongly"
     )]
     UnservedPreTokenizer { pre: String, reason: &'static str },
 }
@@ -447,17 +454,27 @@ impl GgufBpeTokenizer {
             .map(|(i, t)| (t.clone(), i as u32))
             .collect();
 
-        let pre = file.metadata_str("tokenizer.ggml.pre").unwrap_or("");
-        if let Some(reason) = pretokenize::unserved_pre(pre) {
-            return Err(TokenizerLoadError::UnservedPreTokenizer {
-                pre: pre.to_string(),
-                reason,
-            });
-        }
-
         let style = match file.metadata_str("tokenizer.ggml.model") {
             Some("gemma4") => BpeEncodingStyle::SpmWhitespace,
             _ => BpeEncodingStyle::Gpt2,
+        };
+
+        // Keyed on the checkpoint's own `tokenizer.ggml.pre`. Upstream
+        // ignores the key for `tokenizer.ggml.model = gemma4` and forces
+        // `gemma4` (`llama-vocab.cpp:2446`), so it is read only for GPT-2
+        // style; a missing key is upstream's `DEFAULT` list.
+        let (pretokenize_pattern, ignore_merges) = match style {
+            BpeEncodingStyle::Gpt2 => {
+                let pre = file.metadata_str("tokenizer.ggml.pre").unwrap_or("");
+                let arm = pretokenize::pre_split(pre).map_err(|reason| {
+                    TokenizerLoadError::UnservedPreTokenizer {
+                        pre: pre.to_string(),
+                        reason,
+                    }
+                })?;
+                (arm.pretokenizer, arm.ignore_merges)
+            }
+            BpeEncodingStyle::SpmWhitespace => (pretokenize::newline_regex(), false),
         };
 
         let mut merge_rank = std::collections::HashMap::new();
@@ -472,12 +489,6 @@ impl GgufBpeTokenizer {
         }
 
         let (byte_to_unicode, unicode_to_byte) = gpt2_byte_to_unicode();
-        let pretokenize_pattern = match style {
-            // Keyed on the checkpoint's own `tokenizer.ggml.pre`, which
-            // was previously read only to decide BOS prepending.
-            BpeEncodingStyle::Gpt2 => pretokenize::regex_for(pre),
-            BpeEncodingStyle::SpmWhitespace => pretokenize::newline_regex(),
-        };
         let special_tokens = SpecialTokenTable::from_gguf(file, &id_to_token);
 
         Ok(GgufBpeTokenizer {
@@ -488,6 +499,7 @@ impl GgufBpeTokenizer {
             unicode_to_byte,
             special_tokens,
             pretokenize_pattern,
+            ignore_merges,
             style,
         })
     }
@@ -513,6 +525,11 @@ impl GgufBpeTokenizer {
         };
         if pieces.is_empty() {
             return Vec::new();
+        }
+        if self.ignore_merges {
+            if let Some(&id) = self.token_to_id.get(&pieces.concat()) {
+                return vec![id];
+            }
         }
 
         loop {
@@ -1279,13 +1296,14 @@ mod gguf_vocab_tests {
         GgufBpeTokenizer::from_gguf(&file).expect("real vocab fixture must parse as a tokenizer")
     }
 
-    /// A `pre` llama.cpp gained at the `604cc430` pin with an arm this
-    /// engine lacks stops the load (`pretokenize::UNSERVED_PRE`) instead
-    /// of falling through to the GPT-2 pattern. `domyn-small` is the one
-    /// on an architecture frink serves (`nemotron`, upstream #23343).
+    /// A `pre` with an arm this engine lacks stops the load
+    /// (`pretokenize::UNSERVED_PRE`) instead of falling through to the
+    /// GPT-2 pattern, and so does one upstream does not know, which
+    /// llama.cpp refuses too. `domyn-small` is the refused one on an
+    /// architecture frink serves (`nemotron`, upstream #23343).
     ///
-    /// Sabotage to confirm: remove the `unserved_pre` check in
-    /// `from_gguf` and this loads.
+    /// Sabotage to confirm: map the `pre_split` error in `from_gguf` to
+    /// the GPT-2 arm and this loads.
     #[test]
     fn an_unserved_pre_tokenizer_is_refused_not_defaulted() {
         use frink_gguf::GgufValue as V;
@@ -1298,11 +1316,47 @@ mod gguf_vocab_tests {
                     V::Array(vec![V::String("a".into()), V::String("b".into())]),
                 )
         };
-        assert!(matches!(
-            GgufBpeTokenizer::from_gguf(&file("domyn-small")),
-            Err(TokenizerLoadError::UnservedPreTokenizer { .. })
-        ));
+        for pre in ["domyn-small", "soprano", "not-a-pre-llama-cpp-knows"] {
+            assert!(
+                matches!(
+                    GgufBpeTokenizer::from_gguf(&file(pre)),
+                    Err(TokenizerLoadError::UnservedPreTokenizer { .. })
+                ),
+                "{pre}"
+            );
+        }
         assert!(GgufBpeTokenizer::from_gguf(&file("glm5")).is_ok());
+    }
+
+    /// `ignore_merges` (`llama-vocab.cpp:709-712`): on an arm that sets
+    /// it, a word that is itself a vocabulary entry is that entry, even
+    /// where the merges reach a different segmentation. `llama3` sets it
+    /// and `dbrx`, the same pattern, does not, so the one vocabulary
+    /// tells the two apart.
+    ///
+    /// Sabotage to confirm: drop the `ignore_merges` lookup in
+    /// `encode_word` and `llama3` comes out as `ab`, `c`.
+    #[test]
+    fn ignore_merges_takes_a_whole_word_entry_over_the_merges() {
+        use frink_gguf::GgufValue as V;
+        let file = |pre: &str| {
+            let tokens = ["a", "b", "c", "ab", "abc"].map(|t| V::String(t.into()));
+            crate::test_source::StubSource::with_tensors(&[])
+                .with_key("tokenizer.ggml.model", V::String("gpt2".into()))
+                .with_key("tokenizer.ggml.pre", V::String(pre.into()))
+                .with_key("tokenizer.ggml.tokens", V::Array(tokens.to_vec()))
+                .with_key(
+                    "tokenizer.ggml.merges",
+                    V::Array(vec![V::String("a b".into())]),
+                )
+        };
+        let ids = |pre: &str| {
+            GgufBpeTokenizer::from_gguf(&file(pre))
+                .expect("loads")
+                .encode("abc", SpecialTokens::AsText)
+        };
+        assert_eq!(ids("llama3"), [4], "the whole word is an entry");
+        assert_eq!(ids("dbrx"), [3, 2], "merges only: ab, c");
     }
 
     #[test]
@@ -1402,7 +1456,9 @@ mod gguf_vocab_tests {
     #[test]
     fn every_byte_survives_encoding_on_an_arm_with_unmatched_gaps() {
         let mut tok = load_real_fixture();
-        tok.pretokenize_pattern = super::pretokenize::regex_for("olmo");
+        tok.pretokenize_pattern = super::pretokenize::pre_split("olmo")
+            .expect("olmo is an arm")
+            .pretokenizer;
 
         // A tab, an NBSP, an interior newline, a form feed and a
         // trailing tab: every one of these was unmatched by the OLMo

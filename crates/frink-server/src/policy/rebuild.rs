@@ -21,8 +21,9 @@
 //!   allocated back.
 //!
 //! A plain `Result` cannot tell those apart, because both are `Err`.
-//! [`RebuildTxn::teardown_started`] is what distinguishes them, and it
-//! is the whole reason this type exists rather than a closure.
+//! The teardown mark [`RebuildTxn::run`] hands its caller is what
+//! distinguishes them, and it is the whole reason this type exists
+//! rather than a closure.
 //!
 //! # Why only a failed ROLLBACK latches
 //!
@@ -47,62 +48,6 @@
 
 use crate::policy::pool_budget::{PoolSizes, RebuildRequest};
 
-/// What the engine is doing right now, as far as a resize cares.
-///
-/// A resize needs a true idle point: nothing may be holding a page
-/// while the pool under it is freed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EngineActivity {
-    /// Prompts admitted and not yet through prefill.
-    pub pending_prefill: usize,
-    /// Requests decoding.
-    pub running_decode: usize,
-    /// Replies produced and not yet handed back.
-    ///
-    /// Part of "undrained" and therefore part of the barrier: a batch
-    /// whose replies have not been delivered is still mid-step.
-    pub undrained_replies: usize,
-    /// Requests that have FINISHED.
-    ///
-    /// Deliberately not part of the barrier -- see
-    /// [`EngineActivity::is_idle`].
-    pub finished: usize,
-}
-
-impl EngineActivity {
-    /// Whether a resize may proceed.
-    ///
-    /// **`finished` is excluded on purpose.** A finished request holds
-    /// no pages, no slots and no graphs; it is a row waiting to be
-    /// reaped. Gating on it means a resize waits for bookkeeping rather
-    /// than for resources, and on a busy server that reaping may not
-    /// happen until the next request arrives -- so the resize blocks
-    /// until traffic it was meant to make room for shows up, which is
-    /// exactly backwards.
-    pub fn is_idle(&self) -> bool {
-        self.pending_prefill == 0 && self.running_decode == 0 && self.undrained_replies == 0
-    }
-
-    /// What is still busy, for a refusal a caller can act on.
-    ///
-    /// Named rather than counted: "3 in flight" tells an operator to
-    /// wait, while "prefill" tells them a long prompt is chunking and
-    /// "decode" tells them to expect it to clear on its own.
-    pub fn busy_with(&self) -> Vec<&'static str> {
-        let mut busy = Vec::new();
-        if self.pending_prefill > 0 {
-            busy.push("prefill");
-        }
-        if self.running_decode > 0 {
-            busy.push("decode");
-        }
-        if self.undrained_replies > 0 {
-            busy.push("undrained replies");
-        }
-        busy
-    }
-}
-
 /// How a resize ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebuildOutcome {
@@ -123,17 +68,6 @@ pub enum RebuildOutcome {
         reason: String,
         rollback_error: String,
     },
-}
-
-impl RebuildOutcome {
-    /// Whether the engine may keep serving.
-    ///
-    /// True for everything but [`Latched`](RebuildOutcome::Latched) --
-    /// including both failures, which is the point: a resize that did
-    /// not happen must not cost the engine its ability to serve.
-    pub fn engine_preserved(&self) -> bool {
-        !matches!(self, RebuildOutcome::Latched { .. })
-    }
 }
 
 /// Which pools a request actually names.
@@ -160,10 +94,6 @@ impl TouchedPools {
                 || request.mamba_slots.is_some()
                 || request.swa_pages.is_some(),
         }
-    }
-
-    pub fn any(&self) -> bool {
-        self.moe_cache || self.kv
     }
 }
 
@@ -196,20 +126,6 @@ impl RebuildTxn {
             // from "the pools are gone".
             teardown_started: false,
         }
-    }
-
-    /// Which pools a rollback must restore. Everything else is left
-    /// alone -- see [`TouchedPools`].
-    pub fn touched(&self) -> TouchedPools {
-        self.touched
-    }
-
-    pub fn teardown_started(&self) -> bool {
-        self.teardown_started
-    }
-
-    pub fn rollback_target(&self) -> &PoolSizes {
-        &self.rollback_to
     }
 
     /// Runs the resize.
@@ -284,40 +200,6 @@ mod tests {
         }
     }
 
-    /// A finished request holds no pages, no slots and no graphs -- it
-    /// is a row waiting to be reaped. Gating on it makes a resize wait
-    /// for bookkeeping rather than resources, and on a quiet server
-    /// that reaping may not happen until the next request arrives, so
-    /// the resize blocks until the traffic it was meant to make room
-    /// for shows up.
-    #[test]
-    fn a_finished_request_does_not_hold_a_resize_but_every_live_one_does() {
-        let idle = EngineActivity {
-            finished: 12,
-            ..EngineActivity::default()
-        };
-        assert!(idle.is_idle(), "finished rows hold nothing");
-        assert!(idle.busy_with().is_empty());
-
-        for busy in [
-            EngineActivity {
-                pending_prefill: 1,
-                ..EngineActivity::default()
-            },
-            EngineActivity {
-                running_decode: 1,
-                ..EngineActivity::default()
-            },
-            EngineActivity {
-                undrained_replies: 1,
-                ..EngineActivity::default()
-            },
-        ] {
-            assert!(!busy.is_idle(), "{busy:?} still holds resources");
-            assert_eq!(busy.busy_with().len(), 1, "and says which: {busy:?}");
-        }
-    }
-
     /// The failure that costs nothing. The arithmetic said yes, the
     /// allocation said no, and nothing had been given up yet -- so the
     /// engine keeps serving exactly what it was and `restore` is never
@@ -347,7 +229,6 @@ mod tests {
             !restored,
             "there is nothing to restore, so restore must not run"
         );
-        assert!(outcome.engine_preserved());
     }
 
     /// The failure that matters. Past the free the old pools are gone,
@@ -382,11 +263,6 @@ mod tests {
             RebuildOutcome::RolledBack { restored, .. } => assert_eq!(restored, current),
             other => panic!("expected RolledBack, got {other:?}"),
         }
-        assert!(
-            outcome.engine_preserved(),
-            "a resize that did not happen must not cost the engine its \
-             ability to serve"
-        );
     }
 
     /// A failed rebuild is bad; a failed ROLLBACK is unrecoverable, and
@@ -411,11 +287,6 @@ mod tests {
             }
             other => panic!("expected Latched, got {other:?}"),
         }
-        assert!(
-            !outcome.engine_preserved(),
-            "no pools and no way back is the one state that must stop \
-             pretending requests can be served"
-        );
     }
 
     #[test]
@@ -431,7 +302,6 @@ mod tests {
             |_, _| panic!("a successful resize must not restore anything"),
         );
         assert_eq!(outcome, RebuildOutcome::Applied(sizes(256, 8)));
-        assert!(outcome.engine_preserved());
     }
 
     /// A rollback restores only what the request named. Restoring an
@@ -445,19 +315,18 @@ mod tests {
 
         let kv_only = RebuildTxn::open(&kv_request(256), &current);
         assert_eq!(
-            kv_only.touched(),
+            kv_only.touched,
             TouchedPools {
                 moe_cache: false,
                 kv: true
             }
         );
         assert_eq!(
-            kv_only.rollback_target().kv_pages,
-            64,
+            kv_only.rollback_to.kv_pages, 64,
             "the touched pool's old size"
         );
         assert!(
-            !kv_only.teardown_started(),
+            !kv_only.teardown_started,
             "a fresh transaction has freed nothing"
         );
 
@@ -471,7 +340,7 @@ mod tests {
             &current,
         );
         assert_eq!(
-            moe_only.touched(),
+            moe_only.touched,
             TouchedPools {
                 moe_cache: true,
                 kv: false
@@ -497,21 +366,14 @@ mod tests {
             },
         ] {
             assert!(
-                RebuildTxn::open(&request, &current).touched().kv,
+                RebuildTxn::open(&request, &current).touched.kv,
                 "{request:?}"
             );
         }
 
-        assert!(!RebuildTxn::open(
-            &RebuildRequest {
-                moe_cache_slots: None,
-                kv_pages: None,
-                mamba_slots: None,
-                swa_pages: None
-            },
-            &current
-        )
-        .touched()
-        .any());
+        assert_eq!(
+            RebuildTxn::open(&RebuildRequest::default(), &current).touched,
+            TouchedPools::default()
+        );
     }
 }

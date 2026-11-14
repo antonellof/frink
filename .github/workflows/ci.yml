@@ -294,6 +294,16 @@ jobs:
             target/oracle/${{ steps.key.outputs.pin }}/build
           key: libllama-${{ runner.os }}-${{ runner.arch }}-${{ steps.key.outputs.cc }}-${{ steps.key.outputs.pin }}-${{ hashFiles('tools/oracle/llama_build.sh') }}
       - run: bash scripts/oracle.sh
+      # The pre-tokenizer split oracle against this runner's libllama,
+      # which links libstdc++: upstream runs two of its three split
+      # engines through std::regex, so the macOS libc++ check alone
+      # does not bound it (#629).
+      - name: Pre-tokenizer splits vs libllama (libstdc++)
+        run: >
+          python3 tools/oracle/regex_split.py
+          --llama-src target/oracle/${{ steps.key.outputs.pin }}/src
+          --llama-bin target/oracle/${{ steps.key.outputs.pin }}/build/bin
+          --work target/regex_split
       - name: What the oracle rewrote
         if: failure()
         run: git --no-pager diff -- crates/frink-models/tests ':!*.gguf' | head -400

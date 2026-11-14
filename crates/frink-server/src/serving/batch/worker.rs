@@ -292,12 +292,6 @@ pub(super) fn apply_aborts(
 
 /// The gauges both status lines carry.
 ///
-/// This is the block model's admission policy, and the only one on the
-/// serving path. `crate::serving::admission` holds the WINDOW and
-/// RECURRENT models' -- page-aligned chunks, window reclaim, recurrent
-/// slots -- which are precisely the cases this batcher excludes below.
-/// The two are not one policy written twice; see that module's docs
-/// before merging them.
 /// `window` and `recurrent` are `None` and not zero: frink serves no
 /// windowed or recurrent model through this batcher, and the reporter
 /// omits a pool it is given `None` for entirely rather than printing a
@@ -447,12 +441,19 @@ pub(super) fn worker_loop(
                 prefill.state.chunk_ceiling(),
             );
             let before = prefill.state.tokens_processed();
+            let chunk_started = std::time::Instant::now();
             let done = prefill.state.step_chunk(budget);
+            let chunk_tokens = prefill.state.tokens_processed() - before;
             counters.prefill_chunks.fetch_add(1, Ordering::Relaxed);
-            counters.prefill_tokens.fetch_add(
-                (prefill.state.tokens_processed() - before) as u64,
-                Ordering::Relaxed,
-            );
+            counters
+                .prefill_tokens
+                .fetch_add(chunk_tokens as u64, Ordering::Relaxed);
+            // Per chunk, as it is computed, stamped when it started. A
+            // preempted row prefilled again is counted again: the rate
+            // is of work done, and that work was done twice.
+            if let Some(feed) = &prefill.params.serving {
+                feed.prefilled(chunk_started, chunk_tokens);
+            }
             if done {
                 let features = prefill.state.take_features();
                 let mut slot = prefill.into_slot();
@@ -745,6 +746,11 @@ pub(super) fn commit_token(slot: &mut Slot, next: usize, decode: &DecodeFn) -> b
     }
     slot.answer.generated_ids.push(next);
     slot.answer.clock.token();
+    // The same count the private loop keeps in `ChoiceStream::keep`:
+    // a committed token, the ones a speculative block settles included.
+    if let Some(feed) = &slot.params.serving {
+        feed.decoded(1);
+    }
     let piece = slot.answer.utf8.push(&decode(&[next]));
     // An empty piece means the token was the middle of a character.
     // Nothing to show, and nothing a stop string could match yet.

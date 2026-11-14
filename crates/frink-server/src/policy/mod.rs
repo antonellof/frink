@@ -45,26 +45,25 @@
 
 // WHY THE `allow(dead_code)` BELOW, AND WHAT WOULD REMOVE EACH ONE.
 //
-// Every module here has live callers. Several also carry the UNWIRED
-// HALF of a roadmap item that is still open, and the item is named on
-// each. That is the only reason an allow is acceptable in this crate:
+// Every module here has live callers. Some also carry the UNWIRED
+// HALF of an issue that is still open, and the issue is named on each.
+// That is the only reason an allow is acceptable in this crate:
 // `grep -n "allow(dead_code)" policy/mod.rs` is meant to be the list of
-// what still owes a caller. An item that cannot name a roadmap entry
+// what still owes a caller. An item that cannot name an open issue
 // does not belong under one -- delete it instead.
 
 /// Wired: `decode_slide`, `AnchorState`, `SlidingRequest`,
 /// `WindowPolicy`, `resolve_anchor_token`.
-/// Unwired: `prefill_slide`, the prefill half of the same rule.
-/// Closes with sliding-window eviction, #61.
+/// Unwired: `prefill_slide` and `SlideDecision::released`, the prompt
+/// half of the same rule. Closes with #61's prompt-region eviction.
 #[allow(dead_code)]
 pub(crate) mod anchor;
 
 pub(crate) mod detokenize;
 
 /// Wired: effort probing and the thinking-mode resolution behind
-/// `chat_template`. Unwired: `Effort::as_str` / `kwargs_for`, the
-/// name round-trip a user-supplied effort override would parse
-/// through. Closes with the flag tail, #404.
+/// `chat_template`. Unwired: `Effort::kwargs_for`, the round-trip a
+/// user-supplied effort override would go through. Closes with #404.
 #[allow(dead_code)]
 pub(crate) mod effort;
 
@@ -77,44 +76,20 @@ pub(crate) mod effort;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod footprint;
 
-/// Wired: the `MaintenanceGate` behind `/admin` admission and sealing.
-/// Unwired: `finish_loading`, `rebuild_never_dispatched`,
-/// `rebuild_timed_out`, the transitions a live pool rebuild drives.
-/// Closes with the live pool rebuild, #632.
-#[allow(dead_code)]
 pub(crate) mod maintenance;
 
 pub(crate) mod outbox;
 
 /// Wired: both parsers, their formats and `infer`.
-/// Unwired: `ReasoningFormat`/`ToolCallFormat` `as_str` + `parse` (the
-/// name round-trip an explicit `--reasoning-format`-style override
-/// needs) and the `format()` accessors. Closes with the flag tail, #404.
+/// Unwired: `ReasoningFormat`/`ToolCallFormat` `parse`, the name
+/// round-trip an explicit `--reasoning-format` override needs, the
+/// `format()` accessors and `ReasoningDelta::is_empty`. Closes with
+/// #404.
 #[allow(dead_code)]
 pub(crate) mod parser;
 
-/// Wired: `PoolSizes`, `RebuildRequest` and the two SWA constants.
-/// Unwired: `validate_rebuild`, `PoolFloors`, `RebuildRejected` -- the
-/// arithmetic that must refuse a re-split BEFORE the old pool is freed.
-/// `/admin/cache/rebuild` exists and does not yet consult it.
-/// Closes with the live pool rebuild, #632.
-#[allow(dead_code)]
 pub(crate) mod pool_budget;
-
-/// Wired: `RadixCache::insert_prefix` / `match_prefix` / `lock` /
-/// `unlock`, from `generate::publish_to_radix`.
-/// `RadixCache::evict` is wired too: admission reclaims pages from the
-/// tree (`generate.rs`) before it refuses.
-/// Unwired: the introspection accessors (`page_size`, `protected_size`,
-/// `total_size`, `check_integrity`). Closes with #632.
-#[allow(dead_code)]
 pub(crate) mod radix;
-
-/// Wired: `RebuildTxn::open` and the outcome match in `cache_admin`.
-/// Unwired: the activity predicates and rollback accessors the
-/// transaction exposes for a caller that drives it to completion.
-/// Closes with the live pool rebuild, #632.
-#[allow(dead_code)]
 pub(crate) mod rebuild;
 
 /// The differential turn-boundary analyzer, beside `effort` because it

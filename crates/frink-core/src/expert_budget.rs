@@ -50,13 +50,21 @@ pub fn net_cache_budget_bytes(
 }
 
 /// What a given split would actually cost.
+///
+/// Saturating, because a live rebuild prices a size a client typed: a
+/// product that wrapped would come back small and fit any budget, and
+/// one cast past `i64::MAX` would come back negative and fit all of
+/// them.
 pub fn required_bytes(
     moe_cache_slots: u64,
     kv_pages: u64,
     bytes_per_expert: u64,
     bytes_per_page: u64,
 ) -> i64 {
-    (moe_cache_slots * bytes_per_expert + kv_pages * bytes_per_page) as i64
+    let bytes = moe_cache_slots
+        .saturating_mul(bytes_per_expert)
+        .saturating_add(kv_pages.saturating_mul(bytes_per_page));
+    i64::try_from(bytes).unwrap_or(i64::MAX)
 }
 
 /// The KV budget at startup, when the weights have just been loaded.
@@ -186,6 +194,19 @@ pub fn plan_cache_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A price past what the arithmetic can hold is the largest price,
+    /// never a wrapped small one or a negative one that fits every
+    /// budget.
+    #[test]
+    fn a_split_too_large_to_price_costs_the_most_not_the_least() {
+        assert_eq!(required_bytes(2, 3, 5, 7), 31);
+        assert_eq!(required_bytes(0, u64::MAX, 0, 2), i64::MAX);
+        assert_eq!(required_bytes(0, 1 << 62, 0, 4), i64::MAX);
+        // Fits a u64, not an i64: the cast would make it negative.
+        assert_eq!(required_bytes(0, 1 << 61, 0, 4), i64::MAX);
+        assert_eq!(required_bytes(u64::MAX, u64::MAX, 1, 1), i64::MAX);
+    }
 
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;

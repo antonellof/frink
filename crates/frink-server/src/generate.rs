@@ -125,6 +125,17 @@ impl DecodeError {
 pub struct KvPoolConfig {
     pub pool: Arc<Mutex<KvBlockPool>>,
     pub queue_wait: Duration,
+    /// `Some` when the pool was sized from `FRINK_KV_BYTE_BUDGET`: the
+    /// ceiling `POST /v1/cache/rebuild` holds a re-split to. `None` for
+    /// a pool sized in blocks, which has no byte figure to hold it to.
+    pub byte_budget: Option<KvByteBudget>,
+}
+
+/// A KV pool's byte budget and what one block of it costs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KvByteBudget {
+    pub budget_bytes: u64,
+    pub bytes_per_block: u64,
 }
 
 /// The paged counterpart to [`KvPoolConfig`]: per-layer
@@ -1694,6 +1705,12 @@ pub struct GenerationParams {
     /// leaves it `None`. See the `cancel` module for the two tiers that
     /// set it.
     pub cancel: Option<crate::cancel::CancelToken>,
+    /// Where this generation's prefilled and decoded tokens are counted
+    /// for `/v1/stats`. Set by `crate::run_generation_emit` from the
+    /// server's feed and read by both decode paths; `None` (a test, or
+    /// `frink run`) counts nothing. Rides here for the reason `cancel`
+    /// does: the batch worker gets it with the job.
+    pub(crate) serving: Option<crate::stats::ServingFeed>,
     /// Run past the model's own end-of-generation tokens.
     ///
     /// For benchmarking, and for nothing else. A serving run needs every
@@ -2351,6 +2368,10 @@ pub fn generate<'p>(
     let mut pos;
     let mut logits: Vec<f32>;
     let mut kv: Kv;
+    // Prompt positions this request actually runs through the model,
+    // for `/v1/stats`' prefill rate: a restored or adopted prefix was
+    // computed by an earlier request and is not this one's work.
+    let prefilled: usize;
     if let Some(m) = restored {
         // Only the contiguous path reaches here: a prefix cache and a
         // paged store are refused together at startup, because
@@ -2375,6 +2396,7 @@ pub fn generate<'p>(
                 // couldn't serve it) -- zero forward passes needed.
                 pos = m.matched_len;
                 logits = pl;
+                prefilled = 0;
             } else {
                 // Our query exactly matches a strict PREFIX of a longer
                 // stored entry (someone else's conversation continued
@@ -2391,6 +2413,7 @@ pub fn generate<'p>(
                 pos = back_to;
                 logits = decoder.forward_token(tokens[back_to], pos, caches);
                 pos += 1;
+                prefilled = 1;
             }
         } else {
             // One batch, as a prefill would: a chat turn's suffix is the
@@ -2399,6 +2422,7 @@ pub fn generate<'p>(
             // KV again when it finishes.
             logits = forward_prompt_batch(decoder, suffix, m.matched_len, caches, true);
             pos = m.matched_len + suffix.len();
+            prefilled = suffix.len();
         }
     } else {
         kv = match (paged_kv, kv_pool) {
@@ -2431,6 +2455,16 @@ pub fn generate<'p>(
         // empty-string prompt encoding to nothing) has no real token to
         // seed from, so a synthetic id 0 bootstraps decoding.
         pos = 0;
+        // What the radix tree already holds is skipped by every prefill
+        // below that can adopt it (`Kv::prefill`; a scored prompt
+        // declines the adoption, so it reads zero here).
+        prefilled = match &kv {
+            _ if tokens.is_empty() => 1,
+            Kv::Paged(lease) => tokens
+                .len()
+                .saturating_sub(lease.adopted_positions(lease.block_size())),
+            Kv::Contiguous(_) => tokens.len(),
+        };
         logits = if tokens.is_empty() {
             let l = kv.step(decoder, 0, pos);
             pos += 1;
@@ -2485,6 +2519,9 @@ pub fn generate<'p>(
     }
 
     let prefill_secs = prefill_start.elapsed().as_secs_f64();
+    if let Some(feed) = &params.serving {
+        feed.prefilled(prefill_start, prefilled);
+    }
     let decode_start = std::time::Instant::now();
     #[cfg(feature = "metal")]
     let kv_offload = cpu_kv_offload_enabled();
@@ -2846,6 +2883,11 @@ pub fn generate_engine<E: Engine, T: TextTokenizer>(
         l
     };
     let prefill_secs = prefill_start.elapsed().as_secs_f64();
+    if let Some(feed) = &params.serving {
+        // `pos` is every position just run: the whole prompt, or the
+        // one bootstrap token an empty prompt needs.
+        feed.prefilled(prefill_start, pos);
+    }
     let decode_start = std::time::Instant::now();
 
     // Timed for the same reason the `Decoder` path is: a UI that has to
@@ -3517,6 +3559,7 @@ mod tests {
             json_object: false,
             grammar: None,
             cancel: None,
+            serving: None,
             ignore_eos: false,
             reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
             lora: None,
@@ -3914,6 +3957,7 @@ mod tests {
                 json_object: false,
                 grammar: None,
                 cancel: None,
+                serving: None,
                 ignore_eos: false,
                 reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
                 lora: None,
@@ -4090,6 +4134,7 @@ mod tests {
             json_object: false,
             grammar: None,
             cancel: None,
+            serving: None,
             ignore_eos: false,
             reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
             lora: None,
@@ -4397,6 +4442,7 @@ mod tests {
                 json_object: false,
                 grammar: None,
                 cancel: None,
+                serving: None,
                 ignore_eos: false,
                 reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
                 lora: None,
@@ -4736,7 +4782,11 @@ mod tests {
     }
 
     fn pool_config(pool: Arc<Mutex<KvBlockPool>>, queue_wait: Duration) -> KvPoolConfig {
-        KvPoolConfig { pool, queue_wait }
+        KvPoolConfig {
+            pool,
+            queue_wait,
+            byte_budget: None,
+        }
     }
 
     /// Published prefixes must come BACK, or a long-running server

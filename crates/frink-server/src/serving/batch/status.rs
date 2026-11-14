@@ -10,8 +10,6 @@
 //! helpers of `scheduler/scheduler.py` (Apache-2.0); see
 //! `docs/THIRD_PARTY_NOTICES.md`.
 
-use crate::serving::admission::AdmittedChunk;
-
 /// A pool's occupancy, for a status line.
 pub fn usage_ratio(used: usize, total: usize) -> f64 {
     if total == 0 {
@@ -126,28 +124,6 @@ pub struct PrefillSnapshot {
     pub cached_tokens: usize,
 }
 
-impl PrefillSnapshot {
-    /// Snapshot the chunks a [`PrefillPass`] has just admitted, at the
-    /// only moment the numbers are still true.
-    ///
-    /// Cached tokens come from [`AdmittedChunk::admission`], which is
-    /// set on a prompt's **first** chunk only: a prompt cut into ten
-    /// chunks reports its prefix hit once, not ten times. New tokens
-    /// come from every chunk, continuations included -- those are
-    /// tokens this batch really computes.
-    pub fn from_chunks(chunks: &[AdmittedChunk]) -> Self {
-        PrefillSnapshot {
-            new_seqs: chunks.len(),
-            new_tokens: chunks.iter().map(|chunk| chunk.chunk_len).sum(),
-            cached_tokens: chunks
-                .iter()
-                .filter_map(|chunk| chunk.admission)
-                .map(|admission| admission.cached_tokens)
-                .sum(),
-        }
-    }
-}
-
 /// Decode forwards between two status lines, by default.
 pub const DEFAULT_DECODE_LOG_INTERVAL: usize = 40;
 
@@ -200,10 +176,6 @@ impl StatusReporter {
             decode_forwards: 0,
             decode_tokens: 0,
         }
-    }
-
-    pub fn decode_log_interval(&self) -> usize {
-        self.decode_log_interval
     }
 
     /// The line for a prefill batch. Always emitted: prefill batches are
@@ -321,9 +293,6 @@ fn recurrent_field(usage: Option<PoolUsage>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::serving::admission::tests::{geometry, roomy};
-    use crate::serving::admission::{ChunkState, PendingRequest, PrefillPass};
 
     #[test]
     fn a_status_line_never_divides_by_zero() {
@@ -525,7 +494,6 @@ mod tests {
     #[test]
     fn the_decode_interval_is_clamped_to_at_least_one_forward() {
         let mut reporter = StatusReporter::new(0, 0.0);
-        assert_eq!(reporter.decode_log_interval(), 1);
         assert!(reporter.report_decode(1.0, 1, &batch_status()).is_some());
     }
 
@@ -536,19 +504,19 @@ mod tests {
     /// numbers may appear in the line.
     #[test]
     fn a_prefill_line_reports_the_schedule_time_snapshot() {
-        let mut pass = PrefillPass::new(512, 0, geometry());
-        let request = PendingRequest::new(1, 1000, 100);
-        let chunk = pass.take_chunk(&request, 300, 0, &roomy()).unwrap();
-        let snapshot = PrefillSnapshot::from_chunks(&[chunk]);
-        assert_eq!(snapshot.new_seqs, 1);
-        assert_eq!(snapshot.new_tokens, 512);
-        assert_eq!(snapshot.cached_tokens, 300);
+        // One 512-token chunk of a prompt whose first 300 tokens were a
+        // prefix hit, as the worker snapshots it before the forward.
+        let snapshot = PrefillSnapshot {
+            new_seqs: 1,
+            new_tokens: 512,
+            cached_tokens: 300,
+        };
 
         // What the request looks like by the time the batch is reported:
         // the forward has advanced its cached length to its device
         // length, and it now produces one token per step.
         let post_forward_new_tokens = 1;
-        let post_forward_cached_tokens = chunk.computed_len + chunk.chunk_len;
+        let post_forward_cached_tokens = 300 + 512;
         assert_eq!(post_forward_cached_tokens, 812);
 
         let mut reporter = StatusReporter::new(DEFAULT_DECODE_LOG_INTERVAL, 0.0);
@@ -571,39 +539,6 @@ mod tests {
         assert!(
             line.contains("input throughput (token/s): 1024.00"),
             "512 tokens over 0.5s: {line}"
-        );
-    }
-
-    /// A prefix hit belongs to a prompt, not to a chunk: a continuation
-    /// contributes its tokens to `#new-token` and nothing at all to
-    /// `#cached-token`, which it would otherwise re-report on every
-    /// chunk of a long prompt.
-    #[test]
-    fn a_prefix_hit_is_reported_once_across_a_prompts_chunks() {
-        let mut pass = PrefillPass::new(1024, 0, geometry());
-        let fresh = PendingRequest::new(1, 600, 100);
-        let first = pass.take_chunk(&fresh, 200, 0, &roomy()).unwrap();
-        assert_eq!(first.chunk_len, 400);
-
-        let continued = PendingRequest {
-            chunk: Some(ChunkState {
-                computed_len: 512,
-                slot: 1,
-                swa_evicted_len: 0,
-                locked_prefix_len: 0,
-            }),
-            ..PendingRequest::new(2, 2000, 100)
-        };
-        let second = pass.take_chunk(&continued, 0, 1, &roomy()).unwrap();
-        assert_eq!(second.chunk_len, 624);
-        assert_eq!(second.admission, None);
-
-        let snapshot = PrefillSnapshot::from_chunks(&[first, second]);
-        assert_eq!(snapshot.new_seqs, 2, "continuations are batch entries");
-        assert_eq!(snapshot.new_tokens, 1024, "and their tokens are computed");
-        assert_eq!(
-            snapshot.cached_tokens, 200,
-            "only the first chunk's prompt reports a hit"
         );
     }
 }

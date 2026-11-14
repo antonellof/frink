@@ -3,7 +3,7 @@
 //! The arithmetic that decides the split in the first place is
 //! [`frink_core::expert_budget`], beside the expert cache whose slots
 //! it counts. This module is the other half: validating a *change* to
-//! that split against what the engine is doing right now.
+//! that split before anything is touched.
 //!
 //! # Why a rebuild validates before it frees
 //!
@@ -12,10 +12,17 @@
 //! the server is down -- for a request that was never going to work.
 //! So every size check happens up front, on arithmetic alone
 //! ([`validate_rebuild`]), and a rejection leaves the engine serving
-//! exactly what it was serving before.
+//! exactly what it was serving before. `POST /v1/cache/rebuild`
+//! (`crate::cache_admin::cache_rebuild`) calls it before it opens the
+//! transaction that moves the pool.
 //!
-//! Ported 1:1 from FreeToken's `engine/cache_budget.py` (Apache-2.0);
-//! see `docs/THIRD_PARTY_NOTICES.md`.
+//! Ported from FreeToken's `engine/cache_budget.py` (Apache-2.0); see
+//! `docs/THIRD_PARTY_NOTICES.md`. Two departures, both because frink's
+//! KV pool is not FreeToken's: there is no idle check here, since
+//! `KvBlockPool::resize` frees nothing and refuses on its own to shrink
+//! below what in-flight requests hold; and the KV floor is what the
+//! caller says, not at least two pages, since frink's pool reserves no
+//! null page.
 
 pub(crate) use frink_core::expert_budget::{BudgetTooSmall, PoolSizes};
 
@@ -28,8 +35,7 @@ pub const SWA_RETAIN_GAP: usize = 16;
 
 /// How often the window is slid, in decode steps. Sliding every step
 /// would cost a pool operation per token; sliding rarely means the pool
-/// must hold that many extra tokens per request. The pool floor below
-/// pays for exactly this.
+/// must hold that many extra tokens per request.
 pub const DEFAULT_SWA_EVICTION_INTERVAL: usize = 128;
 
 /// A live re-split request. `None` means "leave this pool alone".
@@ -64,10 +70,9 @@ impl RebuildRequest {
 /// Why a rebuild was refused. The engine is untouched in every case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebuildRejected {
-    /// The server is not idle. A rebuild frees pools that in-flight
-    /// requests hold indices into.
-    Busy,
-    /// The model has no such pool.
+    /// The deployment has no such pool. Carries the request's own name
+    /// for it (`moe`, `kv`, `mamba`, `swa`), so the refusal points at
+    /// the field the caller sent.
     NoSuchPool(&'static str),
     /// The target is below what the pool must hold to function.
     BelowFloor {
@@ -82,11 +87,8 @@ pub enum RebuildRejected {
 impl std::fmt::Display for RebuildRejected {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RebuildRejected::Busy => {
-                write!(f, "the engine is not idle; retry when it drains")
-            }
             RebuildRejected::NoSuchPool(pool) => {
-                write!(f, "this model has no {pool} pool")
+                write!(f, "this deployment has no {pool} pool to rebuild")
             }
             RebuildRejected::BelowFloor {
                 pool,
@@ -103,81 +105,53 @@ impl std::fmt::Display for RebuildRejected {
 
 impl std::error::Error for RebuildRejected {}
 
-/// What the served model actually has, and what each pool must hold to
-/// work at all.
+/// What each pool must hold to work at all, and `None` for a pool this
+/// deployment does not have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PoolFloors {
-    /// Minimum expert-cache slots: one whole layer.
-    pub moe_slots: u64,
-    /// Minimum KV pages.
-    pub kv_pages: u64,
-    /// `None` when the model has no recurrent-state pool.
+    pub moe_slots: Option<u64>,
+    pub kv_pages: Option<u64>,
     pub mamba_slots: Option<u64>,
-    /// `None` when the model has no window pool.
     pub swa_pages: Option<u64>,
+}
+
+/// The bytes the two resizable pools may spend, and what one unit of
+/// each costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteBudget {
+    pub budget_bytes: i64,
+    pub bytes_per_expert: u64,
+    pub bytes_per_page: u64,
 }
 
 /// Check a rebuild against the floors and the budget, changing nothing.
 ///
-/// `bytes_per_expert` and `bytes_per_page` price the two resizable
-/// pools; `fixed_bytes` is everything the target geometry costs that
-/// does *not* scale with them -- the window pool at its target size, the
-/// recurrent pool at its target size.
-///
-/// `fixed_bytes` comes off the budget rather than onto the requirement.
-/// That is the same arithmetic either way, but it matches the reference
-/// (`net_cache_budget_bytes(.., fixed_cache_size + extra_fixed_bytes)`)
-/// and it makes the `budget_bytes` carried in a rejection mean the one
-/// useful thing: what was actually left for the two resizable pools.
-///
-/// Passing `0` for a **window model** prices its window pool at nothing.
-/// The fit-check then waves through a full pool that leaves no room for
-/// the window, and the rebuild dies of an allocation failure *after* it
-/// has freed the old cache -- the one failure this whole path exists to
-/// prevent. Price a window model with [`hybrid_swa_kv_cost`] at the
-/// rebuild's *target* window and pass both of its terms:
-/// [`KvCost::cache_per_page`] as `bytes_per_page`,
-/// [`KvCost::fixed_cache_size`] as `fixed_bytes`.
-#[allow(clippy::too_many_arguments)]
+/// `budget` is `None` when the deployment sized its pools in units
+/// rather than bytes (`FRINK_KV_POOL_BLOCKS`): there is no byte figure
+/// to hold the target to, and inventing one would refuse rebuilds the
+/// operator's own configuration allows.
 pub fn validate_rebuild(
     request: &RebuildRequest,
     current: &PoolSizes,
     floors: &PoolFloors,
-    idle: bool,
-    budget_bytes: i64,
-    bytes_per_expert: u64,
-    bytes_per_page: u64,
-    fixed_bytes: u64,
+    budget: Option<&ByteBudget>,
 ) -> Result<PoolSizes, RebuildRejected> {
-    if !idle {
-        return Err(RebuildRejected::Busy);
-    }
-    let below = |pool, requested: u64, floor: u64| RebuildRejected::BelowFloor {
-        pool,
-        requested,
-        floor,
-    };
-    if let Some(slots) = request.moe_cache_slots {
-        if slots < floors.moe_slots {
-            return Err(below("moe", slots, floors.moe_slots));
-        }
-    }
-    if let Some(pages) = request.kv_pages {
-        if pages < floors.kv_pages.max(2) {
-            return Err(below("kv", pages, floors.kv_pages.max(2)));
-        }
-    }
-    if let Some(slots) = request.mamba_slots {
-        match floors.mamba_slots {
-            None => return Err(RebuildRejected::NoSuchPool("recurrent-state")),
-            Some(floor) if slots < floor => return Err(below("mamba", slots, floor)),
-            Some(_) => {}
-        }
-    }
-    if let Some(pages) = request.swa_pages {
-        match floors.swa_pages {
-            None => return Err(RebuildRejected::NoSuchPool("window")),
-            Some(floor) if pages < floor => return Err(below("swa", pages, floor)),
+    for (asked, floor, pool) in [
+        (request.moe_cache_slots, floors.moe_slots, "moe"),
+        (request.kv_pages, floors.kv_pages, "kv"),
+        (request.mamba_slots, floors.mamba_slots, "mamba"),
+        (request.swa_pages, floors.swa_pages, "swa"),
+    ] {
+        let Some(requested) = asked else { continue };
+        match floor {
+            None => return Err(RebuildRejected::NoSuchPool(pool)),
+            Some(floor) if requested < floor => {
+                return Err(RebuildRejected::BelowFloor {
+                    pool,
+                    requested,
+                    floor,
+                })
+            }
             Some(_) => {}
         }
     }
@@ -187,22 +161,20 @@ pub fn validate_rebuild(
         kv_pages: request.kv_pages.unwrap_or(current.kv_pages),
         prefill_overlap: current.prefill_overlap,
     };
-    let needed = required_bytes(
-        target.moe_cache_slots,
-        target.kv_pages,
-        bytes_per_expert,
-        bytes_per_page,
-    );
-    // Signed, and saturating: an over-committed deployment gets a
-    // negative budget that every requirement exceeds, never a
-    // wrapped-around enormous one that every requirement fits inside.
-    let budget_bytes = budget_bytes.saturating_sub(fixed_bytes as i64);
-    if needed > budget_bytes {
-        return Err(RebuildRejected::TooLarge(BudgetTooSmall {
-            needed_bytes: needed,
-            budget_bytes,
-            sizes: target,
-        }));
+    if let Some(budget) = budget {
+        let needed = required_bytes(
+            target.moe_cache_slots,
+            target.kv_pages,
+            budget.bytes_per_expert,
+            budget.bytes_per_page,
+        );
+        if needed > budget.budget_bytes {
+            return Err(RebuildRejected::TooLarge(BudgetTooSmall {
+                needed_bytes: needed,
+                budget_bytes: budget.budget_bytes,
+                sizes: target,
+            }));
+        }
     }
     Ok(target)
 }
@@ -214,60 +186,47 @@ mod tests {
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
 
-    #[test]
-    fn a_rebuild_is_refused_while_the_engine_is_busy() {
-        let current = PoolSizes {
+    fn current() -> PoolSizes {
+        PoolSizes {
             moe_cache_slots: 64,
             kv_pages: 1024,
             prefill_overlap: true,
-        };
-        let floors = PoolFloors {
-            moe_slots: 8,
-            kv_pages: 16,
-            ..PoolFloors::default()
-        };
-        let request = RebuildRequest {
-            moe_cache_slots: Some(128),
-            ..RebuildRequest::default()
-        };
-        assert_eq!(
-            validate_rebuild(&request, &current, &floors, false, i64::MAX, MIB, MIB, 0),
-            Err(RebuildRejected::Busy)
-        );
+        }
+    }
+
+    fn floors() -> PoolFloors {
+        PoolFloors {
+            moe_slots: Some(8),
+            kv_pages: Some(16),
+            mamba_slots: None,
+            swa_pages: Some(32),
+        }
+    }
+
+    fn budget(bytes: u64) -> ByteBudget {
+        ByteBudget {
+            budget_bytes: bytes as i64,
+            bytes_per_expert: MIB,
+            bytes_per_page: MIB,
+        }
     }
 
     #[test]
     fn a_rebuild_below_a_floor_or_over_the_budget_changes_nothing() {
-        let current = PoolSizes {
-            moe_cache_slots: 64,
-            kv_pages: 1024,
-            prefill_overlap: true,
-        };
-        let floors = PoolFloors {
-            moe_slots: 8,
-            kv_pages: 16,
-            mamba_slots: None,
-            swa_pages: Some(32),
-        };
-
         assert!(matches!(
             validate_rebuild(
                 &RebuildRequest {
                     moe_cache_slots: Some(4),
                     ..RebuildRequest::default()
                 },
-                &current,
-                &floors,
-                true,
-                i64::MAX,
-                MIB,
-                MIB,
-                0
+                &current(),
+                &floors(),
+                None,
             ),
             Err(RebuildRejected::BelowFloor { pool: "moe", .. })
         ));
 
-        // A pool this model does not have is named, not silently
+        // A pool this deployment does not have is named, not silently
         // accepted.
         assert_eq!(
             validate_rebuild(
@@ -275,15 +234,11 @@ mod tests {
                     mamba_slots: Some(64),
                     ..RebuildRequest::default()
                 },
-                &current,
-                &floors,
-                true,
-                i64::MAX,
-                MIB,
-                MIB,
-                0
+                &current(),
+                &floors(),
+                None,
             ),
-            Err(RebuildRejected::NoSuchPool("recurrent-state"))
+            Err(RebuildRejected::NoSuchPool("mamba"))
         );
 
         assert!(matches!(
@@ -292,42 +247,56 @@ mod tests {
                     kv_pages: Some(1 << 40),
                     ..RebuildRequest::default()
                 },
-                &current,
-                &floors,
-                true,
-                (2 * GIB) as i64,
-                MIB,
-                MIB,
-                0
+                &current(),
+                &floors(),
+                Some(&budget(2 * GIB)),
             ),
+            Err(RebuildRejected::TooLarge(_))
+        ));
+    }
+
+    /// The budget is checked only when there is one. A pool sized in
+    /// blocks has no byte ceiling, and the same request that a byte
+    /// budget refuses is a valid target there.
+    #[test]
+    fn only_a_byte_budget_can_refuse_a_size() {
+        let big = RebuildRequest {
+            kv_pages: Some(1 << 20),
+            ..RebuildRequest::default()
+        };
+        assert!(validate_rebuild(&big, &current(), &floors(), Some(&budget(GIB))).is_err());
+        assert_eq!(
+            validate_rebuild(&big, &current(), &floors(), None)
+                .expect("no budget, no ceiling")
+                .kv_pages,
+            1 << 20
+        );
+    }
+
+    /// A target so large its price overflows is refused, not wrapped
+    /// into a small number that fits.
+    #[test]
+    fn a_price_that_overflows_is_too_large_rather_than_small() {
+        let huge = RebuildRequest {
+            kv_pages: Some(u64::MAX),
+            ..RebuildRequest::default()
+        };
+        assert!(matches!(
+            validate_rebuild(&huge, &current(), &floors(), Some(&budget(GIB))),
             Err(RebuildRejected::TooLarge(_))
         ));
     }
 
     #[test]
     fn a_rebuild_leaves_untouched_pools_at_their_current_size() {
-        let current = PoolSizes {
-            moe_cache_slots: 64,
-            kv_pages: 1024,
-            prefill_overlap: true,
-        };
-        let floors = PoolFloors {
-            moe_slots: 8,
-            kv_pages: 16,
-            ..PoolFloors::default()
-        };
         let target = validate_rebuild(
             &RebuildRequest {
                 moe_cache_slots: Some(128),
                 ..RebuildRequest::default()
             },
-            &current,
-            &floors,
-            true,
-            (4 * GIB) as i64,
-            MIB,
-            MIB,
-            0,
+            &current(),
+            &floors(),
+            Some(&budget(4 * GIB)),
         )
         .expect("fits");
         assert_eq!(target.moe_cache_slots, 128);

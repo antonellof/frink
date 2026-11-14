@@ -1,13 +1,12 @@
 //! The elastic cache surface: what the pools are, and moving VRAM
 //! between them without a restart.
 //!
-//! `frink-edge` has held the whole policy for a while with nobody to
-//! call it. `pool_budget::CacheReadiness` produces the geometry,
-//! `pool_budget::validate_rebuild` checks a re-split against the floors and the
-//! budget *before* anything is freed, and `maintenance::MaintenanceGate`
-//! decides whether a rebuild may start at all. This module is the three
-//! HTTP endpoints over them, plus the one piece of real mutation frink
-//! can do today: re-budgeting the shared KV block pool.
+//! `maintenance::MaintenanceGate` decides whether a rebuild may start at
+//! all, `pool_budget::validate_rebuild` checks a re-split against the
+//! floors and the byte budget *before* anything is touched, and
+//! `rebuild::RebuildTxn` runs the resize. This module is the three HTTP
+//! endpoints over them, plus the one piece of real mutation frink can do
+//! today: re-budgeting the shared KV block pool.
 //!
 //! # Why the order of the checks is the design
 //!
@@ -23,6 +22,9 @@
 //!    much).
 //!
 //! Any refusal at any step reopens the gate and changes nothing.
+//!
+//! llama.cpp's server has no counterpart: it sizes its KV once at
+//! startup (`-c`, `--kv-unified`) and never re-splits it.
 //!
 //! # What frink can actually re-split
 //!
@@ -42,6 +44,10 @@ use std::sync::Arc;
 use crate::policy::footprint::Footprint;
 use crate::policy::maintenance::{MaintenanceState, RebuildRefused, StopRefused};
 use crate::policy::outbox::Receipt;
+use crate::policy::pool_budget::{
+    validate_rebuild, ByteBudget, PoolFloors, PoolSizes, RebuildRejected, RebuildRequest,
+};
+use crate::policy::rebuild::{RebuildOutcome, RebuildTxn};
 use crate::serving::batch::PoolUsage;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -257,6 +263,29 @@ pub(crate) fn pool_gauges(state: &AppState) -> serde_json::Value {
         })),
         "window_slots": serde_json::Value::Null,
         "state_slots": serde_json::Value::Null,
+        "prefix_cache": prefix_tree_gauge(state),
+    })
+}
+
+/// What the paged store's prefix tree holds, in tokens, across every
+/// cache salt.
+///
+/// `locked` is what live requests are reading and cannot be reclaimed;
+/// `evictable` is what admission may take back from the tree when the
+/// store runs short (`generate::acquire_paged_caches`). `null` without
+/// paged KV (`FRINK_PAGED_KV_BLOCKS`), which is the only store with a
+/// tree, for the same reason as the pools above: no tree and an empty
+/// tree are different facts.
+fn prefix_tree_gauge(state: &AppState) -> serde_json::Value {
+    let Some(radix) = state.paged_kv.as_ref().and_then(|p| p.radix.as_ref()) else {
+        return serde_json::Value::Null;
+    };
+    let tree = radix.lock().unwrap_or_else(|p| p.into_inner());
+    serde_json::json!({
+        "tokens": tree.total_size(),
+        "locked": tree.protected_size(),
+        "evictable": tree.evictable_size(),
+        "page_size": tree.page_size(),
     })
 }
 
@@ -361,13 +390,45 @@ fn refusal(status: StatusCode, status_word: &str, message: String) -> Response {
         .into_response()
 }
 
+/// What `validate_rebuild`'s refusal means to a client.
+///
+/// Every one is a `400`: the request cannot succeed by retrying it.
+/// The pool being held by in-flight requests is the retryable refusal,
+/// and that one comes from the pool itself, after this.
+fn rejected(why: &RebuildRejected, kv_tokens: Option<u64>, page_size: u64) -> Response {
+    let message = match why {
+        RebuildRejected::NoSuchPool("kv") => "this deployment has no shared KV pool; every \
+             request allocates privately (set FRINK_KV_POOL_BLOCKS or FRINK_KV_BYTE_BUDGET \
+             to enable one)"
+            .to_string(),
+        RebuildRejected::NoSuchPool(_) => {
+            format!("{why}; see GET /v1/cache/status for what it does have")
+        }
+        RebuildRejected::BelowFloor { pool: "kv", .. } => format!(
+            "kv={} tokens is below one {page_size}-token page",
+            kv_tokens.unwrap_or(0)
+        ),
+        RebuildRejected::BelowFloor { .. } => why.to_string(),
+        RebuildRejected::TooLarge(too) => format!(
+            "kv={} tokens is {} page(s), which needs {} bytes; FRINK_KV_BYTE_BUDGET is {} \
+             bytes. The engine is unchanged",
+            kv_tokens.unwrap_or(0),
+            too.sizes.kv_pages,
+            too.needed_bytes,
+            too.budget_bytes
+        ),
+    };
+    refusal(StatusCode::BAD_REQUEST, "failed", message)
+}
+
 /// `POST /v1/cache/rebuild`.
 ///
 /// Moves the KV pool's budget on a live engine. Refuses, changing
 /// nothing, when: the engine is not serving; the request names a pool
-/// this deployment does not have; the target is not a positive number of
-/// tokens; or the pool is holding more blocks than the target could
-/// cover.
+/// this deployment does not have, or none at all; the target is under
+/// one page; the target would cost more than the pool's byte budget
+/// (`FRINK_KV_BYTE_BUDGET`, when the pool was sized from one); or the
+/// pool is holding more blocks than the target could cover.
 ///
 /// The last one is the interesting refusal, and it is why this reports
 /// the floor rather than just saying no: shrinking below what is held
@@ -377,89 +438,83 @@ pub(crate) async fn cache_rebuild(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CacheRebuildRequest>,
 ) -> Response {
-    // 1. The gate. A rebuild through a load, another rebuild, or a stop
-    //    is refused before anything is measured.
+    // 1. The gate. A rebuild through another rebuild, a stop, or a
+    //    latched engine is refused before anything is measured.
     {
         let mut gate = state.maintenance.lock().unwrap_or_else(|p| p.into_inner());
         if let Err(why) = gate.begin_rebuild() {
-            let status = match why {
-                RebuildRefused::NotReady | RebuildRefused::Latched => {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-                RebuildRefused::Busy(_) => StatusCode::CONFLICT,
-            };
-            let word = match why {
-                RebuildRefused::NotReady => "loading",
-                RebuildRefused::Latched => "failed",
-                RebuildRefused::Busy(_) => "busy",
+            let (status, word) = match why {
+                RebuildRefused::Latched => (StatusCode::SERVICE_UNAVAILABLE, "failed"),
+                RebuildRefused::Busy(_) => (StatusCode::CONFLICT, "busy"),
             };
             return refusal(status, word, why.to_string());
         }
     }
 
-    // From here every exit reopens the gate. `finish_rebuild(true)`
-    // rather than `rebuild_never_dispatched()`: this engine IS the
-    // scheduler, so there is no in-flight request that might still land
-    // -- the outcome is known the moment this function returns.
-    let reopen = |ok: bool| {
+    // From here every exit but a latch reopens the gate: the resize runs
+    // here, in-process, so its outcome is known the moment this returns.
+    let reopen = || {
         state
             .maintenance
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .finish_rebuild(ok);
+            .finish_rebuild();
     };
 
-    for (asked, pool) in [(req.moe, "moe"), (req.mamba, "mamba"), (req.swa, "swa")] {
-        if asked.is_some() {
-            reopen(true);
-            return refusal(
-                StatusCode::BAD_REQUEST,
-                "failed",
-                format!(
-                    "this deployment has no {pool} pool to rebuild; see \
-                     GET /v1/cache/status for what it does have"
-                ),
-            );
-        }
-    }
-
-    let Some(kv_tokens) = req.kv else {
-        reopen(true);
+    // 2. The arithmetic, before anything is touched. The pool's lock is
+    //    taken here and held through the resize, so the size validated
+    //    is the size resized.
+    let pool = state
+        .kv_pool
+        .as_ref()
+        .map(|cfg| cfg.pool.lock().unwrap_or_else(|p| p.into_inner()));
+    let page_size = pool.as_ref().map_or(1, |p| p.block_size() as u64);
+    let request = RebuildRequest {
+        moe_cache_slots: req.moe,
+        kv_pages: req.kv.map(|tokens| tokens / page_size),
+        mamba_slots: req.mamba,
+        swa_pages: req.swa,
+    };
+    if request.is_empty() {
+        drop(pool);
+        reopen();
         return refusal(
             StatusCode::BAD_REQUEST,
             "failed",
             "nothing to rebuild: pass `kv` in tokens".to_string(),
         );
-    };
-
-    let Some(cfg) = state.kv_pool.as_ref() else {
-        reopen(true);
-        return refusal(
-            StatusCode::BAD_REQUEST,
-            "failed",
-            "this deployment has no shared KV pool; every request allocates privately \
-             (set FRINK_KV_POOL_BLOCKS to enable one)"
-                .to_string(),
-        );
-    };
-
-    // 2. The arithmetic, before anything is touched.
-    let mut pool = cfg.pool.lock().unwrap_or_else(|p| p.into_inner());
-    let page_size = pool.block_size() as u64;
-    let pages = kv_tokens / page_size;
-    if pages == 0 {
-        let held = (pool.total_blocks() - pool.free_blocks()) as u64;
-        drop(pool);
-        reopen(true);
-        return refusal(
-            StatusCode::BAD_REQUEST,
-            "failed",
-            format!(
-                "kv={kv_tokens} tokens is below one {page_size}-token page; \
-                 the pool is currently holding {held} page(s)"
-            ),
-        );
     }
+    let current = PoolSizes {
+        moe_cache_slots: 0,
+        kv_pages: pool.as_ref().map_or(0, |p| p.total_blocks() as u64),
+        prefill_overlap: false,
+    };
+    // Only the KV pool is resizable here (see the module doc), and one
+    // page is the least a pool that admits anything can hold. What
+    // in-flight requests hold is the pool's own refusal, below, because
+    // it is retryable and these are not.
+    let floors = PoolFloors {
+        kv_pages: pool.as_ref().map(|_| 1),
+        ..PoolFloors::default()
+    };
+    let budget = state
+        .kv_pool
+        .as_ref()
+        .and_then(|cfg| cfg.byte_budget)
+        .map(|b| ByteBudget {
+            budget_bytes: i64::try_from(b.budget_bytes).unwrap_or(i64::MAX),
+            bytes_per_expert: 0,
+            bytes_per_page: b.bytes_per_block,
+        });
+    let target = match validate_rebuild(&request, &current, &floors, budget.as_ref()) {
+        Ok(target) => target,
+        Err(why) => {
+            drop(pool);
+            reopen();
+            return rejected(&why, req.kv, page_size);
+        }
+    };
+    let mut pool = pool.expect("validate_rebuild refuses a kv target without a kv pool");
 
     // 3. The pool, inside a transaction -- which can still refuse, and
     //    says by how much.
@@ -474,25 +529,8 @@ pub(crate) async fn cache_rebuild(
     // is torn down, the caller marks the teardown and the rollback arm
     // is already here and already tested, instead of being written
     // under the pressure of the first engine that 503s forever.
-    let before = pool.total_blocks() as u64;
-    let current = crate::policy::pool_budget::PoolSizes {
-        moe_cache_slots: 0,
-        kv_pages: before,
-        prefill_overlap: false,
-    };
-    let target = crate::policy::pool_budget::PoolSizes {
-        kv_pages: pages,
-        ..current
-    };
-    let txn = crate::policy::rebuild::RebuildTxn::open(
-        &crate::policy::pool_budget::RebuildRequest {
-            moe_cache_slots: None,
-            kv_pages: Some(pages),
-            mamba_slots: None,
-            swa_pages: None,
-        },
-        &current,
-    );
+    let before = current.kv_pages;
+    let txn = RebuildTxn::open(&request, &current);
 
     let mut refused_floor: Option<usize> = None;
     let outcome = txn.run(
@@ -508,18 +546,20 @@ pub(crate) async fn cache_rebuild(
     );
 
     match outcome {
-        crate::policy::rebuild::RebuildOutcome::Applied(_) => {
+        RebuildOutcome::Applied(_) => {
             let after = pool.total_blocks() as u64;
             drop(pool);
-            // Any KV-side resize invalidates the prefix cache: a cached
+            // A KV-side resize invalidates the prefix cache: a cached
             // prefix names positions in an allocation that has just
             // stopped existing, and handing one back would serve another
             // request's state.
-            let invalidated = state.prefix_cache.is_some();
-            if let Some(pc) = &state.prefix_cache {
-                pc.lock().unwrap_or_else(|p| p.into_inner()).clear();
+            let invalidated = request.invalidates_prefix_cache() && state.prefix_cache.is_some();
+            if invalidated {
+                if let Some(pc) = &state.prefix_cache {
+                    pc.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                }
             }
-            reopen(true);
+            reopen();
             tracing::info!(
                 "cache rebuilt: kv {before} -> {after} pages of {page_size} tokens \
                  (prefix cache invalidated: {invalidated})"
@@ -535,17 +575,19 @@ pub(crate) async fn cache_rebuild(
             }))
             .into_response()
         }
-        crate::policy::rebuild::RebuildOutcome::RejectedIntact { .. } => {
+        RebuildOutcome::RejectedIntact { .. } => {
             drop(pool);
-            reopen(true);
+            reopen();
             let held = refused_floor.unwrap_or(0);
             refusal(
                 StatusCode::CONFLICT,
                 "busy",
                 format!(
-                    "kv={kv_tokens} tokens is {pages} page(s), below the {held} page(s) \
+                    "kv={} tokens is {} page(s), below the {held} page(s) \
                      currently held by in-flight requests; the engine is unchanged. \
                      Retry when they finish, or ask for at least {} tokens",
+                    req.kv.unwrap_or(0),
+                    target.kv_pages,
                     held as u64 * page_size
                 ),
             )
@@ -553,12 +595,12 @@ pub(crate) async fn cache_rebuild(
         // Unreachable while the resize frees nothing, and written out
         // rather than defaulted so that making it destructive is a
         // compile error here first instead of a silent 503-forever.
-        crate::policy::rebuild::RebuildOutcome::RolledBack { reason, .. } => {
+        RebuildOutcome::RolledBack { reason, .. } => {
             drop(pool);
-            reopen(true);
+            reopen();
             refusal(StatusCode::CONFLICT, "busy", reason)
         }
-        crate::policy::rebuild::RebuildOutcome::Latched {
+        RebuildOutcome::Latched {
             reason,
             rollback_error,
         } => {
@@ -709,7 +751,6 @@ pub(crate) fn check_admission(state: &AppState) -> Result<(), crate::ApiError> {
             Json(serde_json::json!({"error": {
                 "message": closed.to_string(),
                 "type": match closed.state {
-                    MaintenanceState::Loading => "model_loading",
                     MaintenanceState::Rebuilding => "cache_rebuilding",
                     MaintenanceState::Stopping => "server_stopping",
                     MaintenanceState::Failed => "server_failed",
@@ -721,231 +762,4 @@ pub(crate) fn check_admission(state: &AppState) -> Result<(), crate::ApiError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::policy::maintenance::MaintenanceGate;
-
-    /// A rebuild through a load, another rebuild, or a stop is refused
-    /// before anything is measured -- and each refusal is a DIFFERENT
-    /// status, because `busy` is retryable in a moment, `loading` when
-    /// the model finishes, and `failed` not at all.
-    #[test]
-    fn a_rebuild_is_refused_by_the_gate_before_anything_is_measured() {
-        let mut gate = MaintenanceGate::new();
-        assert_eq!(gate.begin_rebuild(), Err(RebuildRefused::NotReady));
-
-        gate.finish_loading(true);
-        gate.begin_rebuild().expect("the first one starts");
-        assert!(matches!(
-            gate.begin_rebuild(),
-            Err(RebuildRefused::Busy(MaintenanceState::Rebuilding))
-        ));
-
-        gate.finish_rebuild(true);
-        gate.begin_stop().expect("stop starts");
-        assert!(matches!(
-            gate.begin_rebuild(),
-            Err(RebuildRefused::Busy(MaintenanceState::Stopping))
-        ));
-    }
-
-    /// The refusal that matters: shrinking below what in-flight
-    /// requests hold cannot be represented, so the engine is left
-    /// exactly as it was and the caller is told the floor rather than
-    /// having to find it by being rejected again.
-    #[test]
-    fn a_rebuild_below_what_is_held_leaves_the_pool_untouched() {
-        use frink_core::cache::{KvBlockPool, KvCache};
-        use std::sync::Mutex;
-
-        let pool = Arc::new(Mutex::new(KvBlockPool::new(16, 64)));
-        let held = KvCache::with_pool(2, 4, Arc::clone(&pool), 64).expect("blocks");
-        let mut p = pool.lock().unwrap();
-        let in_use = p.total_blocks() - p.free_blocks();
-        assert!(in_use > 0);
-
-        assert_eq!(p.resize(in_use - 1), Err(in_use));
-        assert_eq!(p.total_blocks(), 64, "a refused rebuild changes nothing");
-        drop(p);
-        drop(held);
-    }
-
-    /// The whole reason a KV-side rebuild has to invalidate the prefix
-    /// cache: a stored prefix names positions in an allocation that has
-    /// just stopped existing, so handing one back would restore another
-    /// request's state into this one -- silently, since a KV cache
-    /// carries no identity of its own.
-    #[test]
-    fn a_kv_rebuild_drops_every_stored_prefix_but_keeps_the_counters() {
-        use frink_core::cache::KvCache;
-        use frink_models::PrefixCache;
-
-        // The cache must really hold the three positions the prefix
-        // names; `find_longest_prefix` truncates to the matched length.
-        let mut kv = KvCache::new(2, 4);
-        for _ in 0..3 {
-            kv.push(&[0.0; 8], &[0.0; 8]).expect("unpooled push");
-        }
-        let mut pc = PrefixCache::new(4);
-        pc.store(vec![1, 2, 3], vec![kv], vec![0.0; 8]);
-        assert!(pc.find_longest_prefix(&[1, 2, 3, 4]).matched_len > 0);
-        let hits_before = pc.stats().hits;
-
-        pc.clear();
-        assert_eq!(
-            pc.find_longest_prefix(&[1, 2, 3, 4]).matched_len,
-            0,
-            "nothing may survive a re-split"
-        );
-        assert_eq!(
-            pc.stats().hits,
-            hits_before,
-            "the counters describe what this process served, which a \
-             re-split does not undo"
-        );
-    }
-
-    /// A supervisor whose response was lost retries and must receive
-    /// exactly the same totals, not a second and larger snapshot taken
-    /// after more tokens were served.
-    #[test]
-    fn sealing_a_stop_is_idempotent_for_the_life_of_the_process() {
-        let mut gate = MaintenanceGate::new();
-        gate.finish_loading(true);
-        gate.begin_stop().expect("stop starts");
-
-        let snapshot = |completion| {
-            move || crate::policy::maintenance::SealedAccounting {
-                model_id: Some("m".to_string()),
-                prompt_tokens_total: 10,
-                completion_tokens_total: completion,
-                uptime_seconds: 5,
-                drain_complete: true,
-            }
-        };
-        let first = gate.seal(0, false, snapshot(20)).expect("seals");
-        let again = gate.seal(0, false, snapshot(99_999)).expect("seals again");
-        assert_eq!(first, again, "a retry must not re-measure");
-    }
-
-    /// The rule the barrier exists for. A request that will not
-    /// terminate must not be able to talk the server back into serving,
-    /// and must not be sealed around.
-    #[test]
-    fn a_stop_with_work_still_in_flight_seals_nothing_and_reopens_nothing() {
-        let mut gate = MaintenanceGate::new();
-        gate.finish_loading(true);
-        gate.begin_stop().expect("stop starts");
-
-        let err = gate
-            .seal(2, true, || unreachable!("must not snapshot"))
-            .expect_err("refused");
-        assert_eq!(err, StopRefused::AbortBarrierTimedOut(2));
-        assert_eq!(gate.state(), MaintenanceState::Stopping);
-        assert!(gate.check_admission().is_err());
-        assert!(gate.sealed().is_none());
-    }
-
-    /// The convention the three gauges have to share, asserted on
-    /// `PoolUsage` directly because frink cannot yet produce a
-    /// non-zero evictable count (a shared KV pool and the prefix cache
-    /// never coexist -- see `kv_pages`).
-    ///
-    /// A healthy idle server FILLS its caches with reusable prefixes.
-    /// Counting those as occupied puts every gauge near 100% while the
-    /// machine is doing nothing, and admission -- which is happily
-    /// seating requests into that memory -- then disagrees with the
-    /// number the operator is reading and sizes a pool that was never
-    /// full.
-    #[test]
-    fn an_evictable_page_is_memory_and_not_occupancy() {
-        // 40 free, 20 evictable, 40 really held.
-        let usage = PoolUsage::from_available(100, 40 + 20);
-        assert_eq!(usage.used, 40, "evictable pages are not occupancy");
-        assert_eq!(usage.total, 100);
-
-        // The saturating half: `available` is summed from two
-        // independent sources, so a step that double-counts must read
-        // as an empty pool rather than wrap to astronomical nonsense.
-        assert_eq!(PoolUsage::from_available(10, 12).used, 0);
-    }
-
-    /// The whole ordering, end to end and on a real filesystem: the
-    /// receipt is on disk before `prepare_stop` answers, because here
-    /// the ANSWER is the signal -- a supervisor learns the stop is
-    /// sealed by reading it, so replying first would leave a crash in
-    /// between with the supervisor believing a receipt exists that does
-    /// not.
-    ///
-    /// And a retry reuses the same document. With a fresh id per
-    /// attempt, a supervisor whose response was lost writes a SECOND
-    /// receipt for one engine generation, which downstream is a second
-    /// billing event for work that happened once.
-    #[test]
-    fn a_receipt_lands_on_disk_and_a_retry_reuses_the_same_document() {
-        use crate::policy::maintenance::SealedAccounting;
-
-        let dir = std::env::temp_dir().join(format!(
-            "frink-outbox-test-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let sealed = SealedAccounting {
-            model_id: Some("glm-5.2".to_string()),
-            prompt_tokens_total: 100,
-            completion_tokens_total: 50,
-            uptime_seconds: 7,
-            drain_complete: true,
-        };
-        let receipt = Receipt::from_sealed("stable-identity", &sealed);
-        let path = dir.join(format!("{}.json", receipt.id));
-
-        let write = |r: &Receipt| -> Result<(), String> {
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            if path.exists() {
-                return Ok(());
-            }
-            let tmp = dir.join(format!("{}.json.partial", r.id));
-            std::fs::write(&tmp, b"{}").map_err(|e| e.to_string())?;
-            std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
-        };
-
-        crate::policy::outbox::finish_stop(receipt.clone(), write, |_| Ok(())).expect("first stop");
-        assert!(path.exists(), "the receipt must be durable");
-
-        // The retry derives the same id, so it addresses the same file
-        // and writes no second document.
-        let retry = Receipt::from_sealed("stable-identity", &sealed);
-        assert_eq!(retry.id, receipt.id);
-        crate::policy::outbox::finish_stop(retry, write, |_| Ok(())).expect("retry");
-        let count = std::fs::read_dir(&dir).unwrap().count();
-        assert_eq!(count, 1, "one generation, one receipt");
-
-        // No `.partial` survives: a reader must never see a
-        // half-written receipt, and the moment it is most likely to
-        // look is while the engine is stopping.
-        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".partial")));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Unset means no outbox and no persistence step. Inventing a
-    /// directory to write accounting documents nobody asked for would
-    /// be worse than not keeping them.
-    #[test]
-    fn no_configured_outbox_means_nothing_is_written_and_that_is_not_a_failure() {
-        // `outbox_dir` reads the environment, which tests share, so the
-        // assertion is on the shape rather than on a mutated variable:
-        // an absent path yields no directory at all.
-        assert_eq!(
-            std::env::var_os("FRINK_ACCOUNTING_OUTBOX").is_none(),
-            outbox_dir().is_none()
-        );
-    }
-}
+mod tests;
