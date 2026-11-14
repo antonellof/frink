@@ -459,16 +459,22 @@ impl Decoder {
                             };
                             dense_layers.push(frink_metal::attn::DenseLayerMetal {
                                 attn_norm_w: an,
-                                ffn_norm_w: fnw,
-                                q,
-                                kv: frink_metal::attn::LayerKv::Own { k, v, slot: li },
-                                o,
-                                gate: g,
-                                up: u,
-                                down: d,
-                                extras: self.metal_attn_extras(layer),
-                                rope: self.metal_layer_rope(li),
-                                window: self.config.layer_sliding_window(li),
+                                mixer: frink_metal::attn::TokenMixer::Attention(
+                                    frink_metal::attn::AttnMixer {
+                                        q,
+                                        kv: frink_metal::attn::LayerKv::Own { k, v, slot: li },
+                                        o,
+                                        extras: self.metal_attn_extras(layer),
+                                        rope: self.metal_layer_rope(li),
+                                        window: self.config.layer_sliding_window(li),
+                                    },
+                                ),
+                                ffn: Some(frink_metal::attn::DenseFfnMetal {
+                                    norm_w: fnw,
+                                    gate: g,
+                                    up: u,
+                                    down: d,
+                                }),
                                 post_attn_norm: layer.attn.post_attn_norm.as_deref(),
                                 post_ffn_norm: layer.attn.post_ffn_norm.as_deref(),
                                 per_layer: None,
@@ -596,6 +602,27 @@ impl Decoder {
                 if clear_metal_after_stack {
                     **guard = None;
                 }
+            }
+        }
+
+        // A short-convolution hybrid (LFM2): every layer in the dense
+        // stack, the conv layers as a second token mixer
+        // (`decoder::metal_hybrid`). Such a model never reaches the arms
+        // above, whose eligibility is "every layer attends", so it holds
+        // no arena guard here and its row was embedded on the host.
+        #[cfg(feature = "metal")]
+        if !metal_stack_done && metal_kv_guard.is_none() && !hidden.is_empty() {
+            match self.try_metal_hybrid_token(&hidden, pos, kv_caches) {
+                Some(super::metal_hybrid::HybridOut::Logits(logits)) => {
+                    frink_metal::gpu::clear_resident_activation();
+                    return logits;
+                }
+                Some(super::metal_hybrid::HybridOut::Hidden { hidden: h, normed }) => {
+                    hidden = h;
+                    final_norm_done_in_stack = normed;
+                    metal_stack_done = true;
+                }
+                None => {}
             }
         }
 

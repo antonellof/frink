@@ -209,5 +209,5 @@ fn contiguous_step(cache: &mut KvCache, bx: &[f32], l_cache: usize, n_embd: usiz
 /// keeps its `r` cache (`type_r` defaults to `GGML_TYPE_F32`) whatever
 /// `-ctk` says. `ModelConfig::new_kv_caches` builds such a layer's cache
 /// at f32 for that reason, so an f16 one here is a construction bug.
-const SHORT_CONV_HISTORY_IS_F32: &str =
+pub(super) const SHORT_CONV_HISTORY_IS_F32: &str =
     "a short-convolution history is stored at f32 (`ModelConfig::new_kv_caches`)";

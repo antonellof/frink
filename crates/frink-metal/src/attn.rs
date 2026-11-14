@@ -53,7 +53,8 @@
 //!
 //! `FRINK_CTK` selects KV dtype ([`MetalKvDtype`]); see [`is_implemented`].
 pub use crate::decode_dense::{
-    launch_decode_dense_stack, AttnExtras, DenseLayerMetal, EmbdGatherMetal, LayerKv,
+    launch_decode_dense_stack, AttnExtras, AttnMixer, DenseFfnMetal, DenseLayerMetal,
+    EmbdGatherMetal, LayerKv, ShortConvMixer, TokenMixer,
 };
 pub(crate) use crate::dispatch::dispatch_counted;
 use crate::elem::{
@@ -7190,20 +7191,24 @@ mod tests {
     ) -> DenseLayerMetal<'a> {
         DenseLayerMetal {
             attn_norm_w: &w.attn_norm,
-            ffn_norm_w: &w.ffn_norm,
-            q: f32_matvec(&w.q, n_q, hidden),
-            kv: LayerKv::Own {
-                k: f32_matvec(&w.k, n_kv, hidden),
-                v: f32_matvec(&w.v, n_kv, hidden),
-                slot,
-            },
-            o: f32_matvec(&w.o, hidden, n_q),
-            gate: f32_matvec(&w.gate, ffn, hidden),
-            up: f32_matvec(&w.up, ffn, hidden),
-            down: f32_matvec(&w.down, hidden, ffn),
-            extras: AttnExtras::default(),
-            rope,
-            window: None,
+            mixer: TokenMixer::Attention(AttnMixer {
+                q: f32_matvec(&w.q, n_q, hidden),
+                kv: LayerKv::Own {
+                    k: f32_matvec(&w.k, n_kv, hidden),
+                    v: f32_matvec(&w.v, n_kv, hidden),
+                    slot,
+                },
+                o: f32_matvec(&w.o, hidden, n_q),
+                extras: AttnExtras::default(),
+                rope,
+                window: None,
+            }),
+            ffn: Some(DenseFfnMetal {
+                norm_w: &w.ffn_norm,
+                gate: f32_matvec(&w.gate, ffn, hidden),
+                up: f32_matvec(&w.up, ffn, hidden),
+                down: f32_matvec(&w.down, hidden, ffn),
+            }),
             post_attn_norm: None,
             post_ffn_norm: None,
             per_layer: None,

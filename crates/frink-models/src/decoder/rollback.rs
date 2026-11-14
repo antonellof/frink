@@ -55,6 +55,8 @@ impl Decoder {
                     mkv.seq_len = mkv.seq_len.min(cache.rows());
                 }
             }
+            drop(guard);
+            self.rewind_metal_hybrid(kv_caches);
         }
     }
 
@@ -71,6 +73,7 @@ impl Decoder {
         #[cfg(feature = "metal")]
         {
             *Self::lock_metal_attn_kv(&self.metal_attn_kv) = None;
+            self.forget_metal_hybrid();
         }
     }
 }

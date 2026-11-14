@@ -212,6 +212,38 @@ fn falcon_h1_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match(FH1, &FH1_GOLDEN);
 }
 
+/// On Metal every Falcon-H1 layer runs whole in the dense stack, the
+/// attention and the Mamba-2 block side by side
+/// (`TokenMixer::Parallel`, `decoder::metal_hybrid`), and the answer is
+/// still llama.cpp's, with and without `ssm_norm`. The allocation check
+/// is what says the stack ran: the host bodies would match too.
+///
+/// `cargo test -p frink-models --features metal --test falcon_h1_graphs -- --ignored`
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "needs Apple Metal GPU"]
+fn metal_decode_runs_both_branches_in_the_dense_stack() {
+    if frink_metal::gpu::probe().is_none() {
+        eprintln!("skip: no Metal GPU detected");
+        return;
+    }
+    common::pin_backend(common::Backend::Metal);
+    frink_models::set_metal_greedy_argmax(false);
+    for (name, golden) in [(FH1, &FH1_GOLDEN), (FH1_NOSSMNORM, &FH1_NOSSMNORM_GOLDEN)] {
+        let d = load_graph_fixture(name);
+        let got = decode(&d);
+        assert!(
+            d.metal_hybrid_allocated(),
+            "{name}: the hybrid stack never ran"
+        );
+        let worst = worst_vs(&got, golden);
+        assert!(
+            worst < common::METAL_GOLDEN_TOL,
+            "{name}: worst |metal - llama.cpp| {worst:.3e}"
+        );
+    }
+}
+
 #[test]
 fn without_ssm_norm_matches_llama_cpp() {
     assert_all_three_paths_match(FH1_NOSSMNORM, &FH1_NOSSMNORM_GOLDEN);

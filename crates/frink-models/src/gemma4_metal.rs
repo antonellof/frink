@@ -34,8 +34,9 @@
 use frink_core::matmul::{rms_norm, softcap_inplace};
 use frink_core::weight_matrix::WeightMatrix;
 use frink_metal::attn::{
-    AttnExtras, DenseLayerMetal, LayerKv, MetalKvBuffers, PerLayerGateMetal, PleInputMetal,
-    PrefillDenseLayerMetal, PrefillFfnMetal, PrefillMatMetal,
+    AttnExtras, AttnMixer, DenseFfnMetal, DenseLayerMetal, LayerKv, MetalKvBuffers,
+    PerLayerGateMetal, PleInputMetal, PrefillDenseLayerMetal, PrefillFfnMetal, PrefillMatMetal,
+    TokenMixer,
 };
 use frink_metal::rope::{LayerRope, MetalRope, MetalRopeLayout};
 
@@ -201,16 +202,20 @@ impl Gemma4Engine {
             })?;
             out.push(DenseLayerMetal {
                 attn_norm_w: &l.attn_norm,
-                ffn_norm_w: &l.ffn_norm,
-                q: mv(&a.q_proj)?,
-                kv,
-                o: mv(&a.o_proj)?,
-                gate: mv(&l.ffn_gate)?,
-                up: mv(&l.ffn_up)?,
-                down: mv(&l.ffn_down)?,
-                extras: self.layer_extras(il)?,
-                rope: Some(self.layer_rope(il)),
-                window: self.hp.is_swa_layer(il).then_some(self.hp.sliding_window),
+                mixer: TokenMixer::Attention(AttnMixer {
+                    q: mv(&a.q_proj)?,
+                    kv,
+                    o: mv(&a.o_proj)?,
+                    extras: self.layer_extras(il)?,
+                    rope: Some(self.layer_rope(il)),
+                    window: self.hp.is_swa_layer(il).then_some(self.hp.sliding_window),
+                }),
+                ffn: Some(DenseFfnMetal {
+                    norm_w: &l.ffn_norm,
+                    gate: mv(&l.ffn_gate)?,
+                    up: mv(&l.ffn_up)?,
+                    down: mv(&l.ffn_down)?,
+                }),
                 post_attn_norm: Some(&a.post_attn_norm),
                 post_ffn_norm: Some(&l.ffn_post_norm),
                 per_layer: match (

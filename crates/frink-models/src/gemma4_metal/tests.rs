@@ -189,16 +189,17 @@ fn the_stacks_describe_every_gemma4_layer() {
     assert!(e.metal_stacks_cover());
     let layers = e.decode_layers().expect("decode layers");
     for (il, l) in layers.iter().enumerate() {
-        match l.kv {
+        let a = l.mixer.attn().expect("every Gemma-4 layer attends");
+        match a.kv {
             LayerKv::Own { slot, .. } => {
                 assert!(e.hp.has_kv(il));
                 assert_eq!(slot, il);
             }
             LayerKv::Shared { slot } => assert_eq!(slot, e.hp.kv_reuse_layer(il)),
         }
-        assert_eq!(l.window.is_some(), e.hp.is_swa_layer(il));
+        assert_eq!(a.window.is_some(), e.hp.is_swa_layer(il));
         assert_eq!(
-            l.rope.and_then(|r| r.freq_factors).is_some(),
+            a.rope.and_then(|r| r.freq_factors).is_some(),
             !e.hp.is_swa_layer(il),
             "rope_freqs on the full layers only"
         );

@@ -282,6 +282,46 @@ fn mamba_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match_within(MAMBA, &MAMBA_GOLDEN, MAMBA1_TOL);
 }
 
+/// On Metal a pure Mamba-1 model's decode token runs whole in the dense
+/// stack, the block as a token mixer on FFN-free layers
+/// (`decoder::metal_hybrid`, `frink_metal::ssm_decode`), and the answer
+/// is still llama.cpp's. The allocation check is what says the stack
+/// ran: the host bodies would match the golden too. FalconMamba's norms
+/// on dt, B and C have no kernel there, so that file must stay on the
+/// host and still match.
+///
+/// `cargo test -p frink-models --features metal --test mamba_graphs -- --ignored`
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "needs Apple Metal GPU"]
+fn metal_decode_runs_the_mamba1_blocks_in_the_dense_stack() {
+    if frink_metal::gpu::probe().is_none() {
+        eprintln!("skip: no Metal GPU detected");
+        return;
+    }
+    common::pin_backend(common::Backend::Metal);
+    frink_models::set_metal_greedy_argmax(false);
+    for (name, golden, on_stack) in [
+        (MAMBA, &MAMBA_GOLDEN, true),
+        (MAMBA_DTBCRMS, &MAMBA_DTBCRMS_GOLDEN, false),
+        // Pure Mamba-2: `TokenMixer::Mamba2` on every layer.
+        (MAMBA2, &MAMBA2_GOLDEN, true),
+    ] {
+        let d = load_graph_fixture(name);
+        let got = decode(&d);
+        assert_eq!(
+            d.metal_hybrid_allocated(),
+            on_stack,
+            "{name}: which body ran"
+        );
+        let worst = worst_vs(&got, golden);
+        assert!(
+            worst < common::METAL_GOLDEN_TOL,
+            "{name}: worst |metal - llama.cpp| {worst:.3e}"
+        );
+    }
+}
+
 /// `ssm.dt_b_c_rms` (FalconMamba): the weightless norms on dt, B and
 /// C, whose golden differs from the plain file's.
 #[test]

@@ -39,7 +39,7 @@
 //! One of the three tensors without the other two is refused: the graph
 //! would norm none of them, silently.
 
-use frink_core::mamba2::{conv_step, scan_step, Decay, ScanDims};
+use frink_core::mamba2::{conv_silu_rows, scan_rows_state, Decay, ScanDims, ScanRows};
 use frink_core::matmul::rms_norm;
 use frink_core::recurrent_state::RecurrentState;
 use frink_core::weight_matrix::WeightMatrix;
@@ -275,20 +275,34 @@ impl Mamba1 {
         };
         let (d_inner, d_state, dt_rank) = (h.d_inner, h.d_state, h.dt_rank);
         let dims = h.scan_dims();
-        let mut ys = vec![0.0f32; rows * d_inner];
-        let mut xc = vec![0.0f32; d_inner];
-        let mut y = vec![0.0f32; d_inner];
+        // The scan's operand rows, `[x | B | C]` each (`ScanRows`).
+        let width = d_inner + 2 * d_state;
+        // :43-70: the conv over every row and the state, bias, SiLU,
+        // parallel over channels, into each row's `x` slot.
+        let mut xc_rows = vec![0.0f32; rows * d_inner];
+        conv_silu_rows(
+            &mut state.conv,
+            &self.conv1d,
+            &self.conv1d_bias,
+            h.d_conv,
+            &xz,
+            2 * d_inner,
+            rows,
+            &mut xc_rows,
+        );
+        let mut xbc = vec![0.0f32; rows * width];
+        for (r, xc) in xc_rows.chunks_exact(d_inner).enumerate() {
+            xbc[r * width..r * width + d_inner].copy_from_slice(xc);
+        }
+        // :74-82: dt, B, C from one projection of the conv output, the
+        // whole batch at once. Per row this was two device submissions a
+        // token a layer, which was the whole of a Mamba prompt.
+        let x_db = self.project(&self.x_proj, &xc_rows, rows);
+        let x_db_w = dt_rank + 2 * d_state;
+        let mut dt_low_rows = vec![0.0f32; rows * dt_rank];
         for r in 0..rows {
-            let row = &xz[r * 2 * d_inner..(r + 1) * 2 * d_inner];
-            let (x, z) = row.split_at(d_inner);
-            // :43-70: the conv over this token and the state, bias, SiLU.
-            conv_step(&mut state.conv, &self.conv1d, h.d_conv, x, &mut xc);
-            for (v, b) in xc.iter_mut().zip(&self.conv1d_bias) {
-                *v = silu(*v + b);
-            }
-            // :74-82: dt, B, C from one projection of the conv output.
-            let x_db = self.x_proj.apply(&xc);
-            let (dt_low, bc) = x_db.split_at(dt_rank);
+            let row = &x_db[r * x_db_w..(r + 1) * x_db_w];
+            let (dt_low, bc) = row.split_at(dt_rank);
             let (b, c) = bc.split_at(d_state);
             let (dt_low, b, c) = match &self.dt_bc_norm {
                 DtBcNorm::None => (dt_low.to_vec(), b.to_vec(), c.to_vec()),
@@ -303,31 +317,49 @@ impl Mamba1 {
                     rms_norm(c, wc, rms_eps),
                 ),
             };
-            // :90-91: dt up to d_inner, plus the bias; softplus is the scan's.
-            let mut dt = self.dt_proj.apply(&dt_low);
-            for (t, bias) in dt.iter_mut().zip(&self.dt_bias) {
+            dt_low_rows[r * dt_rank..(r + 1) * dt_rank].copy_from_slice(&dt_low);
+            let bc_out = &mut xbc[r * width + d_inner..(r + 1) * width];
+            bc_out[..d_state].copy_from_slice(&b);
+            bc_out[d_state..].copy_from_slice(&c);
+        }
+        // :90-91: dt up to d_inner, plus the bias; softplus is the scan's.
+        let mut dt = self.project(&self.dt_proj, &dt_low_rows, rows);
+        for row in dt.chunks_mut(d_inner) {
+            for (t, bias) in row.iter_mut().zip(&self.dt_bias) {
                 *t += bias;
             }
-            scan_step(
-                dims,
-                &mut state.ssm,
-                &xc,
-                &dt,
-                Decay::PerState(&self.a),
-                &b,
-                &c,
-                &mut y,
-            );
-            // :121-122: y + x * D, then silu(z) * y.
+        }
+        let mut ys = vec![0.0f32; rows * d_inner];
+        scan_rows_state(
+            dims,
+            &mut state.ssm,
+            ScanRows {
+                xbc: &xbc,
+                stride: width,
+                dt: &dt,
+                rows,
+            },
+            Decay::PerState(&self.a),
+            &mut ys,
+        );
+        // :121-122: y + x * D, then silu(z) * y; rows are independent.
+        frink_core::par::chunks_mut(&mut ys, d_inner, 1, |r, y| {
+            let z = &xz[r * 2 * d_inner + d_inner..(r + 1) * 2 * d_inner];
+            let xc = &xc_rows[r * d_inner..(r + 1) * d_inner];
             for i in 0..d_inner {
                 y[i] = (y[i] + xc[i] * self.d[i]) * silu(z[i]);
             }
-            ys[r * d_inner..(r + 1) * d_inner].copy_from_slice(&y);
-        }
+        });
+        self.project(&self.out_proj, &ys, rows)
+    }
+
+    /// `m` over `rows` rows: the matvec for one, the batched product for
+    /// more, which is the split every projection here takes.
+    fn project(&self, m: &WeightMatrix, x: &[f32], rows: usize) -> Vec<f32> {
         if rows == 1 {
-            self.out_proj.apply(&ys)
+            m.apply(x)
         } else {
-            self.out_proj.apply_batch(&ys, rows)
+            m.apply_batch(x, rows)
         }
     }
 }
