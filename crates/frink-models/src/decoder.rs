@@ -39,6 +39,8 @@ mod layer_taps;
 mod lm_head;
 mod metal_eligibility;
 #[cfg(feature = "metal")]
+mod metal_hybrid;
+#[cfg(feature = "metal")]
 pub(crate) use metal_eligibility::metal_attn_switched_on;
 #[cfg(feature = "metal")]
 mod metal_kv;
@@ -191,6 +193,11 @@ pub struct Decoder {
     /// diverge for other reasons.
     #[cfg(feature = "metal")]
     pub(crate) metal_attn_kv: std::sync::Mutex<Option<Vec<frink_metal::attn::MetalKvBuffers>>>,
+    /// The device half of a short-convolution hybrid's decode
+    /// (`decoder::metal_hybrid`): its attention layers' Metal KV and the
+    /// conv windows. Lazily allocated; the host caches stay authoritative.
+    #[cfg(feature = "metal")]
+    pub(crate) metal_hybrid: std::sync::Mutex<Option<metal_hybrid::HybridDeviceState>>,
     /// Load-time execution plan (family, fused-op caps, SWA/RoPE
     /// policy). Built once; hot path must not re-resolve architecture
     /// strings. See [`crate::execution_plan`].

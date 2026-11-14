@@ -218,6 +218,37 @@ fn lfm2_matches_llama_cpp_on_all_three_paths() {
     assert_all_three_paths_match(LFM2, &LFM2_GOLDEN);
 }
 
+/// On Metal the whole decode token runs in the dense stack, the conv
+/// layers as its second token mixer (`decoder::metal_hybrid`), and the
+/// answer is still llama.cpp's. The allocation check is what says the
+/// stack ran: the host bodies would match the golden too.
+///
+/// `cargo test -p frink-models --features metal --test lfm2_graphs -- --ignored`
+#[cfg(feature = "metal")]
+#[test]
+#[ignore = "needs Apple Metal GPU"]
+fn metal_decode_runs_the_conv_layers_in_the_dense_stack() {
+    if frink_metal::gpu::probe().is_none() {
+        eprintln!("skip: no Metal GPU detected");
+        return;
+    }
+    common::pin_backend(common::Backend::Metal);
+    frink_models::set_metal_greedy_argmax(false);
+    for name in [LFM2, LFM2_FUSED] {
+        let d = load_graph_fixture(name);
+        let got = decode(&d);
+        assert!(
+            d.metal_hybrid_allocated(),
+            "{name}: the hybrid stack never ran"
+        );
+        let worst = worst_vs(&got, &LFM2_GOLDEN);
+        assert!(
+            worst < common::METAL_GOLDEN_TOL,
+            "{name}: worst |metal - llama.cpp| {worst:.3e}"
+        );
+    }
+}
+
 /// `create_tensor_qkv` (`lfm2.cpp:78`) takes the fused spelling too;
 /// libllama's logits for the two files are byte-identical.
 #[test]

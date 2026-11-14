@@ -243,6 +243,8 @@ impl Decoder {
             qk_norm_after_rope: false,
             #[cfg(feature = "metal")]
             metal_attn_kv: std::sync::Mutex::new(None),
+            #[cfg(feature = "metal")]
+            metal_hybrid: std::sync::Mutex::new(None),
             execution_plan,
             kv_window: KvWindowPolicy::from_env(),
             plan_cache: std::sync::Mutex::new(std::collections::HashMap::new()),

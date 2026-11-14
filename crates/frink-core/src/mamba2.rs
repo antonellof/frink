@@ -67,6 +67,91 @@ pub fn conv_step(state: &mut [f32], taps: &[f32], d_conv: usize, x: &[f32], out:
     }
 }
 
+/// `rows` tokens of [`conv_step`], then `silu(out + bias)` on each output
+/// (`mamba-base.cpp:66-70`, `:222-226`), parallel over channels.
+///
+/// Channels are independent across the whole batch (each reads only its
+/// own column of the state and its own taps), so one parallel region
+/// walks every row of a channel with its window in registers. Each
+/// output is the same float sum [`conv_step`] makes, in the same order.
+///
+/// `x` row `r` is `width` inputs at `r * x_stride`; `out` is
+/// `[rows][width]`. A serial row loop here was a sixth of a Granite-4.0-H
+/// prompt.
+#[allow(clippy::too_many_arguments)]
+pub fn conv_silu_rows(
+    state: &mut [f32],
+    taps: &[f32],
+    bias: &[f32],
+    d_conv: usize,
+    x: &[f32],
+    x_stride: usize,
+    rows: usize,
+    out: &mut [f32],
+) {
+    let width = bias.len();
+    let hist = d_conv - 1;
+    assert_eq!(state.len(), hist * width);
+    assert_eq!(taps.len(), width * d_conv);
+    assert_eq!(out.len(), rows * width);
+    assert!(rows == 0 || x.len() >= (rows - 1) * x_stride + width);
+    if rows == 0 {
+        return;
+    }
+    // Blocks of channels, so a task reads and writes runs of a row
+    // rather than one float per cache line. A block holds its `rows`
+    // output rows, then its new history rows, each `BLOCK` wide.
+    const BLOCK: usize = 64;
+    let n_blocks = width.div_ceil(BLOCK);
+    let per = (rows + hist) * BLOCK;
+    let mut by_block = vec![0.0f32; n_blocks * per];
+    let state_in: &[f32] = state;
+    crate::par::chunks_mut(&mut by_block, per, 1, |b, blk| {
+        let c0 = b * BLOCK;
+        let bw = BLOCK.min(width - c0);
+        // The block's windows, `[hist][BLOCK]`, oldest row first.
+        let mut window = vec![0.0f32; hist * BLOCK];
+        for i in 0..hist {
+            window[i * BLOCK..i * BLOCK + bw]
+                .copy_from_slice(&state_in[i * width + c0..i * width + c0 + bw]);
+        }
+        for r in 0..rows {
+            let xr = &x[r * x_stride + c0..r * x_stride + c0 + bw];
+            for (j, &xc) in xr.iter().enumerate() {
+                let c = c0 + j;
+                let t = &taps[c * d_conv..(c + 1) * d_conv];
+                // ops.cpp:9598-9603, as `conv_step`.
+                let mut acc = 0.0f32;
+                for (i, tap) in t.iter().enumerate().take(hist) {
+                    acc += window[i * BLOCK + j] * tap;
+                }
+                acc += xc * t[hist];
+                let v = acc + bias[c];
+                blk[r * BLOCK + j] = v / (1.0 + (-v).exp());
+                for i in 1..hist {
+                    window[(i - 1) * BLOCK + j] = window[i * BLOCK + j];
+                }
+                if hist > 0 {
+                    window[(hist - 1) * BLOCK + j] = xc;
+                }
+            }
+        }
+        blk[rows * BLOCK..].copy_from_slice(&window);
+    });
+    for (b, blk) in by_block.chunks_exact(per).enumerate() {
+        let c0 = b * BLOCK;
+        let bw = BLOCK.min(width - c0);
+        for r in 0..rows {
+            out[r * width + c0..r * width + c0 + bw]
+                .copy_from_slice(&blk[r * BLOCK..r * BLOCK + bw]);
+        }
+        for i in 0..hist {
+            let src = &blk[(rows + i) * BLOCK..(rows + i) * BLOCK + bw];
+            state[i * width + c0..i * width + c0 + bw].copy_from_slice(src);
+        }
+    }
+}
+
 /// The stored `A`, in the two shapes the kernel takes.
 #[derive(Debug, Clone, Copy)]
 pub enum Decay<'a> {
@@ -142,6 +227,62 @@ pub struct ScanRows<'a> {
     pub stride: usize,
     pub dt: &'a [f32],
     pub rows: usize,
+}
+
+/// Rows from which a batch's scan goes to the device when one is on: a
+/// decode token's scan is cheaper on the host than a submission.
+pub const DEVICE_SCAN_MIN_ROWS: usize = 8;
+
+/// [`scan_rows`] on a sequence's own state, on the device when one
+/// serves the batch (`frink_metal::ssm_scan`, a prompt on Metal), and
+/// on the host otherwise or if the launch fails. The state is the
+/// page-aligned [`AlignedF32`] a `RecurrentState` holds, which is what
+/// lets the kernel advance it in place.
+///
+/// [`AlignedF32`]: crate::recurrent_state::AlignedF32
+pub fn scan_rows_state(
+    dims: ScanDims,
+    state: &mut crate::recurrent_state::AlignedF32,
+    batch: ScanRows<'_>,
+    a: Decay<'_>,
+    y: &mut [f32],
+) {
+    #[cfg(feature = "metal")]
+    if batch.rows >= DEVICE_SCAN_MIN_ROWS && crate::metal_dense_enabled() {
+        let shape = frink_metal::ssm_scan::ScanShape {
+            n_head: dims.n_head,
+            head_dim: dims.head_dim,
+            d_state: dims.d_state,
+            n_group: dims.n_group,
+        };
+        let (a_rows, per_state) = match a {
+            Decay::PerHead(a) => (a, false),
+            Decay::PerState(a) => (a, true),
+        };
+        assert_eq!(state.len(), dims.state_len());
+        // SAFETY: `state` is an `AlignedF32`, page-aligned with a
+        // whole-page allocation of `alloc_bytes`, and the `&mut` held
+        // across the call keeps every other reader and writer off it
+        // until the launch, which waits for the GPU, returns.
+        let ran = unsafe {
+            frink_metal::ssm_scan::launch_scan_rows(
+                shape,
+                state.as_ptr(),
+                state.alloc_bytes(),
+                batch.xbc,
+                batch.stride,
+                batch.dt,
+                batch.rows,
+                a_rows,
+                per_state,
+                y,
+            )
+        };
+        if ran.is_ok() {
+            return;
+        }
+    }
+    scan_rows(dims, state, batch, a, y);
 }
 
 /// The scan over `rows` tokens of one sequence, in place on `state`
@@ -512,5 +653,43 @@ mod tests {
         let running: f32 = b.iter().zip(&c).fold(0.0f32, |acc, (x, y)| acc + x * y);
         assert_ne!(got, running, "the fixture must tell the two orders apart");
         assert_eq!(s, b, "the state is updated in place");
+    }
+
+    /// The batched conv is `rows` single steps and their bias and SiLU,
+    /// to the bit, outputs and state both, over strided input rows and
+    /// more channels than one parallel task takes.
+    #[test]
+    fn conv_silu_rows_is_that_many_steps() {
+        let (width, d_conv, rows, x_stride) = (150usize, 4usize, 6usize, 170usize);
+        let mut seed = 5u32;
+        let taps = rnd(&mut seed, width * d_conv);
+        let bias = rnd(&mut seed, width);
+        let x = rnd(&mut seed, rows * x_stride);
+        let init = rnd(&mut seed, (d_conv - 1) * width);
+        let mut batched = init.clone();
+        let mut out = vec![0.0f32; rows * width];
+        conv_silu_rows(
+            &mut batched,
+            &taps,
+            &bias,
+            d_conv,
+            &x,
+            x_stride,
+            rows,
+            &mut out,
+        );
+        let mut stepped = init;
+        let mut want = Vec::new();
+        for r in 0..rows {
+            let mut o = vec![0.0f32; width];
+            let row = &x[r * x_stride..r * x_stride + width];
+            conv_step(&mut stepped, &taps, d_conv, row, &mut o);
+            want.extend(o.iter().zip(&bias).map(|(v, b)| {
+                let v = v + b;
+                v / (1.0 + (-v).exp())
+            }));
+        }
+        assert_eq!(out, want);
+        assert_eq!(batched, stepped);
     }
 }

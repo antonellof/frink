@@ -188,12 +188,66 @@ enum Download {
 pub struct DenseLayerMetal<'a> {
     pub attn_norm_w: &'a [f32],
     pub ffn_norm_w: &'a [f32],
-    pub q: MatvecLaunch<'a>,
-    pub kv: LayerKv<MatvecLaunch<'a>>,
-    pub o: MatvecLaunch<'a>,
+    /// What stands between `attn_norm` and the first residual add.
+    pub mixer: TokenMixer<'a>,
     pub gate: MatvecLaunch<'a>,
     pub up: MatvecLaunch<'a>,
     pub down: MatvecLaunch<'a>,
+    /// Gemma post-attention / post-FFN sandwich norms, applied to the
+    /// block output *before* the residual add.
+    pub post_attn_norm: Option<&'a [f32]>,
+    pub post_ffn_norm: Option<&'a [f32]>,
+    /// Gemma-4's per-layer embedding gate, after the FFN residual; reads
+    /// the stack's `ple` plane.
+    pub per_layer: Option<PerLayerGateMetal<'a, MatvecLaunch<'a>>>,
+    /// Gemma-4's `layer_output_scale`: the whole residual stream is
+    /// multiplied by it at the end of the layer.
+    pub out_scale: Option<f32>,
+}
+
+/// A layer's token mixer: attention, or LFM2's short convolution
+/// (`lfm2.cpp:192-208` runs ONE residual topology around either). One
+/// enum rather than optional attention launches beside an optional
+/// conv, so a layer cannot carry both or neither.
+///
+/// Unboxed although the attention arm is the larger: the stack's layers
+/// are built per token, and a box would be an allocation per layer per
+/// token on the decode path.
+#[allow(clippy::large_enum_variant)]
+pub enum TokenMixer<'a> {
+    Attention(AttnMixer<'a>),
+    ShortConv(ShortConvMixer<'a>),
+}
+
+impl<'a> TokenMixer<'a> {
+    /// The attention half, on an attention layer.
+    pub fn attn(&self) -> Option<&AttnMixer<'a>> {
+        match self {
+            Self::Attention(a) => Some(a),
+            Self::ShortConv(_) => None,
+        }
+    }
+}
+
+/// LFM2's short convolution (`crate::shortconv`): `in_proj`, the conv,
+/// `out_proj`.
+pub struct ShortConvMixer<'a> {
+    /// `[3 n_embd, n_embd]`.
+    pub in_proj: MatvecLaunch<'a>,
+    /// `[n_embd][l_cache]`, tap `l_cache - 1` on the newest input.
+    pub taps: &'a [f32],
+    /// `[n_embd, n_embd]`.
+    pub out_proj: MatvecLaunch<'a>,
+    /// The token's windows and which one is this layer's.
+    pub windows: &'a crate::shortconv::ConvWindows,
+    pub window: usize,
+}
+
+/// The attention half of a layer.
+pub struct AttnMixer<'a> {
+    pub q: MatvecLaunch<'a>,
+    pub kv: LayerKv<MatvecLaunch<'a>>,
+    pub o: MatvecLaunch<'a>,
     pub extras: AttnExtras<'a>,
     /// This layer's RoPE base AND divisors. Both halves, always: a
     /// Gemma-3 SWA layer differs from its full-attention neighbours in
@@ -205,16 +259,6 @@ pub struct DenseLayerMetal<'a> {
     pub rope: Option<LayerRope<'a>>,
     /// Sliding-window size for this layer (`None` = full causal).
     pub window: Option<usize>,
-    /// Gemma post-attention / post-FFN sandwich norms, applied to the
-    /// block output *before* the residual add.
-    pub post_attn_norm: Option<&'a [f32]>,
-    pub post_ffn_norm: Option<&'a [f32]>,
-    /// Gemma-4's per-layer embedding gate, after the FFN residual; reads
-    /// the stack's `ple` plane.
-    pub per_layer: Option<PerLayerGateMetal<'a, MatvecLaunch<'a>>>,
-    /// Gemma-4's `layer_output_scale`: the whole residual stream is
-    /// multiplied by it at the end of the layer.
-    pub out_scale: Option<f32>,
 }
 
 impl DenseLayerMetal<'_> {
@@ -275,8 +319,12 @@ pub fn launch_decode_dense_stack(
     assert!(hidden_dim > 0);
     // Head width and KV head count are the SLOT's, per layer: Gemma-4's
     // sliding and full layers differ in both widths.
+    // A conv layer owns no KV slot: the slots are the attention layers'.
     let owned = check_layer_kv(
-        layers.iter().map(|l| (l.kv, l.extras.touches_kv())),
+        layers
+            .iter()
+            .filter_map(|l| l.mixer.attn())
+            .map(|a| (a.kv, a.extras.touches_kv())),
         kvs.len(),
     );
     for (kv, owned) in kvs.iter().zip(&owned) {
@@ -287,13 +335,24 @@ pub fn launch_decode_dense_stack(
         }
     }
     for layer in layers.iter() {
-        let kv = &kvs[layer.kv.slot()];
-        assert_eq!(layer.q.rows, n_heads * kv.head_dim);
-        assert_freq_factors_len(
-            layer.rope.and_then(|r| r.freq_factors),
-            rope_layout,
-            kv.head_dim,
-        );
+        match &layer.mixer {
+            TokenMixer::Attention(a) => {
+                let kv = &kvs[a.kv.slot()];
+                assert_eq!(a.q.rows, n_heads * kv.head_dim);
+                assert_freq_factors_len(
+                    a.rope.and_then(|r| r.freq_factors),
+                    rope_layout,
+                    kv.head_dim,
+                );
+            }
+            TokenMixer::ShortConv(c) => {
+                let (n, l) = (c.windows.n(), c.windows.l_cache());
+                assert_eq!(n, hidden_dim, "lfm2.cpp: the conv is n_embd wide");
+                assert_eq!(c.in_proj.rows, 3 * n);
+                assert_eq!(c.out_proj.rows, n);
+                assert_eq!(c.taps.len(), n * l);
+            }
+        }
         if layer.per_layer.is_some() {
             assert!(ple.is_some(), "a per-layer gate with no PLE plane");
         }
@@ -302,10 +361,26 @@ pub fn launch_decode_dense_stack(
         p.check(1, p.model_proj.rows);
     }
 
-    let max_q = layers.iter().map(|l| l.q.rows).max().unwrap();
+    // A conv layer's `bcx` goes through the Q buffer and its gated
+    // output through the attention buffer, so both are sized for it.
+    let conv_width = layers
+        .iter()
+        .filter_map(|l| match &l.mixer {
+            TokenMixer::ShortConv(c) => Some(c.windows.n()),
+            TokenMixer::Attention(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let max_q = layers
+        .iter()
+        .filter_map(|l| l.mixer.attn().map(|a| a.q.rows))
+        .max()
+        .unwrap_or(0)
+        .max(3 * conv_width);
     let max_kv = layers
         .iter()
-        .filter_map(|l| l.kv.own().map(|(k, v)| k.rows.max(v.rows)))
+        .filter_map(|l| l.mixer.attn())
+        .filter_map(|a| a.kv.own().map(|(k, v)| k.rows.max(v.rows)))
         .max()
         .unwrap_or(1);
     let max_gate = layers
@@ -317,7 +392,8 @@ pub fn launch_decode_dense_stack(
         })
         .max()
         .unwrap();
-    let attn_elems = n_heads * kvs.iter().map(|kv| kv.head_dim).max().unwrap();
+    let attn_elems =
+        (n_heads * kvs.iter().map(|kv| kv.head_dim).max().unwrap_or(0)).max(conv_width);
     let logits_rows = output.map(|o| o.rows);
 
     let shared = shared_metal()?;
@@ -368,9 +444,16 @@ pub fn launch_decode_dense_stack(
     // get out of step with.
     let ff_resident = layers
         .iter()
-        .map(|l| match l.rope.and_then(|r| r.freq_factors) {
-            Some(ff) => resident_f32_buffer(device, ff).map(Some),
-            None => Ok(None),
+        .map(|l| {
+            match l
+                .mixer
+                .attn()
+                .and_then(|a| a.rope)
+                .and_then(|r| r.freq_factors)
+            {
+                Some(ff) => resident_f32_buffer(device, ff).map(Some),
+                None => Ok(None),
+            }
         })
         .collect::<Result<Vec<_>, MetalError>>()?;
 
@@ -462,32 +545,14 @@ pub fn launch_decode_dense_stack(
         }
         assert_eq!(layer.attn_norm_w.len(), hidden_dim);
         assert_eq!(layer.ffn_norm_w.len(), hidden_dim);
-        assert_eq!(layer.o.rows, hidden_dim);
         assert_eq!(layer.down.rows, hidden_dim);
         assert_eq!(layer.gate.rows, layer.up.rows);
-        let kv = &kvs[layer.kv.slot()];
-        let (head_dim, n_kv_heads) = (kv.head_dim, kv.n_kv_heads);
-        let own_kv = layer.kv.own();
 
         let attn_nw = resident_f32_buffer(device, layer.attn_norm_w)?;
         let ffn_nw = resident_f32_buffer(device, layer.ffn_norm_w)?;
-        let q_w = resident_weight_buffer(device, layer.q.weights)?;
-        let kv_w = match own_kv {
-            Some((k, v)) => Some((
-                resident_weight_buffer(device, k.weights)?,
-                resident_weight_buffer(device, v.weights)?,
-            )),
-            None => None,
-        };
-        let o_w = resident_weight_buffer(device, layer.o.weights)?;
         let gate_w = resident_weight_buffer(device, layer.gate.weights)?;
         let up_w = resident_weight_buffer(device, layer.up.weights)?;
         let down_w = resident_weight_buffer(device, layer.down.weights)?;
-        let kv_k = kv.k.as_ref();
-        let kv_v = kv.v.as_ref();
-        // The sinks and `wo`'s bias (gpt-oss), resident; a layer with
-        // neither looks nothing up.
-        let tail = resident_attn_extras(device, &layer.extras)?;
 
         // Pre-LN: layer 0 norms raw hidden; later layers either fuse the
         // previous FFN residual into attn_norm (non-sandwich) or just
@@ -520,125 +585,190 @@ pub fn launch_decode_dense_stack(
             )?;
             mrs.end_op(&[h_buf, down_buf], &[h_buf, x_buf]);
         }
-        // Q∥K∥V (Q alone on a layer that reads another layer's KV).
-        spans.span(&cmd_buf, &mut encoder, "qkv")?;
-        if let (Some((k, v)), Some((k_w, v_w))) = (own_kv, kv_w.as_ref()) {
-            mrs.begin_op(&encoder, &[x_buf], &[q_buf, k_buf, v_buf]);
-            encode_matvec(&encoder, device, &layer.q, &q_w, x_buf, q_buf)?;
-            encode_matvec(&encoder, device, k, k_w, x_buf, k_buf)?;
-            encode_matvec(&encoder, device, v, v_w, x_buf, v_buf)?;
-            mrs.end_op(&[x_buf], &[q_buf, k_buf, v_buf]);
-        } else {
-            mrs.begin_op(&encoder, &[x_buf], &[q_buf]);
-            encode_matvec(&encoder, device, &layer.q, &q_w, x_buf, q_buf)?;
-            mrs.end_op(&[x_buf], &[q_buf]);
+
+        match &layer.mixer {
+            TokenMixer::ShortConv(c) => {
+                // `lfm-base.cpp:26-110`: `bcx = in_proj(x)` into the Q
+                // buffer (sized for it above), the conv and its gate into
+                // the attention buffer, `out_proj` into `o`, which is
+                // where the attention arm leaves its branch too.
+                let in_w = resident_weight_buffer(device, c.in_proj.weights)?;
+                let out_w = resident_weight_buffer(device, c.out_proj.weights)?;
+                let taps = resident_f32_buffer(device, c.taps)?;
+                let win = c.windows.buffer();
+                spans.span(&cmd_buf, &mut encoder, "conv_in_proj")?;
+                mrs.begin_op(&encoder, &[x_buf], &[q_buf]);
+                encode_matvec(&encoder, device, &c.in_proj, &in_w, x_buf, q_buf)?;
+                mrs.end_op(&[x_buf], &[q_buf]);
+                spans.span(&cmd_buf, &mut encoder, "shortconv")?;
+                mrs.begin_op(&encoder, &[q_buf, win], &[attn_buf, win]);
+                crate::shortconv::encode_shortconv_step(
+                    &encoder,
+                    device,
+                    c.windows,
+                    c.window,
+                    &taps.buffer,
+                    q_buf,
+                    attn_buf,
+                )?;
+                mrs.end_op(&[q_buf, win], &[attn_buf, win]);
+                spans.span(&cmd_buf, &mut encoder, "conv_out_proj")?;
+                mrs.begin_op(&encoder, &[attn_buf], &[o_buf]);
+                encode_matvec(&encoder, device, &c.out_proj, &out_w, attn_buf, o_buf)?;
+                mrs.end_op(&[attn_buf], &[o_buf]);
+                // Into the shared tail below with the layer's own norms
+                // and FFN, which is the whole of the conv layer's
+                // difference from an attention layer.
+            }
+            TokenMixer::Attention(attn) => {
+                assert_eq!(attn.o.rows, hidden_dim);
+                let kv = &kvs[attn.kv.slot()];
+                let (head_dim, n_kv_heads) = (kv.head_dim, kv.n_kv_heads);
+                let own_kv = attn.kv.own();
+                let q_w = resident_weight_buffer(device, attn.q.weights)?;
+                let kv_w = match own_kv {
+                    Some((k, v)) => Some((
+                        resident_weight_buffer(device, k.weights)?,
+                        resident_weight_buffer(device, v.weights)?,
+                    )),
+                    None => None,
+                };
+                let o_w = resident_weight_buffer(device, attn.o.weights)?;
+                let kv_k = kv.k.as_ref();
+                let kv_v = kv.v.as_ref();
+                // The sinks and `wo`'s bias (gpt-oss), resident; a layer with
+                // neither looks nothing up.
+                let tail = resident_attn_extras(device, &attn.extras)?;
+
+                // Q∥K∥V (Q alone on a layer that reads another layer's KV).
+                spans.span(&cmd_buf, &mut encoder, "qkv")?;
+                if let (Some((k, v)), Some((k_w, v_w))) = (own_kv, kv_w.as_ref()) {
+                    mrs.begin_op(&encoder, &[x_buf], &[q_buf, k_buf, v_buf]);
+                    encode_matvec(&encoder, device, &attn.q, &q_w, x_buf, q_buf)?;
+                    encode_matvec(&encoder, device, k, k_w, x_buf, k_buf)?;
+                    encode_matvec(&encoder, device, v, v_w, x_buf, v_buf)?;
+                    mrs.end_op(&[x_buf], &[q_buf, k_buf, v_buf]);
+                } else {
+                    mrs.begin_op(&encoder, &[x_buf], &[q_buf]);
+                    encode_matvec(&encoder, device, &attn.q, &q_w, x_buf, q_buf)?;
+                    mrs.end_op(&[x_buf], &[q_buf]);
+                }
+
+                // Skipped entirely when the layer has no biases and no QK-norm:
+                // the hazard check around zero dispatches is still a real
+                // barrier. See `AttnExtras::encodes_anything`.
+                if attn.extras.encodes_anything() {
+                    spans.span(&cmd_buf, &mut encoder, "attn_extras")?;
+                    mrs.begin_op(&encoder, &[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
+                    encode_attn_extras(
+                        &encoder,
+                        device,
+                        &attn.extras,
+                        q_buf,
+                        k_buf,
+                        v_buf,
+                        attn.q.rows,
+                        own_kv.map_or(0, |(k, _)| k.rows),
+                        own_kv.map_or(0, |(_, v)| v.rows),
+                        n_heads,
+                        n_kv_heads,
+                        head_dim,
+                        rms_eps,
+                    )?;
+                    mrs.end_op(&[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
+                }
+
+                // `None` = this layer does not rotate, and then there is no
+                // dispatch at all: q and k reach the KV store and the attention
+                // exactly as the projections left them, which is what ggml does
+                // when the graph never builds the `ggml_rope_ext` node. Writing
+                // the RoPE in unconditionally is how the fused stacks lost the
+                // final norm for OLMo-1, one layer of indirection away.
+                if let Some(layer_rope) = attn.rope {
+                    let ff_buf = ff_resident[layer_idx].as_ref().map(|b| b.buffer.as_ref());
+                    // Q and K in one dispatch: same theta, position and freq
+                    // factors, different buffers, and RoPE is per-head independent.
+                    spans.span(&cmd_buf, &mut encoder, "rope")?;
+                    // A shared-KV layer rotates Q only: its K was rotated, at
+                    // this position, by the layer that wrote the slot.
+                    let qk: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
+                        &[q_buf, k_buf]
+                    } else {
+                        &[q_buf]
+                    };
+                    mrs.begin_op(&encoder, qk, qk);
+                    encode_rope(
+                        &encoder,
+                        device,
+                        rope_layout,
+                        RopeTarget {
+                            vecs: q_buf,
+                            n_heads: n_heads as u32,
+                        },
+                        own_kv.map(|_| RopeTarget {
+                            vecs: k_buf,
+                            n_heads: n_kv_heads as u32,
+                        }),
+                        head_dim as u32,
+                        layer_rope.theta,
+                        pos as u32,
+                        ff_buf,
+                    )?;
+                    mrs.end_op(qk, qk);
+                }
+
+                if own_kv.is_some() {
+                    let token_elems = (n_kv_heads * head_dim) as u32;
+                    let offset = (pos * n_kv_heads * head_dim) as u32;
+                    spans.span(&cmd_buf, &mut encoder, "kv_append")?;
+                    mrs.begin_op(&encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
+                    // K and V in one dispatch: same offset, same length, disjoint
+                    // destinations.
+                    encode_kv_store_append(
+                        &encoder,
+                        device,
+                        k_buf,
+                        v_buf,
+                        kv,
+                        offset,
+                        token_elems,
+                    )?;
+                    mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
+                }
+
+                let new_seq = (pos + 1) as u32;
+                // Sliding window: only the last `window` positions (incl. current)
+                // are visible, matching `causal_gqa_attention_windowed`.
+                let kv_start = match attn.window {
+                    Some(w) => (pos + 1).saturating_sub(w) as u32,
+                    None => 0,
+                };
+                spans.span(&cmd_buf, &mut encoder, "gqa")?;
+                // Self-tracking: with a quantized KV cache this also writes a shared
+                // f16 dequant scratch that no caller can name.
+                encode_gqa_with_kv(
+                    &encoder,
+                    &mut mrs,
+                    device,
+                    q_buf,
+                    kv,
+                    attn_buf,
+                    n_heads as u32,
+                    n_kv_heads as u32,
+                    head_dim as u32,
+                    new_seq,
+                    kv_start,
+                    attn.extras.attn_logit_softcap,
+                    tail.sinks(),
+                )?;
+
+                spans.span(&cmd_buf, &mut encoder, "o_proj")?;
+                mrs.begin_op(&encoder, &[attn_buf], &[o_buf]);
+                encode_matvec(&encoder, device, &attn.o, &o_w, attn_buf, o_buf)?;
+                mrs.end_op(&[attn_buf], &[o_buf]);
+                tail.encode_o_bias(&encoder, &mut mrs, device, o_buf, hidden_dim, 1)?;
+            }
         }
-
-        // Skipped entirely when the layer has no biases and no QK-norm:
-        // the hazard check around zero dispatches is still a real
-        // barrier. See `AttnExtras::encodes_anything`.
-        if layer.extras.encodes_anything() {
-            spans.span(&cmd_buf, &mut encoder, "attn_extras")?;
-            mrs.begin_op(&encoder, &[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
-            encode_attn_extras(
-                &encoder,
-                device,
-                &layer.extras,
-                q_buf,
-                k_buf,
-                v_buf,
-                layer.q.rows,
-                own_kv.map_or(0, |(k, _)| k.rows),
-                own_kv.map_or(0, |(_, v)| v.rows),
-                n_heads,
-                n_kv_heads,
-                head_dim,
-                rms_eps,
-            )?;
-            mrs.end_op(&[q_buf, k_buf, v_buf], &[q_buf, k_buf, v_buf]);
-        }
-
-        // `None` = this layer does not rotate, and then there is no
-        // dispatch at all: q and k reach the KV store and the attention
-        // exactly as the projections left them, which is what ggml does
-        // when the graph never builds the `ggml_rope_ext` node. Writing
-        // the RoPE in unconditionally is how the fused stacks lost the
-        // final norm for OLMo-1, one layer of indirection away.
-        if let Some(layer_rope) = layer.rope {
-            let ff_buf = ff_resident[layer_idx].as_ref().map(|b| b.buffer.as_ref());
-            // Q and K in one dispatch: same theta, position and freq
-            // factors, different buffers, and RoPE is per-head independent.
-            spans.span(&cmd_buf, &mut encoder, "rope")?;
-            // A shared-KV layer rotates Q only: its K was rotated, at
-            // this position, by the layer that wrote the slot.
-            let qk: &[&ProtocolObject<dyn MTLBuffer>] = if own_kv.is_some() {
-                &[q_buf, k_buf]
-            } else {
-                &[q_buf]
-            };
-            mrs.begin_op(&encoder, qk, qk);
-            encode_rope(
-                &encoder,
-                device,
-                rope_layout,
-                RopeTarget {
-                    vecs: q_buf,
-                    n_heads: n_heads as u32,
-                },
-                own_kv.map(|_| RopeTarget {
-                    vecs: k_buf,
-                    n_heads: n_kv_heads as u32,
-                }),
-                head_dim as u32,
-                layer_rope.theta,
-                pos as u32,
-                ff_buf,
-            )?;
-            mrs.end_op(qk, qk);
-        }
-
-        if own_kv.is_some() {
-            let token_elems = (n_kv_heads * head_dim) as u32;
-            let offset = (pos * n_kv_heads * head_dim) as u32;
-            spans.span(&cmd_buf, &mut encoder, "kv_append")?;
-            mrs.begin_op(&encoder, &[k_buf, v_buf], &[kv_k, kv_v]);
-            // K and V in one dispatch: same offset, same length, disjoint
-            // destinations.
-            encode_kv_store_append(&encoder, device, k_buf, v_buf, kv, offset, token_elems)?;
-            mrs.end_op(&[k_buf, v_buf], &[kv_k, kv_v]);
-        }
-
-        let new_seq = (pos + 1) as u32;
-        // Sliding window: only the last `window` positions (incl. current)
-        // are visible, matching `causal_gqa_attention_windowed`.
-        let kv_start = match layer.window {
-            Some(w) => (pos + 1).saturating_sub(w) as u32,
-            None => 0,
-        };
-        spans.span(&cmd_buf, &mut encoder, "gqa")?;
-        // Self-tracking: with a quantized KV cache this also writes a shared
-        // f16 dequant scratch that no caller can name.
-        encode_gqa_with_kv(
-            &encoder,
-            &mut mrs,
-            device,
-            q_buf,
-            kv,
-            attn_buf,
-            n_heads as u32,
-            n_kv_heads as u32,
-            head_dim as u32,
-            new_seq,
-            kv_start,
-            layer.extras.attn_logit_softcap,
-            tail.sinks(),
-        )?;
-
-        spans.span(&cmd_buf, &mut encoder, "o_proj")?;
-        mrs.begin_op(&encoder, &[attn_buf], &[o_buf]);
-        encode_matvec(&encoder, device, &layer.o, &o_w, attn_buf, o_buf)?;
-        mrs.end_op(&[attn_buf], &[o_buf]);
-        tail.encode_o_bias(&encoder, &mut mrs, device, o_buf, hidden_dim, 1)?;
 
         // Gemma sandwich norm: normalize the attn block output *before*
         // the residual add (in-place: each thread reads x[i] only after

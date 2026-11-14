@@ -48,7 +48,7 @@
 //! `mamba-base.cpp:271`, so it is loaded when present and applied when
 //! loaded.
 
-use frink_core::mamba2::{conv_step, scan_rows, Decay, ScanDims, ScanRows};
+use frink_core::mamba2::{conv_silu_rows, scan_rows_state, Decay, ScanDims, ScanRows};
 
 /// Architectures that run the Mamba-2 block IN PARALLEL with attention
 /// on every layer, both reading the same `attn_norm` output, the two
@@ -310,34 +310,29 @@ impl Mamba2 {
         let head_dim = h.head_dim();
         let mut ys = vec![0.0f32; rows * d_inner];
         // :195-226: the conv over every row and the state, its bias,
-        // SiLU. Serial over rows (each reads the window the previous one
-        // left), and cheap beside the scan.
+        // SiLU, parallel over channels.
         let mut xbc_all = vec![0.0f32; rows * w];
+        conv_silu_rows(
+            &mut state.conv,
+            &self.conv1d,
+            &self.conv1d_bias,
+            h.d_conv,
+            &zxbcdt[d_inner..],
+            stride,
+            rows,
+            &mut xbc_all,
+        );
+        // :239: dt + dt_b; the softplus is the scan's.
         let mut dt_all = vec![0.0f32; rows * n_head];
-        for r in 0..rows {
-            let row = &zxbcdt[r * stride..(r + 1) * stride];
-            let xbc = &mut xbc_all[r * w..(r + 1) * w];
-            conv_step(
-                &mut state.conv,
-                &self.conv1d,
-                h.d_conv,
-                &row[d_inner..d_inner + w],
-                xbc,
-            );
-            for (x, b) in xbc.iter_mut().zip(&self.conv1d_bias) {
-                *x = silu(*x + b);
-            }
-            // :239: dt + dt_b; the softplus is the scan's.
-            for (o, (t, bias)) in dt_all[r * n_head..(r + 1) * n_head]
-                .iter_mut()
-                .zip(row[d_inner + w..].iter().zip(&self.dt_bias))
-            {
+        for (r, dt) in dt_all.chunks_exact_mut(n_head).enumerate() {
+            let row = &zxbcdt[r * stride + d_inner + w..(r + 1) * stride];
+            for (o, (t, bias)) in dt.iter_mut().zip(row.iter().zip(&self.dt_bias)) {
                 *o = t + bias;
             }
         }
         // :244-258: the whole batch's scan in one parallel region. The
         // conv output is already `[x | B | C]`, the order it reads.
-        scan_rows(
+        scan_rows_state(
             dims,
             &mut state.ssm,
             ScanRows {
@@ -349,10 +344,10 @@ impl Mamba2 {
             Decay::PerHead(&self.a),
             &mut ys,
         );
-        for r in 0..rows {
+        // Rows are independent from here to `ssm_out`.
+        frink_core::par::chunks_mut(&mut ys, d_inner, 1, |r, y| {
             let z = &zxbcdt[r * stride..r * stride + d_inner];
             let x = &xbc_all[r * w..r * w + d_inner];
-            let y = &mut ys[r * d_inner..(r + 1) * d_inner];
             // :268-269: y + x * D per head, then silu(z) * y.
             for (hd, dd) in self.d.iter().enumerate() {
                 for i in hd * head_dim..(hd + 1) * head_dim {
@@ -372,7 +367,7 @@ impl Mamba2 {
                     }
                 }
             }
-        }
+        });
         if rows == 1 {
             self.out_proj.apply(&ys)
         } else {

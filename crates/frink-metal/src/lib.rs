@@ -118,6 +118,15 @@ mod fa_vec_decode;
 #[cfg(feature = "metal")]
 pub mod decode_dense;
 
+/// LFM2's short convolution, a token mixer the dense decode stack runs
+/// in place of attention on a conv layer.
+#[cfg(feature = "metal")]
+pub mod shortconv;
+
+/// The Mamba selective scan over a prompt's rows, both generations.
+#[cfg(feature = "metal")]
+pub mod ssm_scan;
+
 /// Gemma-4's per-layer embeddings, encoded into the dense stacks.
 #[cfg(feature = "metal")]
 pub mod ple;
