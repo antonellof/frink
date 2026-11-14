@@ -17,6 +17,7 @@ use super::fused_view::FusedAttnCaps;
 use super::{Decoder, LayerWeights};
 use crate::fused_layer::LayerFfnParts;
 use crate::layer_shapes::AttnShape;
+use frink_core::kv_store::KvRows;
 use frink_core::KvCache;
 use frink_metal::gdn_prefill_attn::PrefillAttnLayer;
 use frink_metal::prefill_run::PrefillRunLayer;
@@ -408,29 +409,22 @@ impl Decoder {
                     // The history the conv appended, one `b * x` row per
                     // token, as `contiguous_step` pushes it on the host.
                     let (_, bx) = io.next().expect("one io per conv layer");
-                    let n = bx.len() / rows;
-                    for row in bx.chunks_exact(n) {
-                        cache
-                            .push(row, &[])
-                            .expect("unbounded/planned KvCache growth is infallible");
-                    }
+                    cache
+                        .push_rows(KvRows::F32(&bx), KvRows::F32(&[]), rows)
+                        .expect("unbounded/planned KvCache growth is infallible");
                 }
                 _ => {
                     // The host rows, from the mirror the run appended to:
                     // the host cache stays the authority, and the mirror
                     // stays exactly its rows for the decode after this.
                     let prior = cache.rows();
+                    // Out of the cache for the copy, which borrows it.
                     let mirror = cache
                         .metal_attn
-                        .as_ref()
+                        .take()
                         .expect("the run appended to this layer's mirror");
-                    let (k, v) = mirror.tokens_host(prior, rows);
-                    let width = k.len() / rows;
-                    for (k, v) in k.chunks_exact(width).zip(v.chunks_exact(width)) {
-                        cache
-                            .push(k, v)
-                            .expect("unbounded/planned KvCache growth is infallible");
-                    }
+                    Self::push_rows_from_metal(&mirror, cache, prior, rows);
+                    cache.metal_attn = Some(mirror);
                 }
             }
             // A routed layer chose its experts on the device; like the

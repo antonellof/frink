@@ -19,6 +19,7 @@
 //! ```
 
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -346,18 +347,23 @@ pub struct Mamba1Mixer<'a, P = MatvecLaunch<'a>> {
     ssm_state: (*mut f32, usize),
 }
 
-/// The weights [`Mamba1Mixer::new`] takes, by name.
+/// The weights [`Mamba1Mixer::new`] takes, by name. The per-channel
+/// planes are shared allocations, so the resident copy a decode token
+/// binds is found by address (`gpu::resident_f32_shared`); as slices,
+/// proving the cache still held them was a compare of every byte, 35 MB
+/// a token on Mamba-1.4B, which halved its decode rate whenever the
+/// GPU was busy with the token before (the early-commit split).
 pub struct Mamba1Weights<'a, P = MatvecLaunch<'a>> {
     pub in_proj: P,
-    pub conv1d: &'a [f32],
-    pub conv_bias: &'a [f32],
+    pub conv1d: &'a Arc<[f32]>,
+    pub conv_bias: &'a Arc<[f32]>,
     pub d_conv: usize,
     pub x_proj: P,
     pub dt_bc_norm: Option<DtBcNormMetal<'a>>,
     pub dt_proj: P,
-    pub dt_bias: &'a [f32],
-    pub a: &'a [f32],
-    pub d: &'a [f32],
+    pub dt_bias: &'a Arc<[f32]>,
+    pub a: &'a Arc<[f32]>,
+    pub d: &'a Arc<[f32]>,
     pub out_proj: P,
     pub d_inner: usize,
     pub d_state: usize,
@@ -534,7 +540,7 @@ pub(crate) fn encode_mamba1<P: SsmProj>(
     b: &Mamba1Bufs<'_>,
     rows: usize,
 ) -> Result<(), MetalError> {
-    use crate::gpu::resident_f32_buffer;
+    use crate::gpu::{resident_f32_buffer, resident_f32_shared};
     let w = &m.w;
     let n = w.d_inner;
     let x_db_w = w.dt_rank + 2 * w.d_state;
@@ -562,11 +568,11 @@ pub(crate) fn encode_mamba1<P: SsmProj>(
         &ProtocolObject<dyn MTLBuffer>,
         &ProtocolObject<dyn MTLBuffer>,
     ) = (&conv_state, &ssm_state);
-    let taps = resident_f32_buffer(device, w.conv1d)?;
-    let conv_b = resident_f32_buffer(device, w.conv_bias)?;
-    let dt_b = resident_f32_buffer(device, w.dt_bias)?;
-    let a = resident_f32_buffer(device, w.a)?;
-    let d = resident_f32_buffer(device, w.d)?;
+    let taps = resident_f32_shared(device, w.conv1d)?;
+    let conv_b = resident_f32_shared(device, w.conv_bias)?;
+    let dt_b = resident_f32_shared(device, w.dt_bias)?;
+    let a = resident_f32_shared(device, w.a)?;
+    let d = resident_f32_shared(device, w.d)?;
     // Compiled before the first dispatch of this block is encoded.
     ensure_pipeline(
         device,
@@ -705,17 +711,19 @@ pub struct Mamba2Mixer<'a, P = MatvecLaunch<'a>> {
     ssm_state: (*mut f32, usize),
 }
 
-/// The weights [`Mamba2Mixer::new`] takes, by name.
+/// The weights [`Mamba2Mixer::new`] takes, by name. The conv planes and
+/// `ssm_norm` are shared, as [`Mamba1Weights`]' are; the per-head
+/// vectors are `n_head` floats, cheap to compare.
 pub struct Mamba2Weights<'a, P = MatvecLaunch<'a>> {
     pub in_proj: P,
-    pub conv1d: &'a [f32],
-    pub conv_bias: &'a [f32],
+    pub conv1d: &'a Arc<[f32]>,
+    pub conv_bias: &'a Arc<[f32]>,
     pub d_conv: usize,
     pub dt_bias: &'a [f32],
     pub a: &'a [f32],
     pub d: &'a [f32],
     /// `ssm_norm`, `[d_inner]`, applied per group of `d_inner / n_group`.
-    pub norm: Option<&'a [f32]>,
+    pub norm: Option<&'a Arc<[f32]>>,
     pub norm_eps: f32,
     pub out_proj: P,
     pub d_inner: usize,
@@ -807,7 +815,7 @@ pub(crate) fn encode_mamba2<P: SsmProj>(
     b: &Mamba2Bufs<'_>,
     rows: usize,
 ) -> Result<(), MetalError> {
-    use crate::gpu::resident_f32_buffer;
+    use crate::gpu::{resident_f32_buffer, resident_f32_shared};
     let w = &m.w;
     let (n, width) = (w.d_inner, w.conv_width());
     let stride = w.in_proj.out_rows();
@@ -825,13 +833,13 @@ pub(crate) fn encode_mamba2<P: SsmProj>(
         &ProtocolObject<dyn MTLBuffer>,
         &ProtocolObject<dyn MTLBuffer>,
     ) = (&conv_state, &ssm_state);
-    let taps = resident_f32_buffer(device, w.conv1d)?;
-    let conv_b = resident_f32_buffer(device, w.conv_bias)?;
+    let taps = resident_f32_shared(device, w.conv1d)?;
+    let conv_b = resident_f32_shared(device, w.conv_bias)?;
     let dt_b = resident_f32_buffer(device, w.dt_bias)?;
     let a = resident_f32_buffer(device, w.a)?;
     let d = resident_f32_buffer(device, w.d)?;
     let norm = match w.norm {
-        Some(nw) => Some(resident_f32_buffer(device, nw)?),
+        Some(nw) => Some(resident_f32_shared(device, nw)?),
         None => None,
     };
     ensure_pipeline(

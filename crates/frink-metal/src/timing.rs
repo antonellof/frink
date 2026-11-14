@@ -350,6 +350,12 @@ pub(crate) fn note_wait(
 /// expert-bias planes; with that gone (0.45 ms, #627) it gains at a
 /// sixth: gpt-oss-20b 158 -> 167, Qwen3-30B-A3B 148 -> 172, OLMoE
 /// 427 -> 468, each better than at a third or at the first layer.
+/// The dense stack's Mamba blocks had the same defect: a byte compare
+/// of their A, conv and D planes (35 MB a token on Mamba-1.4B) ran 0.6
+/// ms on an idle bus and 2.9 ms against the first command buffer's GPU
+/// traffic, so the split halved the rate (108 tok/s, 271 unsplit).
+/// Resident by address (`ssm_decode::Mamba1Weights`), it gains: 324
+/// split, 303 unsplit.
 pub(crate) fn early_commit_layer(stack: Stack, n_layers: usize) -> Option<usize> {
     if crate::kernel_timing::kernel_timing_enabled() {
         return None;
