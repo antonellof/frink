@@ -136,7 +136,7 @@ impl PrefillAttnLayer<'_> {
     }
 }
 
-fn encode_q_gate_split(
+pub(crate) fn encode_q_gate_split(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     device: &Retained<ProtocolObject<dyn MTLDevice>>,
     fused: &ProtocolObject<dyn MTLBuffer>,

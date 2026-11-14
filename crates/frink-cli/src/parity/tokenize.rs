@@ -775,7 +775,7 @@ mod tests {
         );
     }
 
-    /// One checkpoint per pre-tokenizer arm that `pretokenize_regex_for`
+    /// One checkpoint per pre-tokenizer arm that `pretokenize::pre_split`
     /// distinguishes, because the defect this closes was *per arm*: the
     /// engine looked correct on whichever family happened to be tested.
     /// Missing files are skipped, so a partial `models/` still checks

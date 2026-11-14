@@ -73,7 +73,40 @@ are the ones worth reading twice.
   28. The gate's bound against the CPU became per fixture with the sliding
   windows, above.
 
+- **`/v1/stats` reports what paged KV's prefix tree holds**
+  (`pools.prefix_cache`: tokens, locked, evictable, page size), `null`
+  without `FRINK_PAGED_KV_BLOCKS` (#632).
+
+### Changed
+
+- **A gated delta-net decode token waits once on Metal** (#540). The
+  attention layers between the recurrent runs ride the run whole (the
+  projections, the Q gate, QK norms, RoPE, the append to the f16 KV
+  mirror, the attention), and so does the output head when the run
+  reaches the last layer, where the token used to return to the host
+  once per attention layer and again for the head. The scratch pool
+  keeps a run's worth of small buffers instead of eight per width, which
+  had sent ~300 Metal buffers back and forth every Bonsai token. M5 Max,
+  interleaved best-of on a shared host: Bonsai-2-27B tg32 38.7 to 43.0
+  (PrismML fork 45.8).
+- **Qwen3-Next and `qwen35moe` run on the Metal device runs** (#540).
+  A routed FFN with one shared expert rides the decode run (router,
+  softmax top-k, `mul_mv_id` experts, the shared expert's sigmoid gate)
+  and the prefill run (`mul_mm_id`, top-k 10 of up to 1024 experts),
+  and `ssm_ba` is split by row into beta and alpha at load, bit for bit
+  the same logits on the CPU. Qwen3-Next-80B-A3B Q4_K_M: tg 8.6 to 106,
+  pp512 11 to 2027 (llama.cpp 94 and 2177).
+
 ### Fixed
+
+- **A K-quant Qwen3.5 decoded and prefilled layer by layer on Metal**
+  (#540). The loader built packed MoE planes for a dense layer's one
+  expert, and every fused FFN refuses a layer with planes, so a Q4_K_M
+  Qwen3.5-9B took a submission per matrix (tg 25 tok/s); and its Q8_0
+  gate projections had no kernel in the prefill run (pp512 415). Planes
+  are now built for routed layers only and the prefill run takes
+  quantized gates as GEMMs: tg128 88.6, pp512 2335 (llama.cpp 86.2 and
+  2502).
 
 - **Gemma-4 reads `rope.dimension_count` and its `_swa` twin** (#635).
   The loader ignored both and rotated every head whole, so a file whose
@@ -85,6 +118,32 @@ are the ones worth reading twice.
   refused at load by key. The Metal stacks take one rotary width per
   run, so a file whose full and sliding widths differ stays on the host
   body. Released Gemma-4 files rotate whole heads and are unchanged.
+
+- **`/v1/stats` throughput and request counts are true.** Nothing fed
+  them: `throughput.decode_tps` and `prefill_tps` read `0.0` on every
+  reply, and `requests.active` counted only streamed requests. Both
+  decode paths now count prompt tokens as they are computed and
+  completion tokens as they are committed, and every generation,
+  streamed or not, is counted in flight, then `completed` or, after a
+  cancel, the new `aborted`. `completed` used to count every row the
+  request ring recorded, errors and embeddings included.
+
+- **`POST /v1/cache/rebuild` holds a re-split to `FRINK_KV_BYTE_BUDGET`**
+  (#632). A pool sized from a byte budget could be grown past it: the
+  endpoint never consulted the pre-check that exists to refuse a split
+  before the pool moves. It answers 400 with both byte figures now. The
+  price of a split saturates, so a target large enough to overflow it
+  is refused rather than wrapped into one that fits.
+
+### Removed
+
+- **Server groundwork with no caller** (#632): chunk-duration admission
+  for the window and recurrent memory models (`serving::admission`,
+  which the continuous batcher never served), the "last known value"
+  stats type, the rebuild transitions for an out-of-process scheduler
+  (timeout, never dispatched) and the gate's loading state, which the
+  server never entered, and the prefix tree's sliding-window and
+  recurrent-state fields left from caches already deleted.
 
 ## [0.63.0] - 2026-11-13
 
@@ -136,6 +195,27 @@ are the ones worth reading twice.
   from 2.52 to 3.65 tok/s.
 
 ### Fixed
+
+- **Every `tokenizer.ggml.pre` llama.cpp knows now splits as libllama
+  does, or is refused by name** (#629). Before, any `pre` without an
+  arm here was tokenized with the GPT-2 pattern, fluently and wrongly:
+  `falcon`, `jais-2`, `chameleon`, `kimi-k2`, `spark2_5`, `youtu`,
+  `tekken` (Mistral's), `dbrx`, `smaug-bpe`, `grok-2`, `bailingmoe`,
+  `seed-coder`, `ufakzeka`, `afmoe`, `laguna`, `exaone-moe`,
+  `minicpm5`, `granite-embed-multi-97m`, and a file with no `pre` at
+  all, which upstream gives its own four-regex `DEFAULT` list.
+  `pixtral` was on the llama3 arm; upstream sends it to tekken's. The
+  GPT-4o pattern now admits combining marks in its lookahead, as the
+  pin does, and runs on the engine upstream runs it on. `ignore_merges`
+  is honoured for the vocabularies that set it (llama3 and its arm,
+  glm4/glm5, tekken/pixtral, youtu, minicpm5, granite-embed-multi-97m):
+  a word that is a vocabulary entry the merges do not reach is now that
+  one token, as in llama.cpp, where frink split it. `flint` is served.
+  A `pre` llama.cpp does not know is refused, as llama.cpp refuses it;
+  `soprano`, `whitespace`, `sarvam-moe` and the SPM-style values under
+  `tokenizer.ggml.model = gpt2` stay refused, each with its reason.
+  `tools/oracle/regex_split.py` checks every served `pre` against
+  libllama's `unicode_regex_split`.
 
 - **The prefix cache stored nothing for a greedy request on Metal**,
   and greedy is the server's default. The Metal decode folds the last

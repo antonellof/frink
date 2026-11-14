@@ -26,6 +26,18 @@ use frink_core::recurrent_state::RecurrentState;
 /// (`frink_metal::gdn_branch::GdnRun::attn_head`).
 pub(crate) type PendingQkv = Option<(usize, (Vec<f32>, Vec<f32>, Vec<f32>))>;
 
+/// What a decode run hands the body after it: the next attention
+/// layer's Q/K/V when the run stopped before that layer, and the logits
+/// when it reached the end of the stack and took the output head too
+/// ([`Decoder::close_run`]).
+#[derive(Default)]
+pub(crate) struct RunCarry {
+    pub(crate) qkv: PendingQkv,
+    /// `output(final_norm(hidden))`, before the head's bias, multiplier
+    /// and softcap, which the body applies (`Logits::from_output_head`).
+    pub(crate) logits: Option<Vec<f32>>,
+}
+
 impl Decoder {
     /// Layer `l` end to end in one submission, or `None` when either
     /// half refuses and the host bodies run it.
@@ -109,9 +121,10 @@ impl Decoder {
     pub(crate) fn fused_recurrent_run(
         &self,
         start: usize,
+        pos: usize,
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
-        pending: &mut PendingQkv,
+        carry: &mut RunCarry,
     ) -> Option<usize> {
         // How far the run reaches: consecutive layers this path serves
         // whole. Asked BEFORE anything is submitted, because a run that
@@ -128,11 +141,7 @@ impl Decoder {
         }
         let mut run = frink_metal::gdn_branch::GdnRun::start(hidden).ok()?;
         self.run_layers(&mut run, start, end, kv_caches)?;
-        let head = self.encode_next_attn_head(&mut run, end, kv_caches.len());
-        let (out, qkv) = run.finish_with_head().ok()?;
-        *hidden = out;
-        *pending = head.then_some(qkv).flatten().map(|q| (end, q));
-        Some(end)
+        self.close_run(run, end, pos, hidden, kv_caches, carry)
     }
 
     /// The same run, begun with an ATTENTION layer's tail.
@@ -143,14 +152,16 @@ impl Decoder {
     /// looks at. So it goes in their command buffer and shares their
     /// single wait, which is sixteen fewer a token on Bonsai.
     #[cfg(feature = "metal")]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn fused_attention_tail_then_run(
         &self,
         l: usize,
+        pos: usize,
         layer: &LayerWeights,
         branch: &[f32],
         hidden: &mut Vec<f32>,
         kv_caches: &mut [frink_core::KvCache],
-        pending: &mut PendingQkv,
+        carry: &mut RunCarry,
     ) -> Option<usize> {
         let (out_proj, fold_branch, ffn, launches) = self.attn_tail_launch(l, layer, branch)?;
         let mut end = l + 1;
@@ -171,13 +182,155 @@ impl Decoder {
         )
         .ok()?;
         let _ = ffn;
-        layer.moe.record_activations_dense();
+        Self::record_fused_ffn(layer);
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
-        let head = self.encode_next_attn_head(&mut run, end, kv_caches.len());
-        let (out, qkv) = run.finish_with_head().ok()?;
+        self.close_run(run, end, pos, hidden, kv_caches, carry)
+    }
+
+    /// Carries `run` on from layer `end` to the end of the stack where
+    /// it can, then waits for it ONCE.
+    ///
+    /// Each attention layer [`Self::resident_attn_parts`] admits joins
+    /// the run whole (`GdnRun::attn_layer_resident`), and the recurrent
+    /// layers after it follow, so a hybrid token that qualifies end to
+    /// end is one wait instead of one per attention layer (#540). Where
+    /// the run stops short of the stack, the next attention layer's
+    /// Q/K/V are encoded at its end as before and come back in
+    /// `carry`; where it reaches the end of the stack, the output head
+    /// rides it as well and the logits come back there. The rows each joined attention layer appended to its
+    /// mirror are copied to the host cache after the wait, so the host
+    /// stays the authority.
+    #[cfg(feature = "metal")]
+    pub(crate) fn close_run(
+        &self,
+        mut run: frink_metal::gdn_branch::GdnRun,
+        mut end: usize,
+        pos: usize,
+        hidden: &mut Vec<f32>,
+        kv_caches: &mut [frink_core::KvCache],
+        carry: &mut RunCarry,
+    ) -> Option<usize> {
+        let n_layers = kv_caches.len();
+        let mut joined = Vec::new();
+        while end < n_layers && self.decode_attn_layer_in_run(&mut run, end, pos, kv_caches) {
+            joined.push(end);
+            let mut next = end + 1;
+            while next < n_layers && self.fused_layer_parts(next).is_some() {
+                next += 1;
+            }
+            self.run_layers(&mut run, end + 1, next, kv_caches)?;
+            end = next;
+        }
+        let head = self.encode_next_attn_head(&mut run, end, n_layers);
+        if end == n_layers {
+            self.encode_output_head(&mut run);
+        }
+        let frink_metal::gdn_branch::RunOut {
+            hidden: out,
+            head: qkv,
+            routed,
+            logits,
+        } = run.finish_with_head().ok()?;
+        // The experts each routed layer chose, recorded as the host
+        // body records them.
+        for (l, ids) in routed {
+            self.layer_for(l).moe.record_activations(&ids);
+        }
+        for l in joined {
+            let cache = &mut kv_caches[l];
+            let prior = cache.rows();
+            let (k, v) = cache.metal_attn.as_ref()?.tokens_host(prior, 1);
+            cache
+                .push(&k, &v)
+                .expect("unbounded/planned KvCache growth is infallible");
+        }
         *hidden = out;
-        *pending = head.then_some(qkv).flatten().map(|q| (end, q));
+        carry.qkv = head.then_some(qkv).flatten().map(|q| (end, q));
+        carry.logits = logits;
         Some(end)
+    }
+
+    /// `final_norm` and the output projection at the end of `run`, when
+    /// both have kernels; `false` and nothing encoded otherwise, and the
+    /// body projects as it always has. A model whose stack is not one
+    /// pass (`layer_loops`) ends somewhere else, so it never folds.
+    #[cfg(feature = "metal")]
+    fn encode_output_head(&self, run: &mut frink_metal::gdn_branch::GdnRun) -> bool {
+        let Some(norm) = self.final_norm.rms_weights() else {
+            return false;
+        };
+        if self.config.layer_loops.is_some() {
+            return false;
+        }
+        let (base, fold) = self.output_head.launch_parts();
+        let Some(launch) = crate::metal_launch::matvec(base) else {
+            return false;
+        };
+        let fold = match fold {
+            None => None,
+            Some(f) => match f.metal_plan(norm.len()) {
+                Some(plan) => Some(plan),
+                None => return false,
+            },
+        };
+        run.output_head(norm, self.config.rms_norm_eps, &launch, fold.as_ref())
+            .is_ok()
+    }
+
+    /// Attention layer `l` appended to `run` whole, at position `pos`,
+    /// or `false` with nothing encoded and nothing advanced.
+    #[cfg(feature = "metal")]
+    fn decode_attn_layer_in_run(
+        &self,
+        run: &mut frink_metal::gdn_branch::GdnRun,
+        l: usize,
+        pos: usize,
+        kv_caches: &mut [frink_core::KvCache],
+    ) -> bool {
+        let cache = &mut kv_caches[l];
+        let Some(p) = self.resident_attn_parts(l, pos, cache) else {
+            return false;
+        };
+        let mv = crate::metal_launch::matvec;
+        let (Some(q), Some(k), Some(v), Some(o), Some(ffn)) =
+            (mv(p.q), mv(p.k), mv(p.v), mv(p.o), p.ffn.launches())
+        else {
+            return false;
+        };
+        let head_dim = self.config.head_dim;
+        let rows = cache.rows();
+        let width = rows * p.n_kv_heads * head_dim;
+        if Self::ensure_attn_mirror(cache, p.n_kv_heads, head_dim, rows, width, 1).is_none() {
+            return false;
+        }
+        let Some(mirror) = cache.metal_attn.as_mut() else {
+            return false;
+        };
+        let ffn = ffn.as_metal();
+        let w = frink_metal::gdn_decode_attn::DecodeAttnLayer {
+            attn_norm: p.attn_norm,
+            eps: p.eps,
+            fold_x: p.fold_x.as_ref(),
+            q: &q,
+            k: &k,
+            v: &v,
+            n_heads: p.n_heads,
+            q_gate: p.q_gate,
+            extras: &p.extras,
+            rope: p.rope,
+            layer_rope: p.layer_rope,
+            o_proj: &o,
+            fold_branch: p.fold_branch.as_ref(),
+            ffn: &ffn,
+        };
+        // SAFETY: the mirror lives in this layer's cache element, which
+        // nothing else touches until the run is waited for in
+        // `close_run`.
+        if unsafe { run.attn_layer_resident(&w, mirror, pos) }.is_err() {
+            return false;
+        }
+        Self::record_fused_ffn(self.layer_for(l));
+        true
     }
 
     /// The NEXT layer's Q/K/V projections at the end of `run`, when
@@ -222,9 +375,48 @@ impl Decoder {
             cache
                 .advance_len(1)
                 .expect("unbounded/planned KvCache growth is infallible");
-            layer.moe.record_activations_dense();
+            Self::record_fused_ffn(layer);
         }
         Some(())
+    }
+
+    /// The hotness counters for a layer a run carried, as the host body
+    /// keeps them: expert 0 for a dense layer here, and a routed
+    /// layer's chosen experts once the run hands them back
+    /// ([`Self::close_run`]).
+    #[cfg(feature = "metal")]
+    pub(crate) fn record_fused_ffn(layer: &LayerWeights) {
+        if layer.moe.n_experts() == 1 {
+            layer.moe.record_activations_dense();
+        }
+    }
+
+    /// Layer `l`'s FFN as a decode run takes it: the dense FFN, or a
+    /// routed one with its single shared expert when the device router
+    /// picks the experts the host would
+    /// ([`Self::gpu_router_matches_host_routing`]) and the input is not
+    /// weighted per expert. The ONE answer every run entry asks.
+    #[cfg(feature = "metal")]
+    pub(crate) fn run_ffn_parts<'a>(
+        &self,
+        l: usize,
+        layer: &'a LayerWeights,
+    ) -> Option<LayerFfnParts<'a>> {
+        let eps = self.config.rms_norm_eps;
+        if let Some(dense) = LayerFfnParts::for_layer(layer, eps, true) {
+            return Some(dense);
+        }
+        if !Self::gpu_router_matches_host_routing(layer, &self.config)
+            || self.config.moe.routed_weight_before_ffn
+        {
+            return None;
+        }
+        let routing = crate::fused_layer::Routing {
+            top_k: self.config.moe.n_experts_active,
+            renormalize: self.config.moe.norm_topk_prob,
+            tag: l,
+        };
+        LayerFfnParts::for_routed_layer(layer, eps, true, routing)
     }
 
     /// Layer `l`'s block, `attn_norm` and dense FFN when every half of
@@ -252,7 +444,7 @@ impl Decoder {
             return None;
         };
         let attn_norm = layer.attn.norm_weight.rms_weights()?;
-        let ffn = LayerFfnParts::for_layer(layer, self.config.rms_norm_eps, true)?;
+        let ffn = self.run_ffn_parts(l, layer)?;
         Some((gdn, attn_norm, ffn))
     }
 }

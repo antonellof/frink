@@ -1,4 +1,4 @@
-//! Rates, and values nothing has measured yet.
+//! Rates over a sliding window.
 //!
 //! [`RateWindow`] divides by the observed span, not by the window. A
 //! server running at 50 tok/s, polled one second into a five-second
@@ -8,9 +8,6 @@
 //! as the samples age out -- which is the property that matters, because
 //! a *cumulative* average would have an idle server reporting the rate
 //! it managed an hour ago forever.
-//!
-//! [`LastKnown`] is the other half of the same honesty rule: a pool that
-//! has never reported an occupancy reports nothing, not zero.
 
 use std::collections::VecDeque;
 
@@ -45,7 +42,7 @@ impl RateWindow {
         }
     }
 
-    /// Records `tokens` produced at `at_ms`.
+    /// Records `tokens` produced at `at_ms`, in any order.
     ///
     /// Bounded by [`RATE_SAMPLE_CAPACITY`] independently of the window,
     /// because age-based eviction only happens on a read.
@@ -56,7 +53,16 @@ impl RateWindow {
         if self.samples.len() == RATE_SAMPLE_CAPACITY {
             self.samples.pop_front();
         }
-        self.samples.push_back((at_ms, tokens));
+        // Kept in time order, which eviction and the span both read off
+        // the front. Concurrent requests stamp a prefill at its START
+        // and record it at its end, so a sample can arrive older than
+        // the newest one held; it is almost always near the back.
+        let at = self
+            .samples
+            .iter()
+            .rposition(|(t, _)| *t <= at_ms)
+            .map_or(0, |i| i + 1);
+        self.samples.insert(at, (at_ms, tokens));
     }
 
     /// Tokens per second over the window ending at `now_ms`.
@@ -76,32 +82,16 @@ impl RateWindow {
         tokens as f64 * 1000.0 / span_ms as f64
     }
 
+    /// Tokens held, without evicting: what a test checks a path fed.
+    #[cfg(test)]
+    pub(crate) fn tokens(&self) -> u64 {
+        self.samples.iter().map(|(_, t)| *t).sum()
+    }
+
     fn evict_before(&mut self, cutoff: u64) {
         while self.samples.front().is_some_and(|(at, _)| *at < cutoff) {
             self.samples.pop_front();
         }
-    }
-}
-
-/// A value that is only reported once something has said what it is.
-///
-/// Pool occupancy arrives on replies that carry it and is absent from
-/// the ones that do not (a prompt-only reply, a non-hybrid model, a
-/// model with no window pool). Last-known-value, and `None` until there
-/// is one: reporting `0/0` would claim an empty pool was measured, which
-/// a client cannot tell apart from "there is no such pool here".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LastKnown<T: Copy> {
-    value: Option<T>,
-}
-
-impl<T: Copy> LastKnown<T> {
-    pub fn get(&self) -> Option<T> {
-        self.value
-    }
-
-    pub fn set(&mut self, value: T) {
-        self.value = Some(value);
     }
 }
 
@@ -142,5 +132,17 @@ mod tests {
             window.record(step, 1);
         }
         assert_eq!(window.samples.len(), RATE_SAMPLE_CAPACITY);
+    }
+
+    /// A sample older than the newest still counts from its own time:
+    /// the span is measured from the oldest sample, wherever it was
+    /// recorded, and it ages out when its time does.
+    #[test]
+    fn a_sample_recorded_out_of_order_is_held_in_time_order() {
+        let mut window = RateWindow::new(1_000);
+        window.record(500, 10);
+        window.record(100, 10);
+        assert_eq!(window.tokens_per_second(600), 40.0);
+        assert_eq!(window.tokens_per_second(1_200), 10.0 * 1000.0 / 700.0);
     }
 }

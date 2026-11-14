@@ -15,23 +15,32 @@ impl Gdn {
     /// This layer's whole prefill body as one description:
     /// `attn_norm`, the four projections, the branch and the FFN.
     ///
-    /// `None` for the shapes the kernels do not serve, each named: the
-    /// FUSED beta/alpha spelling (its per-group interleave is host
-    /// arithmetic), gate projections that are not plain f32 or that
-    /// carry a fold, `qkv` and `z` folded differently (they share one
-    /// input), and any projection with no GEMM for its storage.
+    /// `None` for the shapes the kernels do not serve, each named: gate
+    /// projections that carry a fold, `qkv` and `z` folded differently
+    /// (they share one input), and any projection with no GEMM for its
+    /// storage.
     pub fn prefill_layer<'a>(
         &'a self,
         attn_norm: &'a [f32],
         rms_eps: f32,
         ffn: &LayerFfnParts<'a>,
     ) -> Option<frink_metal::gdn_prefill::PrefillGdnLayer<'a>> {
-        let BetaAlpha::Split { beta, alpha } = &self.beta_alpha else {
-            return None;
-        };
+        let BetaAlpha { beta, alpha } = &self.beta_alpha;
         let f32_rows = |m: &'a WeightMatrix| match m {
             WeightMatrix::F32(t) => Some(t.data.as_slice()),
             _ => None,
+        };
+        // Unfolded, or no launch: the gates read `attn_norm(x)` in the
+        // primal basis, before the run rotates it for `qkv` and `z`.
+        if beta.launch_parts().1.is_some() || alpha.launch_parts().1.is_some() {
+            return None;
+        }
+        let gates = match (f32_rows(beta), f32_rows(alpha)) {
+            (Some(beta), Some(alpha)) => frink_metal::gdn_prefill::GateProj::F32 { beta, alpha },
+            _ => frink_metal::gdn_prefill::GateProj::Gemm {
+                beta: beta.mul_mm_sg_launch()?,
+                alpha: alpha.mul_mm_sg_launch()?,
+            },
         };
         let h = self.h;
         let hidden = attn_norm.len();
@@ -68,10 +77,7 @@ impl Gdn {
             qkv: qkv_base.mul_mm_sg_launch()?,
             z: z_base.mul_mm_sg_launch()?,
             fold_x,
-            // Unfolded and unquantized, or no launch: the gates read
-            // `attn_norm(x)` in the primal basis, at f32.
-            beta: f32_rows(beta)?,
-            alpha: f32_rows(alpha)?,
+            gates,
             conv1d: &self.conv1d,
             dt_bias: &self.dt_bias,
             a: &self.a,
@@ -106,6 +112,19 @@ mod tests {
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
     fn the_prefill_run_matches_the_host_layers() {
+        check_the_prefill_run(false);
+    }
+
+    /// The same run with the gate projections stored Q8_0, as a Q4_K_M
+    /// Qwen3.5 stores them: the run's GEMM instead of the f32 gate
+    /// kernel (`frink_metal::gdn_prefill::GateProj::Gemm`).
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn the_prefill_run_matches_the_host_layers_with_quantized_gates() {
+        check_the_prefill_run(true);
+    }
+
+    fn check_the_prefill_run(q8_gates: bool) {
         let h = GdnHparams {
             d_conv: 4,
             head_dim: 128,
@@ -132,6 +151,13 @@ mod tests {
         };
         let f32m = |rows: usize, cols: usize, v: Vec<f32>| {
             WeightMatrix::F32(Tensor::new(v, vec![rows, cols]))
+        };
+        let gate_m = |rows: usize, cols: usize, v: Vec<f32>| {
+            if q8_gates {
+                q8(rows, cols, v)
+            } else {
+                f32m(rows, cols, v)
+            }
         };
         let mut sign_vec = |n: usize| -> Arc<[f32]> {
             rnd(n, 2.0)
@@ -175,9 +201,9 @@ mod tests {
                 .iter()
                 .map(|x| -(x.abs() + 0.1))
                 .collect(),
-            beta_alpha: BetaAlpha::Split {
-                beta: f32m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
-                alpha: f32m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
+            beta_alpha: BetaAlpha {
+                beta: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
+                alpha: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
             },
             norm: rnd(h.head_dim, 1.0),
             out_proj: q8(n_embd, value_dim, rnd(n_embd * value_dim, 0.2)),

@@ -547,10 +547,11 @@ pub(crate) struct AppState {
     /// is in `error` without the user retrying to find out.
     last_load_error: Mutex<Option<(String, String)>>,
     /// Live serving counters and the two sliding-window rates behind
-    /// `/v1/stats` -- see `crate::stats::ServingStats`. Distinct from
+    /// `/v1/stats`, and the feed both decode paths write them through --
+    /// see `crate::stats::ServingFeed`. Distinct from
     /// `stats`, which is the historical ring: this is what is happening
     /// *now*, and it decays to zero when nothing is.
-    pub(crate) serving: Mutex<crate::stats::ServingStats>,
+    pub(crate) serving: crate::stats::ServingFeed,
     /// The gate every request, cache rebuild and shutdown passes
     /// through -- see `crate::policy::maintenance::MaintenanceGate`. Held across none
     /// of them: each operation takes it, reads or moves the state, and
@@ -1969,7 +1970,15 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
 /// throughput figures come from sliding windows, so an idle server
 /// reports 0 rather than the rate it managed while it was busy -- a
 /// cumulative average never comes back down, and a status bar showing
-/// one is reporting the past as the present.
+/// one is reporting the past as the present. Both decode paths feed
+/// them (`crate::stats::ServingFeed`): prompt tokens computed, stamped
+/// at the start of the work, and completion tokens as each is committed.
+///
+/// `active`, `completed` and `aborted` are the live counters, kept at
+/// `run_generation_emit` for every generation, streamed or not: in
+/// flight, answered, answered after a cancel. A generation that ended in
+/// an error is none of them. The token totals are the ring's, summed
+/// from each finished request's usage.
 ///
 /// Latency is the ring's p95, nearest-rank, so it names a request that
 /// really took that long. Both it and the mean time-to-first-token are
@@ -1977,8 +1986,20 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
 /// request has no TTFT, and averaging those in as zero would make the
 /// server look faster the fewer clients stream.
 async fn serving_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let now_ms = state.uptime().as_millis().min(u64::MAX as u128) as u64;
-    let mut serving = state.serving.lock().unwrap_or_else(|p| p.into_inner());
+    let now_ms = state.serving.now_ms();
+    // Read out and released at once: every decode path takes this lock
+    // per committed token, and nothing below should hold it while it
+    // takes the pool and footprint locks.
+    let (decode_tps, prefill_tps, in_flight, completed, aborted) = {
+        let mut serving = state.serving.lock();
+        (
+            serving.decode_tokens_per_second(now_ms),
+            serving.prefill_tokens_per_second(now_ms),
+            serving.active(),
+            serving.completed(),
+            serving.aborted(),
+        )
+    };
     let active = state.active();
     Json(serde_json::json!({
         "model": active.as_ref().map(|a| a.name()),
@@ -1990,12 +2011,13 @@ async fn serving_stats(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             .as_str(),
         "uptime_s": state.uptime().as_secs(),
         "throughput": {
-            "decode_tps": (serving.decode_tokens_per_second(now_ms) * 10.0).round() / 10.0,
-            "prefill_tps": (serving.prefill_tokens_per_second(now_ms) * 10.0).round() / 10.0,
+            "decode_tps": (decode_tps * 10.0).round() / 10.0,
+            "prefill_tps": (prefill_tps * 10.0).round() / 10.0,
         },
         "requests": {
-            "active": state.cancels.live_count(),
-            "completed": state.stats.recorded_total(),
+            "active": in_flight,
+            "completed": completed,
+            "aborted": aborted,
             "p95_ms": state.stats.p95_duration_ms(),
             "ttft_mean_ms": state.stats.ttft_mean_ms(),
             "prompt_tokens_total": state.stats.tokens_prompt_total(),
@@ -2177,6 +2199,10 @@ fn run_generation_emit(
     continuous_batcher: Option<&serving::batch::ContinuousBatcher>,
     ceiling: Option<&budget::ContextCeiling>,
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
+    // Where `/v1/stats` counts this generation: its admission, its
+    // abort and its reply here, its tokens on whichever decode path
+    // serves it. `None` counts nothing (tests).
+    serving: Option<&crate::stats::ServingFeed>,
     // Takes the CHOICE INDEX with the text. A streaming `n` interleaves
     // the choices a token at a time (`crate::round_robin`), so a piece
     // of text that did not say which completion it belongs to could not
@@ -2236,8 +2262,14 @@ fn run_generation_emit(
                 model.encode(text, SpecialTokens::Parse)
             })
             .map_err(|detail| generate::DecodeError::ReasoningBudget { detail })?;
+        resolved.serving = serving.cloned();
         resolved
     };
+    // Admitted here, the one seam every decode path passes through, so
+    // a generation is counted once whichever path serves it. Answered
+    // below on success; any `?` between here and there drops it as a
+    // failure, which leaves the in-flight set without counting.
+    let admission = serving.map(|feed| feed.admit(params.cancel.as_ref()));
     let used_batcher = matches!((model, continuous_batcher), (Model::Gguf(_), Some(_)));
     let _metal_private_guard =
         acquire_metal_private_decode_gate(metal_private_decode_gate, used_batcher);
@@ -2391,6 +2423,9 @@ fn run_generation_emit(
             logprobs,
         })
         .collect();
+    if let Some(admission) = admission {
+        admission.answered();
+    }
     if let Some(first) = out.first_mut() {
         // The synthetic demo REPLACES the text with a banner, so the
         // token pieces the distributions were collected for no longer
@@ -2427,6 +2462,7 @@ pub(crate) fn run_generation<'p>(
     continuous_batcher: Option<&serving::batch::ContinuousBatcher>,
     ceiling: Option<&budget::ContextCeiling>,
     metal_private_decode_gate: Option<&std::sync::Mutex<()>>,
+    serving: Option<&crate::stats::ServingFeed>,
     // One `(finish_reason, text)` per choice, choice 0 first. See
     // `run_generation_emit`.
 ) -> Result<generate::Generated, generate::DecodeError> {
@@ -2440,6 +2476,7 @@ pub(crate) fn run_generation<'p>(
         continuous_batcher,
         ceiling,
         metal_private_decode_gate,
+        serving,
         |_, _| {},
     )
 }
@@ -3114,6 +3151,7 @@ async fn chat_completions_stream(
             batcher.as_ref(),
             ceiling.as_deref(),
             metal_private_decode_gate.as_deref(),
+            Some(&stats_state.serving),
             |choice, chunk| {
                 if !overlap || chunk.is_empty() {
                     return;
@@ -3986,7 +4024,7 @@ fn build_app_state(
         metal_private_decode_gate,
         loading_model: Mutex::new(None),
         last_load_error: Mutex::new(None),
-        serving: Mutex::new(crate::stats::ServingStats::default()),
+        serving: crate::stats::ServingFeed::default(),
         maintenance: Mutex::new(crate::policy::maintenance::MaintenanceGate::serving()),
         footprint: Mutex::new(crate::policy::footprint::ProbeCache::new(FOOTPRINT_TTL_MS)),
         started_unix: unix_now(),
@@ -4464,6 +4502,7 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             Some(generate::KvPoolConfig {
                 pool: Arc::new(Mutex::new(KvBlockPool::new(block_size, total_blocks))),
                 queue_wait: Duration::from_millis(queue_wait_ms),
+                byte_budget: None,
             })
         }
         (Err(_), Ok(block_size), Ok(byte_budget)) => {
@@ -4511,6 +4550,10 @@ async fn run(mcp_config_path: Option<PathBuf>, exit_on_stdin_close: bool) -> any
             Some(generate::KvPoolConfig {
                 pool: Arc::new(Mutex::new(KvBlockPool::new(block_size, total_blocks))),
                 queue_wait: Duration::from_millis(queue_wait_ms),
+                byte_budget: Some(generate::KvByteBudget {
+                    budget_bytes: budget,
+                    bytes_per_block: bytes_per_block as u64,
+                }),
             })
         }
         (Err(_), Err(_), Err(_)) => None,
@@ -4968,7 +5011,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn greedy_params(max_tokens: usize) -> GenerationParams {
+    pub(crate) fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
             cache_salt: None,
             prompt_logprobs: None,
@@ -4988,6 +5031,7 @@ pub(crate) mod tests {
             json_object: false,
             grammar: None,
             cancel: None,
+            serving: None,
             ignore_eos: false,
             reasoning_budget: crate::reasoning_budget::ReasoningBudget::Unrestricted,
             lora: None,
@@ -4997,7 +5041,7 @@ pub(crate) mod tests {
     /// Declares a full 0..255 byte-compatible vocab so HTTP-level tests
     /// that render chat templates (ASCII role names) do not spuriously
     /// reject their own prompt prefixes.
-    fn test_model_full_byte_vocab() -> Model {
+    pub(crate) fn test_model_full_byte_vocab() -> Model {
         test_model_full_byte_vocab_with_eos(None)
     }
 
@@ -5091,7 +5135,7 @@ pub(crate) mod tests {
             metal_private_decode_gate: None,
             loading_model: Mutex::new(None),
             last_load_error: Mutex::new(None),
-            serving: Mutex::new(crate::stats::ServingStats::default()),
+            serving: crate::stats::ServingFeed::default(),
             maintenance: Mutex::new(crate::policy::maintenance::MaintenanceGate::serving()),
             footprint: Mutex::new(crate::policy::footprint::ProbeCache::new(FOOTPRINT_TTL_MS)),
             started_unix: unix_now(),
@@ -5319,6 +5363,7 @@ pub(crate) mod tests {
             in_flight.generative().unwrap(),
             "hi",
             &greedy_params(3),
+            None,
             None,
             None,
             None,
@@ -7926,7 +7971,7 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(refused["error"]["type"], "cache_rebuilding");
 
-        state.maintenance.lock().unwrap().finish_rebuild(true);
+        state.maintenance.lock().unwrap().finish_rebuild();
         let (status, _) = post_json_uri(&app, "/v1/chat/completions", body).await;
         assert_eq!(
             status,
@@ -10076,6 +10121,7 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(matches!(
             result,
@@ -10104,12 +10150,14 @@ pub(crate) mod tests {
         let config = generate::KvPoolConfig {
             pool,
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
         let result = run_generation(
             &model,
             &prompt,
             &greedy_params(4),
             Some(&config),
+            None,
             None,
             None,
             None,
@@ -10142,6 +10190,7 @@ pub(crate) mod tests {
         let config = generate::KvPoolConfig {
             pool,
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
 
         let result = run_generation(
@@ -10149,6 +10198,7 @@ pub(crate) mod tests {
             &prompt,
             &greedy_params(4),
             Some(&config),
+            None,
             None,
             None,
             None,
@@ -10214,6 +10264,7 @@ pub(crate) mod tests {
         let config = generate::KvPoolConfig {
             pool: pool.clone(),
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
 
         let produced = run_generation(
@@ -10221,6 +10272,7 @@ pub(crate) mod tests {
             &prompt,
             &greedy_params(4),
             Some(&config),
+            None,
             None,
             None,
             None,
@@ -10254,6 +10306,7 @@ pub(crate) mod tests {
                     &model,
                     &prompt,
                     &greedy_params(6),
+                    None,
                     None,
                     None,
                     None,
@@ -10727,6 +10780,7 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("a real Kimi checkpoint must generate without error");
         assert!(matches!(
@@ -10777,6 +10831,7 @@ pub(crate) mod tests {
                 active.generative().unwrap(),
                 "hi",
                 &params,
+                None,
                 None,
                 None,
                 None,
@@ -10836,6 +10891,7 @@ pub(crate) mod tests {
         let kv_pool_config = generate::KvPoolConfig {
             pool: pool.clone(),
             queue_wait: Duration::ZERO,
+            byte_budget: None,
         };
         let pc = Mutex::new(PrefixCache::new(4));
 
@@ -10850,6 +10906,7 @@ pub(crate) mod tests {
             Some(&kv_pool_config),
             None,
             Some(&pc),
+            None,
             None,
             None,
             None,

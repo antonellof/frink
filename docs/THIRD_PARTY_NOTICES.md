@@ -336,7 +336,6 @@ code and not the crate name.
 | frink module | FreeToken source |
 |---|---|
 | `policy::radix::{tree,plain}` | `python/freetoken/kvcache/radix_cache.py` |
-| `serving::admission` | `python/freetoken/scheduler/{prefill,decode,table}.py` |
 | `serving::batch::status` | `python/freetoken/scheduler/status.py`, the pool-occupancy helpers of `scheduler/scheduler.py` |
 | `policy::parser::reasoning` | `python/freetoken/server/reasoning_parser.py` |
 | `policy::parser::tool_call` | `python/freetoken/server/function_call_parser.py` |
@@ -376,6 +375,7 @@ than quietly dropping the rows:
 | `state_pool` | `python/freetoken/kvcache/linear_state_pool.py`, `attention/linear.py` | reachable only from `cache_manager` |
 | `cache_report` | `python/freetoken/cache_report.py` | rendered a `CacheGeometry` nothing built |
 | `supervisor` | `python/freetoken/daemon/serve_manager.py` | manages an engine child process; frink ships one binary |
+| `serving::admission` | `python/freetoken/scheduler/{prefill,decode,table}.py` | admission for the window and recurrent memory models, which the continuous batcher does not serve; it never had a caller |
 
 
 FreeToken credits prior art of its own, llama.cpp among it: its radix

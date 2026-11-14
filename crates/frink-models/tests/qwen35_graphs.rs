@@ -324,10 +324,14 @@ fn qwen3next_matches_llama_cpp_on_all_three_paths() {
     ));
     let g = d.layers[0].attn.ssm.as_ref().unwrap().gdn().unwrap();
     assert_eq!(g.h.map, frink_core::gdn::HeadMap::Grouped);
-    assert!(matches!(
-        g.beta_alpha,
-        frink_models::gdn::BetaAlpha::Fused { .. }
-    ));
+    // `ssm_ba` taken apart by row: beta then alpha per K group.
+    let (beta_rows, alpha_rows) = frink_models::gdn::split_ba_rows(g.h.n_k_heads, g.h.n_v_heads);
+    let ratio = g.h.n_v_heads / g.h.n_k_heads;
+    assert!(ratio > 1, "the fixture groups its heads");
+    assert_eq!(beta_rows[..ratio], (0..ratio).collect::<Vec<_>>()[..]);
+    assert_eq!(alpha_rows[0], ratio);
+    assert_eq!(g.beta_alpha.beta.rows(), g.h.n_v_heads);
+    assert_eq!(g.beta_alpha.alpha.rows(), g.h.n_v_heads);
     assert_eq!(d.config.moe.n_experts, 4);
 }
 

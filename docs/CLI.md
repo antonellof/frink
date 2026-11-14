@@ -435,11 +435,12 @@ against llama.cpp on the same GGUF: the tokenizer first, then the graph.
 
 ### The tokenizer half
 
-Frink's token ids against llama.cpp's for a fixed 22-case corpus built
+Frink's token ids against llama.cpp's for a fixed 23-case corpus built
 from what pre-tokenizer regexes differ on (digit runs, space runs,
 indents, tabs, CRLF, contractions, CJK, emoji and ZWJ, Unicode
 whitespace, control bytes, punctuation runs, version strings, non-Latin
-scripts and non-ASCII digits, special-token markers). Each
+scripts and non-ASCII digits, special-token markers, and words that are
+vocabulary entries the merges do not reach, for `ignore_merges`). Each
 diverging case prints the token index, the byte offset, the input
 around it and both engines' ids and pieces. Ids are compared with `add_special = false`; the add-BOS decision and
 the vocab sizes are compared separately. Both halves are always

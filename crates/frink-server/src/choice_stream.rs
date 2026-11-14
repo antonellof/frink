@@ -146,7 +146,7 @@ impl ChoiceStream {
             // answer is part of the answer. It still ends it -- the
             // field is about what comes back, not about when to stop.
             if ctx.params.keep_special_tokens {
-                self.generated_ids.push(next);
+                self.keep(next, ctx);
                 let text = self
                     .matcher
                     .flush_with(&self.utf8.push(&decode_one(&[next])));
@@ -163,7 +163,7 @@ impl ChoiceStream {
         if self.matcher.is_stop_token(next) {
             return Committed::Stopped(FinishReason::Stop);
         }
-        self.generated_ids.push(next);
+        self.keep(next, ctx);
 
         // Layer 2: only text that can no longer become part of a stop
         // string leaves here.
@@ -180,6 +180,16 @@ impl ChoiceStream {
                 }
                 Committed::Stopped(FinishReason::StopSequence(stop))
             }
+        }
+    }
+
+    /// Appends `next` to the answer, and counts it toward `/v1/stats`'
+    /// decode rate: every path that keeps a token keeps it here, so the
+    /// rate and `usage.completion_tokens` count the same tokens.
+    fn keep(&mut self, next: usize, ctx: &StepContext<'_>) {
+        self.generated_ids.push(next);
+        if let Some(feed) = &ctx.params.serving {
+            feed.decoded(1);
         }
     }
 
