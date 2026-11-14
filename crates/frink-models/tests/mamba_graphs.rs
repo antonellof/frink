@@ -475,9 +475,7 @@ fn each_seam_is_visible_in_the_logits() {
     else {
         unreachable!()
     };
-    for a in m.a.iter_mut() {
-        *a = -30.0;
-    }
+    m.a = vec![-30.0; m.a.len()].into();
     let worst = worst_vs(&decode(&d), &JAMBA_GOLDEN);
     assert!(worst > 1e-2, "the SSM state not seen: {worst}");
 }

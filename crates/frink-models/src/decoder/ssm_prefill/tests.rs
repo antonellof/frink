@@ -172,17 +172,17 @@ fn mamba1(r: &mut Rng, n: usize, dt_bc_norm: DtBcNorm) -> Mamba1 {
     Mamba1 {
         h,
         in_proj: q8(2 * h.d_inner, n, r.v(2 * h.d_inner * n, 0.3)),
-        conv1d: r.v(h.d_inner * h.d_conv, 1.0),
-        conv1d_bias: r.v(h.d_inner, 0.5),
+        conv1d: r.v(h.d_inner * h.d_conv, 1.0).into(),
+        conv1d_bias: r.v(h.d_inner, 0.5).into(),
         x_proj: q8(x_rows, h.d_inner, r.v(x_rows * h.d_inner, 0.3)),
         dt_bc_norm,
         dt_proj: q8(h.d_inner, h.dt_rank, r.v(h.d_inner * h.dt_rank, 0.5)),
-        dt_bias: r.v(h.d_inner, 1.0),
+        dt_bias: r.v(h.d_inner, 1.0).into(),
         a: r.v(h.d_inner * h.d_state, 2.0)
             .iter()
             .map(|v| -v.abs())
             .collect(),
-        d: r.v(h.d_inner, 1.0),
+        d: r.v(h.d_inner, 1.0).into(),
         out_proj: q8(n, h.d_inner, r.v(n * h.d_inner, 0.3)),
     }
 }
@@ -314,8 +314,8 @@ fn a_mamba2_layer_in_the_run_matches_the_host_body() {
     let m = Mamba2 {
         h,
         in_proj: q8(h.in_proj_rows(), n, r.v(h.in_proj_rows() * n, 0.3)),
-        conv1d: r.v(h.conv_width() * h.d_conv, 1.0),
-        conv1d_bias: r.v(h.conv_width(), 0.5),
+        conv1d: r.v(h.conv_width() * h.d_conv, 1.0).into(),
+        conv1d_bias: r.v(h.conv_width(), 0.5).into(),
         dt_bias: r.v(h.n_head, 1.0),
         a: r.v(h.n_head, 2.0).iter().map(|v| -v.abs()).collect(),
         d: r.v(h.n_head, 1.0),
@@ -354,7 +354,7 @@ fn a_mamba2_layer_in_the_run_matches_the_host_body() {
         dt_bias: &m.dt_bias,
         a: &m.a,
         d: &m.d,
-        norm: m.norm.as_deref(),
+        norm: m.norm.as_ref(),
         norm_eps: EPS,
         out_proj: gemm(&m.out_proj).unwrap(),
         d_inner: h.d_inner,

@@ -67,6 +67,95 @@ fn advance_len_matches_pushing_zero_rows_one_at_a_time() {
     assert!(z.k.is_empty());
 }
 
+/// `push_rows(k, v, n)` is `n` calls to `push`: the same rows,
+/// positions and pool blocks, the same partial append and refusal when
+/// the pool runs dry part way, and, from f16 rows, the same rounded
+/// values as pushing their widened f32 (bit for bit into an f16 store).
+#[test]
+fn push_rows_matches_pushing_one_row_at_a_time() {
+    use half::f16;
+    // (block_size, total_blocks, rows already pushed, n)
+    let cases = [
+        (3, 10, 0, 7),
+        (3, 10, 2, 1),
+        (3, 10, 3, 9),
+        (4, 3, 1, 20), // runs out of blocks after 12 rows
+        (2, 1, 0, 5),  // only the constructor's block
+    ];
+    let row = |p: usize, w: usize, sign: f32| -> Vec<f32> {
+        (0..w)
+            .map(|i| sign * ((p * w + i) as f32 * 0.37 + 0.1))
+            .collect()
+    };
+    for dtype in [KvDtype::F32, KvDtype::F16] {
+        for from_f16 in [false, true] {
+            for (block_size, total, pre, n) in cases {
+                let pool_a = Arc::new(Mutex::new(KvBlockPool::new(block_size, total)));
+                let pool_b = Arc::new(Mutex::new(KvBlockPool::new(block_size, total)));
+                let mut a = KvCache::with_pool_split(2, 3, 2, pool_a.clone(), 0)
+                    .unwrap()
+                    .with_dtype(dtype);
+                let mut b = KvCache::with_pool_split(2, 3, 2, pool_b.clone(), 0)
+                    .unwrap()
+                    .with_dtype(dtype);
+                for p in 0..pre {
+                    a.push(&row(p, 6, 1.0), &row(p, 4, -1.0)).unwrap();
+                    b.push(&row(p, 6, 1.0), &row(p, 4, -1.0)).unwrap();
+                }
+                let k: Vec<f32> = (0..n).flat_map(|p| row(pre + p, 6, 1.0)).collect();
+                let v: Vec<f32> = (0..n).flat_map(|p| row(pre + p, 4, -1.0)).collect();
+                let (kh, vh): (Vec<f16>, Vec<f16>) = (
+                    k.iter().map(|&x| f16::from_f32(x)).collect(),
+                    v.iter().map(|&x| f16::from_f32(x)).collect(),
+                );
+                // What `push` is handed: the f16 rows widened, or the f32.
+                let (kw, vw): (Vec<f32>, Vec<f32>) = if from_f16 {
+                    (
+                        kh.iter().map(|x| x.to_f32()).collect(),
+                        vh.iter().map(|x| x.to_f32()).collect(),
+                    )
+                } else {
+                    (k.clone(), v.clone())
+                };
+                let mut want = Ok(());
+                for p in 0..n {
+                    want = a.push(&kw[p * 6..(p + 1) * 6], &vw[p * 4..(p + 1) * 4]);
+                    if want.is_err() {
+                        break;
+                    }
+                }
+                let got = if from_f16 {
+                    b.push_rows(KvRows::F16(&kh), KvRows::F16(&vh), n)
+                } else {
+                    b.push_rows(KvRows::F32(&k), KvRows::F32(&v), n)
+                };
+                let case = format!(
+                    "{dtype:?} from_f16 {from_f16} block {block_size} total {total} pre {pre} n {n}"
+                );
+                assert_eq!(got.is_err(), want.is_err(), "{case}");
+                assert_eq!(b.k, a.k, "{case}");
+                assert_eq!(b.v, a.v, "{case}");
+                assert_eq!(b.positions(), a.positions(), "{case}");
+                assert_eq!(
+                    pool_b.lock().unwrap().free_blocks(),
+                    pool_a.lock().unwrap().free_blocks(),
+                    "{case}"
+                );
+            }
+        }
+    }
+    // No V width (a conv layer's history): K rows only.
+    let mut a = KvCache::new_split(1, 4, 0);
+    let mut b = KvCache::new_split(1, 4, 0);
+    let k: Vec<f32> = (0..12).map(|i| i as f32).collect();
+    for r in k.as_chunks::<4>().0 {
+        a.push(r, &[]).unwrap();
+    }
+    b.push_rows(KvRows::F32(&k), KvRows::F32(&[]), 3).unwrap();
+    assert_eq!(b.k, a.k);
+    assert_eq!(b.positions(), a.positions());
+}
+
 /// The f16 store holds half the bytes of the f32 one for the same
 /// rows, and every edit a cache makes (push, truncate, evict, clone)
 /// keeps its dtype and its rounded values.

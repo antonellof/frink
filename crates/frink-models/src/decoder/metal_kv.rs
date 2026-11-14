@@ -81,17 +81,30 @@ impl Decoder {
             cache.truncate(cache.positions() - (rows - real));
         }
         let n = mkv.seq_len - real;
-        let (k, v) = mkv.tokens_host(real, n);
-        // The Metal KV holds ONE head width for K and V
-        // (`metal_can_serve_model` refuses split widths).
-        let per = cache.n_kv_heads * cache.head_dim;
-        for i in 0..n {
-            let off = i * per;
-            cache
-                .push(&k[off..off + per], &v[off..off + per])
-                .expect("unbounded/planned KvCache growth is infallible");
-        }
+        Self::push_rows_from_metal(mkv, cache, real, n);
         mkv.host_rows_real = mkv.seq_len;
+    }
+
+    /// Append device rows `start..start + n` to the host cache: bit for
+    /// bit from an f16 store into an f16 cache, widened otherwise. The
+    /// Metal KV holds ONE head width for K and V (`metal_can_serve_model`
+    /// refuses split widths).
+    #[cfg(feature = "metal")]
+    pub(super) fn push_rows_from_metal(
+        mkv: &frink_metal::attn::MetalKvBuffers,
+        cache: &mut KvCache,
+        start: usize,
+        n: usize,
+    ) {
+        use frink_core::kv_store::KvRows;
+        let pushed = match mkv.tokens_f16(start, n) {
+            Some((k, v)) => cache.push_rows(KvRows::F16(k), KvRows::F16(v), n),
+            None => {
+                let (k, v) = mkv.tokens_host(start, n);
+                cache.push_rows(KvRows::F32(&k), KvRows::F32(&v), n)
+            }
+        };
+        pushed.expect("unbounded/planned KvCache growth is infallible");
     }
 
     /// Re-upload from the host every layer of the device KV that `stale`
@@ -209,5 +222,41 @@ mod tests {
         Decoder::catch_up_host_kv_from_metal(&mut mkv, &mut cache);
         assert_eq!(cache.rows(), rows + 1);
         assert_eq!(cache.k.to_f32_vec()[rows * width..], own[..]);
+    }
+
+    /// Device rows into a host cache: an f16 store copies its bits into
+    /// an f16 cache, and every pairing of store and cache ends with the
+    /// rows `n` row-by-row pushes of the widened download would leave.
+    /// Values off the f16 grid, so a second rounding would show.
+    #[test]
+    #[ignore = "needs a real Metal GPU"]
+    fn device_rows_reach_the_host_as_pushing_the_download_would() {
+        use frink_core::kv_store::KvDtype;
+        use frink_metal::kv_wire::MetalKvDtype;
+        let (n_kv_heads, head_dim, rows) = (2usize, 32usize, 5usize);
+        let width = n_kv_heads * head_dim;
+        let k: Vec<f32> = (0..rows * width)
+            .map(|i| (i as f32 * 0.0137).sin())
+            .collect();
+        let v: Vec<f32> = k.iter().map(|x| 1.0 / (1.5 + x)).collect();
+        for store in [MetalKvDtype::F16, MetalKvDtype::Q8_0] {
+            let mut mkv =
+                MetalKvBuffers::with_capacity_dtype(n_kv_heads, head_dim, 8, store).expect("kv");
+            mkv.upload_from_host(&k, &v, rows).expect("upload");
+            assert_eq!(mkv.tokens_f16(1, 3).is_some(), store == MetalKvDtype::F16);
+            let (kd, vd) = mkv.tokens_host(1, 3);
+            for dtype in [KvDtype::F32, KvDtype::F16] {
+                let mut want = KvCache::new(n_kv_heads, head_dim).with_dtype(dtype);
+                for (kr, vr) in kd.chunks_exact(width).zip(vd.chunks_exact(width)) {
+                    want.push(kr, vr).expect("unbounded");
+                }
+                let mut got = KvCache::new(n_kv_heads, head_dim).with_dtype(dtype);
+                Decoder::push_rows_from_metal(&mkv, &mut got, 1, 3);
+                let case = format!("{store:?} store, {dtype:?} cache");
+                assert_eq!(got.k, want.k, "{case}");
+                assert_eq!(got.v, want.v, "{case}");
+                assert_eq!(got.positions(), 3, "{case}");
+            }
+        }
     }
 }

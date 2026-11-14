@@ -1382,6 +1382,36 @@ impl MetalKvBuffers {
         (k, v)
     }
 
+    /// `n` tokens from `start` as the device stores them, borrowed, when
+    /// the store is f16: a host cache that is f16 too copies them bit
+    /// for bit, where [`Self::tokens_host`] widens every element to
+    /// round it straight back (1.2 ms of LFM2-1.2B's 512-token prefill
+    /// for its six attention layers). `None` for a quantized store.
+    /// Only after the command buffers that wrote them completed.
+    pub fn tokens_f16(&self, start: usize, n: usize) -> Option<(&[half::f16], &[half::f16])> {
+        use half::slice::HalfBitsSliceExt;
+        if self.dtype != MetalKvDtype::F16 {
+            return None;
+        }
+        assert!(start + n <= self.seq_len);
+        let per = self.elems_per_token();
+        let (off, elems) = (start * per, n * per);
+        // SAFETY: an f16 store's shared buffers hold `seq_len * per`
+        // u16s each (`tokens_host`'s f16 arm reads the same range), and
+        // the borrow of `self` keeps them alive and unwritten: every
+        // writer takes `&mut self`.
+        let (k, v) = unsafe {
+            (
+                std::slice::from_raw_parts(self.k.contents().as_ptr() as *const u16, off + elems),
+                std::slice::from_raw_parts(self.v.contents().as_ptr() as *const u16, off + elems),
+            )
+        };
+        Some((
+            k[off..].reinterpret_cast::<half::f16>(),
+            v[off..].reinterpret_cast::<half::f16>(),
+        ))
+    }
+
     /// Downloads `n` tokens starting at `start` as f32 (after a completed CB).
     pub fn tokens_host(&self, start: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
         assert!(start + n <= self.seq_len);

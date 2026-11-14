@@ -477,7 +477,7 @@ impl Decoder {
                         dt_bias: &m.dt_bias,
                         a: &m.a,
                         d: &m.d,
-                        norm: m.norm.as_deref(),
+                        norm: m.norm.as_ref(),
                         norm_eps: self.config.rms_norm_eps,
                         out_proj: Self::metal_matvec_launch(&m.out_proj)?,
                         d_inner: m.h.d_inner,

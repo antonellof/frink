@@ -570,11 +570,44 @@ impl KvCache {
     /// (zero-fill). Used when Metal owns the KV plane and the host cache
     /// only needs matching `seq_len` for sync checks.
     pub fn advance_len(&mut self, n: usize) -> Result<(), KvPoolExhausted> {
-        // `n` zero rows in bulk, with `push`'s pool accounting: a
-        // block is acquired each time the rows reach the capacity, and
-        // a refusal leaves every row that fitted pushed, as `n` calls
-        // to `push` would. Row by row, the f16 rounding of each zero
-        // row cost a Metal prefill of 512 tokens about 4 ms.
+        // Row by row, the f16 rounding of each zero row cost a Metal
+        // prefill of 512 tokens about 4 ms.
+        self.append_rows(n, |k, v, _, take, (kw, vw)| {
+            k.extend_zeros(take * kw);
+            v.extend_zeros(take * vw);
+        })
+    }
+
+    /// `n` positions' K and V rows (`[n][k_width]`, `[n][v_width]`)
+    /// appended at once: what `n` calls to [`Self::push`] append, pool
+    /// refusal included, without a growth and a rounding call per row.
+    /// A Metal prefill hands its rows back to the host this way; row by
+    /// row, LFM2-1.2B's 512-token prompt spent 1.8 ms of its 36 here.
+    /// The rows are copied bit for bit when their dtype is the store's.
+    pub fn push_rows(
+        &mut self,
+        k: KvRows<'_>,
+        v: KvRows<'_>,
+        n: usize,
+    ) -> Result<(), KvPoolExhausted> {
+        assert_eq!(k.len(), n * self.k_width());
+        assert_eq!(v.len(), n * self.v_width());
+        self.append_rows(n, |kb, vb, from, take, (kw, vw)| {
+            kb.extend_from_rows(k.slice(from * kw..(from + take) * kw));
+            vb.extend_from_rows(v.slice(from * vw..(from + take) * vw));
+        })
+    }
+
+    /// `n` rows in bulk, with `push`'s pool accounting: a block is
+    /// acquired each time the rows reach the capacity, and a refusal
+    /// leaves every row that fitted appended, as `n` calls to `push`
+    /// would. `fill(k, v, from, take, (k_width, v_width))` appends rows
+    /// `from..from + take` of the batch.
+    fn append_rows(
+        &mut self,
+        n: usize,
+        mut fill: impl FnMut(&mut KvBuf, &mut KvBuf, usize, usize, (usize, usize)),
+    ) -> Result<(), KvPoolExhausted> {
         let (k_width, v_width) = (self.k_width(), self.v_width());
         // Rows are counted, not derived from `k.len()`: a cache with no
         // K width (a recurrent-only layer) still advances its positions.
@@ -594,8 +627,7 @@ impl KvCache {
                 }
                 take = take.min(self.k.capacity() / k_width - rows);
             }
-            self.k.extend_zeros(take * k_width);
-            self.v.extend_zeros(take * v_width);
+            fill(&mut self.k, &mut self.v, n - left, take, (k_width, v_width));
             self.positions += take;
             left -= take;
         }

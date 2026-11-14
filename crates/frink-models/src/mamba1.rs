@@ -44,6 +44,7 @@ use frink_core::matmul::rms_norm;
 use frink_core::recurrent_state::RecurrentState;
 use frink_core::weight_matrix::WeightMatrix;
 use frink_gguf::TensorSource;
+use std::sync::Arc;
 
 use crate::loader::{load_f32_vec, load_f32_vec_optional, load_weight_matrix, LoadError};
 
@@ -112,25 +113,33 @@ pub enum DtBcNorm {
 }
 
 /// One Mamba-1 layer's weights.
+///
+/// The per-channel planes are shared allocations, not `Vec`s: the Metal
+/// decode stack keeps them resident, and a borrowed slice can only be
+/// proven to be the upload its cache holds by comparing every byte, per
+/// layer per token (`frink_metal`'s `resident_f32_shared`). That compare
+/// read both copies of 368 KB a layer on Mamba-1.4B (35 MB a token) and
+/// of 736 KB on FalconMamba-7B (94 MB), against GPU traffic for the
+/// memory bus.
 pub struct Mamba1 {
     pub h: Mamba1Hparams,
     /// `blk.N.ssm_in.weight`, `[2 d_inner, n_embd]`.
     pub in_proj: WeightMatrix,
     /// `blk.N.ssm_conv1d.weight`, `[d_inner][d_conv]`.
-    pub conv1d: Vec<f32>,
+    pub conv1d: Arc<[f32]>,
     /// `blk.N.ssm_conv1d.bias`, `[d_inner]` (REQUIRED, `mamba.cpp:57`).
-    pub conv1d_bias: Vec<f32>,
+    pub conv1d_bias: Arc<[f32]>,
     /// `blk.N.ssm_x.weight`, `[dt_rank + 2 d_state, d_inner]`.
     pub x_proj: WeightMatrix,
     pub dt_bc_norm: DtBcNorm,
     /// `blk.N.ssm_dt.weight`, `[d_inner, dt_rank]`.
     pub dt_proj: WeightMatrix,
     /// `blk.N.ssm_dt.bias`, `[d_inner]`.
-    pub dt_bias: Vec<f32>,
+    pub dt_bias: Arc<[f32]>,
     /// `blk.N.ssm_a`, `[d_inner][d_state]`, stored negative.
-    pub a: Vec<f32>,
+    pub a: Arc<[f32]>,
     /// `blk.N.ssm_d`, `[d_inner]`.
-    pub d: Vec<f32>,
+    pub d: Arc<[f32]>,
     /// `blk.N.ssm_out.weight`, `[n_embd, d_inner]`.
     pub out_proj: WeightMatrix,
 }
@@ -231,14 +240,14 @@ impl Mamba1 {
         Ok(Self {
             h,
             in_proj,
-            conv1d,
-            conv1d_bias,
+            conv1d: conv1d.into(),
+            conv1d_bias: conv1d_bias.into(),
             x_proj,
             dt_bc_norm,
             dt_proj,
-            dt_bias,
-            a,
-            d,
+            dt_bias: dt_bias.into(),
+            a: a.into(),
+            d: d.into(),
             out_proj,
         })
     }
@@ -325,7 +334,7 @@ impl Mamba1 {
         // :90-91: dt up to d_inner, plus the bias; softplus is the scan's.
         let mut dt = self.project(&self.dt_proj, &dt_low_rows, rows);
         for row in dt.chunks_mut(d_inner) {
-            for (t, bias) in row.iter_mut().zip(&self.dt_bias) {
+            for (t, bias) in row.iter_mut().zip(self.dt_bias.iter()) {
                 *t += bias;
             }
         }
@@ -417,8 +426,8 @@ mod tests {
         let m = Mamba1 {
             h,
             in_proj: mat(2 * h.d_inner, n_embd, rnd(2 * h.d_inner * n_embd)),
-            conv1d: rnd(h.d_conv * h.d_inner),
-            conv1d_bias: rnd(h.d_inner),
+            conv1d: rnd(h.d_conv * h.d_inner).into(),
+            conv1d_bias: rnd(h.d_inner).into(),
             x_proj: mat(
                 h.dt_rank + 2 * h.d_state,
                 h.d_inner,
@@ -430,12 +439,12 @@ mod tests {
                 c: vec![0.7, 1.3],
             },
             dt_proj: mat(h.d_inner, h.dt_rank, rnd(h.d_inner * h.dt_rank)),
-            dt_bias: rnd(h.d_inner),
+            dt_bias: rnd(h.d_inner).into(),
             a: rnd(h.d_inner * h.d_state)
                 .iter()
                 .map(|v| -(v.abs() + 0.5))
                 .collect(),
-            d: rnd(h.d_inner),
+            d: rnd(h.d_inner).into(),
             out_proj: mat(n_embd, h.d_inner, rnd(n_embd * h.d_inner)),
         };
         let tokens: Vec<Vec<f32>> = (0..4).map(|_| rnd(n_embd)).collect();
