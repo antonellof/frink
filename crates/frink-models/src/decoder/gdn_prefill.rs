@@ -40,7 +40,7 @@ pub(super) struct ResidentAttnParts<'a> {
 
 /// One layer of a run as planned, before any cache is touched.
 enum Planned<'a> {
-    Gdn(&'a crate::gdn::Gdn, &'a [f32], LayerFfnParts<'a>),
+    Gdn(&'a crate::gdn::Gdn, &'a [f32], Box<LayerFfnParts<'a>>),
     Attn(Box<PrefillAttnLayer<'a>>),
 }
 
@@ -83,7 +83,7 @@ impl Decoder {
         if !self.prefill_rows_take_device(rows) || !self.fused_attention_tail_eligible(l, layer) {
             return None;
         }
-        let ffn = LayerFfnParts::for_layer(layer, self.config.rms_norm_eps, true)?;
+        let ffn = self.run_ffn_parts(l, layer)?;
         let (base, fold) = layer.attn.o_proj.launch_parts();
         let o_proj = base.mul_mm_sg_launch()?;
         let width = branch.len() / rows;
@@ -107,7 +107,7 @@ impl Decoder {
             rows,
             kv_caches,
         )?;
-        layer.moe.record_activations_dense();
+        Self::record_fused_ffn(layer);
         Some(end)
     }
 
@@ -228,7 +228,7 @@ impl Decoder {
             layer_rope: self.metal_layer_rope(l),
             o,
             fold_branch,
-            ffn: LayerFfnParts::for_layer(layer, eps, true)?,
+            ffn: self.run_ffn_parts(l, layer)?,
         })
     }
 
@@ -255,7 +255,7 @@ impl Decoder {
         let mut end = start;
         while end < run_end.min(kv_caches.len()) {
             if let Some((gdn, attn_norm, ffn)) = self.fused_layer_parts(end) {
-                plan.push(Planned::Gdn(gdn, attn_norm, ffn));
+                plan.push(Planned::Gdn(gdn, attn_norm, Box::new(ffn)));
             } else if let Some((a, n_kv)) = self.prefill_attn_layer(end, start_pos, &kv_caches[end])
             {
                 // The mirror, made or caught up to the host rows with
@@ -342,7 +342,9 @@ impl Decoder {
                         .expect("unbounded/planned KvCache growth is infallible");
                 }
             }
-            self.layer_for(l).moe.record_activations_dense();
+            // A routed layer chose its experts on the device; like the
+            // dense prefill stack's MoE, nothing reads them back.
+            Self::record_fused_ffn(self.layer_for(l));
         }
         *hidden = out;
         Some(end)

@@ -78,9 +78,8 @@ pub struct BranchWeights<'a> {
 /// The head of a layer: `attn_norm(x)`, then the four projections the
 /// branch reads.
 ///
-/// `beta` and `alpha` are the SPLIT spelling only; the fused one's
-/// per-group interleave is host arithmetic with no kernel here, and a
-/// caller carrying it passes `None` for the whole head.
+/// `beta` and `alpha` are one projection each; a checkpoint that stores
+/// them as one (`qwen3next`'s `ssm_ba`) is split by row at load.
 pub struct LayerHeadIn<'a> {
     pub norm: &'a [f32],
     pub norm_eps: f32,
@@ -109,6 +108,46 @@ pub struct LayerFfn<'a> {
     /// The rotations the FFN's input and its activation need.
     pub fold_x: Option<&'a FoldPlan<'a>>,
     pub fold_act: Option<&'a FoldPlan<'a>>,
+    /// A mixture-of-experts layer's routed experts, when `gate`, `up`
+    /// and `down` above are its SHARED expert (`crate::gdn_moe`).
+    pub routed: Option<crate::gdn_moe::RoutedExperts<'a>>,
+}
+
+impl LayerFfn<'_> {
+    /// The tail's scratch: the residual, the normed copy, the two
+    /// projections, the activation and the FFN output, then the routed
+    /// half's buffers when there is one.
+    pub(crate) fn tail_lens(&self, hidden: usize) -> Vec<usize> {
+        let mut lens = vec![
+            hidden,
+            hidden,
+            self.gate.rows,
+            self.up.rows,
+            self.gate.rows,
+            hidden,
+        ];
+        if let Some(r) = &self.routed {
+            lens.extend(r.scratch_lens(hidden));
+        }
+        lens
+    }
+
+    /// Whether the widths agree with each other and with `hidden`. A
+    /// routed layer takes no rotation: the router and the shared gate
+    /// read the normed input in the basis the experts do.
+    pub(crate) fn fits(&self, hidden: usize) -> bool {
+        let cols = |m: &MatvecLaunch<'_>| m.row_bytes / m.block_bytes * m.block_elems;
+        self.norm.len() == hidden
+            && self.gate.rows == self.up.rows
+            && self.down.rows == hidden
+            && cols(self.gate) == hidden
+            && cols(self.up) == hidden
+            && cols(self.down) == self.gate.rows
+            && self
+                .routed
+                .as_ref()
+                .is_none_or(|r| r.fits(hidden) && self.fold_x.is_none() && self.fold_act.is_none())
+    }
 }
 
 impl BranchWeights<'_> {
@@ -147,18 +186,7 @@ impl BranchWeights<'_> {
                             .all(|m| m.row_bytes / m.block_bytes * m.block_elems == hidden)
                 }
             }
-            && match &self.ffn {
-                None => true,
-                Some(f) => {
-                    let hidden = self.out_proj.rows;
-                    f.norm.len() == hidden
-                        && f.gate.rows == f.up.rows
-                        && f.down.rows == hidden
-                        && f.gate.row_bytes / f.gate.block_bytes * f.gate.block_elems == hidden
-                        && f.up.row_bytes / f.up.block_bytes * f.up.block_elems == hidden
-                        && f.down.row_bytes / f.down.block_bytes * f.down.block_elems == f.gate.rows
-                }
-            }
+            && self.ffn.as_ref().is_none_or(|f| f.fits(self.out_proj.rows))
     }
 }
 
@@ -263,7 +291,13 @@ fn encode_ffn_tail<'b>(
         )?;
     }
     encode_matvec(encoder, device, f.down, &down_w, act_buf, ffn_out)?;
+    if let Some(g) = f.routed.as_ref().and_then(|r| r.shared_gate) {
+        crate::gdn_moe::encode_shared_gate(encoder, device, g, normed, ffn_out, 1)?;
+    }
     crate::elem::encode_vec_add(encoder, device, h_buf, ffn_out, hidden as u32)?;
+    if let Some(r) = &f.routed {
+        crate::gdn_moe::encode_routed(encoder, device, r, normed, h_buf, sc)?;
+    }
     Ok(h_buf)
 }
 
@@ -391,11 +425,8 @@ unsafe fn encode_layer(
     let ffn_scratch = match &w.ffn {
         None => None,
         Some(f) => Some(
-            crate::scratch_pool::Scratch::take(
-                device,
-                &[hidden, hidden, f.gate.rows, f.up.rows, f.gate.rows, hidden],
-            )
-            .ok_or(MetalError::BufferAllocFailed)?,
+            crate::scratch_pool::Scratch::take(device, &f.tail_lens(hidden))
+                .ok_or(MetalError::BufferAllocFailed)?,
         ),
     };
     let conv_out = scratch.buf(0);
@@ -661,6 +692,11 @@ pub unsafe fn launch_gdn_branch(
     residual: Option<&[f32]>,
     h_ext: Option<&ProtocolObject<dyn MTLBuffer>>,
 ) -> Result<Vec<f32>, MetalError> {
+    // A routed layer's experts are read back for the hotness counters
+    // only by a run (`GdnRun::finish_with_head`); alone, the host runs it.
+    if w.ffn.as_ref().is_some_and(|f| f.routed.is_some()) {
+        return Err(MetalError::CommandFailed);
+    }
     let shared = shared_metal()?;
     let queue = &shared.queue;
     let cmd_buf = queue.commandBuffer().ok_or(MetalError::CommandFailed)?;
@@ -729,6 +765,19 @@ pub struct GdnRun {
     /// and their lengths. `finish` reads them back with the hidden
     /// state, so the host gets all four for one wait.
     head: Option<(crate::scratch_pool::Scratch, usize, usize)>,
+    /// Each routed tail in the run: its caller's tag, the `keep` entry
+    /// holding its scratch, and its `top_k`, so the experts it chose
+    /// come back with the residual stream.
+    routed: Vec<(usize, usize, usize)>,
+}
+
+/// What a finished run hands back: the residual stream, the next
+/// attention layer's Q/K/V when [`GdnRun::attn_head`] encoded them, and
+/// the experts each routed layer chose, by the tag its caller gave it.
+pub struct RunOut {
+    pub hidden: Vec<f32>,
+    pub head: Option<(Vec<f32>, Vec<f32>, Vec<f32>)>,
+    pub routed: Vec<(usize, Vec<usize>)>,
 }
 
 impl GdnRun {
@@ -747,7 +796,15 @@ impl GdnRun {
             rows: hidden.len(),
             submissions: 0,
             head: None,
+            routed: Vec::new(),
         })
+    }
+
+    /// Notes the tail just pushed onto `keep` when it is routed.
+    pub(crate) fn note_routed(&mut self, ffn: &LayerFfn<'_>) {
+        if let Some(r) = &ffn.routed {
+            self.routed.push((r.tag, self.keep.len() - 1, r.top_k));
+        }
     }
 
     /// Records a buffer this run has just committed.
@@ -819,6 +876,9 @@ impl GdnRun {
         encoder.endEncoding();
         cmd_buf.commit();
         self.keep.push(keep);
+        if let Some(f) = &w.ffn {
+            self.note_routed(f);
+        }
         self.committed(cmd_buf);
         Ok(())
     }
@@ -846,12 +906,7 @@ impl GdnRun {
     ) -> Result<(), MetalError> {
         let hidden = self.rows;
         let branch_cols = out_proj.row_bytes / out_proj.block_bytes * out_proj.block_elems;
-        if out_proj.rows != hidden
-            || branch.len() != branch_cols
-            || ffn.norm.len() != hidden
-            || ffn.gate.rows != ffn.up.rows
-            || ffn.down.rows != hidden
-        {
+        if out_proj.rows != hidden || branch.len() != branch_cols || !ffn.fits(hidden) {
             return Err(MetalError::CommandFailed);
         }
         let shared = shared_metal()?;
@@ -860,18 +915,8 @@ impl GdnRun {
             .ok_or(MetalError::BufferAllocFailed)?;
         let branch_buf = scratch.write(0, branch).ok_or(MetalError::CommandFailed)?;
         let proj_buf = scratch.buf(1);
-        let tail = crate::scratch_pool::Scratch::take(
-            device,
-            &[
-                hidden,
-                hidden,
-                ffn.gate.rows,
-                ffn.up.rows,
-                ffn.gate.rows,
-                hidden,
-            ],
-        )
-        .ok_or(MetalError::BufferAllocFailed)?;
+        let tail = crate::scratch_pool::Scratch::take(device, &ffn.tail_lens(hidden))
+            .ok_or(MetalError::BufferAllocFailed)?;
         let out_w = resident_weight_buffer(device, out_proj.weights)?;
         let signs = match fold_branch.and_then(|p| p.signs) {
             None => None,
@@ -915,6 +960,7 @@ impl GdnRun {
             head: None,
             ffn: Some(tail),
         });
+        self.note_routed(ffn);
         self.committed(cmd_buf);
         Ok(())
     }
@@ -1028,6 +1074,7 @@ impl GdnRun {
             Some(hidden_buf),
             &mut self.keep,
         )?;
+        self.note_routed(ffn);
         encoder.endEncoding();
         cmd_buf.commit();
         self.committed(cmd_buf);
@@ -1037,15 +1084,13 @@ impl GdnRun {
     /// Waits for every layer committed so far and returns the residual
     /// stream.
     pub fn finish(self) -> Result<Vec<f32>, MetalError> {
-        Ok(self.finish_with_head()?.0)
+        Ok(self.finish_with_head()?.hidden)
     }
 
     /// [`Self::finish`], also returning the Q/K/V that
-    /// [`Self::attn_head`] encoded, when it did.
-    #[allow(clippy::type_complexity)]
-    pub fn finish_with_head(
-        self,
-    ) -> Result<(Vec<f32>, Option<(Vec<f32>, Vec<f32>, Vec<f32>)>), MetalError> {
+    /// [`Self::attn_head`] encoded, when it did, and the experts every
+    /// routed layer chose.
+    pub fn finish_with_head(self) -> Result<RunOut, MetalError> {
         let read = |buf: &ProtocolObject<dyn MTLBuffer>, n: usize| -> Vec<f32> {
             // SAFETY: shared storage of exactly `n` floats, written by
             // kernels the wait below has completed.
@@ -1054,7 +1099,11 @@ impl GdnRun {
         let Some(last) = &self.last else {
             // SAFETY: shared storage of exactly `rows` floats, written
             // by `start` and by nothing since.
-            return Ok((read(self.hidden.buf(0), self.rows), None));
+            return Ok(RunOut {
+                hidden: read(self.hidden.buf(0), self.rows),
+                head: None,
+                routed: Vec::new(),
+            });
         };
         // One queue is ordered, so waiting for the LAST buffer waits
         // for every buffer before it.
@@ -1074,7 +1123,19 @@ impl GdnRun {
                 read(sc.buf(3), *k_rows),
             )
         });
-        Ok((hidden, head))
+        let routed = self
+            .routed
+            .iter()
+            .filter_map(|&(tag, at, k)| {
+                let tail = self.keep.get(at)?.ffn.as_ref()?;
+                Some((tag, crate::gdn_moe::read_ids(tail, k)))
+            })
+            .collect();
+        Ok(RunOut {
+            hidden,
+            head,
+            routed,
+        })
     }
 }
 
@@ -1135,11 +1196,12 @@ pub fn launch_attn_tail(
 ) -> Result<Vec<f32>, MetalError> {
     let hidden = residual.len();
     let branch_cols = out_proj.row_bytes / out_proj.block_bytes * out_proj.block_elems;
+    // A routed tail alone has no run to hand its experts back through
+    // for the hotness counters (`GdnRun::finish_with_head`).
     if out_proj.rows != hidden
         || branch.len() != branch_cols
-        || ffn.norm.len() != hidden
-        || ffn.gate.rows != ffn.up.rows
-        || ffn.down.rows != hidden
+        || !ffn.fits(hidden)
+        || ffn.routed.is_some()
     {
         return Err(MetalError::CommandFailed);
     }
@@ -1164,18 +1226,8 @@ pub fn launch_attn_tail(
     let proj_buf = scratch.buf(1);
     // The FFN tail indexes its own scratch from 0, so it gets a view
     // starting where its six buffers do.
-    let tail = crate::scratch_pool::Scratch::take(
-        device,
-        &[
-            hidden,
-            hidden,
-            ffn.gate.rows,
-            ffn.up.rows,
-            ffn.gate.rows,
-            hidden,
-        ],
-    )
-    .ok_or(MetalError::BufferAllocFailed)?;
+    let tail = crate::scratch_pool::Scratch::take(device, &ffn.tail_lens(hidden))
+        .ok_or(MetalError::BufferAllocFailed)?;
 
     let out_w = resident_weight_buffer(device, out_proj.weights)?;
     let signs = match fold_branch.and_then(|p| p.signs) {
@@ -1327,6 +1379,10 @@ pub fn launch_attn_layer(
     ffn: &LayerFfn<'_>,
     residual: &[f32],
 ) -> Result<Vec<f32>, MetalError> {
+    // As `launch_attn_tail`: a routed layer rides in a run or not here.
+    if ffn.routed.is_some() {
+        return Err(MetalError::CommandFailed);
+    }
     let hidden = residual.len();
     let shared = shared_metal()?;
     let cmd_buf = shared

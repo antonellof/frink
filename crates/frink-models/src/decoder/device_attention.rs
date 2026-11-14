@@ -164,7 +164,7 @@ impl Decoder {
                 .push(k, v)
                 .expect("unbounded/planned KvCache growth is infallible");
         }
-        layer.moe.record_activations_dense();
+        Self::record_fused_ffn(layer);
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
         self.close_run(run, end, pos, hidden, kv_caches, pending)
     }

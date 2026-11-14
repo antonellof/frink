@@ -15,20 +15,17 @@ impl Gdn {
     /// This layer's whole prefill body as one description:
     /// `attn_norm`, the four projections, the branch and the FFN.
     ///
-    /// `None` for the shapes the kernels do not serve, each named: the
-    /// FUSED beta/alpha spelling (its per-group interleave is host
-    /// arithmetic), gate projections that are not plain f32 or that
-    /// carry a fold, `qkv` and `z` folded differently (they share one
-    /// input), and any projection with no GEMM for its storage.
+    /// `None` for the shapes the kernels do not serve, each named: gate
+    /// projections that carry a fold, `qkv` and `z` folded differently
+    /// (they share one input), and any projection with no GEMM for its
+    /// storage.
     pub fn prefill_layer<'a>(
         &'a self,
         attn_norm: &'a [f32],
         rms_eps: f32,
         ffn: &LayerFfnParts<'a>,
     ) -> Option<frink_metal::gdn_prefill::PrefillGdnLayer<'a>> {
-        let BetaAlpha::Split { beta, alpha } = &self.beta_alpha else {
-            return None;
-        };
+        let BetaAlpha { beta, alpha } = &self.beta_alpha;
         let f32_rows = |m: &'a WeightMatrix| match m {
             WeightMatrix::F32(t) => Some(t.data.as_slice()),
             _ => None,
@@ -204,7 +201,7 @@ mod tests {
                 .iter()
                 .map(|x| -(x.abs() + 0.1))
                 .collect(),
-            beta_alpha: BetaAlpha::Split {
+            beta_alpha: BetaAlpha {
                 beta: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
                 alpha: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
             },

@@ -95,12 +95,7 @@ impl DecodeAttnLayer<'_> {
             && cols(self.o_proj) == q_width
             && fold_ok(self.fold_x, hidden)
             && fold_ok(self.fold_branch, q_width)
-            && f.norm.len() == hidden
-            && f.gate.rows == f.up.rows
-            && f.down.rows == hidden
-            && cols(f.gate) == hidden
-            && cols(f.up) == hidden
-            && cols(f.down) == f.gate.rows
+            && f.fits(hidden)
             && norm_ok(e.q_norm)
             && norm_ok(e.k_norm)
             && e.v_norm.is_none()
@@ -228,18 +223,8 @@ pub(crate) fn encode_attn_core(
     {
         return Err(MetalError::CommandFailed);
     }
-    let tail = crate::scratch_pool::Scratch::take(
-        device,
-        &[
-            hidden,
-            hidden,
-            ffn.gate.rows,
-            ffn.up.rows,
-            ffn.gate.rows,
-            hidden,
-        ],
-    )
-    .ok_or(MetalError::BufferAllocFailed)?;
+    let tail = crate::scratch_pool::Scratch::take(device, &ffn.tail_lens(hidden))
+        .ok_or(MetalError::BufferAllocFailed)?;
     let proj = crate::scratch_pool::Scratch::take(device, &[hidden])
         .ok_or(MetalError::BufferAllocFailed)?;
     let out_w = resident_weight_buffer(device, out_proj.weights)?;
@@ -437,6 +422,7 @@ impl GdnRun {
             Some(hidden_buf),
             &mut self.keep,
         )?;
+        self.note_routed(w.ffn);
         encoder.endEncoding();
         cmd_buf.commit();
         self.committed(cmd_buf);

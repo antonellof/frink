@@ -170,7 +170,7 @@ impl Decoder {
         )
         .ok()?;
         let _ = ffn;
-        layer.moe.record_activations_dense();
+        Self::record_fused_ffn(layer);
         self.run_layers(&mut run, l + 1, end, kv_caches)?;
         self.close_run(run, end, pos, hidden, kv_caches, pending)
     }
@@ -209,7 +209,16 @@ impl Decoder {
             end = next;
         }
         let head = self.encode_next_attn_head(&mut run, end, n_layers);
-        let (out, qkv) = run.finish_with_head().ok()?;
+        let frink_metal::gdn_branch::RunOut {
+            hidden: out,
+            head: qkv,
+            routed,
+        } = run.finish_with_head().ok()?;
+        // The experts each routed layer chose, recorded as the host
+        // body records them.
+        for (l, ids) in routed {
+            self.layer_for(l).moe.record_activations(&ids);
+        }
         for l in joined {
             let cache = &mut kv_caches[l];
             let prior = cache.rows();
@@ -275,7 +284,7 @@ impl Decoder {
         if unsafe { run.attn_layer_resident(&w, mirror, pos) }.is_err() {
             return false;
         }
-        self.layer_for(l).moe.record_activations_dense();
+        Self::record_fused_ffn(self.layer_for(l));
         true
     }
 
@@ -321,9 +330,48 @@ impl Decoder {
             cache
                 .advance_len(1)
                 .expect("unbounded/planned KvCache growth is infallible");
-            layer.moe.record_activations_dense();
+            Self::record_fused_ffn(layer);
         }
         Some(())
+    }
+
+    /// The hotness counters for a layer a run carried, as the host body
+    /// keeps them: expert 0 for a dense layer here, and a routed
+    /// layer's chosen experts once the run hands them back
+    /// ([`Self::close_run`]).
+    #[cfg(feature = "metal")]
+    pub(crate) fn record_fused_ffn(layer: &LayerWeights) {
+        if layer.moe.n_experts() == 1 {
+            layer.moe.record_activations_dense();
+        }
+    }
+
+    /// Layer `l`'s FFN as a decode run takes it: the dense FFN, or a
+    /// routed one with its single shared expert when the device router
+    /// picks the experts the host would
+    /// ([`Self::gpu_router_matches_host_routing`]) and the input is not
+    /// weighted per expert. The ONE answer every run entry asks.
+    #[cfg(feature = "metal")]
+    pub(crate) fn run_ffn_parts<'a>(
+        &self,
+        l: usize,
+        layer: &'a LayerWeights,
+    ) -> Option<LayerFfnParts<'a>> {
+        let eps = self.config.rms_norm_eps;
+        if let Some(dense) = LayerFfnParts::for_layer(layer, eps, true) {
+            return Some(dense);
+        }
+        if !Self::gpu_router_matches_host_routing(layer, &self.config)
+            || self.config.moe.routed_weight_before_ffn
+        {
+            return None;
+        }
+        let routing = crate::fused_layer::Routing {
+            top_k: self.config.moe.n_experts_active,
+            renormalize: self.config.moe.norm_topk_prob,
+            tag: l,
+        };
+        LayerFfnParts::for_routed_layer(layer, eps, true, routing)
     }
 
     /// Layer `l`'s block, `attn_norm` and dense FFN when every half of
@@ -351,7 +399,7 @@ impl Decoder {
             return None;
         };
         let attn_norm = layer.attn.norm_weight.rms_weights()?;
-        let ffn = LayerFfnParts::for_layer(layer, self.config.rms_norm_eps, true)?;
+        let ffn = self.run_ffn_parts(l, layer)?;
         Some((gdn, attn_norm, ffn))
     }
 }

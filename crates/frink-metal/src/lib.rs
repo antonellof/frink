@@ -56,6 +56,10 @@ pub mod gdn_prefill_attn;
 #[cfg(feature = "metal")]
 pub mod gdn_decode_attn;
 
+/// The routed experts of a hybrid's MoE layer inside that run (#540).
+#[cfg(feature = "metal")]
+pub mod gdn_moe;
+
 /// Shared-storage buffers reused across launches, because allocating
 /// them per launch is host time the GPU ledger cannot see.
 #[cfg(feature = "metal")]
