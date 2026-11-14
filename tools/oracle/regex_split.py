@@ -152,6 +152,11 @@ def main():
     ap.add_argument("--work", required=True)
     ap.add_argument("--cargo-target-dir", default=None)
     args = ap.parse_args()
+    # cargo runs frink's side from the crate directory, so every path
+    # handed to it must not depend on this script's working directory.
+    for name in ("llama_src", "llama_bin", "work", "cargo_target_dir"):
+        if getattr(args, name):
+            setattr(args, name, os.path.abspath(getattr(args, name)))
     os.makedirs(args.work, exist_ok=True)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
