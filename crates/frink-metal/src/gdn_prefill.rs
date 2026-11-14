@@ -146,8 +146,7 @@ pub struct PrefillGdnLayer<'a> {
     /// projections are stored unfolded and read `attn_norm(x)` before it.
     pub fold_x: Option<FoldPlan<'a>>,
     /// `blk.N.ssm_beta.weight` / `ssm_alpha.weight`, `[n_v_heads][hidden]`.
-    pub beta: &'a [f32],
-    pub alpha: &'a [f32],
+    pub gates: GateProj<'a>,
     pub conv1d: &'a [f32],
     pub dt_bias: &'a [f32],
     pub a: &'a [f32],
@@ -155,6 +154,31 @@ pub struct PrefillGdnLayer<'a> {
     pub out_proj: MulMmSgLaunch<'a>,
     pub fold_y: Option<FoldPlan<'a>>,
     pub ffn: PrefillFfn<'a>,
+}
+
+/// The two gate projections, as the checkpoint stores them.
+pub enum GateProj<'a> {
+    /// Unquantized (Bonsai): both in one dispatch, [`GATE_PROJ_SRC`].
+    F32 { beta: &'a [f32], alpha: &'a [f32] },
+    /// Quantized (a Q4_K_M Qwen3.5 stores them Q8_0): the run's own
+    /// GEMM, once each, as `qkv` and `z` are.
+    Gemm {
+        beta: MulMmSgLaunch<'a>,
+        alpha: MulMmSgLaunch<'a>,
+    },
+}
+
+impl GateProj<'_> {
+    fn fits(&self, n_v_heads: usize, hidden: usize) -> bool {
+        match self {
+            GateProj::F32 { beta, alpha } => {
+                beta.len() == n_v_heads * hidden && alpha.len() == n_v_heads * hidden
+            }
+            GateProj::Gemm { beta, alpha } => [beta, alpha]
+                .iter()
+                .all(|m| m.rows == n_v_heads && cols_of(m) == hidden),
+        }
+    }
 }
 
 /// The dense half of the layer: `h += down(silu(gate(n)) * up(n))`
@@ -211,8 +235,7 @@ impl PrefillGdnLayer<'_> {
             && cols_of(&self.qkv) == hidden
             && self.z.rows == value_dim
             && cols_of(&self.z) == hidden
-            && self.beta.len() == h.n_v_heads * hidden
-            && self.alpha.len() == h.n_v_heads * hidden
+            && self.gates.fits(h.n_v_heads, hidden)
             && self.conv1d.len() == conv_dim * h.d_conv
             && self.dt_bias.len() == h.n_v_heads
             && self.a.len() == h.n_v_heads
@@ -400,8 +423,6 @@ unsafe fn encode_layer(
     let conv_state = unsafe { buffer_no_copy(device, state.conv_ptr, state.conv_bytes) }
         .ok_or(MetalError::BufferAllocFailed)?;
     let attn_norm = resident_f32_buffer(device, w.attn_norm)?;
-    let w_beta = resident_f32_buffer(device, w.beta)?;
-    let w_alpha = resident_f32_buffer(device, w.alpha)?;
     let taps = resident_f32_buffer(device, w.conv1d)?;
     let dt = resident_f32_buffer(device, w.dt_bias)?;
     let a = resident_f32_buffer(device, w.a)?;
@@ -424,18 +445,28 @@ unsafe fn encode_layer(
     // BEFORE the rotation: the gate projections are stored unfolded
     // and read `attn_norm(x)` in the primal basis; the fold below
     // rewrites that buffer in place.
-    encode_gate_proj(
-        encoder,
-        device,
-        b(slot::XN),
-        &w_beta.buffer,
-        &w_alpha.buffer,
-        b(slot::BETA_IN),
-        b(slot::ALPHA_IN),
-        hidden,
-        h.n_v_heads,
-        rows,
-    )?;
+    match &w.gates {
+        GateProj::F32 { beta, alpha } => {
+            let w_beta = resident_f32_buffer(device, beta)?;
+            let w_alpha = resident_f32_buffer(device, alpha)?;
+            encode_gate_proj(
+                encoder,
+                device,
+                b(slot::XN),
+                &w_beta.buffer,
+                &w_alpha.buffer,
+                b(slot::BETA_IN),
+                b(slot::ALPHA_IN),
+                hidden,
+                h.n_v_heads,
+                rows,
+            )?;
+        }
+        GateProj::Gemm { beta, alpha } => {
+            encode_gemm(encoder, device, beta, b(slot::XN), b(slot::BETA_IN), rows)?;
+            encode_gemm(encoder, device, alpha, b(slot::XN), b(slot::ALPHA_IN), rows)?;
+        }
+    }
     let encoder = enc.span("pf_fold_x")?;
     encode_fold(
         encoder,

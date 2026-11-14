@@ -33,6 +33,18 @@ impl Gdn {
             WeightMatrix::F32(t) => Some(t.data.as_slice()),
             _ => None,
         };
+        // Unfolded, or no launch: the gates read `attn_norm(x)` in the
+        // primal basis, before the run rotates it for `qkv` and `z`.
+        if beta.launch_parts().1.is_some() || alpha.launch_parts().1.is_some() {
+            return None;
+        }
+        let gates = match (f32_rows(beta), f32_rows(alpha)) {
+            (Some(beta), Some(alpha)) => frink_metal::gdn_prefill::GateProj::F32 { beta, alpha },
+            _ => frink_metal::gdn_prefill::GateProj::Gemm {
+                beta: beta.mul_mm_sg_launch()?,
+                alpha: alpha.mul_mm_sg_launch()?,
+            },
+        };
         let h = self.h;
         let hidden = attn_norm.len();
         let (qkv_base, qkv_fold) = self.qkv.launch_parts();
@@ -68,10 +80,7 @@ impl Gdn {
             qkv: qkv_base.mul_mm_sg_launch()?,
             z: z_base.mul_mm_sg_launch()?,
             fold_x,
-            // Unfolded and unquantized, or no launch: the gates read
-            // `attn_norm(x)` in the primal basis, at f32.
-            beta: f32_rows(beta)?,
-            alpha: f32_rows(alpha)?,
+            gates,
             conv1d: &self.conv1d,
             dt_bias: &self.dt_bias,
             a: &self.a,
@@ -106,6 +115,19 @@ mod tests {
     #[test]
     #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
     fn the_prefill_run_matches_the_host_layers() {
+        check_the_prefill_run(false);
+    }
+
+    /// The same run with the gate projections stored Q8_0, as a Q4_K_M
+    /// Qwen3.5 stores them: the run's GEMM instead of the f32 gate
+    /// kernel (`frink_metal::gdn_prefill::GateProj::Gemm`).
+    #[test]
+    #[ignore = "needs a real Metal-capable GPU; run manually with --ignored on Apple Silicon"]
+    fn the_prefill_run_matches_the_host_layers_with_quantized_gates() {
+        check_the_prefill_run(true);
+    }
+
+    fn check_the_prefill_run(q8_gates: bool) {
         let h = GdnHparams {
             d_conv: 4,
             head_dim: 128,
@@ -132,6 +154,13 @@ mod tests {
         };
         let f32m = |rows: usize, cols: usize, v: Vec<f32>| {
             WeightMatrix::F32(Tensor::new(v, vec![rows, cols]))
+        };
+        let gate_m = |rows: usize, cols: usize, v: Vec<f32>| {
+            if q8_gates {
+                q8(rows, cols, v)
+            } else {
+                f32m(rows, cols, v)
+            }
         };
         let mut sign_vec = |n: usize| -> Arc<[f32]> {
             rnd(n, 2.0)
@@ -176,8 +205,8 @@ mod tests {
                 .map(|x| -(x.abs() + 0.1))
                 .collect(),
             beta_alpha: BetaAlpha::Split {
-                beta: f32m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
-                alpha: f32m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
+                beta: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
+                alpha: gate_m(h.n_v_heads, n_embd, rnd(h.n_v_heads * n_embd, 0.2)),
             },
             norm: rnd(h.head_dim, 1.0),
             out_proj: q8(n_embd, value_dim, rnd(n_embd * value_dim, 0.2)),
