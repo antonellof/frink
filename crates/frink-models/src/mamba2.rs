@@ -16,7 +16,7 @@
 //! xBC    = silu(conv(xBC) + conv1d_b)           causal, width d_conv, state = last d_conv-1 :195-226
 //! x, B, C = xBC split                           {n_head, head_dim}, {n_group, d_state} x 2  :231-236
 //! dt     = dt + dt_b                                                                        :239
-//! y      = ssm_scan(state, x, softplus(dt), A, B, C)   frink_core::mamba2::scan_step      :244-258
+//! y      = ssm_scan(state, x, softplus(dt), A, B, C)   frink_core::mamba2::scan_rows      :244-258
 //! y      = y + x * D                             D {n_head}, per head                       :268
 //! y      = silu(z) * y                           ggml_swiglu_split                          :269
 //! y      = rms_norm(y per group) * ssm_norm      {d_inner / n_group, n_group}, if present   :271-274
@@ -48,7 +48,7 @@
 //! `mamba-base.cpp:271`, so it is loaded when present and applied when
 //! loaded.
 
-use frink_core::mamba2::{conv_step, scan_step, Decay, ScanDims};
+use frink_core::mamba2::{conv_step, scan_rows, Decay, ScanDims, ScanRows};
 
 /// Architectures that run the Mamba-2 block IN PARALLEL with attention
 /// on every layer, both reading the same `attn_norm` output, the two
@@ -304,50 +304,56 @@ impl Mamba2 {
         } else {
             self.in_proj.apply_batch(normed, rows)
         };
-        let (d_inner, w, n_head, d_state, n_group) =
-            (h.d_inner, h.conv_width(), h.n_head, h.d_state, h.n_group);
+        let (d_inner, w, n_head, n_group) = (h.d_inner, h.conv_width(), h.n_head, h.n_group);
         let stride = h.in_proj_rows();
         let dims = h.scan_dims();
+        let head_dim = h.head_dim();
         let mut ys = vec![0.0f32; rows * d_inner];
-        let mut xbc = vec![0.0f32; w];
-        let mut y = vec![0.0f32; d_inner];
-        let mut dt = vec![0.0f32; n_head];
+        // :195-226: the conv over every row and the state, its bias,
+        // SiLU. Serial over rows (each reads the window the previous one
+        // left), and cheap beside the scan.
+        let mut xbc_all = vec![0.0f32; rows * w];
+        let mut dt_all = vec![0.0f32; rows * n_head];
         for r in 0..rows {
             let row = &zxbcdt[r * stride..(r + 1) * stride];
-            let z = &row[..d_inner];
-            // :195-226: the conv over this token and the state, its
-            // bias, SiLU.
+            let xbc = &mut xbc_all[r * w..(r + 1) * w];
             conv_step(
                 &mut state.conv,
                 &self.conv1d,
                 h.d_conv,
                 &row[d_inner..d_inner + w],
-                &mut xbc,
+                xbc,
             );
             for (x, b) in xbc.iter_mut().zip(&self.conv1d_bias) {
                 *x = silu(*x + b);
             }
-            let (x, bc) = xbc.split_at(d_inner);
-            let (b, c) = bc.split_at(n_group * d_state);
             // :239: dt + dt_b; the softplus is the scan's.
-            for (o, (t, bias)) in dt
+            for (o, (t, bias)) in dt_all[r * n_head..(r + 1) * n_head]
                 .iter_mut()
                 .zip(row[d_inner + w..].iter().zip(&self.dt_bias))
             {
                 *o = t + bias;
             }
-            scan_step(
-                dims,
-                &mut state.ssm,
-                x,
-                &dt,
-                Decay::PerHead(&self.a),
-                b,
-                c,
-                &mut y,
-            );
+        }
+        // :244-258: the whole batch's scan in one parallel region. The
+        // conv output is already `[x | B | C]`, the order it reads.
+        scan_rows(
+            dims,
+            &mut state.ssm,
+            ScanRows {
+                xbc: &xbc_all,
+                stride: w,
+                dt: &dt_all,
+                rows,
+            },
+            Decay::PerHead(&self.a),
+            &mut ys,
+        );
+        for r in 0..rows {
+            let z = &zxbcdt[r * stride..r * stride + d_inner];
+            let x = &xbc_all[r * w..r * w + d_inner];
+            let y = &mut ys[r * d_inner..(r + 1) * d_inner];
             // :268-269: y + x * D per head, then silu(z) * y.
-            let head_dim = h.head_dim();
             for (hd, dd) in self.d.iter().enumerate() {
                 for i in hd * head_dim..(hd + 1) * head_dim {
                     y[i] += x[i] * dd;
@@ -366,7 +372,6 @@ impl Mamba2 {
                     }
                 }
             }
-            ys[r * d_inner..(r + 1) * d_inner].copy_from_slice(&y);
         }
         if rows == 1 {
             self.out_proj.apply(&ys)
