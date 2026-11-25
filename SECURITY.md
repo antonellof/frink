@@ -37,5 +37,12 @@ workspace share one version.
   unsafety, an out-of-bounds read, or an unbounded allocation is in
   scope.
 
+- Soundness of the published crates' APIs: safe code in a caller's own
+  program, with no `unsafe` of its own, that reaches an out-of-bounds
+  read or write; or an implementation of our `frink-core` traits
+  (`SlotMemory`, `SlabRegion`) that breaks the caller's memory safety.
+  The fix ships in the next release and the advisory names the
+  patched version, so `cargo audit` and Dependabot can see it.
+
 See [`docs/CONFIG.md`](docs/CONFIG.md) for the server's security
 variables.

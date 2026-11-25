@@ -32,7 +32,18 @@ use std::ptr::NonNull;
 use crate::expert_slots::{SlotDevice, SlotGeometry};
 
 /// Memory a slab of slots lives in.
-pub trait SlabRegion: Send + Sync {
+///
+/// # Safety
+///
+/// `base()` must be valid and writable for `len()` bytes for as long as
+/// the region lives, and never move. `SlotSlab` reads and writes through
+/// it -- `write_slot`, `copy_slot` and `slot_ptr` all add a slot offset
+/// to it and copy `slot_bytes` bytes without checking either number --
+/// so an implementation that reports a longer `len()` than it allocated
+/// turns those into reads and writes past the end of its own buffer, in
+/// safe code. An out-of-range `slot` is refused; a lying `base()`/`len()`
+/// pair cannot be, which is why the trait is `unsafe`.
+pub unsafe trait SlabRegion: Send + Sync {
     /// Where the bytes live, for reports and tests: `"host"`, `"metal"`.
     const KIND: &'static str;
 
@@ -51,7 +62,21 @@ pub trait SlabRegion: Send + Sync {
 /// What the expert store holds: [`SlotDevice`] for the writes, and
 /// [`slot_ptr`](Self::slot_ptr) for building weight views over a
 /// resident slot without copying it out again.
-pub trait SlotMemory: SlotDevice + Send + Sync {
+///
+/// # Safety
+///
+/// `slot_ptr(slot)` must be valid for `geometry().row_bytes[0]` bytes
+/// for as long as the value lives, and `geometry()` must be the geometry
+/// those bytes really hold. `SlotPool::new` caches one pointer per slot
+/// and `ExpertBytes::as_slice` builds a `&[u8]` of the source's length
+/// from that pointer, so an implementation returning a pointer into a
+/// shorter buffer makes the store read past it, in safe code. Nothing
+/// can check the promise at runtime -- there is no portable way to ask
+/// an allocation how big it is -- so it is stated as an invariant of an
+/// `unsafe trait` instead: an implementation cannot be written by safe
+/// code, and the `SAFETY:` note in `as_slice` can only be reached from
+/// one that spells the promise out.
+pub unsafe trait SlotMemory: SlotDevice + Send + Sync {
     fn geometry(&self) -> &SlotGeometry;
 
     /// [`SlabRegion::KIND`] of the memory behind the slots.
@@ -150,7 +175,7 @@ impl<R: SlabRegion> SlotDevice for SlotSlab<R> {
     }
 }
 
-impl<R: SlabRegion> SlotMemory for SlotSlab<R> {
+unsafe impl<R: SlabRegion> SlotMemory for SlotSlab<R> {
     fn geometry(&self) -> &SlotGeometry {
         &self.geometry
     }
@@ -195,7 +220,7 @@ impl HostRegion {
     }
 }
 
-impl SlabRegion for HostRegion {
+unsafe impl SlabRegion for HostRegion {
     const KIND: &'static str = "host";
 
     fn base(&self) -> NonNull<u8> {
@@ -221,7 +246,7 @@ impl HostSlotSlab {
 }
 
 #[cfg(feature = "metal")]
-impl SlabRegion for frink_metal::expert_slab::MetalSlab {
+unsafe impl SlabRegion for frink_metal::expert_slab::MetalSlab {
     const KIND: &'static str = "metal";
 
     fn base(&self) -> NonNull<u8> {
@@ -292,6 +317,37 @@ mod tests {
             slot(&slab, 0).iter().all(|&b| b == 0),
             "refusals write nothing"
         );
+    }
+
+    /// The contracts on [`SlabRegion`](Self::SlabRegion) and
+    /// [`SlotMemory`](Self::SlotMemory) are invariants an `unsafe trait`
+    /// enforces, not prose a caller may ignore: an implementation that
+    /// has not read them cannot be written in safe code at all. Dropping
+    /// the `unsafe` compiles again and quietly reopens both reports these
+    /// two traits close -- a safe `SlotMemory::slot_ptr` over a short
+    /// buffer has `ExpertBytes::as_slice` read past its allocation, and a
+    /// safe `SlabRegion::base` does the same through `write_slot` -- so
+    /// the modifier is pinned here, in the idiom of
+    /// `frink-models/tests/documented_counts.rs`: prose and code agree,
+    /// or a test says so.
+    #[test]
+    fn the_slot_contracts_are_unsafe_trait_invariants() {
+        let src = include_str!("expert_slab.rs");
+        for name in ["SlabRegion", "SlotMemory"] {
+            // Built at runtime: the text searched is this same file, so a
+            // needle spelled out in one piece would match this test's own
+            // source and pass for a file that declares a safe trait.
+            let declared = format!("pub unsafe trait {name}");
+            let safe = format!("pub trait {name}");
+            assert!(
+                src.contains(&declared),
+                "expert_slab.rs must declare `{declared}`"
+            );
+            assert!(
+                !src.contains(&safe),
+                "`{safe}` is a safe trait, which is the bug"
+            );
+        }
     }
 
     #[test]

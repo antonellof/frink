@@ -98,6 +98,31 @@ pub struct AlignedF32 {
 /// for mmap-backed weights).
 pub const PAGE: usize = 16384;
 
+/// The size in bytes [`AlignedF32::zeros`](AlignedF32::zeros) asks `alloc`
+/// for, or `None` when `len` has no representable size. `PAGE`-aligned, and
+/// never shorter than `len * size_of(f32)`, which is exactly what `Deref`'s
+/// `SAFETY:` note needs in order to be true.
+///
+/// Two multiplications are checked, because both can wrap and they wrap at
+/// different `len`s: `len * size_of(f32)` from `len = 2**62` up (`2**62 + 4`
+/// is `2**64 + 16`, i.e. 16 bytes), then the rounding `div_ceil(PAGE) * PAGE`
+/// just under a `usize`'s maximum (`2**62 - 1` needs `2**64 - 4` bytes, so
+/// it is refused although its multiply fits). A wrapped size allocates one
+/// page, keeps the `len` it was given, and `Deref` hands out a `&[f32]` of
+/// that `len` over it: every index past the page is outside the allocation,
+/// from safe code, in every build without overflow checks. `Debug` builds
+/// panic on the multiply instead, which is why the boundary tests are written
+/// against this -- `zeros` cannot be handed a `len` it would refuse, since
+/// it would ask for an allocation that large.
+fn page_rounded_bytes(len: usize) -> Option<usize> {
+    if len == 0 {
+        return Some(PAGE); // `zeros(0)` took one page before, and still does.
+    }
+    let floats = std::mem::size_of::<f32>();
+    len.checked_mul(floats)
+        .and_then(|bytes| bytes.div_ceil(PAGE).checked_mul(PAGE))
+}
+
 // SAFETY: the allocation is owned exclusively by this value and holds
 // plain `f32`, so moving it between threads and sharing `&` are both
 // sound. A Metal buffer wrapping it is created and consumed inside one
@@ -109,7 +134,11 @@ impl AlignedF32 {
     /// `len` zeroed floats, page-aligned, with the allocation rounded
     /// up to a whole page.
     pub fn zeros(len: usize) -> Self {
-        let bytes = (len * std::mem::size_of::<f32>()).max(1).div_ceil(PAGE) * PAGE;
+        // A length with no byte size is a caller's error, named, and not
+        // an allocation shorter than the slice `Deref` is about to hand
+        // out of it.
+        let bytes = page_rounded_bytes(len)
+            .expect("AlignedF32::zeros: no page-rounded byte size fits a usize");
         let layout = std::alloc::Layout::from_size_align(bytes, PAGE).expect("page layout");
         // SAFETY: a non-zero layout; the pointer is checked below and
         // freed in `Drop` with the same layout.
@@ -143,13 +172,23 @@ impl Drop for AlignedF32 {
 impl std::ops::Deref for AlignedF32 {
     type Target = [f32];
     fn deref(&self) -> &[f32] {
-        // SAFETY: `len` floats were allocated and zeroed by `zeros`.
+        debug_assert!(
+            self.bytes >= self.len.saturating_mul(std::mem::size_of::<f32>()),
+            "the allocation must hold the floats `deref` hands out",
+        );
+        // SAFETY: `len` floats were allocated and zeroed by `zeros`, whose
+        // size comes from `page_rounded_bytes`, so the allocation is at
+        // least `len * size_of(f32)` bytes.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 
 impl std::ops::DerefMut for AlignedF32 {
     fn deref_mut(&mut self) -> &mut [f32] {
+        debug_assert!(
+            self.bytes >= self.len.saturating_mul(std::mem::size_of::<f32>()),
+            "the allocation must hold the floats `deref` hands out",
+        );
         // SAFETY: as `deref`, with the exclusive borrow this takes.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
@@ -198,6 +237,56 @@ mod aligned_tests {
             assert_eq!(b.len(), len);
             assert!(b.iter().all(|v| *v == 0.0), "zeroed");
         }
+    }
+
+    /// A `len` with no page-rounded byte size is refused, not allocated
+    /// short. `2**62` is where `len * size_of(f32)` wraps; `2**62 - 4095`
+    /// sits below that wrap, so its multiply fits and only the page rounding
+    /// overflows -- the second guard, which the first alone would let through
+    /// as a 16 KiB allocation for 4096 floats' worth of `len`.
+    #[test]
+    fn a_len_with_no_page_rounded_size_is_refused() {
+        assert_eq!(page_rounded_bytes(0), Some(PAGE), "zeros(0) takes one page");
+        assert_eq!(
+            page_rounded_bytes(1),
+            Some(PAGE),
+            "one float takes one page"
+        );
+        let floats = std::mem::size_of::<f32>();
+        for len in [
+            1usize << 62,
+            (1usize << 62) - (PAGE / floats - 1),
+            1usize << 63,
+        ] {
+            assert_eq!(page_rounded_bytes(len), None, "len {len} has no size");
+        }
+    }
+
+    /// The accepted side of the same boundary: `PAGE / size_of(f32)` = 4096
+    /// floats below the wrap is the largest `len` whose page-rounded byte
+    /// size is still a `usize`, so it must stay acceptable and the `len`
+    /// above it must not be.
+    #[test]
+    fn an_accepted_len_allocates_at_least_the_floats_it_holds() {
+        let floats = std::mem::size_of::<f32>();
+        let last = (1usize << 62) - (PAGE / floats);
+        let bytes = page_rounded_bytes(last).expect("the largest acceptable len must be accepted");
+        assert_eq!(bytes % PAGE, 0, "len {last} is not page aligned");
+        assert!(
+            bytes >= last * floats,
+            "len {last} is shorter than its floats"
+        );
+        assert_eq!(
+            page_rounded_bytes(last + 1),
+            None,
+            "the len above must be refused",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "no page-rounded byte size fits")]
+    fn zeros_refuses_a_len_it_cannot_allocate() {
+        AlignedF32::zeros(1usize << 62);
     }
 
     #[test]
