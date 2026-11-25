@@ -15,6 +15,8 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.64.0] - 2026-11-25
+
 ### Added
 
 - **A CUDA decode token can replay from a CUDA graph
@@ -158,7 +160,7 @@ are the ones worth reading twice.
 ### Fixed
 
 - **`AlignedF32::zeros` sized its allocation with wrapping arithmetic**
-  (GHSA-xj2w-fm6g-f5pj, `frink-core` 0.26.0-0.63.0). `len * size_of(f32)`
+  (GHSA-xj2w-fm6g-f5pj, reported by @ydongyeon; `frink-core` 0.26.0-0.63.0). `len * size_of(f32)`
   wraps from `len = 2**62`, and the page rounding `div_ceil(PAGE) * PAGE`
   wraps on its own just under a `usize`'s maximum (`2**62 - 1` needs
   `2**64 - 4` bytes), so `zeros` allocated one 16 KiB page, stored the
@@ -172,7 +174,7 @@ are the ones worth reading twice.
   `state_floats`, and the tensors those hyperparams size are checked against
   the file before any state is allocated.
 - **`SlotMemory` and `SlabRegion` promised their contract in prose only**
-  (GHSA-94v8-9f79-j8qf, `frink-core` 0.51.0-0.63.0). `SlotMemory::slot_ptr`
+  (GHSA-94v8-9f79-j8qf, reported by @ydongyeon; `frink-core` 0.51.0-0.63.0). `SlotMemory::slot_ptr`
   is documented as valid for `geometry().row_bytes[0]` bytes and
   `SlabRegion::base` for `len()` bytes, and `SlotPool::new`,
   `ExpertBytes::as_slice`, `SlotSlab::write_slot` and `SlotSlab::copy_slot`
