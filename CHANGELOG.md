@@ -157,6 +157,35 @@ are the ones worth reading twice.
 
 ### Fixed
 
+- **`AlignedF32::zeros` sized its allocation with wrapping arithmetic**
+  (GHSA-xj2w-fm6g-f5pj, `frink-core` 0.26.0-0.63.0). `len * size_of(f32)`
+  wraps from `len = 2**62`, and the page rounding `div_ceil(PAGE) * PAGE`
+  wraps on its own just under a `usize`'s maximum (`2**62 - 1` needs
+  `2**64 - 4` bytes), so `zeros` allocated one 16 KiB page, stored the
+  `len` it was handed, and `Deref` handed out a `&[f32]` of that `len` over
+  it: every index past 4096 was outside the allocation, from safe code, in
+  every build without overflow checks. `Debug` built on the multiply and
+  panicked, which is why it survived review. Both multiplications are now
+  `checked_*` behind `page_rounded_bytes`, a `len` with no representable
+  byte size is refused by name, and the boundary is tested on both sides.
+  Nothing reachable from a model file was affected: the `len`s come from
+  `state_floats`, and the tensors those hyperparams size are checked against
+  the file before any state is allocated.
+- **`SlotMemory` and `SlabRegion` promised their contract in prose only**
+  (GHSA-94v8-9f79-j8qf, `frink-core` 0.51.0-0.63.0). `SlotMemory::slot_ptr`
+  is documented as valid for `geometry().row_bytes[0]` bytes and
+  `SlabRegion::base` for `len()` bytes, and `SlotPool::new`,
+  `ExpertBytes::as_slice`, `SlotSlab::write_slot` and `SlotSlab::copy_slot`
+  all execute that promise under `unsafe`. Both traits were safe, so an
+  implementation written without a line of `unsafe` could return a pointer
+  into a shorter buffer and the store read past it. A runtime check is not
+  available (nothing portable can ask an allocation how big it is), so the
+  promise became what ADR 0004 prefers: an `unsafe trait` invariant, refused
+  at compile time for an implementation that has not stated it. The three
+  in-tree implementations (`SlotSlab<R>`, `HostRegion`, `MetalSlab`) are
+  marked `unsafe impl`; off-tree implementors are a source break, which is
+  the point.
+
 - **A K-quant Qwen3.5 decoded and prefilled layer by layer on Metal**
   (#540). The loader built packed MoE planes for a dense layer's one
   expert, and every fused FFN refuses a layer with planes, so a Q4_K_M

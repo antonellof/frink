@@ -85,6 +85,11 @@ Rust specifics:
 - Clippy with `-D warnings` is a gate, in debug and release.
 - `unsafe` needs a `// SAFETY:` comment and a scalar twin it is tested
   against.
+- A trait whose implementors must hold an invariant for memory safety is
+  an `unsafe trait` whose `# Safety` section names the invariant, so an
+  implementation that has not read it cannot be written in safe code.
+  A runtime check is not always available: nothing portable can ask an
+  allocation how big it is, so `unsafe` is the check (ADR 0004).
 - Borrow on per-token paths; hoist feature probes out of loops.
 - Tests live in `#[cfg(test)]` beside the code. Sabotage a new test
   once, grep that the mutation landed, and see it go red.
