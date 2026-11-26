@@ -24,7 +24,12 @@ wait for them to finish.
 - Admission: `worker.rs:63` (`admit`), capped by both a sequence count
   and a block budget (`block_budget.rs`). A head job that does not fit
   stops the line rather than being skipped, because skipping on SIZE
-  is a starvation bug.
+  is a starvation bug. The waiting job chosen is the one the
+  cache-aware policy picks among the first eight (a radix-cached job may
+  jump ahead), with a request's `priority` as the primary dimension:
+  the highest-priority waiting job is admitted first, ties keep the
+  arrival order, and a job at its own skip bound is admitted regardless
+  of priority.
 - One row's state is a value (`row.rs`, `Slot`), so rows are added and
   removed without a second code path.
 - Per-row timing is owned by one type (`clock.rs`), which is why
@@ -59,9 +64,13 @@ followed by every token it had generated, then carries on.
   request's whole life before it runs. What can happen is a job
   waiting behind rows that hold large reservations, so the trigger is
   the job admission would take next having waited that many admission
-  passes. `make_room` (`preempt.rs:113`) then evicts the most recently
-  admitted decoding rows, as few as make that job fit under BOTH caps,
-  or none if every eligible row together would not.
+  passes. `make_room` (`preempt.rs:120`) then evicts decoding rows, as
+  few as make that job fit under BOTH caps, or none if every eligible
+  row together would not. Priority decides which rows are eligible: a
+  row whose priority is higher than the waiting request's is never
+  evicted, and the surviving rows are evicted lowest-priority first
+  (ties keep the newest-first order). With no `priority` set anywhere,
+  this is exactly the pre-priority behaviour: newest-first.
 - **What survives is one type.** Everything a row has produced that a
   recompute cannot reproduce lives in `answer.rs` (`Answer`): the
   sampler's RNG position, the grammar parse, the reasoning budget, the

@@ -15,6 +15,23 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+### Added
+
+- **Request `priority` orders the continuous batcher (#541).** Three
+  generation wires (`/v1/chat/completions`, `/v1/completions`,
+  `/completion`) now carry the field as an advisory scheduling hint: the
+  highest-priority waiting job is admitted first, ties keep the arrival
+  order, and the existing anti-starvation bound (a job at its skip bound
+  is admitted regardless) still wins. Inside a priority class the
+  cache-aware rule ranks the jobs exactly as before. Preemption prefers
+  the lowest-priority evictable row (ties keep the newest-first order)
+  and never evicts a row that asked for more than the waiting request.
+  The field never changes the answer: it is not in the response cache
+  key, no token, text or timing is derived from it, and a request with
+  none behaves exactly as before. The per-API-key cap that the issue
+  names as the untrusted-input safety net is NOT in this change; it is
+  left as an open question for the maintainer.
+
 ## [0.64.0] - 2026-11-25
 
 ### Added

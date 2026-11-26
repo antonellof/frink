@@ -104,6 +104,9 @@ pub(crate) async fn serve(
         // Set by the STREAMING routes, which are the only ones whose
         // delivery order a client can observe (`crate::round_robin`).
         interleave_choices: false,
+        // A scheduling hint only: it decides which waiter starts
+        // first, never what comes back. `None` is arrival order.
+        priority: req.unimplemented.priority,
         // llama.cpp's native wire carries neither field.
         logit_bias: crate::logit_bias::LogitBias::parse(req.logit_bias.as_ref(), "/completion")?,
         keep_special_tokens: false,

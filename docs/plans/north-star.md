@@ -152,7 +152,8 @@ DFlash drafts with it (#606, #608).
     batched checkpoint), and per-token recurrent snapshots so a partial
     accept does not replay.
 17. **Scheduling**: preemption on by default after a measurement
-    (#408), and a request priority (#541).
+    (#408). Request priority landed (#541); the per-API-key cap it
+    names is still open.
 18. **Memory**: sliding-window eviction in the paged store and the pool
     (#61); KV quantization on the host and CUDA stores (#535); the disk
     KV tier wired into serving, or deleted (#536); continuous batching

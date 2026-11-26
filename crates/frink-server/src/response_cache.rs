@@ -227,6 +227,13 @@ pub fn generation_key(params: &GenerationParams) -> GenerationKey {
         stop_token_ids,
         json_object,
         grammar,
+        // NOT KEYED. A scheduling hint does not change the answer --
+        // the same prompt under the same sampling parameters reads
+        // the same tokens whether the caller asked to be served
+        // first or not. Keying it would give every request that set
+        // one a unique key and switch the cache off for exactly the
+        // high-priority traffic it is built to serve.
+        priority: _,
         // NOT KEYED. A cancel token is this request's own handle, not a
         // parameter of the answer: two identical requests hold two
         // different tokens, so keying on it would give every request a
@@ -622,6 +629,7 @@ mod tests {
     /// field at its do-nothing value.
     fn params() -> GenerationParams {
         GenerationParams {
+            priority: None,
             cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,

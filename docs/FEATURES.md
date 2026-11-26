@@ -217,6 +217,7 @@ Frink Studio ([`ui/`](../ui)) is a separate app over HTTP;
 |---|---|
 | Private loop | The default: one client at a time. On Metal it attends on the device and is the faster path for one client |
 | Continuous batching | Opt-in on every backend (`-cb`, `-np` / `--parallel N`, `FRINK_CONTINUOUS_BATCHING=1`): clients share one batched decode worker, llama.cpp's slots model. Throughput per concurrency is in [`RESULTS.md`](../benchmarks/RESULTS.md#serving-features-measured) |
+| `priority` | An advisory scheduling hint on the batched path: the highest-priority waiting request is admitted first (ties keep arrival order), and a row strictly above it in priority is never evicted to make room. It changes nothing about the answer, and a deployment that does not want clients setting one should refuse it at the gateway |
 | Chunked prefill | `-b` / `-ub` set the chunk on both paths. Each tick has one token budget for prefill and decode (`FRINK_CB_MAX_BATCH_TOKENS`, default 256) with a 16-token prefill floor. Latency effect not yet measured |
 | Cache-aware admission | With a radix cache, a waiting job whose prompt is computed may go first. Only the first eight waiters are considered and none is passed over more than four times; ties keep arrival order, and a picked job that does not fit stops the line |
 | Prefix cache | `FRINK_PREFIX_CACHE_ENTRIES`, private loop: LRU KV snapshots, so a follow-up turn prefills only the new message. Stores greedy Metal requests too; refuses a recurrent model's state |

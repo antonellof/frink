@@ -109,7 +109,7 @@ const CITATIONS: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/frink-server/src/serving/batch/preempt.rs",
-        113,
+        120,
         "fn make_room",
     ),
     (

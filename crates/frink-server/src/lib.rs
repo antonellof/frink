@@ -5013,6 +5013,7 @@ pub(crate) mod tests {
 
     pub(crate) fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            priority: None,
             cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,

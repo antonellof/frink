@@ -84,6 +84,7 @@ Request bodies are capped at axum's 2 MiB default; a larger body is a
 | `n` (>1) | On `/v1/completions` and chat: one prefill, KV forked per choice, `prompt_tokens` counts the prompt once. Choice `i` uses `seed + i`, so choice 0 equals the `n = 1` answer. Streamed on chat, choices are interleaved and each chunk carries its index. **501** on `/completion` |
 | `best_of` (>1) | Where `n` is served: generates `best_of` from one prefill and returns the `n` best by summed log-probability (not per-token mean), as upstream. `usage.completion_tokens` counts discards too. `best_of < n` is a 400 |
 | `cache_salt` | Every store. The caller's prefix-cache namespace; the contiguous cache, the response cache and the paged radix tree all key on it. Only its hash is kept. Absent, empty or whitespace is the shared namespace |
+| `priority` | Advisory scheduling hint. The continuous batcher admits a higher-`priority` request ahead of a lower one (ties keep arrival order), and prefers to evict a decoding row with a lower priority to make room (never one with more than it). `None`/absent is arrival order. It never changes the answer: no token, text or timing is derived from it. A deployment that does not want a client to set one should refuse it at the gateway |
 | `prompt_logprobs` | On `/v1/completions`: one entry per prompt token, the first `null`, each later one with a 1-based `rank`, scored from the plain softmax. Cap 5. On the paged store such a request skips the prefix tree. **501** on the other wires |
 | `logit_bias` | All three generation wires. `{"<token id>": <bias>}`, added before sampling, range `-100..100`; outside is a **400**. `{}` and `null` accepted. Cannot lift a token a grammar, JSON mode, `allowed_token_ids` or `bad_words` forbade |
 | `allowed_token_ids`, `bad_words` | All three generation wires, in the grammar's mask. `bad_words` works on tokens: a word's last token is forbidden only after the tokens before it, so it is exact only for the model's own tokenization. An empty `allowed_token_ids` is a **400** |
@@ -756,6 +757,14 @@ Admission is first in, first out, except that a job whose prompt the
 radix prefix cache already holds may jump ahead: only the first eight
 waiting jobs are considered, and no job is passed over more than four
 times.
+
+`priority`, when the caller sends one, is the primary dimension of the
+same choice: the highest-priority waiting job is admitted first, ties
+keep the arrival order, and a job at its own skip bound is admitted
+regardless of priority. Inside a priority class, the existing
+cache-aware rule ranks the jobs. An absent `priority` is the same class
+as an explicit `0`, so a server where nobody sets one behaves exactly
+as above: arrival order, with the cache-aware exception.
 
 `-b N` / `--batch-size N` and `-ub N` / `--ubatch-size N` set the
 prefill chunk on both decode paths (`FRINK_CB_PREFILL_CHUNK` here,

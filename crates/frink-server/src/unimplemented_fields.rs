@@ -34,7 +34,11 @@
 //! hint, a tracing tag -- is not refused, because refusing it would
 //! break a caller for whom ignoring it was correct.
 //!
-//! So `priority` is deliberately absent, and `cache_salt` is absent
+//! `priority` was deliberately absent too: it is a scheduling hint
+//! that cannot change the answer, and refusing it on the routes that
+//! do not batch would break callers for whom ignoring it was correct.
+//! It is now SERVED (`GenerationParams::priority`), on the routes
+//! that carry it. `cache_salt` is absent
 //! with a reason worth writing down: it changes which prefix-cache
 //! entries a request may reuse, so a server that IGNORES it can serve
 //! one caller from another's cached prefix. frink's radix cache is
@@ -129,6 +133,15 @@ pub(crate) struct UnimplementedFields {
     /// route, because the store is a property of the deployment rather
     /// than of the field.
     pub(crate) cache_salt: Option<String>,
+    /// The scheduling hint a request asks for: the batcher admits a
+    /// higher-priority job ahead of a lower-priority one.
+    ///
+    /// SERVED and NOT refused: like `cache_salt`, this changes nothing
+    /// about the answer, only which waiter starts first. Higher wins;
+    /// `None` (absent) is arrival order. It is deliberately not in the
+    /// `refuse()` destructure below beyond the shared field list --
+    /// there is nothing to refuse.
+    pub(crate) priority: Option<i32>,
     /// Include the model's end-of-generation token in the returned
     /// text. SERVED (`GenerationParams::keep_special_tokens`); `true`
     /// is the default and means what this server already did.
@@ -205,6 +218,7 @@ impl UnimplementedFields {
             cache_salt,
             skip_special_tokens,
             return_tokens_as_token_ids,
+            priority,
         } = self;
 
         // `n` > 1 is SERVED on the routes whose response has a
@@ -308,6 +322,9 @@ impl UnimplementedFields {
         // Both served; see the fields. Named so the exhaustive
         // destructure stays exhaustive.
         let _ = (skip_special_tokens, return_tokens_as_token_ids);
+        // Served; see the field. Named here so the exhaustive destructure
+        // stays exhaustive.
+        let _ = priority;
         Ok(())
     }
 }
@@ -378,7 +395,7 @@ mod tests {
         // or named here as SERVED. A member added to the struct and
         // forgotten in both places changes the count and fails, which
         // is the whole reason this assertion exists.
-        const SERVED: [&str; 7] = [
+        const SERVED: [&str; 8] = [
             "cache_salt",
             "allowed_token_ids",
             "bad_words",
@@ -386,6 +403,7 @@ mod tests {
             "truncate_prompt_tokens",
             "skip_special_tokens",
             "return_tokens_as_token_ids",
+            "priority",
         ];
         assert_eq!(
             cases.len() + SERVED.len(),

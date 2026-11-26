@@ -177,15 +177,26 @@ pub(super) fn admit(
 /// clock. Asking through the ordinary lookup would make the cache's
 /// own recency reflect what was CONSIDERED rather than what was
 /// served.
+///
+/// The same rule is applied to the priority axis whether or not a
+/// radix cache is configured: a caller's priority is read off the
+/// params, so a server with no paged KV still admits a higher-priority
+/// waiter ahead of a lower-priority one. The `None`/`0` default keeps
+/// the arrival order for a server where nobody asks.
 fn cache_aware_pick(waiting: &VecDeque<Job>, paged: Option<&PagedKvConfig>) -> usize {
     if waiting.len() < 2 {
         return 0;
     }
-    let Some(radix) = paged.and_then(|c| c.radix.as_ref()) else {
-        return 0;
-    };
     let window = waiting.len().min(cache_aware::WINDOW);
     let skips: Vec<u32> = waiting.iter().take(window).map(|j| j.skips).collect();
+    let priorities: Vec<Option<i32>> = waiting
+        .iter()
+        .take(window)
+        .map(|j| j.params.priority)
+        .collect();
+    let Some(radix) = paged.and_then(|c| c.radix.as_ref()) else {
+        return cache_aware::choose(&vec![0; window], &skips, &priorities);
+    };
     let depths: Vec<usize> = {
         let tree = radix.lock().unwrap_or_else(|p| p.into_inner());
         waiting
@@ -197,7 +208,7 @@ fn cache_aware_pick(waiting: &VecDeque<Job>, paged: Option<&PagedKvConfig>) -> u
             })
             .collect()
     };
-    cache_aware::choose(&depths, &skips)
+    cache_aware::choose(&depths, &skips, &priorities)
 }
 
 /// Applies every pending cancellation, at a step boundary, on the

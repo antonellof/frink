@@ -94,18 +94,28 @@ pub(super) const MAX_SKIPS: u32 = 4;
 /// Both inputs below are therefore built per tick from the queue
 /// itself, so they are the same length by construction.
 /// Which waiting job to admit next, given how much of each one's
-/// prompt is already computed.
+/// prompt is already computed, and how high each job asked to go.
 ///
-/// Takes DEPTHS rather than jobs: the policy ranks numbers, and where
-/// the numbers come from is the caller's business. That also makes
-/// every case below testable without building a `Job`, which needs a
-/// reply channel and an abort handle to exist at all.
+/// Takes DEPTHS and PRIORITIES rather than jobs: the policy ranks
+/// numbers, and where the numbers come from is the caller's business.
+/// That also makes every case below testable without building a `Job`,
+/// which needs a reply channel and an abort handle to exist at all.
+///
+/// `priorities` is a scheduling hint, one entry per job: a higher
+/// value is admitted sooner, and `None` means "the caller said
+/// nothing" (which is 0, so every unprioritised job is in one equal
+/// class and the arrival order is never reordered by this axis). It
+/// is the PRIMARY dimension, ahead of the cache depth: a job requesting
+/// top priority is admitted ahead of a deeper-hitting lower-priority
+/// one, because the cache can be recomputed and the wait cannot be.
+/// The anti-starvation bound and the window bound are unchanged and
+/// checked exactly as before, so priority can never overrule either.
 ///
 /// Returns an index into `depths`. Always `0` when the head has been
 /// passed over its limit, when the queue is one deep, or when no job
-/// in the window has a strictly deeper hit than the head -- so the
-/// ordinary case is FIFO and costs one comparison.
-pub(super) fn choose(depths: &[usize], skips: &[u32]) -> usize {
+/// in the window outranks the head -- so the ordinary case is FIFO and
+/// costs one comparison.
+pub(super) fn choose(depths: &[usize], skips: &[u32], priorities: &[Option<i32>]) -> usize {
     if depths.len() < 2 {
         return 0;
     }
@@ -117,24 +127,44 @@ pub(super) fn choose(depths: &[usize], skips: &[u32]) -> usize {
     if skips.first().copied().unwrap_or(0) >= MAX_SKIPS {
         return 0;
     }
-    let mut best = 0usize;
-    let mut best_depth = depths[0];
-    for (i, &d) in depths.iter().enumerate().take(WINDOW).skip(1) {
-        // A job that is itself at the bound cannot be overtaken
-        // either, so the scan stops at it rather than stepping past --
-        // otherwise the bound would protect one job by starving the
-        // next.
-        if skips.get(i).copied().unwrap_or(0) >= MAX_SKIPS {
+    // The window. Inside it, the scan stops at the first at-bound job
+    // rather than stepping past -- otherwise the bound would protect
+    // one job by starving the next.
+    let mut bound = depths.len().min(WINDOW);
+    for (i, &s) in skips.iter().take(bound).enumerate().skip(1) {
+        if s >= MAX_SKIPS {
+            bound = i;
             break;
         }
-        // Strictly deeper: a tie keeps arrival order, so equal jobs
-        // stay FIFO and the policy has no effect on a cold server.
-        if d > best_depth {
+    }
+    // Priority is the primary dimension: the earliest job in the
+    // window that is at the top priority (None = 0). Among jobs in
+    // that class, the deepest cache hit wins, and ties keep arrival
+    // order. Because the head is always in the top class when nothing
+    // is better, a server where every job is unprioritised reduces to
+    // the old depth rule exactly.
+    let top = priorities
+        .iter()
+        .take(bound)
+        .map(|p| p.unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    // The head is processed first and anchors the comparison, so a tie
+    // in depth keeps arrival order; a later job must be strictly
+    // deeper to win. The head is not silently dropped -- it simply
+    // drops out of the class if a higher priority exists.
+    let mut best: Option<usize> = None;
+    let mut best_depth = 0usize;
+    for (i, &d) in depths.iter().enumerate().take(bound) {
+        if priorities.get(i).copied().flatten().unwrap_or(0) != top {
+            continue;
+        }
+        if best.is_none() || d > best_depth {
+            best = Some(i);
             best_depth = d;
-            best = i;
         }
     }
-    best
+    best.unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -147,19 +177,19 @@ mod tests {
 
     #[test]
     fn a_cold_server_is_still_fifo() {
-        assert_eq!(choose(&[0, 0, 0], &queued(3)), 0);
+        assert_eq!(choose(&[0, 0, 0], &queued(3), &[None; 3]), 0);
     }
 
     /// Ties keep arrival order, so a server where every job shares one
     /// prefix behaves exactly as it did before.
     #[test]
     fn equal_depth_keeps_arrival_order() {
-        assert_eq!(choose(&[64, 64, 64], &queued(3)), 0);
+        assert_eq!(choose(&[64, 64, 64], &queued(3), &[None; 3]), 0);
     }
 
     #[test]
     fn the_deepest_hit_in_the_window_goes_first() {
-        assert_eq!(choose(&[0, 64, 512], &queued(3)), 2);
+        assert_eq!(choose(&[0, 64, 512], &queued(3), &[None; 3]), 2);
     }
 
     /// **The anti-starvation bound.**
@@ -176,7 +206,7 @@ mod tests {
         let mut admitted_head_after = None;
         for round in 0..MAX_SKIPS + 3 {
             // The second job wins on depth every single time.
-            let pick = choose(&[0, 4096], &skips);
+            let pick = choose(&[0, 4096], &skips, &[None; 2]);
             if pick == 0 {
                 admitted_head_after = Some(round);
                 break;
@@ -204,10 +234,47 @@ mod tests {
         let mut skips = queued(3);
         skips[1] = MAX_SKIPS;
         assert_eq!(
-            choose(&[0, 0, 4096], &skips),
+            choose(&[0, 0, 4096], &skips, &[None; 3]),
             0,
             "a job behind one at the bound must not be pulled in front of it"
         );
+    }
+
+    /// **The priority axis.** A high-priority job is admitted ahead of
+    /// a lower-priority one whatever the depths say; that is the whole
+    /// point of the field. Depth still orders WITHIN a class, and an
+    /// absent priority is the default class.
+    #[test]
+    fn priority_orders_admission_ahead_of_depth() {
+        // Head is deep but low priority; the second job is shallow but
+        // higher priority: the second job must win.
+        assert_eq!(choose(&[900, 0], &queued(2), &[Some(1), Some(2)]), 1);
+        // Within a class, depth still wins.
+        assert_eq!(choose(&[0, 900], &queued(2), &[Some(2), Some(2)]), 1);
+        // An absent priority is the default class and ties with an
+        // explicit 0: depth breaks the tie.
+        assert_eq!(choose(&[0, 900], &queued(2), &[None, Some(0)]), 1);
+    }
+
+    /// Priority cannot overrule the head's anti-starvation bound: a job
+    /// that has been passed over `MAX_SKIPS` times is admitted ahead of
+    /// every higher-priority job.
+    #[test]
+    fn priority_cannot_overrule_the_starvation_bound() {
+        let skips = [MAX_SKIPS, 0];
+        assert_eq!(
+            choose(&[0, 900], &skips, &[None, Some(9)]),
+            0,
+            "the head at the bound must be admitted first, whatever the priority"
+        );
+    }
+
+    /// A job strictly lower in priority than everything else is not
+    /// pulled ahead of the head just because of its own depth -- the
+    /// head is never displaced by a deeper job in a lower class.
+    #[test]
+    fn depth_cannot_pull_a_lower_priority_job_ahead_of_the_head() {
+        assert_eq!(choose(&[0, 999], &queued(2), &[Some(2), Some(1)]), 0);
     }
 
     /// Only the first `WINDOW` jobs are considered, so a long queue
@@ -217,7 +284,7 @@ mod tests {
         let mut depths = vec![0usize; WINDOW + 2];
         depths[WINDOW + 1] = 999_999;
         assert_eq!(
-            choose(&depths, &queued(WINDOW + 2)),
+            choose(&depths, &queued(WINDOW + 2), &[None; WINDOW + 2]),
             0,
             "a job past the window must not be reachable"
         );
@@ -276,7 +343,7 @@ mod tests {
         };
 
         let fifo = run(&[0, 1, 2]);
-        let picked = choose(&start, &queued(3));
+        let picked = choose(&start, &queued(3), &[None; 3]);
         assert_eq!(picked, 1, "the deepest hit should go first");
         let policy = run(&[1, 2, 0]);
 

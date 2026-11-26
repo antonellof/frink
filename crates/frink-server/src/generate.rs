@@ -1605,6 +1605,17 @@ pub struct GenerationParams {
     /// speculation with it, because the order it collects in cannot be
     /// observed.
     pub interleave_choices: bool,
+    /// The scheduling hint this request asks for: the continuous
+    /// batcher admits a higher-priority job ahead of a lower-priority
+    /// one, and prefers to evict a lower-priority row to make room.
+    ///
+    /// The answer is never different -- no token, text or timing is
+    /// decided by it -- so it is carried here, on the params, like
+    /// `interleave_choices`, and ignored by the private generate path
+    /// (the batched path is the only one with an admission order).
+    /// Higher wins; `None` means the request said nothing and is
+    /// served in arrival order.
+    pub priority: Option<i32>,
     /// Whether this request will READ the per-token distribution.
     ///
     /// A flag rather than "report always", because reporting costs the
@@ -3541,6 +3552,7 @@ mod tests {
 
     fn greedy_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            priority: None,
             cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,
@@ -3939,6 +3951,7 @@ mod tests {
             None,
             &prompt,
             &GenerationParams {
+                priority: None,
                 cache_salt: None,
                 prompt_logprobs: None,
                 wants_logprobs: false,
@@ -4113,6 +4126,7 @@ mod tests {
 
     fn scripted_params(max_tokens: usize) -> GenerationParams {
         GenerationParams {
+            priority: None,
             cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,
@@ -4424,6 +4438,7 @@ mod tests {
             None,
             &prompt,
             &GenerationParams {
+                priority: None,
                 cache_salt: None,
                 prompt_logprobs: None,
                 wants_logprobs: false,

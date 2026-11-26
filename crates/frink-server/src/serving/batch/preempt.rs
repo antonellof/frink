@@ -102,11 +102,18 @@ impl Slot {
     }
 }
 
-/// Evicts the most recently admitted decoding rows until `head` fits
-/// under both caps, and returns the jobs that continue them, newest
-/// first. Evicts nothing, and returns an empty list, when preemption is
-/// off, when `head` has not waited long enough, or when every eligible
-/// row together would still not make room.
+/// Evicts the decoding rows until `head` fits under both caps, and
+/// returns the jobs that continue them, newest first. Evicts nothing,
+/// and returns an empty list, when preemption is off, when `head` has
+/// not waited long enough, or when every eligible row together would
+/// still not make room.
+///
+/// Priority decides WHICH rows are evictable: a row is never evicted
+/// if it asked for more than the request waiting for admission, and
+/// the surviving rows are evicted lowest-priority first (ties keep the
+/// newest-first order). A request that sets no priority is equal to
+/// every other request that does not set one -- the behaviour this
+/// function had before priorities existed, unchanged.
 ///
 /// `prefilling` is the number of prompts in flight that are not in
 /// `rows`: they hold a sequence slot and cannot be evicted.
@@ -123,22 +130,42 @@ pub(super) fn make_room(
     if head.waited < after {
         return Vec::new();
     }
+    let head_priority = head.params.priority.unwrap_or(0);
     let fits = |free: usize, seats: usize| {
         seats < config.max_seqs && (budget.total.is_none() || head.blocks <= free)
     };
-    let mut free = budget.free();
-    let mut seats = rows.len() + prefilling;
-    let mut victims = Vec::new();
+    // Collect the evictable rows newest-first, then order them by
+    // ascending priority: a waiting request prefers to evict the row
+    // that asked for the least, but never one that asked for more than
+    // the request waiting for admission. Rows at the same priority keep
+    // the newest-first order; a request with no priority set is equal
+    // to every row that is not, so nothing is reordered -- the
+    // pre-priority behaviour, byte for byte.
+    let mut candidates: Vec<(super::row::Uid, i32)> = Vec::new();
     for &uid in rows.order.iter().rev() {
-        if fits(free, seats) {
-            break;
-        }
         let Some(slot) = rows.get(uid) else {
             continue;
         };
+        let row_priority = slot.params.priority.unwrap_or(0);
+        if row_priority > head_priority {
+            continue;
+        }
         if !slot.preemptible() {
             continue;
         }
+        candidates.push((uid, row_priority));
+    }
+    candidates.sort_by_key(|(_, priority)| *priority); // stable
+    let mut free = budget.free();
+    let mut seats = rows.len() + prefilling;
+    let mut victims = Vec::new();
+    for (uid, _) in candidates {
+        if fits(free, seats) {
+            break;
+        }
+        let slot = rows
+            .get(uid)
+            .expect("a candidate was read from the table above");
         victims.push(uid);
         free += slot.blocks;
         seats -= 1;

@@ -115,6 +115,7 @@ mod tests {
 
     fn params(max_tokens: usize, stop: &[&str]) -> GenerationParams {
         GenerationParams {
+            priority: None,
             cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,

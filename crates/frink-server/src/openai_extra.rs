@@ -612,6 +612,9 @@ pub async fn completions(
         // Set by the STREAMING routes, which are the only ones whose
         // delivery order a client can observe (`crate::round_robin`).
         interleave_choices: false,
+        // A scheduling hint only: it decides which waiter starts
+        // first, never what comes back. `None` is arrival order.
+        priority: req.unimplemented.priority,
         // `allowed_token_ids` and `bad_words`, both steering the
         // draw. The bad words are still STRINGS here; the layer
         // with the tokenizer resolves them (`run_generation_emit`).

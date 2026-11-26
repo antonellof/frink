@@ -406,6 +406,7 @@ mod tests {
 
     fn greedy_params() -> GenerationParams {
         GenerationParams {
+            priority: None,
             cache_salt: None,
             prompt_logprobs: None,
             wants_logprobs: false,

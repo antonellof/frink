@@ -37,6 +37,7 @@ mod admission;
 mod batching;
 mod cancel;
 mod preempt;
+mod priority;
 mod queue;
 mod radix;
 mod rows;
@@ -51,6 +52,7 @@ fn tiny_decoder() -> Arc<Decoder> {
 
 fn greedy_params(max_tokens: usize, seed: u64) -> GenerationParams {
     GenerationParams {
+        priority: None,
         cache_salt: None,
         prompt_logprobs: None,
         wants_logprobs: false,
