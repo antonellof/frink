@@ -107,8 +107,8 @@ without a rental.
 
 9. **One file per architecture** (#403,
    [`arch-registry-migration.md`](arch-registry-migration.md)): step
-   9c (`step35`, `mimo2`, `lfm3`), then the audited list, the catalog
-   and the layer plan derived from the registry.
+   10 (`AUDITED_GENERIC_GQA` derived from the registry), then the
+   catalog and the layer plan derived from the registry.
 10. **The architectures that refuse as unaudited** (#538), each as one
     file with a libllama golden and a greedy decode, or a refusal with
     its reason in [`MODELS.md`](../MODELS.md).

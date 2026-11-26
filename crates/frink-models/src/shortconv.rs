@@ -83,7 +83,7 @@
 //!
 //! `lfm3.cpp:178-181` norms the branch output with `attn_post_norm`
 //! OUTSIDE the `is_recr` branch, so a conv layer's output is normed as
-//! an attention layer's is ([`CONV_OUTPUT_POST_NORMED`]); `lfm2.cpp`
+//! an attention layer's is ([`conv_output_post_normed`]); `lfm2.cpp`
 //! creates no such tensor.
 
 use frink_core::weight_matrix::WeightMatrix;
@@ -91,8 +91,9 @@ use frink_gguf::TensorSource;
 
 use crate::loader::{load_f32_vec, load_weight_matrix, LoadError};
 
-/// The two graphs that build the block, with the lines that decide
-/// which layers run it.
+/// The remaining legacy rows that build the short-conv block, with the
+/// lines that decide which layers run it (`lfm3` is in
+/// `crate::models::lfm3`).
 pub const SHORTCONV_ARCHITECTURES: &[(&str, &str)] = &[
     (
         "lfm2",
@@ -102,16 +103,16 @@ pub const SHORTCONV_ARCHITECTURES: &[(&str, &str)] = &[
         "lfm2moe",
         "lfm2moe.cpp:12-14, :66-69; the graph is lfm2's (models.h:1899)",
     ),
-    (
-        "lfm3",
-        "lfm3.cpp:8-10 (is_recr), :84-86 (tensors), :165-171 (lfm-base.cpp:9-112, the block)",
-    ),
 ];
 
-/// The short-conv graphs that norm the conv block's output with
+/// True when `arch` norms the short-conv block's output with
 /// `attn_post_norm` before the residual add (`lfm3.cpp:178-181`, outside
-/// the `is_recr` branch). See the module doc.
-pub const CONV_OUTPUT_POST_NORMED: &[&str] = &["lfm3"];
+/// the `is_recr` branch, stated in `crate::models::lfm3`).
+pub fn conv_output_post_normed(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .conv_output_post_normed
+}
 
 /// Why a short-conv architecture's window cannot be served, or `None`
 /// when it can (or the architecture is not a short-conv one). `window`
@@ -164,6 +165,12 @@ pub fn shortconv_window_refusal(
 
 /// True for an architecture whose zero-KV layers are short convolutions.
 pub fn is_shortconv_architecture(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch).topology.shortconv
+}
+
+/// [`is_shortconv_architecture`] from [`SHORTCONV_ARCHITECTURES`] alone,
+/// for `ArchFacts::from_tables`.
+pub(crate) fn is_shortconv_architecture_from_table(arch: &str) -> bool {
     SHORTCONV_ARCHITECTURES.iter().any(|(a, _)| *a == arch)
 }
 

@@ -32,16 +32,23 @@
 //! fused Metal launches fold `wo` into their kernels with no scale
 //! after it, and `metal_can_serve_model` refuses a model that has one.
 
-/// Architectures whose graph reads `attention.value_scale`, with the
-/// line.
-pub const VALUE_SCALE_READERS: &[(&str, &str)] = &[("mimo2", "src/models/mimo2.cpp:14-17,180-183")];
-
 /// The scale this model multiplies its attention output by after
 /// `wo`, or `None` for no scale: the key absent, the key 1.0
 /// (`mimo2.cpp:15`), the key 0 (`:180` skips), or an architecture
-/// whose graph does not read it.
+/// whose graph does not read it (`mimo2` states it in
+/// `crate::models::mimo2`).
 pub fn resolve_attn_value_scale(arch: &str, key: Option<f32>) -> Option<f32> {
-    if !VALUE_SCALE_READERS.iter().any(|(name, _)| *name == arch) {
+    resolve_attn_value_scale_for(
+        crate::models::ArchFacts::of(arch)
+            .scaling
+            .reads_attn_value_scale,
+        key,
+    )
+}
+
+/// [`resolve_attn_value_scale`] given `ScalingFacts::reads_attn_value_scale`.
+pub(crate) fn resolve_attn_value_scale_for(reads: bool, key: Option<f32>) -> Option<f32> {
+    if !reads {
         return None;
     }
     key.filter(|&v| v != 1.0 && v != 0.0)
@@ -70,14 +77,23 @@ mod tests {
 
     #[test]
     fn every_reader_is_an_audited_generic_row() {
-        for (arch, line) in VALUE_SCALE_READERS {
-            let profile = crate::capability::resolve_profile(arch)
-                .unwrap_or_else(|| panic!("`{arch}` ({line}) is not a registered architecture"));
-            assert!(matches!(
-                profile.path,
-                crate::capability::ArchPath::GenericGqa { .. }
-            ));
-            assert!(crate::capability::AUDITED_GENERIC_GQA.contains(arch));
+        let mut count = 0;
+        for def in crate::models::REGISTRY
+            .iter()
+            .filter(|d| d.facts.scaling.reads_attn_value_scale)
+        {
+            for arch in def.names {
+                count += 1;
+                let profile = crate::capability::resolve_profile(arch).unwrap_or_else(|| {
+                    panic!("`{arch}` ({}) is not a registered architecture", def.source)
+                });
+                assert!(matches!(
+                    profile.path,
+                    crate::capability::ArchPath::GenericGqa { .. }
+                ));
+                assert!(crate::capability::AUDITED_GENERIC_GQA.contains(arch));
+            }
         }
+        assert!(count > 0, "at least mimo2 reads attention.value_scale");
     }
 }

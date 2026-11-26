@@ -52,8 +52,12 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
             .iter()
             .map(|r| r.0),
     );
-    names.extend(crate::act_layers::SWIGLU_CLAMP_READERS);
     names.extend(crate::act_layers::XIELU_ARCHITECTURES);
+    names.extend(
+        crate::shortconv::SHORTCONV_ARCHITECTURES
+            .iter()
+            .map(|r| r.0),
+    );
     names.extend(t::QK_NORM_AFTER_ROPE_ARCHITECTURES);
     names.extend(
         crate::qk_layer_norm::PER_HEAD_LAYER_NORM_QK
@@ -69,7 +73,6 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
     );
     {
         use crate::norm_sites as ns;
-        names.extend(ns::POST_NORMS_BOTH_OR_NEITHER.iter().map(|r| r.0));
         for table in [
             ns::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
             ns::NO_OUTPUT_NORM,
@@ -311,6 +314,11 @@ fn the_facts_agree_with_every_public_lookup() {
                 ),
                 // No legacy table: only a definition states it.
                 attn_temperature_literal: def.and_then(|f| f.scaling.attn_temperature_literal),
+                reads_attn_value_scale: crate::attn_value_scale::resolve_attn_value_scale(
+                    name,
+                    Some(0.5),
+                )
+                .is_some(),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(name),
@@ -329,6 +337,8 @@ fn the_facts_agree_with_every_public_lookup() {
                     |f| f.topology.per_layer_shapes,
                 ),
                 reads_nextn: crate::mtp_blocks::reads_nextn(name),
+                split_kv_head_dims: crate::kv_head_dims::admits_split_kv_head_dims(name),
+                shortconv: crate::shortconv::is_shortconv_architecture(name),
             },
             tensors: TensorFacts {
                 gpt_oss_layers: name == "gpt-oss",
@@ -337,10 +347,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 per_head_scalar_qk_gain: cap::uses_per_head_scalar_qk_gain(name),
                 per_head_distinct_qk_norm: cap::uses_per_head_distinct_qk_norm(name),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(name),
-                post_norms_both_or_neither: crate::norm_sites::POST_NORMS_BOTH_OR_NEITHER
-                    .iter()
-                    .find(|r| r.0 == name)
-                    .map(|r| r.1),
+                post_norms_both_or_neither: crate::norm_sites::post_norms_both_or_neither(name),
                 shared_expert_sum_scale: crate::parallel_dense_ffn::shared_expert_sum_scale(
                     name, true,
                 ),
@@ -355,6 +362,7 @@ fn the_facts_agree_with_every_public_lookup() {
                 qkv_tensors: crate::qkv_fused::qkv_tensors(name),
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn(name),
                 attn_norm_2_feeds_attention: crate::norm_sites::attn_norm_2_feeds_attention(name),
+                conv_output_post_normed: crate::shortconv::conv_output_post_normed(name),
             },
             rules: HparamRules {
                 swa_window_override: cap::swa_window_override,
@@ -487,6 +495,8 @@ fn the_config_loader_reads_the_tables_only_through_the_facts() {
         "block_sub_norms(",
         "learned_positions(",
         "weight_before_ffn(",
+        "resolve_v_head_dim(",
+        "resolve_attn_value_scale(",
     ] {
         assert!(
             !src.contains(direct),

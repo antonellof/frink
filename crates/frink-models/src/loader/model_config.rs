@@ -221,8 +221,10 @@ impl ModelConfig {
                 }
             }
         };
-        let v_head_dim = crate::kv_head_dims::resolve_v_head_dim(
+        let v_head_dim = crate::kv_head_dims::resolve_v_head_dim_for(
             &arch,
+            facts.topology.split_kv_head_dims,
+            facts.topology.pure_recurrent_block.is_some(),
             head_dim,
             file.metadata_u64(&key("attention.value_length"))
                 .map(|v| v as usize),
@@ -1335,8 +1337,8 @@ impl ModelConfig {
                 n_layers,
             ),
             learned_positions: facts.tensors.position_embd.is_some(),
-            attn_value_scale: crate::attn_value_scale::resolve_attn_value_scale(
-                &arch,
+            attn_value_scale: crate::attn_value_scale::resolve_attn_value_scale_for(
+                facts.scaling.reads_attn_value_scale,
                 file.metadata_f32(&key("attention.value_scale")),
             ),
             alibi_max_bias: crate::alibi::max_alibi_bias_for(

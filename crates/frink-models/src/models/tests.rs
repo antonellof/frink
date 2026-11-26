@@ -115,9 +115,20 @@ fn the_registry_pattern_readers_are_pinned() {
     for name in registry_names() {
         let want = if callers.contains(&name) {
             PatternKeyRead::ArrayThenScalar
-        } else if ["kolibri1", "maple", "spark2_5", "granite_swa"].contains(&name) {
+        } else if [
+            "kolibri1",
+            "maple",
+            "spark2_5",
+            "granite_swa",
+            "step35",
+            "mimo2",
+            "lfm3",
+        ]
+        .contains(&name)
+        {
             // `get_arr` with no scalar attempt: kolibri1.cpp:17,
-            // maple.cpp:10, spark2-5.cpp:8, granite-swa.cpp:17.
+            // maple.cpp:10, spark2-5.cpp:8, granite-swa.cpp:17,
+            // step35.cpp:26, mimo2.cpp:12, lfm3.cpp:13.
             PatternKeyRead::PerLayerBool
         } else {
             PatternKeyRead::Unread

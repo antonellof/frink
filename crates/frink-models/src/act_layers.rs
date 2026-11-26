@@ -261,31 +261,14 @@ impl SwigluClamps {
     }
 }
 
-/// Architectures on the generic path whose graph READS the two clamp
-/// arrays: `grep -l LLM_KV_SWIGLU_CLAMP src/models/*.cpp` was
-/// `step35.cpp`, `deepseek4.cpp` and `dflash.cpp` over the then-140
-/// graphs, and the last two are on frink's own DeepSeek-4 engine.
-/// Re-measured over 155 on 2026-09-19 it is SIX: `bailingmoe3`,
-/// `hy-v4` and `maple` read them too, all three refused today for
-/// other reasons, and `maple`'s verdict says the clamp is the one
-/// thing it does NOT need work for -- the verdict deliberately spells
-/// it "the SwiGLU clamp arrays" rather than the key, because
-/// `tests/unaudited_triage.rs`'s guard greps blockers for the key name
-/// and would read a SERVED mention as a missing one. For every other
-/// architecture the
-/// arrays stay zero-filled upstream whatever the file says, so the
-/// keys are dead metadata there and frink ignores them the same way.
-pub const SWIGLU_CLAMP_READERS: &[&str] = &["step35"];
-
 /// Does this architecture's graph read `swiglu_clamp_exp` / `_shexp`?
+///
+/// `maple` and `step35` are the generic-path readers, both in
+/// `crate::models`. For every other architecture the arrays stay
+/// zero-filled upstream whatever the file says, so the keys are dead
+/// metadata there and frink ignores them the same way.
 pub fn reads_swiglu_clamps(arch: &str) -> bool {
     crate::models::ArchFacts::of(arch).ffn.reads_swiglu_clamps
-}
-
-/// [`reads_swiglu_clamps`] from [`SWIGLU_CLAMP_READERS`] alone (`maple`
-/// is in `crate::models::maple`).
-pub(crate) fn reads_swiglu_clamps_from_table(arch: &str) -> bool {
-    SWIGLU_CLAMP_READERS.contains(&arch)
 }
 
 /// The two clamp arrays for a file, read as `step35.cpp:28-29` reads

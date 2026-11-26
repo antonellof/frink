@@ -27,9 +27,9 @@ use frink_moe::GatingFunction;
 /// reaching here -- but the list is what a later admission would trust.
 pub(crate) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
     // `cohere2moe` is in `crate::models::cohere2moe` (#403 step 7b).
+    // `step35` is in `crate::models::step35` (#403 step 9c).
     "deepseek2",
     "glm4moe",
-    "step35",
 ];
 
 /// Architectures whose graph passes a gating LITERAL into
@@ -58,7 +58,7 @@ pub(crate) const SIGMOID_GATING_ARCHITECTURES: &[&str] = &[
 /// the answer is unchanged, and on one with it this loader already
 /// read the key. No row is added or removed.
 pub(crate) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
-    ("mimo2", GatingFunction::Sigmoid),
+    // `mimo2` is in `crate::models::mimo2` (#403 step 9c).
     // `nemotron-h.cpp:218`: the SIGMOID literal; the converter writes no
     // `expert_gating_func` (`conversion/nemotron.py:238-250`).
     ("nemotron_h_moe", GatingFunction::Sigmoid),
@@ -67,7 +67,7 @@ pub(crate) const GATING_LITERAL_ARCHITECTURES: &[(&str, GatingFunction)] = &[
 
 /// The names alone, for the cross-table test.
 #[cfg(test)]
-pub(super) const GATING_LITERAL_NAMES: &[&str] = &["mimo2", "nemotron_h_moe"];
+pub(super) const GATING_LITERAL_NAMES: &[&str] = &["nemotron_h_moe"];
 
 /// Architectures whose `load_arch_hparams` reads
 /// `{arch}.expert_weights_scale` (`LLM_KV_EXPERT_WEIGHTS_SCALE`) -- and
@@ -98,7 +98,7 @@ pub(crate) const EXPERT_WEIGHTS_SCALE_READERS: &[&str] = &[
     "glm4moe",
     // `nemotron-h.cpp:19` (`routed_scaling_factor`, 2.5 on Nemotron-3 Nano).
     "nemotron_h_moe",
-    "step35",
+    // `step35` is in `crate::models::step35` (#403 step 9c).
 ];
 
 /// The same for `{arch}.expert_weights_norm` (`LLM_KV_EXPERT_WEIGHTS_NORM`):
@@ -126,7 +126,7 @@ pub(crate) const EXPERT_WEIGHTS_NORM_READERS: &[&str] = &[
     // `mellum` is in `crate::models::mellum`.
     // `nemotron-h.cpp:18` (`norm_topk_prob`).
     "nemotron_h_moe",
-    "step35",
+    // `step35` is in `crate::models::step35` (#403 step 9c).
 ];
 
 /// Names that appear in a behaviour table above but are `DedicatedOnly`

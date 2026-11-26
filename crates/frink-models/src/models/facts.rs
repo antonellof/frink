@@ -170,6 +170,9 @@ pub struct ScalingFacts {
     /// `attn_temperature`: a LITERAL attention temperature, read from no
     /// key (`llama4`).
     pub attn_temperature_literal: Option<crate::attn_temperature::AttnTemperature>,
+    /// `attn_value_scale`: reads `{arch}.attention.value_scale` and scales
+    /// the attention branch after `wo` (`mimo2.cpp:14-17,180-183`).
+    pub reads_attn_value_scale: bool,
 }
 
 /// Layer-topology rows read at config time.
@@ -198,6 +201,12 @@ pub struct TopologyFacts {
     /// `mtp_blocks::NEXTN_READERS`: `nextn_predict_layers` blocks are
     /// subtracted from the layer count.
     pub reads_nextn: bool,
+    /// `kv_head_dims`: `attention.value_length` may differ from
+    /// `attention.key_length` (`mimo2.cpp:47-48,52`).
+    pub split_kv_head_dims: bool,
+    /// `shortconv`: layers with `head_count_kv == 0` run a short
+    /// convolution block (`lfm2`, `lfm2moe`, `lfm3`).
+    pub shortconv: bool,
 }
 
 /// Decoder tensor-table rows (`Decoder::from_gguf`, canonical name).
@@ -246,6 +255,9 @@ pub struct TensorFacts {
     pub attn_norm_2_feeds_attention: bool,
     /// `parallel_dense_ffn`: a dense FFN summed with the routed experts.
     pub parallel_dense: Option<&'static crate::parallel_dense_ffn::ParallelDenseFfn>,
+    /// `shortconv`: the short-conv block's output is post-normed with
+    /// `attn_post_norm` before the residual add (`lfm3.cpp:178-181`).
+    pub conv_output_post_normed: bool,
 }
 
 /// The decisions that are code rather than rows: each takes a
@@ -358,6 +370,7 @@ impl ArchFacts {
             clamp_kqv: None,
             reads_yarn_beta: false,
             attn_temperature_literal: None,
+            reads_attn_value_scale: false,
         },
         topology: TopologyFacts {
             pure_recurrent_block: None,
@@ -369,6 +382,8 @@ impl ArchFacts {
             per_layer_shapes: None,
             rope_gated_on_finetuned: false,
             reads_nextn: false,
+            split_kv_head_dims: false,
+            shortconv: false,
         },
         tensors: TensorFacts {
             gpt_oss_layers: false,
@@ -389,6 +404,7 @@ impl ArchFacts {
             qkv_tensors: crate::qkv_fused::QkvTensors::Helper,
             attn_norm_2_feeds_attention: false,
             parallel_dense: None,
+            conv_output_post_normed: false,
         },
         rules: HparamRules::LEGACY,
     };
@@ -425,12 +441,16 @@ impl ArchFacts {
             },
             swa: SwaFacts {
                 default_layout: crate::capability::default_swa_layout_from_table(arch),
-                window_required: crate::swa_geometry::window_required_from_table(arch),
-                rope_base_required: crate::swa_geometry::swa_rope_base_required(arch),
+                // No table: every window-requiring graph is in `crate::models`.
+                window_required: None,
+                // No table: `lfm3` was the only row.
+                rope_base_required: None,
                 // No table: `olmo2` and `laguna` are in `crate::models`.
                 layers_unscaled_rope: None,
-                full_layers_rotate_half: crate::swa_geometry::full_layers_rotate_half(arch),
-                layers_drop_rope_factors: crate::swa_geometry::swa_layers_drop_rope_factors(arch),
+                // No table: `step35` was the only row.
+                full_layers_rotate_half: None,
+                // No table: `step35` and `lfm3` are in `crate::models`.
+                layers_drop_rope_factors: None,
                 rope_base_follows_model: crate::capability::swa_rope_base_follows_model_from_table(
                     arch,
                 ),
@@ -450,7 +470,8 @@ impl ArchFacts {
                 // No table: `smallthinker` was the only row.
                 reglu: false,
                 xielu: crate::act_layers::uses_xielu(arch),
-                reads_swiglu_clamps: crate::act_layers::reads_swiglu_clamps_from_table(arch),
+                // No table: `maple` and `step35` are in `crate::models`.
+                reads_swiglu_clamps: false,
                 clamp_before_silu: crate::act_layers::clamp_before_silu_from_table(arch),
             },
             norm: NormFacts {
@@ -473,6 +494,8 @@ impl ArchFacts {
                 reads_yarn_beta: crate::loader::rope_scaling::YARN_BETA_READERS.contains(&arch),
                 // No table: `llama4` was the only row.
                 attn_temperature_literal: None,
+                // No table: `mimo2` was the only row.
+                reads_attn_value_scale: false,
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
@@ -488,6 +511,9 @@ impl ArchFacts {
                 rope_gated_on_finetuned: crate::rope_finetuned::ROPE_GATED_ON_FINETUNED
                     .contains(&arch),
                 reads_nextn: crate::mtp_blocks::reads_nextn_from_table(arch),
+                // No table: `mimo2` was the only row.
+                split_kv_head_dims: false,
+                shortconv: crate::shortconv::is_shortconv_architecture_from_table(arch),
             },
             tensors: TensorFacts {
                 // No table: `gpt-oss` states it in `crate::models::gpt_oss`.
@@ -502,7 +528,8 @@ impl ArchFacts {
                 per_head_scalar_qk_gain: crate::capability::uses_per_head_scalar_qk_gain(arch),
                 per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(arch),
-                post_norms_both_or_neither: crate::norm_sites::post_norms_both_or_neither(arch),
+                // No table: `lfm3` was the only row.
+                post_norms_both_or_neither: None,
                 // No table: `cohere2moe` was the only row.
                 shared_expert_sum_scale: None,
                 // No table: `muse-glimmer` was the only row.
@@ -518,6 +545,8 @@ impl ArchFacts {
                 // No table: `falcon` was the only row.
                 attn_norm_2_feeds_attention: false,
                 parallel_dense: crate::parallel_dense_ffn::parallel_dense_ffn_from_table(arch),
+                // No table: `lfm3` was the only row.
+                conv_output_post_normed: false,
             },
             rules: HparamRules::LEGACY,
         }

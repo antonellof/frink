@@ -170,12 +170,7 @@ pub const PER_LAYER_ARRAY_READERS: &[(&str, &str)] = &[
     ("dots3note", "src/models/dots3note.cpp:34"),
     ("flint", "src/models/flint.cpp:13"),
     ("muse-spark", "src/models/muse-spark.cpp:17"),
-    ("step35", "src/models/step35.cpp:26"),
-    ("mimo2", "src/models/mimo2.cpp:12"),
-    // Landed upstream after the 2026-08-04 pin; `ml.get_arr` with no
-    // scalar attempt, like the four above.
-    // Landed upstream after the 2026-09-19 pin.
-    ("lfm3", "src/models/lfm3.cpp:13"),
+    // `step35`, `mimo2` and `lfm3` are in `crate::models` (#403 step 9c).
 ];
 
 /// `LLAMA_MAX_LAYERS` (`llama-hparams.h:11`): the longest array `get_arr`

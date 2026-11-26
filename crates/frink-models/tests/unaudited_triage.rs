@@ -1153,7 +1153,7 @@ fn the_per_layer_rope_gate_is_no_longer_anybody_s_leading_blocker() {
 /// every real export actually carries.
 #[test]
 fn the_gated_attention_seam_closed_two_rows_and_narrowed_the_third() {
-    use frink_models::attn_gate::{attn_gate_spec, GatePresence, ATTN_GATE_ARCHS};
+    use frink_models::attn_gate::{attn_gate_spec, GatePresence};
     for arch in ["afmoe", "laguna", "step35"] {
         assert!(
             is_audited_generic(arch) && unaudited_triage(arch).is_none(),
@@ -1166,9 +1166,8 @@ fn the_gated_attention_seam_closed_two_rows_and_narrowed_the_third() {
         "step35.cpp:96 creates the gate TENSOR_NOT_REQUIRED"
     );
     // The census names the three, so the verdicts and the table cannot
-    // drift apart about which rows carry the op. `afmoe` and `laguna`
-    // state theirs in `frink_models::models` (#403 step 9b).
-    assert!(ATTN_GATE_ARCHS.iter().any(|(n, _)| *n == "step35"));
+    // drift apart about which rows carry the op. `afmoe`, `laguna` and
+    // `step35` state theirs in `frink_models::models` (#403 steps 9b, 9c).
     for arch in ["afmoe", "laguna", "step35"] {
         assert!(
             attn_gate_spec(arch).is_some(),
@@ -1195,12 +1194,9 @@ fn mimo2_is_audited_and_carries_no_stale_verdict() {
     assert!(frink_models::kv_head_dims::admits_split_kv_head_dims(
         "mimo2"
     ));
-    assert!(frink_models::kv_head_dims::SPLIT_KV_HEAD_DIM_ARCHS
-        .iter()
-        .all(|(name, _)| is_audited_generic(name)));
-    assert!(frink_models::attn_value_scale::VALUE_SCALE_READERS
-        .iter()
-        .all(|(name, _)| is_audited_generic(name)));
+    assert!(
+        frink_models::attn_value_scale::resolve_attn_value_scale("mimo2", Some(0.707)).is_some()
+    );
 }
 
 /// Every one of the 47 now carries a verdict, and the four classes are

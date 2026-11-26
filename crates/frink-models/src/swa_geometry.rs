@@ -78,12 +78,11 @@ pub fn swa_layers_unscaled_rope(arch: &str) -> Option<&'static str> {
 /// The llama.cpp line where `arch` halves the FULL-attention layers'
 /// rotary width after the sliding width was seeded from the unhalved
 /// value, or `None`. `step35.cpp:9` alone (measured: `grep -n
-/// "n_rot_full / 2" src/models/*.cpp`).
+/// "n_rot_full / 2" src/models/*.cpp`), stated in `crate::models::step35`.
 pub fn full_layers_rotate_half(arch: &str) -> Option<&'static str> {
-    match arch {
-        "step35" => Some("step35.cpp:9"),
-        _ => None,
-    }
+    crate::models::ArchFacts::of(arch)
+        .swa
+        .full_layers_rotate_half
 }
 
 /// The llama.cpp line where `arch` reads `attention.sliding_window`
@@ -95,18 +94,9 @@ pub fn full_layers_rotate_half(arch: &str) -> Option<&'static str> {
 /// which is a different graph from the one llama.cpp refuses to build.
 /// Measured: `grep -n "LLM_KV_ATTENTION_SLIDING_WINDOW," src/models/*.cpp`
 /// without a trailing `false` on the generic path. Answers through the
-/// registry (`kolibri1` lives in `crate::models`).
+/// registry (`crate::models`).
 pub fn window_required(arch: &str) -> Option<&'static str> {
     crate::models::ArchFacts::of(arch).swa.window_required
-}
-
-/// The legacy table behind [`window_required`], for
-/// `ArchFacts::from_tables`.
-pub(crate) fn window_required_from_table(arch: &str) -> Option<&'static str> {
-    match arch {
-        "lfm3" => Some("lfm3.cpp:18"),
-        _ => None,
-    }
 }
 
 /// The llama.cpp line where `arch` reads `rope.freq_base_swa` as a
@@ -116,28 +106,19 @@ pub(crate) fn window_required_from_table(arch: &str) -> Option<&'static str> {
 /// rotated the sliding layers at the fallback base. Measured: `grep -n
 /// "LLM_KV_ROPE_FREQ_BASE_SWA" src/models/*.cpp` without a trailing
 /// `false` is `dots3note.cpp:33`, `lfm3.cpp:20` and `muse-spark.cpp:7`,
-/// and only `lfm3` is on the generic path.
+/// and only `lfm3` is on the generic path (`crate::models::lfm3`).
 pub fn swa_rope_base_required(arch: &str) -> Option<&'static str> {
-    match arch {
-        "lfm3" => Some("lfm3.cpp:20"),
-        _ => None,
-    }
+    crate::models::ArchFacts::of(arch).swa.rope_base_required
 }
 
 /// The llama.cpp line where `arch` passes NO rope factors to its
 /// sliding layers, or `None` when the sliding layers take the same
-/// factors tensor as the full ones.
+/// factors tensor as the full ones (`step35` and `lfm3` in
+/// `crate::models`).
 pub fn swa_layers_drop_rope_factors(arch: &str) -> Option<&'static str> {
-    match arch {
-        "step35" => Some("step35.cpp:247"),
-        // `rope_factors = hparams.is_swa(il) ? nullptr : rope_freqs`,
-        // landed after the 2026-09-19 pin. The converter writes the
-        // tensor as the FULL layers' partial-RoPE mask
-        // (`conversion/lfm3.py:101-111`), so a sliding layer that took
-        // it would rotate a fraction of its head.
-        "lfm3" => Some("lfm3.cpp:113"),
-        _ => None,
-    }
+    crate::models::ArchFacts::of(arch)
+        .swa
+        .layers_drop_rope_factors
 }
 
 /// The three SWA-geometry keys as the file declares them, beside the

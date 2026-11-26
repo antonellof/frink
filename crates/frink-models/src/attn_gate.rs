@@ -157,27 +157,29 @@ pub const MUSE_GLIMMER: AttnGateSpec = AttnGateSpec {
     lines: "src/models/muse-glimmer.cpp:46,100-135",
 };
 
-/// The three architectures whose graph gates its softmax attention
+/// `step35`'s gate, stated by its `crate::models` file (#403 step 9c).
+pub const STEP35: AttnGateSpec = AttnGateSpec {
+    act: GateAct::Sigmoid,
+    widths: &[GateWidth::PerHead],
+    presence: GatePresence::Optional,
+    lines: "src/models/step35.cpp:96,268-284",
+};
+
+/// `lfm3`'s gate, stated by its `crate::models` file (#403 step 9c).
+pub const LFM3: AttnGateSpec = AttnGateSpec {
+    act: GateAct::Sigmoid,
+    widths: &[GateWidth::PerHead],
+    presence: GatePresence::Required,
+    lines: "src/models/lfm3.cpp:77,132-139",
+};
+
+/// The remaining legacy rows whose graph gates its softmax attention
 /// output through `LLM_TENSOR_ATTN_GATE`. See the module doc for the
 /// three that store a different thing under the same name.
 pub const ATTN_GATE_ARCHS: &[(&str, AttnGateSpec)] = &[
     // `afmoe` is in `crate::models` ([`AFMOE`]).
     // `laguna` is in `crate::models` ([`LAGUNA`]).
-    (
-        "step35",
-        AttnGateSpec {
-            act: GateAct::Sigmoid,
-            widths: &[GateWidth::PerHead],
-            presence: GatePresence::Optional,
-            lines: "src/models/step35.cpp:96,268-284",
-        },
-    ),
-    // Landed upstream after the 2026-08-04 pin and closed on
-    // 2026-09-19 as ONE row: `spark2-5.cpp:41` creates the tensor
-    // REQUIRED at `{n_embd, n_head}` and `:97-105` sigmoids it and
-    // multiplies it in per head, which is `step35`'s corner of the two
-    // axes with the presence flipped. Nothing else in that graph was
-    // new (`tests/gated_attention_graphs.rs`).
+    // `step35` is in `crate::models` ([`STEP35`]).
     // `hrm-text.cpp:77-78` creates the tensor REQUIRED at
     // `{n_embd, n_head * head_dim}` and `:113-134` sigmoid it and
     // multiply it into the attention output PER ELEMENT before `wo`;
@@ -192,26 +194,9 @@ pub const ATTN_GATE_ARCHS: &[(&str, AttnGateSpec)] = &[
             lines: "src/models/hrm-text.cpp:77-78,113-134",
         },
     ),
-    // `muse-glimmer.cpp:46` creates the tensor REQUIRED at
-    // `{n_embd, n_head * head_dim}` and `:100-135` sigmoid it and
-    // multiply it into the attention output PER ELEMENT before `wo`,
-    // which is `afmoe`'s corner; its own comment says "same as afmoe".
     // `muse-glimmer` is in `crate::models` ([`MUSE_GLIMMER`]).
     // `spark2_5` is in `crate::models::spark2_5` ([`SPARK2_5`]).
-    // Landed upstream after the 2026-09-19 pin: `lfm3.cpp:77` creates
-    // the tensor REQUIRED at `{n_embd, n_head}` on every attention
-    // layer, and `:132-139` project it from the `attn_norm` output
-    // (`cur_in`), sigmoid it and multiply it in per head before `wo`.
-    // `spark2_5`'s corner.
-    (
-        "lfm3",
-        AttnGateSpec {
-            act: GateAct::Sigmoid,
-            widths: &[GateWidth::PerHead],
-            presence: GatePresence::Required,
-            lines: "src/models/lfm3.cpp:77,132-139",
-        },
-    ),
+    // `lfm3` is in `crate::models` ([`LFM3`]).
 ];
 
 /// The three graphs whose FULL-attention layers gate the softmax output

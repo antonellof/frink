@@ -91,7 +91,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("glm4", "src/models/glm4.cpp:28"),
     ("glm5-next", "src/models/glm5-next.cpp:76"),
     ("hy-v3", "src/models/hy-v3.cpp:74"),
-    ("mimo2", "src/models/mimo2.cpp:38"),
     ("mistral4", "src/models/models.h:1624 (deepseek2.cpp:88)"),
     (
         "nemotron_h_moe",
@@ -101,7 +100,6 @@ pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("qwen35moe", "src/models/qwen35moe.cpp:144"),
     ("qwen3next", "src/models/qwen3next.cpp:126"),
     ("qwen4exp", "src/models/qwen4exp.cpp:310"),
-    ("step35", "src/models/step35.cpp:170"),
 ];
 
 /// Does `arch`'s graph subtract `nextn_predict_layers` from its layer
