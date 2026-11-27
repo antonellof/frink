@@ -56,7 +56,7 @@ eligibility test so a new field forces a Metal decision.
 | 6 | MoE routing families (olmoe, dots1, gpt-oss, phimoe, dbrx, grok, llama4) | per-family tests |
 | 7 | Parallel residual families | `parallel_residual_graphs.rs` |
 | 8 | ALiBi and learned positions | `alibi_graphs.rs`, `position_embd_graphs.rs` |
-| 9 | SWA families, in batches 9a to 9c (the window's KV eviction itself is #61, separate) | `swa_pattern.rs`, `window_array_graphs.rs` |
+| 9 | SWA families, in batches 9a to 9c, then 9d for the graphs with one decoder row each, QK norm after RoPE and `talkie` (the window's KV eviction itself is #61, separate) | `swa_pattern.rs`, `window_array_graphs.rs`, `one_match_arm_graphs.rs`, `skip_stream_graphs.rs` |
 | 10 | `AUDITED_GENERIC_GQA` derived from the registry | `documented_counts.rs`, `arch_coverage.rs` |
 | 11 | Catalog and `ArchProfile` move to `arch.rs` | `arch_coverage.rs` |
 | 12 | Triage prose shrinks to one line per row; arguments move into `tests/unaudited_triage.rs`, evidence prose into each `models/<arch>.rs` header | `unaudited_triage.rs` |
@@ -83,6 +83,7 @@ eligibility test so a new field forces a Metal decision.
 | 9a | #472 | `gemma2`, `gemma3`, `mellum`, `plamo3`, `maple`, `spark2_5`, `granite_swa` |
 | 9b | #618 | `afmoe`, `exaone-moe`, `laguna`, `smallthinker`, `muse-glimmer` |
 | 9c | #647 | `step35`, `mimo2`, `lfm3` |
+| 9d | #648 | `hunyuan-dense`, `hunyuan-moe`, `maincoder`, `talkie` |
 
 **Next: step 10**, deriving `AUDITED_GENERIC_GQA` from the registry,
 then steps 11 to 15. `gemma3n`, `gemma-embedding` and `dflash` stay in

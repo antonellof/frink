@@ -44,15 +44,22 @@
 //! carries `hunyuan-dense.rope.scaling.alpha` and compares against
 //! libllama's own logits.
 
-/// Architectures whose `load_arch_hparams` applies
-/// `{arch}.rope.scaling.alpha` to the trained RoPE base.
+/// The architectures still in the legacy tables whose
+/// `load_arch_hparams` applies `{arch}.rope.scaling.alpha` to the
+/// trained RoPE base.
 ///
 /// `hunyuan-vl` is here for completeness of the reading even though it
 /// resolves to a deferred multimodal row rather than the generic
 /// decoder: leaving it out would make the list disagree with
 /// `models.h:1830`, where `hunyuan-dense` inherits the behaviour FROM
-/// it.
-pub const NTK_ALPHA_RESCALED_ROPE_BASE: &[&str] = &["hunyuan-dense", "hunyuan-vl"];
+/// it. `hunyuan-dense` states it in `crate::models::hunyuan_dense`.
+pub const NTK_ALPHA_RESCALED_ROPE_BASE: &[&str] = &["hunyuan-vl"];
+
+/// [`NTK_ALPHA_RESCALED_ROPE_BASE`] alone, for
+/// `ArchFacts::from_tables`.
+pub(crate) fn rescales_rope_base_from_table(arch: &str) -> bool {
+    NTK_ALPHA_RESCALED_ROPE_BASE.contains(&arch)
+}
 
 /// llama.cpp's `hunyuan-vl.cpp:8-12`, for the base this architecture
 /// should rotate at.
@@ -73,7 +80,23 @@ pub fn ntk_alpha_scaled_rope_base(
     head_dim: usize,
     alpha: Option<f32>,
 ) -> f32 {
-    if !NTK_ALPHA_RESCALED_ROPE_BASE.contains(&arch) {
+    ntk_alpha_scaled_rope_base_for(
+        crate::models::ArchFacts::of(arch).scaling.rope_ntk_alpha,
+        base,
+        head_dim,
+        alpha,
+    )
+}
+
+/// [`ntk_alpha_scaled_rope_base`] given the row
+/// (`ScalingFacts::rope_ntk_alpha`), for the config loader.
+pub(crate) fn ntk_alpha_scaled_rope_base_for(
+    rescales: bool,
+    base: f32,
+    head_dim: usize,
+    alpha: Option<f32>,
+) -> f32 {
+    if !rescales {
         return base;
     }
     let Some(alpha) = alpha.filter(|a| *a > 0.0) else {
@@ -108,6 +131,28 @@ mod tests {
         let want = 10_000.0f32 * 50.0f32.powf(128.0 / 126.0);
         assert!((got - want).abs() < 1e-3, "got {got}, want {want}");
         assert!(got > 10_000.0, "alpha > 1 must EXPAND the base, got {got}");
+    }
+
+    /// `hunyuan-dense` states the row in `crate::models`, `hunyuan-vl`
+    /// is still in the legacy table, and both answer through the same
+    /// public lookup.
+    #[test]
+    fn both_rows_rescale_whichever_place_states_them() {
+        assert!(rescales_rope_base_from_table("hunyuan-vl"));
+        assert!(!rescales_rope_base_from_table("hunyuan-dense"));
+        assert!(
+            crate::models::ArchFacts::of("hunyuan-dense")
+                .scaling
+                .rope_ntk_alpha
+        );
+        assert!(
+            crate::models::ArchFacts::of("hunyuan-vl")
+                .scaling
+                .rope_ntk_alpha
+        );
+        for arch in ["hunyuan-dense", "hunyuan-vl"] {
+            assert!(ntk_alpha_scaled_rope_base(arch, 10_000.0, 128, Some(50.0)) > 10_000.0);
+        }
     }
 
     /// An architecture that is not on the list keeps its base even when

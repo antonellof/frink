@@ -537,7 +537,7 @@ const MULTIPLIER_ARCHITECTURES: &[(&str, MultiplierSupport)] = &[
     ("granite-hybrid", MultiplierSupport::GRANITE),
     // `granite_swa` is in `crate::models::granite_swa`.
     ("minicpm", MultiplierSupport::MINICPM),
-    ("talkie", MultiplierSupport::TALKIE),
+    // `talkie` is in `crate::models::talkie`.
     ("minimax-01", MultiplierSupport::MINIMAX_01),
     // `muse-glimmer` is in `crate::models::muse_glimmer`.
     // `hrm-text.cpp:8` reads `embedding_scale` OPTIONAL and

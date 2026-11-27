@@ -28,12 +28,15 @@ pub mod granite;
 pub mod granite_moe;
 pub mod granite_swa;
 pub mod grok;
+pub mod hunyuan_dense;
+pub mod hunyuan_moe;
 pub mod jais;
 pub mod kolibri1;
 pub mod laguna;
 pub mod lfm3;
 pub mod llama;
 pub mod llama4;
+pub mod maincoder;
 pub mod maple;
 pub mod mellum;
 pub mod mimo2;
@@ -58,6 +61,7 @@ pub mod spark2_5;
 pub mod stablelm;
 pub mod starcoder;
 pub mod step35;
+pub mod talkie;
 
 #[cfg(test)]
 mod tests;
@@ -134,6 +138,10 @@ pub const REGISTRY: &[ModelDef] = &[
     step35::DEF,
     mimo2::DEF,
     lfm3::DEF,
+    hunyuan_dense::DEF,
+    hunyuan_moe::DEF,
+    maincoder::DEF,
+    talkie::DEF,
 ];
 
 /// The registry entry naming `arch`.

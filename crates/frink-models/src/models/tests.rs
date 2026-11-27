@@ -136,3 +136,62 @@ fn the_registry_pattern_readers_are_pinned() {
         assert_eq!(crate::swa_layers::pattern_key_read(name), want, "{name}");
     }
 }
+
+/// The four graphs that norm Q and K AFTER RoPE (`maincoder.cpp:78-95`,
+/// `hunyuan-moe.cpp:93-118`, `hunyuan-vl.cpp:56-81` for `hunyuan-dense`,
+/// `talkie.cpp:82-91`). No GGUF key states the order, so a definition
+/// that drops its row serves the generic "before" order and shifts every
+/// layer's attention scores without a shape change.
+#[test]
+fn the_registry_qk_norm_after_rope_rows_are_pinned() {
+    let after = ["hunyuan-dense", "hunyuan-moe", "maincoder", "talkie"];
+    for name in registry_names() {
+        assert_eq!(
+            ArchFacts::of(name).tensors.qk_norm_after_rope,
+            after.contains(&name),
+            "{name}"
+        );
+    }
+}
+
+/// `hunyuan-dense` inherits `hunyuan-vl`'s NTK-alpha RoPE rescale
+/// (`models.h:1830-1834`, `hunyuan-vl.cpp:8-12`); no other registry
+/// graph applies it.
+#[test]
+fn only_hunyuan_dense_rescales_the_rope_base_in_the_registry() {
+    for name in registry_names() {
+        assert_eq!(
+            ArchFacts::of(name).scaling.rope_ntk_alpha,
+            name == "hunyuan-dense",
+            "{name}"
+        );
+    }
+}
+
+/// `talkie` is the one graph with the embedding skip stream, the
+/// per-head scalar Q gain and the weightless RMSNorm at every site
+/// (`talkie.cpp:26,50-52,68,90,110,123-126,137`) among the registry
+/// rows, and its REQUIRED `logit_scale` is multiplied onto the logits
+/// (`:5,141`).
+#[test]
+fn the_talkie_rows_are_pinned() {
+    use crate::norm::NormFunction;
+    use crate::scalar_multipliers::MultiplierSupport;
+    for name in registry_names() {
+        let facts = ArchFacts::of(name);
+        let is_talkie = name == "talkie";
+        assert_eq!(facts.topology.skip_stream, is_talkie, "{name}");
+        assert_eq!(facts.tensors.per_head_scalar_qk_gain, is_talkie, "{name}");
+        assert_eq!(
+            facts.tensors.norm_sites.function == NormFunction::RmsNoParams,
+            is_talkie,
+            "{name}"
+        );
+    }
+    // `cohere2` carries the same row (`cohere2.cpp:14,153-154`), so this
+    // one is pinned for `talkie` alone.
+    assert_eq!(
+        ArchFacts::of("talkie").scaling.multipliers,
+        MultiplierSupport::TALKIE
+    );
+}

@@ -255,12 +255,12 @@ impl ModelConfig {
         // NTK-alpha: `{arch}.rope.scaling.alpha` is read for every
         // architecture (llama-model.cpp:1186) and APPLIED by two
         // (`hunyuan-vl.cpp:8-12`, inherited by `hunyuan-dense`). The
-        // list and the arithmetic live together in one module so the
-        // key's readers and its appliers cannot drift apart -- see
-        // `crate::rope_ntk_alpha`, which also records why a converted
-        // `hunyuan-dense` file carries the already-scaled base instead.
-        let rope_theta = crate::rope_ntk_alpha::ntk_alpha_scaled_rope_base(
-            &arch,
+        // row is `ScalingFacts::rope_ntk_alpha` and the arithmetic
+        // lives in `crate::rope_ntk_alpha`, which also records why a
+        // converted `hunyuan-dense` file carries the already-scaled
+        // base instead.
+        let rope_theta = crate::rope_ntk_alpha::ntk_alpha_scaled_rope_base_for(
+            facts.scaling.rope_ntk_alpha,
             rope_theta,
             head_dim,
             metadata_f32_any(file, &[key("rope.scaling.alpha")]),
