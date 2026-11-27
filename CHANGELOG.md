@@ -15,6 +15,24 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.65.0] - 2026-11-27
+
+### Changed
+
+- **`step35`, `mimo2` and `lfm3` each state their architecture in one
+  file** (`crates/frink-models/src/models/`), mirroring its
+  `src/models/<arch>.cpp` at the pin, which closes the last SWA batch
+  of the registry migration (#403 step 9c, #647, contributed by
+  @njetty). Four `ArchFacts` fields carry what the emptied tables did:
+  `ScalingFacts::reads_attn_value_scale`,
+  `TopologyFacts::split_kv_head_dims`, `TopologyFacts::shortconv` and
+  `TensorFacts::conv_output_post_normed`. No tokens change: every
+  libllama golden for the three passes unchanged. The public tables
+  `SWIGLU_CLAMP_READERS`, `VALUE_SCALE_READERS`,
+  `SPLIT_KV_HEAD_DIM_ARCHS`, `CONV_OUTPUT_POST_NORMED` and
+  `POST_NORMS_BOTH_OR_NEITHER` are gone from `frink-models`; ask
+  `ArchFacts::of(arch)` or the lookup function that replaced each.
+
 ## [0.64.0] - 2026-11-25
 
 ### Added

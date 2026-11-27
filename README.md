@@ -96,7 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/antonellof/frink/main/scripts/insta
 
 Installs `frink` (built with `serve`) and `frink-server` into
 `~/.local/bin` (override with `FRINK_INSTALL_DIR`, pin with
-`FRINK_VERSION=v0.64.0`). Prebuilts are macOS arm64 with Metal and
+`FRINK_VERSION=v0.65.0`). Prebuilts are macOS arm64 with Metal and
 Linux x86_64 with CPU.
 
 From crates.io or source:
@@ -173,7 +173,7 @@ unrelated). Features, none on by default: `metal`, `cuda`, `api`.
 
 ```toml
 [dependencies]
-frink-inference = "0.64"
+frink-inference = "0.65"
 ```
 
 ```rust

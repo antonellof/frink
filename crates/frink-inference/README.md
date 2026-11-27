@@ -9,7 +9,7 @@ It contains no logic: it re-exports the workspace under one name (the
 
 ```toml
 [dependencies]
-frink-inference = "0.64"
+frink-inference = "0.65"
 ```
 
 ```rust
