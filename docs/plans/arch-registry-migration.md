@@ -83,7 +83,7 @@ eligibility test so a new field forces a Metal decision.
 | 9a | #472 | `gemma2`, `gemma3`, `mellum`, `plamo3`, `maple`, `spark2_5`, `granite_swa` |
 | 9b | #618 | `afmoe`, `exaone-moe`, `laguna`, `smallthinker`, `muse-glimmer` |
 | 9c | #647 | `step35`, `mimo2`, `lfm3` |
-| 9d | (this PR) | `hunyuan-dense`, `hunyuan-moe`, `maincoder`, `talkie` |
+| 9d | #648 | `hunyuan-dense`, `hunyuan-moe`, `maincoder`, `talkie` |
 
 **Next: step 10**, deriving `AUDITED_GENERIC_GQA` from the registry,
 then steps 11 to 15. `gemma3n`, `gemma-embedding` and `dflash` stay in
