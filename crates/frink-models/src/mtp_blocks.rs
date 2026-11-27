@@ -76,7 +76,7 @@ use crate::loader::LoadError;
 
 /// Every graph whose tensor loader creates the blocks past `n_layer()`,
 /// with the loop. Measured over all `src/models/*.cpp` at `604cc430`
-/// (module doc); `exaone4` is in `crate::models::exaone4`.
+/// (module doc); `exaone4`, `step35` and `mimo2` are in `crate::models`.
 pub const NEXTN_READERS: &[(&str, &str)] = &[
     ("bailingmoe2", "src/models/bailingmoe2.cpp:35"),
     ("bailingmoe3", "src/models/bailingmoe3.cpp:122"),
