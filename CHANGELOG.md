@@ -15,6 +15,23 @@ are the ones worth reading twice.
 
 ## [Unreleased]
 
+## [0.66.0] - 2026-11-27
+
+### Changed
+
+- **`hunyuan-dense`, `hunyuan-moe`, `maincoder` and `talkie` each state
+  their architecture in one file** (`crates/frink-models/src/models/`),
+  the four graphs that norm Q and K after RoPE (#403 step 9d, #648,
+  contributed by @njetty). `hunyuan-dense` mirrors `hunyuan-vl.cpp`,
+  which `models.h:1830-1834` derives it from, and the new
+  `ScalingFacts::rope_ntk_alpha` carries its NTK-alpha RoPE base
+  rescale. No tokens change: every libllama golden for the four passes
+  unchanged. The public tables `QK_NORM_AFTER_ROPE_ARCHITECTURES`,
+  `SKIP_STREAM_ARCHS` and `PER_HEAD_SCALAR_QK_GAIN` are gone from
+  `frink-models`, `NON_PARAMETRIC_RMS_NORM` keeps only `hrm_text`, and
+  `NTK_ALPHA_RESCALED_ROPE_BASE` only `hunyuan-vl`; ask
+  `ArchFacts::of(arch)` or the lookup function that replaced each.
+
 ## [0.65.0] - 2026-11-27
 
 ### Changed
