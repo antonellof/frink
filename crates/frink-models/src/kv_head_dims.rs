@@ -24,8 +24,8 @@
 //! `v_head_dim` -- `head_dim: 192, v_head_dim: 128` on MiMo-V2-Flash,
 //! the same on V2.5 -- for the generic-path graph `mimo2.cpp`, whose
 //! `:47-48,132-140,152-154` size and view K and V separately and whose
-//! `wo` is `{n_embd_head_v * n_head, n_embd}` (`:52`). So
-//! [`SPLIT_KV_HEAD_DIM_ARCHS`] has one row.
+//! `wo` is `{n_embd_head_v * n_head, n_embd}` (`:52`). `mimo2` states
+//! this in `crate::models::mimo2` (`TopologyFacts::split_kv_head_dims`).
 //!
 //! # What frink does with it
 //!
@@ -47,19 +47,13 @@
 
 use crate::LoadError;
 
-/// Architectures whose graph sizes K and V heads separately AND whose
-/// converter writes the two keys apart, with the lines.
-pub const SPLIT_KV_HEAD_DIM_ARCHS: &[(&str, &str)] = &[(
-    "mimo2",
-    "src/models/mimo2.cpp:47-48,52,132-140,152-154; conversion/mimo.py:154",
-)];
-
 /// Whether this architecture may declare `attention.value_length`
-/// different from `attention.key_length`.
+/// different from `attention.key_length` (`mimo2`, stated in
+/// `crate::models::mimo2`).
 pub fn admits_split_kv_head_dims(arch: &str) -> bool {
-    SPLIT_KV_HEAD_DIM_ARCHS
-        .iter()
-        .any(|(name, _)| *name == arch)
+    crate::models::ArchFacts::of(arch)
+        .topology
+        .split_kv_head_dims
 }
 
 /// The V head width for a file: `attention.value_length` when present,
@@ -70,11 +64,29 @@ pub fn resolve_v_head_dim(
     head_dim: usize,
     value_length: Option<usize>,
 ) -> Result<usize, LoadError> {
+    let facts = crate::models::ArchFacts::of(arch);
+    resolve_v_head_dim_for(
+        arch,
+        facts.topology.split_kv_head_dims,
+        facts.topology.pure_recurrent_block.is_some(),
+        head_dim,
+        value_length,
+    )
+}
+
+/// [`resolve_v_head_dim`] given the architecture's `ArchFacts` flags.
+pub(crate) fn resolve_v_head_dim_for(
+    arch: &str,
+    admits_split: bool,
+    pure_recurrent: bool,
+    head_dim: usize,
+    value_length: Option<usize>,
+) -> Result<usize, LoadError> {
     let v_head_dim = value_length.unwrap_or(head_dim);
-    if v_head_dim == head_dim || admits_split_kv_head_dims(arch) {
+    if v_head_dim == head_dim || admits_split {
         // A pure recurrent model has no heads and no head width at all
         // (`layer_shapes::PURE_RECURRENT`): zero is its answer.
-        if v_head_dim == 0 && crate::layer_shapes::pure_recurrent_block(arch).is_none() {
+        if v_head_dim == 0 && !pure_recurrent {
             return Err(LoadError::UnsupportedFeature(
                 arch.to_string(),
                 "attention.value_length is 0".to_string(),
@@ -127,22 +139,33 @@ mod tests {
         assert!(resolve_v_head_dim("mimo2", 192, Some(0)).is_err());
     }
 
-    /// Every table row is a generic-path architecture, and audited: the
-    /// seam is asked by something and evidenced by something.
+    /// Every architecture declaring split K/V head widths is on the
+    /// generic path and audited: the seam is asked by something and
+    /// evidenced by something.
     #[test]
     fn every_table_row_is_on_the_generic_path() {
-        for (arch, line) in SPLIT_KV_HEAD_DIM_ARCHS {
-            let profile = crate::capability::resolve_profile(arch)
-                .unwrap_or_else(|| panic!("`{arch}` ({line}) is not a registered architecture"));
-            assert!(
-                matches!(profile.path, crate::capability::ArchPath::GenericGqa { .. }),
-                "`{arch}` ({line}) is {:?}",
-                profile.path
-            );
-            assert!(
-                crate::capability::AUDITED_GENERIC_GQA.contains(arch),
-                "`{arch}` is served here and must be audited, or the seam is unevidenced"
-            );
+        let mut count = 0;
+        for def in crate::models::REGISTRY
+            .iter()
+            .filter(|d| d.facts.topology.split_kv_head_dims)
+        {
+            for arch in def.names {
+                count += 1;
+                let profile = crate::capability::resolve_profile(arch).unwrap_or_else(|| {
+                    panic!("`{arch}` ({}) is not a registered architecture", def.source)
+                });
+                assert!(
+                    matches!(profile.path, crate::capability::ArchPath::GenericGqa { .. }),
+                    "`{arch}` ({}) is {:?}",
+                    def.source,
+                    profile.path
+                );
+                assert!(
+                    crate::capability::AUDITED_GENERIC_GQA.contains(arch),
+                    "`{arch}` is served here and must be audited, or the seam is unevidenced"
+                );
+            }
         }
+        assert!(count > 0, "at least mimo2 admits split K/V head dims");
     }
 }

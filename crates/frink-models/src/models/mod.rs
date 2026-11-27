@@ -31,10 +31,12 @@ pub mod grok;
 pub mod jais;
 pub mod kolibri1;
 pub mod laguna;
+pub mod lfm3;
 pub mod llama;
 pub mod llama4;
 pub mod maple;
 pub mod mellum;
+pub mod mimo2;
 pub mod mpt;
 pub mod muse_glimmer;
 pub mod olmo;
@@ -55,6 +57,7 @@ pub mod smallthinker;
 pub mod spark2_5;
 pub mod stablelm;
 pub mod starcoder;
+pub mod step35;
 
 #[cfg(test)]
 mod tests;
@@ -128,6 +131,9 @@ pub const REGISTRY: &[ModelDef] = &[
     laguna::DEF,
     smallthinker::DEF,
     muse_glimmer::DEF,
+    step35::DEF,
+    mimo2::DEF,
+    lfm3::DEF,
 ];
 
 /// The registry entry naming `arch`.

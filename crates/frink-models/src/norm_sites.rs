@@ -105,18 +105,14 @@ pub fn weightless_embedding_norm(arch: &str) -> bool {
 /// (`lfm2moe.cpp:31`).
 pub const OUTPUT_NORM_UNDER_EMBEDDING_NAME: &[&str] = &["lfm2", "lfm2moe"];
 
-/// Architectures whose two OPTIONAL post norms must be present together
-/// or not at all, with the line that refuses a file carrying one. The
-/// default row loads each independently, so without this a file with
-/// one would be served where llama.cpp throws.
-pub const POST_NORMS_BOTH_OR_NEITHER: &[(&str, &str)] = &[("lfm3", "lfm3.cpp:53-55")];
-
-/// `arch`'s [`POST_NORMS_BOTH_OR_NEITHER`] row: the llama.cpp line.
+/// The llama.cpp line where `arch` requires its two OPTIONAL post norms
+/// to be present together or not at all (`lfm3.cpp:53-55`, stated in
+/// `crate::models::lfm3`). The default row loads each independently, so
+/// without this a file with one would be served where llama.cpp throws.
 pub fn post_norms_both_or_neither(arch: &str) -> Option<&'static str> {
-    POST_NORMS_BOTH_OR_NEITHER
-        .iter()
-        .find(|(a, _)| *a == arch)
-        .map(|(_, line)| *line)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .post_norms_both_or_neither
 }
 
 /// Why layer `layer`'s post norms cannot be served, or `None`.

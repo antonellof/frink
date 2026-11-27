@@ -82,11 +82,12 @@ eligibility test so a new field forces a Metal decision.
 | 8 | #468 | the ALiBi and learned-position graphs |
 | 9a | #472 | `gemma2`, `gemma3`, `mellum`, `plamo3`, `maple`, `spark2_5`, `granite_swa` |
 | 9b | #618 | `afmoe`, `exaone-moe`, `laguna`, `smallthinker`, `muse-glimmer` |
+| 9c | #647 | `step35`, `mimo2`, `lfm3` |
 
-**Next: 9c**, `step35`, `mimo2`, `lfm3`. `gemma3n`, `gemma-embedding`
-and `dflash` stay in the legacy tables until audited (risk 3). Then
-steps 10 to 15. Each step's divergences from the pin were filed and
-fixed (#439, #470, #620).
+**Next: step 10**, deriving `AUDITED_GENERIC_GQA` from the registry,
+then steps 11 to 15. `gemma3n`, `gemma-embedding` and `dflash` stay in
+the legacy tables until audited (risk 3). Each step's divergences from
+the pin were filed and fixed (#439, #470, #620).
 
 What the landed steps taught, and every later step follows:
 

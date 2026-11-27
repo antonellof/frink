@@ -86,6 +86,28 @@ pub const LAGUNA_SHAPES: &str =
          KV heads uniform (:86). Closed with the gated attention (`crate::attn_gate`); the \
          second rotary width at :50 is `ModelConfig::rope_dim_swa` (`crate::swa_geometry`)";
 
+/// `mimo2`'s reach note, stated by `crate::models::mimo2` (#403 step 9c).
+pub const MIMO2_SHAPES: &str =
+    "mimo2.cpp:47-49,111-112 read heads per layer (`swa_num_key_value_heads` on the \
+         sliding layers, the converter's array). Closed with the split K/V head width \
+         (`crate::kv_head_dims`, the V width :47-48 sizes apart from K's) and the value \
+         scale (`crate::attn_value_scale`, :16,181); the sinks at :58 are \
+         `AttnWeights::sinks`, the is_swa array at :12 is `crate::swa_layers` and the NEXTN \
+         blocks its tensor loader creates at :38 are `crate::mtp_blocks`";
+
+/// `step35`'s reach note, stated by `crate::models::step35` (#403 step 9c).
+pub const STEP35_SHAPES: &str =
+    "generic. step35.cpp:76-78,208-209 (loader and graph) read heads and KV widths per \
+         layer. Closed with the per-layer activation seam (`crate::act_layers`, the clamp \
+         arrays at :28-29) and the two-valued rotary width (`crate::swa_geometry`, :9); the \
+         gate at :96 is `crate::attn_gate`, the is_swa array at :26 `crate::swa_layers`, \
+         the NEXTN blocks its tensor loader creates at :170 `crate::mtp_blocks`";
+
+/// `lfm3`'s reach note, stated by `crate::models::lfm3` (#403 step 9c).
+pub const LFM3_SHAPES: &str =
+    "hybrid: n_head_kv(il) == 0 marks a recurrent layer (lfm3.cpp:8-10,61,165); the \
+         attention layers' per-layer widths at :105-107";
+
 /// Architectures whose llama.cpp tensor loader AND graph both index the
 /// per-layer arrays, with the lines. Anything else gets layer 0 from
 /// `LLAMA_LOAD_LOCALS` upstream, so a file whose layers disagree cannot
@@ -108,23 +130,7 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
         "generic. openelm.cpp:26-28 (loader) and :67-69 (graph): all three per layer, sizing \
          one fused wqkv per layer",
     ),
-    (
-        "mimo2",
-        "mimo2.cpp:47-49,111-112 read heads per layer (`swa_num_key_value_heads` on the \
-         sliding layers, the converter's array). Closed with the split K/V head width \
-         (`crate::kv_head_dims`, the V width :47-48 sizes apart from K's) and the value \
-         scale (`crate::attn_value_scale`, :16,181); the sinks at :58 are \
-         `AttnWeights::sinks`, the is_swa array at :12 is `crate::swa_layers` and the NEXTN \
-         blocks its tensor loader creates at :38 are `crate::mtp_blocks`",
-    ),
-    (
-        "step35",
-        "generic. step35.cpp:76-78,208-209 (loader and graph) read heads and KV widths per \
-         layer. Closed with the per-layer activation seam (`crate::act_layers`, the clamp \
-         arrays at :28-29) and the two-valued rotary width (`crate::swa_geometry`, :9); the \
-         gate at :96 is `crate::attn_gate`, the is_swa array at :26 `crate::swa_layers`, \
-         the NEXTN blocks its tensor loader creates at :170 `crate::mtp_blocks`",
-    ),
+    // `mimo2` and `step35` are in `crate::models` ([`MIMO2_SHAPES`], [`STEP35_SHAPES`]).
     (
         "nanbeige",
         "nanbeige.cpp:24-26 copies each physical layer's arrays to every logical slot; \
@@ -152,11 +158,7 @@ pub const PER_LAYER_SHAPE_ARCHS: &[(&str, &str)] = &[
         "lfm2moe",
         "hybrid: n_head_kv(il) == 0 marks a recurrent layer (lfm2moe.cpp:13,63)",
     ),
-    (
-        "lfm3",
-        "hybrid: n_head_kv(il) == 0 marks a recurrent layer (lfm3.cpp:8-10,61,165); the \
-         attention layers' per-layer widths at :105-107",
-    ),
+    // `lfm3` is in `crate::models` ([`LFM3_SHAPES`]).
     (
         "nemotron_h",
         "generic. nemotron-h.cpp:9-11 (hparams), :53-98 (loader) and :146-153 (graph): \
@@ -868,12 +870,12 @@ pub(crate) fn load_non_gqa_attention(
         // other recurrent graph creates one on a recurrent layer, and
         // the two attention-less shapes have no output to norm.
         // `lfm3.cpp:178-181` does the same for its conv block
-        // (`shortconv::CONV_OUTPUT_POST_NORMED`); `lfm2.cpp` creates no
+        // (`shortconv::conv_output_post_normed`); `lfm2.cpp` creates no
         // such tensor, so its conv layers keep `None` whatever a file
         // carries.
         post_attn_norm: match shape {
             AttnShape::Plamo2Ssm => NormSites::load_post_norm(norm_sites.post_attn, file, layer)?,
-            AttnShape::ShortConv if crate::shortconv::CONV_OUTPUT_POST_NORMED.contains(&arch) => {
+            AttnShape::ShortConv if crate::shortconv::conv_output_post_normed(arch) => {
                 NormSites::load_post_norm(norm_sites.post_attn, file, layer)?
             }
             _ => None,

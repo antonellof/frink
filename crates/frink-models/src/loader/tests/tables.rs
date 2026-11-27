@@ -55,24 +55,22 @@ fn the_gating_literal_names_are_the_gating_literal_table() {
     assert_eq!(from_table, GATING_LITERAL_NAMES);
     // `mimo2.cpp:227` passes the SIGMOID literal, so the key is
     // never read there; a hand-written SOFTMAX key must not turn it.
+    // (`mimo2` states it in `crate::models::mimo2`.)
     assert!(matches!(
-        GATING_LITERAL_ARCHITECTURES
-            .iter()
-            .find(|(n, _)| *n == "mimo2")
-            .map(|(_, g)| *g),
+        crate::models::ArchFacts::of("mimo2").moe.gating_literal,
         Some(GatingFunction::Sigmoid)
     ));
 }
 
 #[test]
 fn the_architectures_llama_cpp_defaults_to_sigmoid_gating_are_pinned() {
-    for arch in ["deepseek2", "glm4moe", "step35"] {
+    for arch in ["deepseek2", "glm4moe"] {
         assert!(
             SIGMOID_GATING_ARCHITECTURES.contains(&arch),
             "{arch} sets SIGMOID when the gating key is absent"
         );
     }
-    // `afmoe` and `laguna` state it in `crate::models` (#403 step 9b).
+    // `afmoe`, `laguna` and `step35` state it in `crate::models` (#403 steps 9b, 9c).
     for arch in ["afmoe", "deepseek2", "glm4moe", "laguna", "step35"] {
         assert!(
             crate::models::ArchFacts::of(arch).moe.sigmoid_by_default,
