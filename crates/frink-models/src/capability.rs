@@ -81,7 +81,8 @@ pub enum QkNormStyle {
     /// learned scalar per head for Q (`attn_q_norm` is `{1, n_head}`),
     /// and the same per-head RMSNorm with NO weight for K (`:90`,
     /// `build_norm(Kcur, nullptr, ...)`); there is no `attn_k_norm`
-    /// tensor. Decided by architecture (`PER_HEAD_SCALAR_QK_GAIN`), not
+    /// tensor. Decided by architecture (`TensorFacts::per_head_scalar_qk_gain`,
+    /// stated in `crate::models::talkie`), not
     /// by the weight's length: a file whose `n_head == head_dim` would
     /// make the length ambiguous. Applied after RoPE, as the graph does.
     PerHeadScalar,
@@ -109,15 +110,15 @@ pub fn uses_per_head_distinct_qk_norm(arch: &str) -> bool {
     PER_HEAD_DISTINCT_QK_NORM.contains(&arch)
 }
 
-/// Architectures whose Q norm weight is one scalar per head and whose K
-/// norm has no weight ([`QkNormStyle::PerHeadScalar`]). Measured:
+/// Does this architecture's Q norm weight hold one scalar per head, with
+/// no weight on the K norm ([`QkNormStyle::PerHeadScalar`])? Measured:
 /// `attn_q_norm` created `{1, n_head}` in one of 155 graphs,
-/// `talkie.cpp:26`.
-pub const PER_HEAD_SCALAR_QK_GAIN: &[&str] = &["talkie"];
-
-/// See [`PER_HEAD_SCALAR_QK_GAIN`].
+/// `talkie.cpp:26`, which states the row in `crate::models::talkie`
+/// (#403 step 9d).
 pub fn uses_per_head_scalar_qk_gain(arch: &str) -> bool {
-    PER_HEAD_SCALAR_QK_GAIN.contains(&arch)
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .per_head_scalar_qk_gain
 }
 
 /// How much work admitting one UNAUDITED architecture to the generic
@@ -1317,7 +1318,9 @@ pub fn uses_non_parametric_layer_norm(arch: &str) -> bool {
 /// `LLM_NORM_RMS`: the embeddings at `:50`, `attn_norm` at `:68`, the K
 /// norm at `:90`, `ffn_norm` at `:110`, the final norm at `:137`).
 /// `NormOp::RmsNoParams` is the function; `crate::skip_stream` is the
-/// rest of `talkie`.
+/// rest of `talkie`, which states its row in `crate::models::talkie`
+/// (#403 step 9d). This table keeps the rows still in the legacy
+/// tables: `hrm_text`.
 ///
 /// **Re-measured 2026-09-19, when the pin moved to `5b59b83`, and the
 /// answer CHANGED**: two graphs that landed upstream in the six weeks
@@ -1332,10 +1335,24 @@ pub fn uses_non_parametric_layer_norm(arch: &str) -> bool {
 /// checked for either. `muse-glimmer`'s is also the first WEIGHTLESS
 /// norm at the EMBEDDING site, where `crate::norm_sites`' row is
 /// `bloom`'s weighted one.
-pub const NON_PARAMETRIC_RMS_NORM: &[&str] = &["talkie", "hrm_text"];
+pub const NON_PARAMETRIC_RMS_NORM: &[&str] = &["hrm_text"];
 
-/// See [`NON_PARAMETRIC_RMS_NORM`].
+/// Does this architecture normalise with a non-parametric RMSNorm at
+/// every site? Derived from its norm-site row: `talkie` states it in
+/// `crate::models::talkie`, `hrm_text` is still in
+/// [`NON_PARAMETRIC_RMS_NORM`].
 pub fn uses_non_parametric_rms_norm(arch: &str) -> bool {
+    crate::models::ArchFacts::of(arch)
+        .tensors
+        .norm_sites
+        .function
+        == crate::norm::NormFunction::RmsNoParams
+}
+
+/// [`NON_PARAMETRIC_RMS_NORM`] alone, for `norm_function_from_table`
+/// (which `ArchFacts::from_tables` reads, so it cannot go through the
+/// registry).
+pub(crate) fn uses_non_parametric_rms_norm_from_table(arch: &str) -> bool {
     NON_PARAMETRIC_RMS_NORM.contains(&arch)
 }
 

@@ -404,9 +404,10 @@ pub fn file_norm_function(
 
 /// The architecture's own function from the legacy lists alone, for
 /// `ArchFacts::from_tables` (`olmo`'s non-parametric LayerNorm is in
-/// `crate::models::olmo`).
+/// `crate::models::olmo`, `talkie`'s non-parametric RMSNorm in
+/// `crate::models::talkie`; `hrm_text`'s is still a legacy row).
 pub(crate) fn norm_function_from_table(arch: &str) -> NormFunction {
-    if crate::capability::uses_non_parametric_rms_norm(arch) {
+    if crate::capability::uses_non_parametric_rms_norm_from_table(arch) {
         NormFunction::RmsNoParams
     } else if crate::capability::BIASED_LAYER_NORM.contains(&arch) {
         NormFunction::LayerNormBias

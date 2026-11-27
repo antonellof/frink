@@ -20,9 +20,9 @@
 //! from the embedding: Gemma-4 (`gemma4.cpp:365-366`) multiplies its
 //! own layer output by it, on its own engine, which has done so since
 //! it existed. The embedding norm at `:50` is `talkie` alone. So
-//! [`SKIP_STREAM_ARCHS`] has one row, and the fact is one `bool` on
-//! `ModelConfig` covering both halves, because neither exists without
-//! the other in any graph.
+//! the row is one `bool` ([`has_skip_stream`], stated in
+//! `crate::models::talkie`) on `ModelConfig` covering both halves,
+//! because neither exists without the other in any graph.
 //!
 //! # Where it lives
 //!
@@ -41,14 +41,11 @@ use crate::loader::load_f32_vec;
 use crate::LoadError;
 use frink_gguf::TensorSource;
 
-/// Architectures whose graph adds the normed embedding into every
-/// layer's output, with the lines.
-pub const SKIP_STREAM_ARCHS: &[(&str, &str)] = &[("talkie", "src/models/talkie.cpp:50-52,123-126")];
-
 /// Whether this architecture norms its embeddings and keeps them as a
-/// skip stream.
+/// skip stream (`talkie.cpp:50-52,123-126`, stated in
+/// `crate::models::talkie`).
 pub fn has_skip_stream(arch: &str) -> bool {
-    SKIP_STREAM_ARCHS.iter().any(|(name, _)| *name == arch)
+    crate::models::ArchFacts::of(arch).topology.skip_stream
 }
 
 /// Layer `l`'s `layer_output_scale`, REQUIRED for a skip-stream model
@@ -97,15 +94,24 @@ mod tests {
     }
 
     #[test]
-    fn every_table_row_is_an_audited_generic_row() {
-        for (arch, line) in SKIP_STREAM_ARCHS {
-            let profile = crate::capability::resolve_profile(arch)
-                .unwrap_or_else(|| panic!("`{arch}` ({line}) is not a registered architecture"));
-            assert!(matches!(
-                profile.path,
-                crate::capability::ArchPath::GenericGqa { .. }
-            ));
-            assert!(crate::capability::AUDITED_GENERIC_GQA.contains(arch));
+    fn every_skip_stream_row_is_an_audited_generic_row() {
+        let mut count = 0;
+        for def in crate::models::REGISTRY
+            .iter()
+            .filter(|d| d.facts.topology.skip_stream)
+        {
+            for arch in def.names {
+                count += 1;
+                let profile = crate::capability::resolve_profile(arch).unwrap_or_else(|| {
+                    panic!("`{arch}` ({}) is not a registered architecture", def.source)
+                });
+                assert!(matches!(
+                    profile.path,
+                    crate::capability::ArchPath::GenericGqa { .. }
+                ));
+                assert!(crate::capability::AUDITED_GENERIC_GQA.contains(arch));
+            }
         }
+        assert!(count > 0, "at least talkie uses the skip stream");
     }
 }

@@ -173,6 +173,10 @@ pub struct ScalingFacts {
     /// `attn_value_scale`: reads `{arch}.attention.value_scale` and scales
     /// the attention branch after `wo` (`mimo2.cpp:14-17,180-183`).
     pub reads_attn_value_scale: bool,
+    /// `rope_ntk_alpha`: the trained RoPE base is rescaled by
+    /// `{arch}.rope.scaling.alpha` (`hunyuan-vl.cpp:8-12`, inherited by
+    /// `hunyuan-dense`).
+    pub rope_ntk_alpha: bool,
 }
 
 /// Layer-topology rows read at config time.
@@ -182,7 +186,8 @@ pub struct TopologyFacts {
     pub pure_recurrent_block: Option<ZeroKvLayer>,
     /// `rope_layers::reads_rope_pattern`.
     pub reads_rope_pattern: bool,
-    /// `skip_stream::has_skip_stream`.
+    /// `skip_stream::has_skip_stream`: the normed embedding is added
+    /// into every layer's output (`talkie.cpp:50-52,123-126`).
     pub skip_stream: bool,
     /// `mamba2::parallel_with_attention`.
     pub parallel_ssm: bool,
@@ -221,7 +226,8 @@ pub struct TensorFacts {
     pub norm_sites: NormSites,
     /// `qk_layer_norm::per_head_layer_norm_lines`.
     pub per_head_layer_norm_qk: Option<&'static str>,
-    /// `capability::uses_per_head_scalar_qk_gain`.
+    /// `capability::uses_per_head_scalar_qk_gain`: one learned scalar
+    /// per head on Q and a weightless K norm (`talkie.cpp:26,82-91`).
     pub per_head_scalar_qk_gain: bool,
     /// `capability::uses_per_head_distinct_qk_norm`.
     pub per_head_distinct_qk_norm: bool,
@@ -233,7 +239,8 @@ pub struct TensorFacts {
     pub shared_expert_sum_scale: Option<f32>,
     /// `norm_sites::weightless_embedding_norm`.
     pub weightless_embedding_norm: bool,
-    /// `QK_NORM_AFTER_ROPE_ARCHITECTURES`.
+    /// The per-head Q/K norm runs AFTER RoPE (`maincoder.cpp:78-95`,
+    /// `hunyuan-moe.cpp:93-118`). No GGUF key states the order.
     pub qk_norm_after_rope: bool,
     /// `proj_bias::ATTN_OUT_BIAS_CREATORS`: `blk.N.attn_output.bias`.
     pub attn_out_bias: Option<Presence>,
@@ -371,6 +378,7 @@ impl ArchFacts {
             reads_yarn_beta: false,
             attn_temperature_literal: None,
             reads_attn_value_scale: false,
+            rope_ntk_alpha: false,
         },
         topology: TopologyFacts {
             pure_recurrent_block: None,
@@ -496,12 +504,14 @@ impl ArchFacts {
                 attn_temperature_literal: None,
                 // No table: `mimo2` was the only row.
                 reads_attn_value_scale: false,
+                rope_ntk_alpha: crate::rope_ntk_alpha::rescales_rope_base_from_table(arch),
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(arch),
                 // No table: `granite_swa` was the only row.
                 reads_rope_pattern: false,
-                skip_stream: crate::skip_stream::has_skip_stream(arch),
+                // No table: `talkie` was the only row.
+                skip_stream: false,
                 parallel_ssm: crate::mamba2::parallel_with_attention(arch),
                 // No table: the five ALiBi graphs are in `crate::models`.
                 alibi: None,
@@ -525,7 +535,8 @@ impl ArchFacts {
                 per_head_layer_norm_qk: crate::qk_layer_norm::per_head_layer_norm_lines_from_table(
                     arch,
                 ),
-                per_head_scalar_qk_gain: crate::capability::uses_per_head_scalar_qk_gain(arch),
+                // No table: `talkie` was the only row.
+                per_head_scalar_qk_gain: false,
                 per_head_distinct_qk_norm: crate::capability::uses_per_head_distinct_qk_norm(arch),
                 q_gate_interleaved: crate::attn_gate::q_gate_interleaved(arch),
                 // No table: `lfm3` was the only row.
@@ -534,7 +545,9 @@ impl ArchFacts {
                 shared_expert_sum_scale: None,
                 // No table: `muse-glimmer` was the only row.
                 weightless_embedding_norm: false,
-                qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&arch),
+                // No table: `hunyuan-dense`, `hunyuan-moe`, `maincoder` and
+                // `talkie` are in `crate::models`.
+                qk_norm_after_rope: false,
                 attn_out_bias: crate::proj_bias::attn_out_presence_from_table(arch),
                 ffn_bias: crate::proj_bias::ffn_presence_from_table(arch),
                 output_bias: crate::proj_bias::output_presence_from_table(arch),

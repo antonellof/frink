@@ -209,7 +209,7 @@ impl Decoder {
                     }
                     // Refine WholeVector vs PerHead from the first observed norm length.
                     // The per-head SCALAR gain is decided by architecture first
-                    // (`capability::PER_HEAD_SCALAR_QK_GAIN`): its length is
+                    // (`TensorFacts::per_head_scalar_qk_gain`): its length is
                     // `n_heads`, which a length test alone could confuse with
                     // `head_dim`.
                     if let Some(ref w) = q_norm {

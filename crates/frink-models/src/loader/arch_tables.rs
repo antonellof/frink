@@ -220,29 +220,3 @@ pub(crate) const NO_TOPK_RENORMALIZE_ARCHITECTURES: &[&str] = &["deepseek", "jam
 /// is load-bearing and must be honoured. Membership here is a statement
 /// about ONE architecture's graph, checked in that graph.
 pub(crate) const LEADING_DENSE_KEY_IS_INERT: &[&str] = &["bailingmoe"];
-
-/// Architectures whose reference graph applies `attn_q_norm` /
-/// `attn_k_norm` AFTER `ggml_rope_ext`, not before it.
-///
-/// There is no GGUF key for this. llama.cpp writes the order into each
-/// hand-written graph, so the only place it can come from is the
-/// architecture string, and getting it wrong changes every layer's
-/// attention scores without changing a single tensor shape.
-///
-/// - `maincoder`: `src/models/maincoder.cpp:78-90` ropes Q and K, then
-///   norms them at `:92` and `:95`.
-/// - `hunyuan-moe`: `src/models/hunyuan-moe.cpp:93,104` rope, `:110,115`
-///   norm.
-///
-/// - `hunyuan-dense`: it has no graph of its own --
-///   `src/models/models.h:1830-1834` derives `llama_model_hunyuan_dense`
-///   from `llama_model_hunyuan_vl` and reuses its graph -- so the lines
-///   are `hunyuan-vl.cpp:56-66` (rope) then `:73-81` (norm). Its second
-///   blocker, the NTK-alpha RoPE base rescale, is implemented too; see
-///   [`crate::rope_ntk_alpha`].
-///
-/// The audited majority is the other way round -- `qwen3moe.cpp:99,108`
-/// and `bailingmoe2.cpp:123-135` both norm first -- which is why the
-/// decoder's default is "before" and this list is the exception.
-pub(crate) const QK_NORM_AFTER_ROPE_ARCHITECTURES: &[&str] =
-    &["hunyuan-dense", "hunyuan-moe", "maincoder", "talkie"];

@@ -58,13 +58,11 @@ pub(crate) fn behaviour_table_names() -> Vec<&'static str> {
             .iter()
             .map(|r| r.0),
     );
-    names.extend(t::QK_NORM_AFTER_ROPE_ARCHITECTURES);
     names.extend(
         crate::qk_layer_norm::PER_HEAD_LAYER_NORM_QK
             .iter()
             .map(|r| r.0),
     );
-    names.extend(crate::capability::PER_HEAD_SCALAR_QK_GAIN);
     names.extend(crate::capability::PER_HEAD_DISTINCT_QK_NORM);
     names.extend(
         crate::attn_gate::Q_INTERLEAVED_GATE_ARCHS
@@ -319,6 +317,14 @@ fn the_facts_agree_with_every_public_lookup() {
                     Some(0.5),
                 )
                 .is_some(),
+                // Through the public step: a rescaling architecture moves
+                // the base, every other one returns it.
+                rope_ntk_alpha: crate::rope_ntk_alpha::ntk_alpha_scaled_rope_base(
+                    name,
+                    10_000.0,
+                    128,
+                    Some(50.0),
+                ) != 10_000.0,
             },
             topology: TopologyFacts {
                 pure_recurrent_block: crate::layer_shapes::pure_recurrent_block(name),
@@ -352,7 +358,8 @@ fn the_facts_agree_with_every_public_lookup() {
                     name, true,
                 ),
                 weightless_embedding_norm: crate::norm_sites::weightless_embedding_norm(name),
-                qk_norm_after_rope: t::QK_NORM_AFTER_ROPE_ARCHITECTURES.contains(&name),
+                // No legacy table: only a definition states it.
+                qk_norm_after_rope: def.is_some_and(|f| f.tensors.qk_norm_after_rope),
                 attn_out_bias: crate::proj_bias::attn_out_presence(name),
                 ffn_bias: crate::proj_bias::ffn_presence(name),
                 output_bias: crate::proj_bias::output_presence(name),
@@ -497,6 +504,7 @@ fn the_config_loader_reads_the_tables_only_through_the_facts() {
         "weight_before_ffn(",
         "resolve_v_head_dim(",
         "resolve_attn_value_scale(",
+        "ntk_alpha_scaled_rope_base(",
     ] {
         assert!(
             !src.contains(direct),
@@ -533,7 +541,6 @@ fn the_decoder_loader_reads_the_tables_only_through_the_facts() {
         "post_norm_pairing_refusal(",
         "shared_expert_sum_scale(",
         "weightless_embedding_norm(",
-        "QK_NORM_AFTER_ROPE_ARCHITECTURES.",
     ] {
         assert!(
             !src.contains(direct),

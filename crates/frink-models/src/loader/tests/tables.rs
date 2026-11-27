@@ -123,10 +123,6 @@ fn every_architecture_keyed_behaviour_table_names_a_real_generic_row() {
             crate::norm_sites::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
         ),
         ("LEADING_DENSE_KEY_IS_INERT", LEADING_DENSE_KEY_IS_INERT),
-        (
-            "QK_NORM_AFTER_ROPE_ARCHITECTURES",
-            QK_NORM_AFTER_ROPE_ARCHITECTURES,
-        ),
     ];
     for (table, names) in tables {
         for arch in *names {
@@ -155,19 +151,20 @@ fn every_architecture_keyed_behaviour_table_names_a_real_generic_row() {
     }
 }
 
-/// The three tables that describe how a layer is BUILT, rather than
-/// how it is routed, only carry architectures that are audited.
+/// The remaining legacy tables that describe how a layer is BUILT,
+/// rather than how it is routed, only carry architectures that are
+/// audited (`QK_NORM_AFTER_ROPE_ARCHITECTURES` moved to `crate::models`
+/// in #403 step 9d).
 ///
 /// The distinction matters and is not pedantry. A routing default
 /// (`SIGMOID_GATING_ARCHITECTURES`, `NO_TOPK_RENORMALIZE_ARCHITECTURES`)
 /// is allowed to name an architecture that still refuses: it is
 /// written down ahead of time so a later admission inherits the
-/// right answer, and the tables say so. But the three below change
-/// which TENSOR a layer reads and in what order -- and each was
-/// added for exactly one architecture, whose fixture is the only
-/// thing proving the change is right. A fourth name appearing here
-/// without evidence would be a claim about a graph nobody read,
-/// carried by a list whose doc comment cites two.
+/// right answer, and the tables say so. But the tables below change
+/// which TENSOR a layer reads and in what order, and each was added
+/// for specific audited architectures whose fixtures prove the change
+/// is right. An unaudited name appearing here would be a guess about
+/// a graph nobody verified.
 #[test]
 fn the_layer_shape_tables_only_name_audited_architectures() {
     for (table, names) in [
@@ -176,10 +173,6 @@ fn the_layer_shape_tables_only_name_audited_architectures() {
             crate::norm_sites::PRE_FFN_NORM_IS_POST_ATTENTION_NORM,
         ),
         ("LEADING_DENSE_KEY_IS_INERT", LEADING_DENSE_KEY_IS_INERT),
-        (
-            "QK_NORM_AFTER_ROPE_ARCHITECTURES",
-            QK_NORM_AFTER_ROPE_ARCHITECTURES,
-        ),
     ] {
         for arch in names {
             assert!(
